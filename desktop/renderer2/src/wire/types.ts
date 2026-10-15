@@ -417,6 +417,57 @@ export interface SpawnedWorkStop {
   alreadyFinished?: boolean; signalled?: number[]; forced?: number[]; summary?: string; error?: string;
 }
 
+// ---- Forkable subsessions (fork:* channels, additive) ----------------------
+// A fork point seals a chat's history at one message; runs of children each
+// resume that sealed prefix with their own message. Views are the daemon's
+// public projections (internal/acp/forks.go ForkPointView/ForkRunView/
+// ForkChildView). Every field the daemon may omit is optional here.
+export interface ForkUsage { input: number; output: number; cacheRead: number; cacheCreation: number; }
+export interface ForkAttachment { name: string; path: string; width: number; height: number; bytes: number; }
+export type ForkChildStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export interface ForkPointView {
+  forkPointId: string; name: string; chatId: string; tabId: string; providerId: string;
+  status: 'sealing' | 'ready' | 'failed' | string; cwd: string; createdAt: string;
+  readyAt?: string; modelId?: string; effort?: string; modeId?: string; error?: string;
+  afterMessageId?: string; sealUsage: ForkUsage; sealWallMs: number; prefixSize: number;
+  sealTurns: number; addDirs?: string[];
+}
+export interface ForkChildView {
+  childId: string; index: number; label?: string; status: ForkChildStatus | string;
+  usage: ForkUsage; cacheHitShare: number; turns: number; wallMs: number; attempt: number;
+  transcriptRetained: boolean; attachments: ForkAttachment[];
+  result?: string; error?: string; stopReason?: string; activity?: string;
+  startedAt?: string; finishedAt?: string; retryOf?: string; sessionId?: string; nativeSessionKept?: boolean;
+}
+export interface ForkRunView {
+  runId: string; forkPointId: string; chatId: string; tabId: string;
+  status: 'running' | 'completed' | 'cancelled' | string; concurrency: number;
+  retention: 'throwaway' | 'keep' | string; retentionDays: number; createdAt: string;
+  counts: Record<string, number>; totals: ForkUsage & { cacheHitShare: number };
+  warnings?: string[]; children: ForkChildView[];
+}
+export interface ForkListReply { ok: boolean; forkPoints?: ForkPointView[]; runs?: ForkRunView[]; error?: string; }
+export type ForkTranscriptEntry =
+  | { kind: 'user'; at: string; text: string; attachments?: ForkAttachment[] }
+  | { kind: 'call'; at: string; call?: number; usage?: Partial<ForkUsage> }
+  | { kind: 'tool'; at: string; id: string; name: string; target?: string; input?: unknown }
+  | { kind: 'tool_result'; at: string; toolUseId: string; isError?: boolean; text?: string }
+  | { kind: 'assistant'; at: string; text: string }
+  | { kind: 'result'; at: string; subtype?: string; isError?: boolean; turns?: number; durationMs?: number; text?: string; usage?: Partial<ForkUsage> };
+export interface ForkTranscriptReply { ok: boolean; entries?: ForkTranscriptEntry[]; error?: string; }
+export interface ForkImageReply { ok: boolean; name?: string; mimeType?: string; data?: string; width?: number; height?: number; error?: string; }
+export interface ForkChildReply { ok: boolean; child?: ForkChildView; error?: string; }
+export interface ForkRetainReply { ok: boolean; run?: ForkRunView; error?: string; }
+export interface ForkChanged { tabId: string; chatId: string; }
+// fork:summary — one cheap line per chat that has fork points (local daemon).
+// children/counts already collapse retries to each child's latest attempt.
+export interface ForkSummaryChat { chatId: string; tabId: string; forkPoints: number; children: number; counts: Record<string, number>; updatedAt?: string; }
+export interface ForkSummaryReply { ok: boolean; chats?: ForkSummaryChat[]; error?: string; }
+// Every fork call carries its chat's tabId/chatId even where the daemon reads
+// only run/child ids: those tagged ids are what route the call to the machine
+// that owns the chat, and the daemon ignores fields it does not read.
+export interface ForkChatRef { tabId: string; chatId: string; }
+
 export interface SessionReplaced {
   chatId: string | null;
   oldSessionId: unknown;
@@ -711,7 +762,17 @@ export interface WorkassApi {
   appUpdateWork?: () => Promise<AppUpdateWork>;
   spawnedWorkRead?: (tabId: string, chatId: string, id: string, tailBytes?: number) => Promise<SpawnedWorkRead>;
   spawnedWorkStop?: (tabId: string, chatId: string, id: string) => Promise<SpawnedWorkStop>;
-  startJob?: (opts: StartJobOpts) => Promise<StartJobReply>;
+  // Forkable subsessions (fork:* channels). Additive and feature-detected: a
+  // bridge or daemon without them reads as "this chat has no forks".
+  forkList?: (tabId: string, chatId: string) => Promise<ForkListReply>;
+  // No chat id to route by: answers for the local daemon's chats only.
+  forkSummary?: () => Promise<ForkSummaryReply>;
+  forkTranscript?: (opts: ForkChatRef & { runId: string; childId: string }) => Promise<ForkTranscriptReply>;
+  forkImage?: (opts: ForkChatRef & { runId: string; childId: string; index: number }) => Promise<ForkImageReply>;
+  forkCancelChild?: (opts: ForkChatRef & { runId: string; childId: string; operationId: string }) => Promise<ForkChildReply>;
+  forkRetryChild?: (opts: ForkChatRef & { runId: string; childId: string; message?: string; operationId: string }) => Promise<ForkChildReply>;
+  forkRetain?: (opts: ForkChatRef & { runId: string; keep: boolean }) => Promise<ForkRetainReply>;
+  startJob?:(opts: StartJobOpts) => Promise<StartJobReply>;
   cancelJob?: (id: string) => Promise<boolean | JobCancelResult>;
   chatPermissionDecide?: (id: string, optionId: string) => Promise<{ ok: boolean }>;
   chatPendingPermissions?: () => Promise<{ permissions: PermissionRequest[] }>;
@@ -753,7 +814,8 @@ export interface WorkassApi {
   // bridges omit it → no plan section.
   onChatPlanUsage?: (cb: (s: PlanUsageSnapshot) => void) => void;
   onSpawnedWorkChanged?: (cb: (s: SpawnedWorkChanged) => void) => void;
-  onProvidersList?: (cb: (providers: ProviderRecord[]) => void) => void;
+  onForkChanged?: (cb: (s: ForkChanged) => void) => void;
+  onProvidersList?:(cb: (providers: ProviderRecord[]) => void) => void;
   onProcChanged?: (cb: (e: ProcChanged) => void) => void;
   onLanAccessRequest?: (cb: (r: AccessRequest) => void) => void;
   onLanAccessRequestClosed?: (cb: (r: { requestId: string }) => void) => void;

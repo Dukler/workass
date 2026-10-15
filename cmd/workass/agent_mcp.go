@@ -52,6 +52,12 @@ func agentMCPTools() []map[string]any {
 	operationID := func() map[string]any {
 		return str(agenttext.Get("schema.browserMCPTools.02"))
 	}
+	imagePaths := func(description string) map[string]any {
+		return map[string]any{
+			"type": "array", "description": description, "maxItems": acp.MaxImageAttachments,
+			"items": map[string]any{"type": "string", "minLength": 1},
+		}
+	}
 	mutationObject := func(properties map[string]any, required ...string) map[string]any {
 		properties["operation_id"] = operationID()
 		required = append(required, "operation_id")
@@ -120,10 +126,11 @@ func agentMCPTools() []map[string]any {
 			"force": boolean(agenttext.Get("schema.agentMCPTools.guidance.35")),
 		}, "tab_id", "chat_id"), false, true, false, false),
 		tool("workass_send_chat_message", agenttext.Get("tools.workass_send_chat_message"), mutationObject(map[string]any{
-			"tab_id":   str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id":  str(agenttext.Get("schema.agentMCPTools.guidance.21")),
-			"message":  str(agenttext.Get("schema.agentMCPTools.guidance.38")),
-			"delivery": enum(agenttext.Get("schema.agentMCPTools.guidance.39"), "auto", "queue", "steer"),
+			"tab_id":      str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id":     str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.38")),
+			"delivery":    enum(agenttext.Get("schema.agentMCPTools.guidance.39"), "auto", "queue", "steer"),
+			"attachments": imagePaths(agenttext.Get("schema.agentMCPTools.guidance.attachments")),
 		}, "tab_id", "chat_id", "message"), false, false, false, true),
 		tool("workass_cancel_chat_turn", agenttext.Get("tools.workass_cancel_chat_turn"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
@@ -202,6 +209,53 @@ func agentMCPTools() []map[string]any {
 		tool("workass_cancel_subagent", agenttext.Get("tools.workass_cancel_subagent"), mutationObject(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
 		}, "subagent_id"), false, true, false, false),
+		tool("workass_create_fork_point", agenttext.Get("tools.workass_create_fork_point"), mutationObject(map[string]any{
+			"tab_id":   str(agenttext.Get("schema.fork.target_tab")),
+			"chat_id":  str(agenttext.Get("schema.fork.target_chat")),
+			"name":     map[string]any{"type": "string", "minLength": 1, "maxLength": 80, "description": agenttext.Get("schema.fork.name")},
+			"mode_id":  str(agenttext.Get("schema.fork.mode_id")),
+			"effort":   str(agenttext.Get("schema.fork.effort")),
+			"add_dirs": map[string]any{"type": "array", "maxItems": 8, "items": map[string]any{"type": "string", "minLength": 1}, "description": agenttext.Get("schema.fork.add_dirs")},
+		}, "tab_id", "chat_id", "name"), false, false, true, true),
+		tool("workass_list_forks", agenttext.Get("tools.workass_list_forks"), object(map[string]any{
+			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.09")),
+			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+		}, "tab_id", "chat_id"), true, false, true, false),
+		tool("workass_fork_run", agenttext.Get("tools.workass_fork_run"), mutationObject(map[string]any{
+			"fork_point_id": str(agenttext.Get("schema.fork.fork_point_id")),
+			"children": map[string]any{
+				"type": "array", "minItems": 1, "maxItems": acp.MaxForkChildrenPerRun, "description": agenttext.Get("schema.fork.children"),
+				"items": object(map[string]any{
+					"label":       map[string]any{"type": "string", "maxLength": 80, "description": agenttext.Get("schema.fork.child_label")},
+					"message":     map[string]any{"type": "string", "minLength": 1, "description": agenttext.Get("schema.fork.child_message")},
+					"attachments": imagePaths(agenttext.Get("schema.fork.attachments")),
+				}, "message"),
+			},
+			"concurrency":       map[string]any{"type": "integer", "minimum": 1, "maximum": acp.MaxForkConcurrency, "description": agenttext.Get("schema.fork.concurrency")},
+			"retention":         enum(agenttext.Get("schema.fork.retention"), acp.ForkRetentionThrowaway, acp.ForkRetentionKeep),
+			"retention_days":    map[string]any{"type": "integer", "minimum": 1, "maximum": 90, "description": agenttext.Get("schema.fork.retention_days")},
+			"child_timeout_ms":  map[string]any{"type": "integer", "minimum": 10000, "maximum": 7200000, "description": agenttext.Get("schema.fork.child_timeout_ms")},
+			"label_images":      boolean(agenttext.Get("schema.fork.label_images")),
+			"max_image_edge_px": map[string]any{"type": "integer", "minimum": 64, "maximum": acp.MaxImageEdgeCeiling, "description": agenttext.Get("schema.fork.max_image_edge_px")},
+		}, "fork_point_id", "children"), false, false, false, true),
+		tool("workass_wait_fork_run", agenttext.Get("tools.workass_wait_fork_run"), object(map[string]any{
+			"run_id":      str(agenttext.Get("schema.fork.run_id")),
+			"child_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": agenttext.Get("schema.fork.child_ids")},
+			"return_when": enum(agenttext.Get("schema.fork.return_when"), "first", "all"),
+			"timeout_ms": map[string]any{
+				"type": "integer", "description": agenttext.Get("schema.fork.timeout_ms"),
+				"anyOf": []any{map[string]any{"enum": []int{-1, 0}}, map[string]any{"minimum": 1000, "maximum": 3600000}},
+			},
+		}, "run_id"), true, false, true, false),
+		tool("workass_cancel_fork_child", agenttext.Get("tools.workass_cancel_fork_child"), mutationObject(map[string]any{
+			"run_id":   str(agenttext.Get("schema.fork.run_id")),
+			"child_id": str(agenttext.Get("schema.fork.child_id")),
+		}, "run_id", "child_id"), false, true, true, false),
+		tool("workass_retry_fork_child", agenttext.Get("tools.workass_retry_fork_child"), mutationObject(map[string]any{
+			"run_id":   str(agenttext.Get("schema.fork.run_id")),
+			"child_id": str(agenttext.Get("schema.fork.child_id")),
+			"message":  str(agenttext.Get("schema.fork.retry_message")),
+		}, "run_id", "child_id"), false, false, false, true),
 		tool("workass_decide_subagent_permission", agenttext.Get("tools.workass_decide_subagent_permission"), mutationObject(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.78")),
 			"decision":    enum(agenttext.Get("schema.agentMCPTools.guidance.79"), "allow", "deny"),
@@ -315,6 +369,18 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "agent.decide_permission"
 	case "workass_ask_user_question":
 		method = "agent.question"
+	case "workass_create_fork_point":
+		method = "fork.create"
+	case "workass_list_forks":
+		method = "fork.list"
+	case "workass_fork_run":
+		method = "fork.run"
+	case "workass_wait_fork_run":
+		method = "fork.wait"
+	case "workass_cancel_fork_child":
+		method = "fork.cancel"
+	case "workass_retry_fork_child":
+		method = "fork.retry"
 	default:
 		return agentMCPErrorResult("unknown agent tool: " + call.Name), nil
 	}

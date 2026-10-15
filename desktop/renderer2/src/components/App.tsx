@@ -16,6 +16,9 @@ import { ImageLightbox } from './ImageLightbox';
 import { ImageClipboardController } from './ImageClipboardController';
 import { IcSidebar } from '../icons';
 import { localBrowserOwnsChat } from '../browser';
+import { ForkChildView } from './ForkChildView';
+import { forkStore, useForks } from '../store/forks';
+import { forkSelectionVisible } from '../fork-sidebar';
 
 function AssistStub() {
   return (
@@ -64,7 +67,10 @@ function SidebarToggle({ expanded }: { expanded: boolean }) {
 
 export function App() {
   const app = useApp();
+  useForks();
   const chat = store.active();
+  // A selected fork child replaces the transcript and composer of its parent.
+  const forkChild = !!chat && app.mode !== 'assist' && forkSelectionVisible(forkStore.selected, app.activeId);
   // The right column's occupant is per-chat: read the ACTIVE chat's choice.
   const requestedPane = chatPane(chat);
   const activePane = requestedPane === 'browser' && (!chat || !localBrowserOwnsChat(chat.id, chat.machineId))
@@ -142,6 +148,7 @@ export function App() {
       if (store.state.settingsOpen) { store.closeSettings(); lastEsc.current = 0; return; }
       if (store.state.rewind.open) { store.closeRewind(); lastEsc.current = 0; return; }
       if (store.state.review.open) { store.closeReview(); lastEsc.current = 0; return; }
+      if (forkSelectionVisible(forkStore.selected, store.state.activeId)) { forkStore.clearSelection(); lastEsc.current = 0; return; }
       const now = Date.now();
       const isDouble = now - lastEsc.current < 550;
       lastEsc.current = now;
@@ -162,9 +169,11 @@ export function App() {
       <SidebarV2 />
       {app.panes.side && <ResizeHandle which="side" />}
       <main>
-        {app.mode === 'assist' ? <AssistStub /> : <Transcript key={`transcript:${chat?.id ?? 'none'}`} chat={chat} />}
+        {app.mode === 'assist' ? <AssistStub />
+          : forkChild && chat ? <ForkChildView key={`fork-child:${chat.id}`} chat={chat} />
+          : <Transcript key={`transcript:${chat?.id ?? 'none'}`} chat={chat} />}
         {app.mode !== 'assist' && <ConnectionBanner />}
-        {app.mode !== 'assist' && <Composer key={`composer:${chat?.id ?? 'none'}`} chat={chat} />}
+        {app.mode !== 'assist' && !forkChild && <Composer key={`composer:${chat?.id ?? 'none'}`} chat={chat} />}
       </main>
       <RightRail key={`rail:${chat?.id ?? 'none'}`} chat={chat} />
       {/* One shared resize handle for the right column — drives --rail-w whether

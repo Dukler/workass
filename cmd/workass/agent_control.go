@@ -18,6 +18,7 @@ type agentControlHandler struct {
 	chats         *chatControlCoordinator
 	artifacts     *artifacthost.Registry
 	remoteChats   agentChatRemoteRouter
+	forks         *acp.ForkService
 	validateOwner func(ownerKey, chatID, tabID string) bool
 }
 
@@ -346,6 +347,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		})
 	case "artifact.host":
 		return h.hostArtifact(r, ownerKey, tabID, chatID, params)
+	case "fork.create", "fork.list", "fork.run", "fork.wait", "fork.cancel", "fork.retry":
+		return h.callFork(r, request.Method, params, ownerKey, tabID, chatID)
 	case "agent.cancel":
 		id := fieldString(params, "id")
 		if id == "" {

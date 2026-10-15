@@ -71,7 +71,12 @@ var mutatingChannels = map[string]struct{}{
 	// Stopping background work kills processes on this machine, so it belongs
 	// with proc:kill rather than with the read-only spawned-work channels an
 	// approved device may call while another device holds the lease.
-	"spawned-work:stop":      {},
+	"spawned-work:stop": {},
+	// Fork children are provider processes on this machine: stopping,
+	// retrying or keeping one is control, like spawned-work:stop.
+	"fork:cancel-child":      {},
+	"fork:retry-child":       {},
+	"fork:retain":            {},
 	"agent-proc:kill":        {},
 	"code:unlock":            {},
 	"code:lock":              {},

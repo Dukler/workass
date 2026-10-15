@@ -70,6 +70,14 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = 
   // Stopping work on ANOTHER machine is the point of routing it: the row is
   // rendered here and the process runs there.
   ['spawnedWorkStop', 'spawned-work:stop', (a) => [{ tabId: a[0], chatId: a[1], id: a[2] }]],
+  // Fork channels: the chat's tagged tabId/chatId ride every call, so a fork
+  // run on another machine is read and controlled there.
+  ['forkList', 'fork:list', (a) => [{ tabId: a[0], chatId: a[1] }]],
+  ['forkTranscript', 'fork:transcript'],
+  ['forkImage', 'fork:image'],
+  ['forkCancelChild', 'fork:cancel-child', undefined, 'urgent'],
+  ['forkRetryChild', 'fork:retry-child', undefined, 'control'],
+  ['forkRetain', 'fork:retain', undefined, 'control'],
   ['providersList', 'providers:list'],
   ['providersDetect', 'providers:detect', (a) => [a[0] ?? {}]],
   ['providersToggle', 'providers:toggle', (a) => [{ id: a[0], enabled: a[1] }], 'control'],
@@ -94,6 +102,7 @@ const REMOTE_EVENTS: Array<[keyof WorkassApi, string]> = [
   ['onChatPermissionRequest', 'chat:permission-request'],
   ['onChatPermissionResolved', 'chat:permission-resolved'],
   ['onSpawnedWorkChanged', 'spawned-work:changed'],
+  ['onForkChanged', 'fork:changed'],
   ['onChatCommands', 'chat:commands'],
   ['onChatGoal', 'chat:goal'],
   ['onProvidersList', 'providers:list'],

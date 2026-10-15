@@ -353,12 +353,16 @@ func main() {
 		os.Exit(1)
 	}
 	agentControl.artifacts = artifactHosting
+	forkService := newForkService(stateDir, acpManager, hub.Broadcast)
+	agentControl.forks = forkService
+	registerForkWireHandlers(hub, forkService)
 	rendererAgentRouter := registerRendererAgentRouter(hub)
 	agentControl.remoteChats = rendererAgentRouter
 	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, identity.MachineID)
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			forkService.CancelAll()
 			// Durable chat actors own the disposable provider-lane attachments.
 			// Detach those actors before the manager tears down its bridge maps so
 			// shutdown preserves the exact native-thread bindings for resume.

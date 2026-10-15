@@ -385,6 +385,7 @@ func (m *Manager) agentCatalogV2(ctx context.Context, parent *Job) map[string]an
 			"providerId": group.ProviderID, "providerName": group.ProviderName,
 			"models": models, "modes": group.Modes, "status": group.Status,
 			"permissionIntents": permissionIntentModes(group.ProviderID, group.Modes),
+			"fork":              ForkCapability(group.ProviderID),
 		}
 		if group.LatencyMs != nil {
 			entry["latencyMs"] = *group.LatencyMs

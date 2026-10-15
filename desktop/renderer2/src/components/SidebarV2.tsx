@@ -8,6 +8,9 @@ import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
+import { ForkKidsToggle, ForkNest } from './ForkSidebar';
+import { forkStore, useForks } from '../store/forks';
+import { forkChatBadge, forkSidebarOpen, forkSummaryForChat, type ForkChatBadge } from '../fork-sidebar';
 
 // Sidebar v2 — port of T3 Code's "Sidebar v2" beta (nightly 0.0.29.20260724,
 // commit 41a430a8), read from the source maps it ships rather than copied by
@@ -226,6 +229,8 @@ function WorkingDuration({ since }: { since: number }) {
 type Row = {
   chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
   status: Status; since: number; bg: number; error: string; order: number;
+  // Fork subsessions under this chat (⑂ N), or null when it never forked.
+  fork: ForkChatBadge | null;
 };
 
 // Port of T3's effectiveSettled. Live work, pending approval, parked work, and
@@ -322,8 +327,10 @@ export function canDropSidebarRow(
 }
 
 /* ---- row ---------------------------------------------------------------- */
-function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu, onSettle, onUnsettle }: {
+function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefore, onTip, onMenu, onSettle, onUnsettle }: {
   row: Row; active: boolean;
+  // Whether this row's fork subsessions are expanded beneath it.
+  forkOpen?: boolean;
   drag: DragItem | null; setDrag: (item: DragItem | null) => void;
   onDropBefore: (targetChatId: string) => void;
   onTip: (tip: Tip) => void;
@@ -339,6 +346,12 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
   const section = rowSection(row);
   const canDrop = canDropSidebarRow(drag?.id, drag?.section, chat.id, section);
   const commit = () => { setEditing(false); store.renameChat(chat.id, value); };
+  const forkToggle = row.fork && !editing ? (
+    <ForkKidsToggle
+      count={row.fork.children} open={forkOpen}
+      onToggle={() => { closeTip(); forkStore.setChatOpen({ tabId: chat.id, chatId: chat.chatId ?? '' }, !forkOpen); }}
+    />
+  ) : null;
   const pill = row.archived
     ? { label: 'Archivado', icon: null, tone: 'archived' }
     : status === 'ready' ? null : STATUS_PILL[status];
@@ -428,7 +441,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
         draggable={!editing}
         onMouseEnter={openTip}
         onMouseLeave={closeTip}
-        onClick={() => { if (!editing) { closeTip(); store.switchChat(chat.id); } }}
+        onClick={() => { if (!editing) { closeTip(); forkStore.clearSelection(); store.switchChat(chat.id); } }}
         onDoubleClick={() => { closeTip(); setValue(chat.title); setEditing(true); }}
         onContextMenu={(e) => { e.preventDefault(); closeTip(); onMenu(row, e.clientX, e.clientY); }}
         onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag({ id: chat.id, section }); closeTip(); }}
@@ -451,6 +464,7 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
                 line changes width, so here it is anchored. */}
             <div className="sv2-l2">
               {title}
+              {forkToggle}
               <span className="sv2-prov" aria-hidden="true">
                 <ModelIcon provider={store.providerBrand(chat.providerId, chat)} />
               </span>
@@ -471,10 +485,12 @@ function SidebarV2Row({ row, active, drag, setDrag, onDropBefore, onTip, onMenu,
           <>
             <span className="sv2-fav"><ProjectIcon chatId={chat.id} cwd={chat.cwd ?? ''} /></span>
             {title}
+            {forkToggle}
             {slot}
           </>
         )}
       </div>
+      {forkOpen && row.fork && <ForkNest chat={chat} />}
     </li>
   );
 }
@@ -621,6 +637,8 @@ function RowMenu({ row, x, y, onClose, onRename, onSettle, onUnsettle }: {
 export function SidebarV2() {
   const app = useApp();
   useSpawnedWork();
+  const forkVersion = useForks();
+  useEffect(() => { forkStore.start(); }, []);
   const groups = buildWorkspaceGroups(app.workspaces, app.chats, app.removedWorkspaces);
   const [browsing, setBrowsing] = useState(false);
   const [scope, setScope] = useState<string | null>(() => {
@@ -681,7 +699,10 @@ export function SidebarV2() {
         const project = workspaceLabelForChat(g, chat);
         if (needle && !`${chat.title} ${project}`.toLowerCase().includes(needle)) continue;
         const work = store.spawnedWork(chat);
-        const live = chatHasLiveActivity(chat, work);
+        // A running fork child keeps its parent "Trabajando" like any other
+        // work the chat started.
+        const fork = forkChatBadge(forkSummaryForChat(forkStore.summary(), chat), forkStore.chat(chat.id));
+        const live = chatHasLiveActivity(chat, work) || (fork?.running ?? 0) > 0;
         const active = chat.id === app.activeId;
         const touched = lastTouchedAt(chat);
         const status = resolveStatus(chat, live, active, store.obligation(chat));
@@ -690,18 +711,19 @@ export function SidebarV2() {
         const archived = resolveArchived(chat, status, now, touched);
         out.push({
           chat, project, touched, status, settled, archived,
-          since: status === 'working' ? (workingSince(chat, work) || touched) : 0,
+          since: status === 'working' ? (workingSince(chat, work) || fork?.since || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
           order: manualOrder.get(chat.id) ?? Number.MAX_SAFE_INTEGER,
           // Density follows lifecycle, never age or selection. Every ordinary
           // thread stays full-size; only settled/archive rows are compact.
           card: isFullSizeSidebarRow(settled, archived),
+          fork,
         });
       }
     }
     return out;
-  }, [groups, scope, query, app.activeId, app.chats, lifecycleNow]);
+  }, [groups, scope, query, app.activeId, app.chats, lifecycleNow, forkVersion]);
 
   const searching = query.trim().length > 0;
   // Machine ownership is presentation metadata, never a grouping boundary.
@@ -743,6 +765,11 @@ export function SidebarV2() {
   }, [cards, app.activeId]);
   const unsettleRow = useCallback((row: Row) => { store.settleChat(row.chat.id, false); }, []);
 
+  // A selected fork child takes the highlight from its parent row.
+  const isActiveRow = (row: Row) => row.chat.id === app.activeId && !forkStore.selectedFor(row.chat.id);
+  const isForkOpen = (row: Row) => !!row.fork && forkSidebarOpen(
+    forkStore.chatOpenExplicit(row.chat.id), row.chat.id === app.activeId, row.fork.running > 0,
+  );
   const rowProps = {
     drag, setDrag, onDropBefore: dropChatBefore, onTip: setTip,
     onMenu: (row: Row, x: number, y: number) => setCtx({ row, x, y }),
@@ -798,14 +825,14 @@ export function SidebarV2() {
         <ul role="list">
           {searching ? searchRows.map((row) => (
             <SidebarV2Row
-              key={`${row.chat.id}:search`} row={row} active={row.chat.id === app.activeId}
+              key={`${row.chat.id}:search`} row={row} active={isActiveRow(row)} forkOpen={isForkOpen(row)}
               {...rowProps}
             />
           )) : (
             <>
               {cards.map((row) => (
                 <SidebarV2Row
-                  key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={row.chat.id === app.activeId}
+                  key={`${row.chat.id}:${row.card ? 'card' : 'slim'}`} row={row} active={isActiveRow(row)} forkOpen={isForkOpen(row)}
                   {...rowProps}
                 />
               ))}
@@ -820,7 +847,7 @@ export function SidebarV2() {
               )}
               {tailVisible.map((row) => (
                 <SidebarV2Row
-                  key={`${row.chat.id}:slim`} row={row} active={row.chat.id === app.activeId}
+                  key={`${row.chat.id}:slim`} row={row} active={isActiveRow(row)} forkOpen={isForkOpen(row)}
                   {...rowProps}
                 />
               ))}

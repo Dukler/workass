@@ -536,10 +536,24 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 	if delivery == "steer" && !running {
 		return nil, errors.New("cannot steer an idle chat; use auto or queue")
 	}
-	receipt, err := c.providerChats.QueueAgentMessage(
+	var attachments []acp.ImageAttachment
+	if paths := stringSliceField(params["attachments"]); len(paths) > 0 {
+		_, state, err := c.providerChats.exactActor(tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		cwd := ""
+		if state.Presentation.CWD != nil {
+			cwd = strings.TrimSpace(*state.Presentation.CWD)
+		}
+		if attachments, err = acp.ValidateImageAttachmentPaths(paths, cwd, 0); err != nil {
+			return nil, err
+		}
+	}
+	receipt, err := c.providerChats.QueueAgentMessageWithAttachments(
 		context.Background(), tabID, chatID,
 		operationID,
-		fieldString(params, "message"), delivery,
+		fieldString(params, "message"), delivery, attachments,
 	)
 	if err != nil {
 		return nil, err

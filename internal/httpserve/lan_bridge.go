@@ -203,6 +203,9 @@ const LANBridgeJS = `(() => {
     chatGoalGet: (tabId, chatId) => invoke('chat:goal-get', { tabId, chatId }),
     spawnedWorkRead: (tabId, chatId, id, tailBytes) => invoke('spawned-work:read', { tabId, chatId, id, tailBytes }),
     spawnedWorkStop: (tabId, chatId, id) => invoke('spawned-work:stop', { tabId, chatId, id }),
+    forkList: (tabId, chatId) => invoke('fork:list', { tabId, chatId }), forkSummary: () => invoke('fork:summary'),
+    forkTranscript: (o) => invoke('fork:transcript', o), forkImage: (o) => invoke('fork:image', o),
+    forkCancelChild: (o) => invoke('fork:cancel-child', o), forkRetryChild: (o) => invoke('fork:retry-child', o), forkRetain: (o) => invoke('fork:retain', o),
     appChatDetectAcp: (opts) => invoke('app-chat:detect-acp', opts || {}),
     appChatFork: (o) => invoke('app-chat:fork', o),
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
@@ -225,6 +228,7 @@ const LANBridgeJS = `(() => {
     onChatPlanUsage: (cb) => on('chat:plan-usage', cb),
     onMachinesChanged: (cb) => on('machines:changed', cb),
     onSpawnedWorkChanged: (cb) => on('spawned-work:changed', cb),
+    onForkChanged: (cb) => on('fork:changed', cb),
     onProvidersList: (cb) => on('providers:list', cb), onProvidersUpdates: (cb) => on('providers:updates', cb), onProvidersUpdateProgress: (cb) => on('providers:update-progress', cb), onAppUpdate: (cb) => on('app:update', cb),
   };
 })();`

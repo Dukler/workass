@@ -1,5 +1,5 @@
 import { FloatingBrowser } from './FloatingBrowser';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type RefObject, type WheelEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject, type WheelEvent } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useProc } from '../store/store';
 import { chatPane } from '../store/right-pane';
@@ -13,6 +13,9 @@ import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
+import { forkStore, useForkPoints } from '../store/forks';
+import { placeForkPoints } from '../fork-format';
+import { ForkMarker } from './ForkMarker';
 
 const HISTORY_PAGE = 40;
 // How long the streaming height hold outlives the last growth (see onResize).
@@ -23,7 +26,9 @@ const SEARCH_WINDOW = 40;
 // read chats through the daemon (archives + Agent API), humans don't paste
 // transcripts around. The '\u00b7\u00b7\u00b7' menu returns when it has real options.
 
-function Topbar({ chat, onFind }: { chat: Chat | null; onFind: () => void }) {
+// `title` replaces the chat title (a fork subsession shows its breadcrumb
+// there); without `onFind` the search button has nothing to search.
+export function Topbar({ chat, onFind, title }: { chat: Chat | null; onFind?: () => void; title?: ReactNode }) {
   const app = useApp();
   useProc(); // re-render the bg-process chip as proc:list / proc:changed land
   const pane = chatPane(chat); // this chat's right-column occupant (rail/browser/closed)
@@ -36,7 +41,7 @@ function Topbar({ chat, onFind }: { chat: Chat | null; onFind: () => void }) {
       {/* No reopen toggle here: the single sticky .side-toggle (App.tsx) owns
           show/hide in both pane states (user law 2026-07-11). */}
       <IcDoc />
-      <b>{chat?.title ?? 'workass'}</b>
+      {title ?? <b>{chat?.title ?? 'workass'}</b>}
       {ws && <span className="provbadge" title={chat?.cwd ?? 'Workspace'}>{ws}</span>}
       {/* Provider chip removed by user request (2026-07-11) — the bound agent
           is visible in the composer's model selector; the titlebar stays
@@ -46,7 +51,9 @@ function Topbar({ chat, onFind }: { chat: Chat | null; onFind: () => void }) {
           background processes surface in the Tareas card + inline transcript
           rows only. */}
       <span className="ticons">
-        <button className="tico" title="Buscar en este chat · ⌘F" aria-label="Buscar en este chat" onClick={onFind}><IcSearch /></button>
+        {onFind
+          ? <button className="tico" title="Buscar en este chat · ⌘F" aria-label="Buscar en este chat" onClick={onFind}><IcSearch /></button>
+          : <button className="tico soon" title="Buscar (no disponible en una subsesión)" aria-label="Buscar" disabled><IcSearch /></button>}
         <button className="tico soon" title="Terminal (próximamente)"><IcTerminal /></button>
         <button className="tico soon" title="Cambios (próximamente)"><IcChanges /></button>
         <button className="tico soon" title="Vista previa (próximamente)"><IcPreview /></button>
@@ -281,6 +288,30 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     && message.status === 'running'
     && message.turnTerminal !== false
   ));
+  // Fork points: ONE quiet marker line where the chat forked, after its message.
+  const forkPoints = useForkPoints(chat?.id);
+  const forkPlacement = forkPoints.length ? placeForkPoints(shown, forkPoints) : null;
+  useEffect(() => {
+    if (chat?.id && chat.chatId) forkStore.ensure({ tabId: chat.id, chatId: chat.chatId });
+  }, [chat?.id, chat?.chatId]);
+  // A child view's "Prefijo heredado" comes back here, at the fork point.
+  useEffect(() => {
+    const target = forkStore.pendingMarker(chat?.id);
+    if (!target) return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const marker = docRef.current?.querySelector(`[data-fork-point="${CSS.escape(target)}"]`);
+        if (!marker) return;
+        forkStore.clearPendingMarker();
+        stick.current = false;
+        marker.scrollIntoView({ block: 'center' });
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [chat?.id, forkPoints]);
+  const forkMarkers = (ids: readonly string[]) => (forkPlacement && chat
+    ? ids.flatMap((id) => forkPlacement.after.get(id) ?? []).map((point) => <ForkMarker key={`fork:${point.forkPointId}`} chat={chat} point={point} />)
+    : []);
   const turnBlocks = assistantTurnBlockRanges(shown);
   const turnBlockStarts = new Map<number, number>();
   const turnBlockMembers = new Set<number>();
@@ -707,12 +738,12 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                       : `Ver ${Math.min(HISTORY_PAGE, residentHidden > 0 ? residentHidden : hidden)} mensajes anteriores`}
                   </button>
                 )}
-                {shown.map((m, index) => {
+                {shown.flatMap((m, index) => {
                   const midRun = (at: number) => shown[at]?.role === 'assistant' && shown[at + 1]?.role === 'assistant';
                   const blockEnd = turnBlockStarts.get(index);
                   if (blockEnd != null) {
                     const messages = shown.slice(index, blockEnd);
-                    return (
+                    return [(
                       <AssistantTurnBlock
                         key={`turn-block:${messages[0].id}`}
                         tabId={chat.id}
@@ -721,10 +752,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         artifactOrigin={artifactOrigin}
                         midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
-                    );
+                    ), ...forkMarkers(messages.map((message) => message.id))];
                   }
-                  if (turnBlockMembers.has(index)) return null;
-                  return (
+                  if (turnBlockMembers.has(index)) return [];
+                  return [(
                     <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
                         <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
@@ -738,8 +769,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         />
                       )}
                     </div>
-                  );
+                  ), ...forkMarkers([m.id])];
                 })}
+                {forkPlacement && chat && forkPlacement.tail.map((point) => <ForkMarker key={`fork:${point.forkPointId}`} chat={chat} point={point} />)}
               </>
             )}
           </div>

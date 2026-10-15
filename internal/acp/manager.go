@@ -3918,8 +3918,8 @@ func (b *Bridge) promptImageBlocks(images []any) ([]any, error) {
 	if !imageSupport {
 		return nil, &providercontract.Error{Kind: providercontract.ErrorUnsupportedCapability, Message: "the selected agent does not support image input; the attachment was not sent as a text-only turn"}
 	}
-	if len(images) > maxToolResultImages {
-		return nil, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Message: fmt.Sprintf("too many attached images: got %d, maximum is %d", len(images), maxToolResultImages)}
+	if len(images) > maxPromptImages {
+		return nil, &providercontract.Error{Kind: providercontract.ErrorAdmissionRejected, Message: fmt.Sprintf("too many attached images: got %d, maximum is %d", len(images), maxPromptImages)}
 	}
 	blocks := make([]any, 0, len(images))
 	total := 0
@@ -3940,7 +3940,7 @@ func (b *Bridge) promptImageBlocks(images []any) ([]any, error) {
 		if !safeToolImageMIME(mimeType) || data == "" {
 			return nil, fmt.Errorf("attached image %d is not a supported PNG, JPEG, WebP, or GIF raster", index+1)
 		}
-		if len(data) > maxToolResultImageBytes || total+len(data) > maxToolResultTotalBytes {
+		if len(data) > maxPromptImageBytes || total+len(data) > maxPromptTotalBytes {
 			return nil, fmt.Errorf("attached image %d exceeds Workass's bounded image payload", index+1)
 		}
 		// Only the MIME label used to be checked: invalid base64, or plain text

@@ -1058,6 +1058,15 @@ const (
 	maxToolResultTotalBytes = 16 * 1024 * 1024
 )
 
+// Prompt input carries more images than a tool result: an agent can attach a
+// whole set of crops to one message (agent-supplied paths are validated in
+// fork_images.go). The renderer keeps its own smaller paste limit.
+const (
+	maxPromptImages     = MaxImageAttachments
+	maxPromptImageBytes = 8 * 1024 * 1024
+	maxPromptTotalBytes = 28 * 1024 * 1024
+)
+
 // toolImagesFromContent preserves raster images returned by MCP tools instead
 // of silently discarding them while extracting the text result. The payload is
 // bounded before it reaches the wire/session mirror; remote URLs and SVG are

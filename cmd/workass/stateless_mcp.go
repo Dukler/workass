@@ -234,7 +234,8 @@ func workassToolMutates(kind toolKind, name string) bool {
 		"workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
 		"workass_message_subagent", "workass_retry_subagent", "workass_register_external_work",
 		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission",
-		"workass_ask_user_question":
+		"workass_ask_user_question",
+		"workass_create_fork_point", "workass_fork_run", "workass_cancel_fork_child", "workass_retry_fork_child":
 		return true
 	default:
 		return false
@@ -250,7 +251,7 @@ func agentToolsForChild() []map[string]any {
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == "workass_ask_user_question" || strings.Contains(name, "subagent") {
+		if name == "workass_ask_user_question" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
 			continue
 		}
 		filtered = append(filtered, tool)
