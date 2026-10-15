@@ -951,9 +951,23 @@ table.mdtable th { background: var(--field); font-weight: 600; }
   .qchoice, .qchoice::before, .qchoice-end, .qfree, .qsend, .qbtn, .qclose { transition: none; }
 }
 
-.stamp { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 14px 0 0; }
-.stamp svg { width: 13px; height: 13px; cursor: pointer; }
-.stamp svg:hover { color: var(--ink2); }
+/* The reply's action row: one per run of replies, quiet until the reply is
+   hovered (user 2026-10-15). A real 24px button whose 14px glyph sits flush
+   with the text's left edge (the -5px pull); every item centred on one line.
+   A state word (error/detenido) is news, so it never hides. */
+.stamp { display: flex; align-items: center; gap: 4px; height: 24px; margin: -6px 0 14px -5px; color: var(--faint); font-size: 12px; line-height: 1; }
+.stamp-btn { display: grid; place-items: center; flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; transition: color .12s ease, background .12s ease, opacity .12s ease; }
+.stamp-btn svg { width: 14px; height: 14px; }
+.stamp-btn:hover { color: var(--ink); background: var(--line); }
+.stamp-time { font-variant-numeric: tabular-nums; transition: opacity .12s ease; }
+.stamp-state { padding: 0 5px; }
+/* The row sits inside the reply's last paragraph margin (14px) and gives the
+   same gap back below it, so it belongs to its own reply. A state word under a
+   reply that another follows tucks in closer still: it must never read as a
+   label for the next reply. */
+.stamp.stamp-quiet { height: 18px; margin-top: -10px; margin-bottom: 12px; }
+.stamp-btn, .stamp-time { opacity: 0; }
+.amsg:hover .stamp-btn, .amsg:hover .stamp-time, .stamp:focus-within .stamp-btn, .stamp:focus-within .stamp-time { opacity: 1; }
 .turnfail { color: var(--del); }
 
 .doc-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; color: var(--faint); text-align: center; padding: 40px; }

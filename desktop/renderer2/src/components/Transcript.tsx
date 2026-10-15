@@ -677,6 +677,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                   </button>
                 )}
                 {shown.map((m, index) => {
+                  const midRun = (at: number) => shown[at]?.role === 'assistant' && shown[at + 1]?.role === 'assistant';
                   const blockEnd = turnBlockStarts.get(index);
                   if (blockEnd != null) {
                     const messages = shown.slice(index, blockEnd);
@@ -687,6 +688,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         messages={messages}
                         turnSeqs={messages.map((message) => store.checkpointForJob(chat, message.jobId)?.turnSeq)}
                         artifactOrigin={artifactOrigin}
+                        midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
                     );
                   }
@@ -701,6 +703,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                           msg={m}
                           turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
                           artifactOrigin={artifactOrigin}
+                          midRun={midRun(index)}
                         />
                       )}
                     </div>
