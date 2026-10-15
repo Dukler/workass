@@ -42,8 +42,19 @@ export function projectSteeringPresentation(messages: readonly Msg[]): SteeringP
     // after it without moving or copying the user row.
     if (message.role === 'assistant' && message.steerBoundary === 'waiting') continue;
     if (trayIds.has(message.id)) continue;
+    if (isEmptySettledReply(message)) continue;
     transcriptMessages.push(message);
   }
 
   return { transcriptMessages, steeringTrayMessages };
+}
+
+// A reply that finished having said and done nothing. Claude Code wakes the
+// agent once per finished background task, and a wake it answers silently
+// still left a bubble with only a copy button and a timestamp — a column of
+// blank rows in a chat running 15 reviewers (DepthVision speed, 2026-10-15).
+// Failed and cancelled replies stay: their state is the message.
+export function isEmptySettledReply(message: Msg): boolean {
+  return message.role === 'assistant' && message.status === 'done'
+    && !(message.content ?? '').trim() && !message.events?.length && !message.images?.length;
 }

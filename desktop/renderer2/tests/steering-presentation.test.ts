@@ -130,3 +130,20 @@ test('ordinary messages without steer ownership retain their exact order', () =>
   assert.deepEqual(projection.transcriptMessages, rows);
   assert.deepEqual(projection.steeringTrayMessages, []);
 });
+
+// Claude Code wakes the agent once per finished background task; a wake it
+// answers with nothing left a blank row with only a copy button and a time.
+test('a reply that finished having said and done nothing leaves no row', () => {
+  const rows = [
+    user('prompt', 'run the reviewers'),
+    assistant('one', 'One of 15 back.'),
+    assistant('empty', ''),
+    assistant('blank', '  \n'),
+    assistant('tools-only', '', { events: [{ key: 't', at: 0, kind: 'thinking', text: 'checking' }] as Msg['events'] }),
+    assistant('failed', '', { status: 'failed' }),
+    assistant('running', '', { status: 'running' }),
+    assistant('two', 'Two of 15 back.'),
+  ];
+  const ids = projectSteeringPresentation(rows).transcriptMessages.map((message) => message.id);
+  assert.deepEqual(ids, ['prompt', 'one', 'tools-only', 'failed', 'running', 'two']);
+});

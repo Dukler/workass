@@ -4766,3 +4766,41 @@ func TestStderrTailIsAppendedOnce(t *testing.T) {
 		t.Fatalf("stderr tail repeated: %q", twice.Error())
 	}
 }
+
+// Claude streams a thought a few characters at a time. Chunks were trimmed and
+// joined with a space, and timed windows (joined with a line break) were cut
+// mid-word, so the thought line read "Star ting the short -task" (DepthVision
+// speed, 2026-10-15). Windows now end at whitespace, chunks stay verbatim,
+// and the last partial word is published before whatever follows the thought.
+func TestStreamedThoughtNeverSplitsAWord(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	manager := NewManager(Options{Broadcast: events.Broadcast, ThoughtFlushInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	b := &Bridge{providerID: "claude", manager: manager, opts: manager.opts}
+	job := &Job{ID: "thought-job"}
+	for _, chunk := range []string{"Star", "ting the ", "short-task lab"} {
+		b.queueThinking(job, chunk)
+	}
+	b.flushThinking(job, false) // a timed window
+	b.queueThinking(job, "elling round")
+	b.flushThinking(job, false) // "round" has no whitespace after it yet
+	b.flushThinking(job, true)  // the agent moved on
+	var windows []string
+	for _, event := range events.snapshot() {
+		if event.channel != "job:event" {
+			continue
+		}
+		if inner := mapFromAny(mapFromAny(event.payload)["event"]); inner["kind"] == "thinking" {
+			windows = append(windows, asString(inner["text"]))
+		}
+	}
+	if len(windows) == 0 {
+		t.Fatal("no thinking published")
+	}
+	// The renderer joins windows with a line break and shows them on one line.
+	joined := strings.Join(strings.Fields(strings.Join(windows, "\n")), " ")
+	if joined != "Starting the short-task labelling round" {
+		t.Fatalf("windows %q read as %q", windows, joined)
+	}
+}

@@ -1649,3 +1649,45 @@ func TestForegroundClaudeBashTaskEndsWithItsToolCall(t *testing.T) {
 		t.Fatalf("late provider ending revived the foreground task: %q ×%d", got, count)
 	}
 }
+
+// Claude's SendMessage resumes a finished (or restart-orphaned) agent under a
+// new call, but the agent's own messages keep naming the Agent call that
+// launched it. A fresh row keyed to the resume call left its calls in a second
+// group labeled with a raw tool id (DepthVision speed, 2026-10-15). The same
+// row must come back, running, under the launch call.
+func TestResumedClaudeAgentKeepsItsLaunchCall(t *testing.T) {
+	t.Parallel()
+	for _, evicted := range []bool{false, true} {
+		manager := NewManager(Options{
+			StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+			SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+		})
+		t.Cleanup(func() { manager.Reset() })
+		observe := func(event map[string]any) {
+			observeRawSpawnLifecycleFixture(t, manager, "tab-resume", "chat-resume", "session-resume", "claude", event)
+		}
+		observe(map[string]any{"type": "started", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_launch", "description": "Build fast batched CUDA trainer", "subagentType": "general-purpose", "taskType": "local_agent"})
+		observe(map[string]any{"type": "notification", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_launch", "status": "completed", "summary": "stopped"})
+		if evicted {
+			// A restart orphans the row and it leaves the live set.
+			key := spawnedWorkKey("tab-resume", "chat-resume", "a281f4ed0610bdf38")
+			manager.spawnedWorkMu.Lock()
+			manager.rememberSettledSpawnedWorkLocked(key, manager.spawnedWork[key].Item)
+			delete(manager.spawnedWork, key)
+			manager.spawnedWorkMu.Unlock()
+		}
+		resumedAt := time.Now().UTC()
+		observe(map[string]any{"type": "started", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_sendmessage", "description": "Build fast batched CUDA trainer", "taskType": "local_agent"})
+		items := manager.ListSpawnedWork("tab-resume", "chat-resume")
+		if len(items) != 1 {
+			t.Fatalf("evicted=%v: a resume made %d rows: %#v", evicted, len(items), items)
+		}
+		item := items[0]
+		if item.Status != "running" || item.ToolCallID != "toolu_launch" || item.Kind != "agent" || item.Label != "Build fast batched CUDA trainer" || item.FinishedAt != "" {
+			t.Fatalf("evicted=%v: resumed agent = %#v", evicted, item)
+		}
+		if started, _ := time.Parse(time.RFC3339Nano, item.StartedAt); started.Before(resumedAt.Add(-time.Second)) {
+			t.Fatalf("evicted=%v: a resumed run kept the old clock: %s", evicted, item.StartedAt)
+		}
+	}
+}

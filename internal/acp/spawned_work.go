@@ -639,7 +639,9 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	}
 	m.spawnedWorkMu.Lock()
 	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID)
+	revived := event.Kind == "started" && m.reviveResumedAgentLocked(tabID, chatID, taskID, &candidate)
 	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, description, task.TaskType, task.SubagentType, task.OutputFile)
+	changed = changed || revived
 	if rec != nil {
 		rec.LastLevelSeen = now
 		if model := compactText(redactSensitiveText(task.ModelLabel), 160); model != "" && model != rec.Item.ModelLabel {
@@ -751,6 +753,40 @@ func (m *Manager) rememberSettledSpawnedWorkLocked(key string, item SpawnedWorkI
 		delete(m.spawnedWorkSettled, m.spawnedWorkSettledOrder[0])
 		m.spawnedWorkSettledOrder = m.spawnedWorkSettledOrder[1:]
 	}
+}
+
+// reviveResumedAgentLocked handles an agent started again under a different
+// call than the one that launched it: Claude's SendMessage resumes a finished
+// or orphaned agent, and the resumed agent's own messages still name the
+// launching Agent call as their parent. It is the same agent, so its row comes
+// back as a new run under the launch call; a fresh row keyed to the resume
+// call left its calls in a second, nameless group (DepthVision speed,
+// 2026-10-15). Reports whether the row was revived.
+func (m *Manager) reviveResumedAgentLocked(tabID, chatID, taskID string, candidate *spawnedWorkCandidate) bool {
+	key := spawnedWorkKey(tabID, chatID, taskID)
+	prior, live := SpawnedWorkItem{}, m.spawnedWork[key]
+	if live != nil {
+		prior = live.Item
+	} else if settled, ok := m.spawnedWorkSettled[key]; ok {
+		prior = settled
+	} else {
+		return false
+	}
+	launch := strings.TrimSpace(prior.ToolCallID)
+	if prior.Kind != "agent" || launch == "" || candidate.ToolCallID == "" || launch == strings.TrimSpace(candidate.ToolCallID) {
+		return false
+	}
+	candidate.ToolCallID = launch
+	if live != nil && prior.Status == "running" {
+		return false
+	}
+	item := prior
+	now := isoNow()
+	item.Status, item.FinishedAt, item.ExitCode = "running", "", nil
+	item.StartedAt, item.UpdatedAt = now, now
+	m.spawnedWork[key] = &spawnedWorkRecord{Item: item, SessionID: candidate.SessionID}
+	delete(m.spawnedWorkSettled, key)
+	return true
 }
 
 func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID string) spawnedWorkCandidate {
