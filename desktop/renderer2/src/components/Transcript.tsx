@@ -12,7 +12,7 @@ import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
-import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL } from '../chat/residency';
+import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
 
 const HISTORY_PAGE = 40;
 const SEARCH_WINDOW = 40;
@@ -271,7 +271,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const searchEnd = selectedFindMatch ? Math.min(total, searchStart + SEARCH_WINDOW) : 0;
   const shown = selectedFindMatch
     ? visibleMessages.slice(Math.max(0, searchEnd - SEARCH_WINDOW), searchEnd)
-    : visibleMessages.slice(Math.max(0, total - reveal));
+    : visibleMessages.slice(transcriptWindowStart(visibleMessages, reveal));
   const residentHidden = selectedFindMatch ? 0 : total - shown.length;
   const hidden = selectedFindMatch ? 0 : Math.max(0, knownTotal - shown.length);
   const runningMessage = [...shown].reverse().find((message) => (
@@ -545,6 +545,19 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setNewCount(0);
     setScrollTop(el, el.scrollHeight);
   }, [chat?.id, latestUserMessageId]);
+
+  // A window shorter than the screen left a band of nothing under the newest
+  // row while older messages sat behind "Ver anteriores" (user 2026-10-15).
+  // Show more of what is already loaded until the screen is full. It only
+  // grows while there is nothing to scroll, so it never moves what is read.
+  useLayoutEffect(() => {
+    const doc = docRef.current;
+    const el = scrollRef.current;
+    if (!doc || !el || selectedFindMatch || residentHidden <= 0) return;
+    if (doc.offsetHeight < el.clientHeight) {
+      setReveal((current) => Math.min(total, Math.max(current, shown.length) + CHAT_INITIAL_HISTORY));
+    }
+  });
 
   // A turn's held height lasts exactly as long as the turn.
   useLayoutEffect(() => {

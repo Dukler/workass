@@ -50,3 +50,21 @@ export function preserveUnchangedFullHistories(previous: Chat[], restored: Chat[
   }
   return preserved;
 }
+
+// Where the transcript's visible window starts. A count alone let a burst of
+// short agent replies (Claude Code wakes the agent once per finished background
+// task: "Seven of 15 back.", "Eight of 15 back.") push the user's own message
+// and the real answers behind "Ver anteriores" (user 2026-10-15). The window
+// always reaches back to the latest user message, within the resident tail.
+export function transcriptWindowStart(messages: readonly { role: string }[], reveal: number): number {
+  const total = messages.length;
+  let start = Math.max(0, total - reveal);
+  const floor = Math.max(0, total - CHAT_MESSAGE_TAIL);
+  for (let index = total - 1; index >= floor; index--) {
+    if (messages[index].role === 'user') {
+      start = Math.min(start, index);
+      break;
+    }
+  }
+  return start;
+}
