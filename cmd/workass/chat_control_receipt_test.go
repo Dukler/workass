@@ -176,3 +176,69 @@ func TestPresentationWithoutDraftNeverMutatesLegacyDraft(t *testing.T) {
 		t.Fatal("metadata retry rewrote another edit")
 	}
 }
+
+// workass_settle_chat is the agent twin of the sidebar Settle button: it files
+// the chat, clears unread, keeps every other presentation field, replays
+// exactly, and never restarts the archive clock of an already-settled chat.
+func TestChatControlSettleMatchesSidebarAndReplaysExactly(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := acp.NewManager(acp.Options{StateDir: stateDir, RuntimeProfile: "dev"})
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	const tabID, chatID = "settle-receipt-tab", "settle-receipt-chat"
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"tabId": tabID, "chatId": chatID, "operationId": "settle-receipt-create",
+		"title": "Fork source", "providerId": "mock", "currentModelId": "mock-deterministic",
+	}); err != nil {
+		t.Fatalf("create actor chat: %v", err)
+	}
+	coordinator := newChatControlCoordinator(manager, nil, runtime)
+	before, _ := runtime.Snapshot(chatID)
+	settle := map[string]any{"operation_id": "settle-once", "tab_id": tabID, "chat_id": chatID, "settled": true}
+	if _, err := coordinator.settle(settle); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	first, _ := runtime.Snapshot(chatID)
+	if first.Presentation.Settled != "settled" || first.Presentation.SettledAt <= 0 || first.Presentation.Unread {
+		t.Fatalf("settled presentation = %#v", first.Presentation)
+	}
+	if first.Presentation.Title != before.Presentation.Title || first.Presentation.TitleLocked != before.Presentation.TitleLocked ||
+		first.Presentation.CurrentModelID != before.Presentation.CurrentModelID {
+		t.Fatalf("settle changed other chat state: before=%#v after=%#v", before.Presentation, first.Presentation)
+	}
+	if _, err := coordinator.settle(settle); err != nil {
+		t.Fatalf("lost-reply settle retry: %v", err)
+	}
+	retried, _ := runtime.Snapshot(chatID)
+	if retried.Revision != first.Revision {
+		t.Fatalf("settle retry changed actor revision: %d -> %d", first.Revision, retried.Revision)
+	}
+	changed := maps.Clone(settle)
+	changed["settled"] = false
+	if _, err := coordinator.settle(changed); err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("changed settle reused operation id: %v", err)
+	}
+	again := maps.Clone(settle)
+	again["operation_id"] = "settle-twice"
+	if _, err := coordinator.settle(again); err != nil {
+		t.Fatalf("second settle: %v", err)
+	}
+	if twice, _ := runtime.Snapshot(chatID); twice.Presentation.SettledAt != first.Presentation.SettledAt {
+		t.Fatalf("repeated settle restarted the archive clock: %d -> %d", first.Presentation.SettledAt, twice.Presentation.SettledAt)
+	}
+	listed, err := runtime.ListChats()
+	if err != nil || len(listed) != 1 || listed[0]["settled"] != "settled" || listed[0]["settledAt"] != int(first.Presentation.SettledAt) {
+		t.Fatalf("list chats = %#v, err=%v", listed, err)
+	}
+
+	reactivate := map[string]any{"operation_id": "reactivate-once", "tab_id": tabID, "chat_id": chatID, "settled": false}
+	if _, err := coordinator.settle(reactivate); err != nil {
+		t.Fatalf("reactivate: %v", err)
+	}
+	active, _ := runtime.Snapshot(chatID)
+	if active.Presentation.Settled != "active" || active.Presentation.SettledAt != 0 {
+		t.Fatalf("reactivated presentation = %#v", active.Presentation)
+	}
+	if _, err := coordinator.settle(map[string]any{"operation_id": "settle-bad", "tab_id": tabID, "chat_id": chatID, "settled": "yes"}); err == nil {
+		t.Fatal("non-boolean settled was accepted")
+	}
+}

@@ -19,8 +19,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// count so new recurring context cost remains an explicit decision.
 	// 2026-10-15: +6 fork tools (create point, run, wait, list, cancel, retry),
 	// requested by the operator for cache-sharing fan-out of vision reviews.
-	if len(tools) != 35 {
-		t.Fatalf("tool count = %d, want 35", len(tools))
+	// 2026-10-15: +1 workass_settle_chat, so agents can file the helper chats
+	// they create the way the sidebar Settle button does.
+	if len(tools) != 36 {
+		t.Fatalf("tool count = %d, want 36", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

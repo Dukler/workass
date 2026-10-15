@@ -402,6 +402,22 @@ func (c *chatControlCoordinator) rename(params map[string]any) (map[string]any, 
 	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "title": sanitizedChatTitle(fieldString(params, "title"))}, nil
 }
 
+func (c *chatControlCoordinator) settle(params map[string]any) (map[string]any, error) {
+	tabID, chatID, operationID, err := c.validateMutation(params, "settle")
+	if err != nil {
+		return nil, err
+	}
+	settled, ok := params["settled"].(bool)
+	if !ok {
+		return nil, errors.New("settled must be true or false")
+	}
+	if err := c.providerChats.SettleChat(tabID, chatID, settled, operationID); err != nil {
+		return nil, err
+	}
+	c.refresh(tabID, chatID, false)
+	return map[string]any{"ok": true, "tabId": tabID, "chatId": chatID, "settled": settled}, nil
+}
+
 func (c *chatControlCoordinator) configure(ctx context.Context, params map[string]any) (map[string]any, error) {
 	tabID, chatID, operationID, err := c.validateMutation(params, "configure")
 	if err != nil {

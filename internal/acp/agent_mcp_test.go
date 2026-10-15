@@ -59,7 +59,7 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 	brief := manager.buildEnvironmentBrief(false)
 	for _, want := range []string{
 		"Workass CLI",
-		"list/read/create/rename/configure/focus/delete exact chats",
+		"list/read/create/rename/settle/configure/focus/delete exact chats",
 		"provider/model/effort/permission catalog",
 		"inspect bounded redacted update state and failure logs",
 		"workass_list_update_targets",

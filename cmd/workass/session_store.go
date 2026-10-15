@@ -489,6 +489,17 @@ func (s *sessionStore) recordLoadError(err error) {
 	s.mu.Unlock()
 }
 
+// nonNilDigestStrings keeps a digest list field a JSON array. A nil slice
+// encodes as null, and the renderer's digest reconciler read .length on it:
+// one chat without a pending permission threw before any sync was scheduled,
+// so the digest silently stopped healing anything (ghost agent queue rows).
+func nonNilDigestStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
 func nullableDigestString(value string) any {
 	if strings.TrimSpace(value) == "" {
 		return nil

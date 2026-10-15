@@ -57,7 +57,7 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 			"providerId":                nullableDigestString(digest.ProviderID),
 			"currentModelId":            nullableDigestString(digest.CurrentModelID),
 			"currentModeId":             nullableDigestString(digest.CurrentModeID),
-			"pendingPermissionIds":      digest.PendingPermissionIDs,
+			"pendingPermissionIds":      nonNilDigestStrings(digest.PendingPermissionIDs),
 		}
 		chats = append(chats, projected)
 	}

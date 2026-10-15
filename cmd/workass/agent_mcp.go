@@ -108,6 +108,9 @@ func agentMCPTools() []map[string]any {
 		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
 		}, "tab_id", "chat_id", "title"), false, false, false, false),
+		tool("workass_settle_chat", agenttext.Get("tools.workass_settle_chat"), mutationObject(map[string]any{
+			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "settled": boolean(agenttext.Get("schema.settleChat.settled")),
+		}, "tab_id", "chat_id", "settled"), false, false, false, false),
 		tool("workass_configure_chat", agenttext.Get("tools.workass_configure_chat"), mutationObject(map[string]any{
 			"tab_id":            str(agenttext.Get("schema.agentMCPTools.guidance.09")),
 			"chat_id":           str(agenttext.Get("schema.agentMCPTools.guidance.21")),
@@ -312,6 +315,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "chat.create"
 	case "workass_rename_chat":
 		method = "chat.rename"
+	case "workass_settle_chat":
+		method = "chat.settle"
 	case "workass_configure_chat":
 		method = "chat.configure"
 	case "workass_focus_chat":

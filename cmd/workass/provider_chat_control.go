@@ -628,6 +628,10 @@ func (r *providerChatRuntime) ListChats() ([]map[string]any, error) {
 			"cwd": fieldString(item, "cwd"), "providerId": fieldString(item, "providerId"),
 			"modelId": fieldString(item, "currentModelId"), "modeId": fieldString(item, "currentModeId"),
 			"active": fieldString(root, "activeId") == tabID,
+			// The sidebar's explicit settle override: "settled", "active"
+			// (reactivated), or "" (never filed). Archiving is a sidebar view
+			// over settledAt, not stored state.
+			"settled": fieldString(item, "settled"), "settledAt": max(0, intField(item, "settledAt")),
 		}
 		state, ok := r.Snapshot(chatID)
 		if ok && actorForegroundRunning(state.Foreground) {
@@ -825,6 +829,61 @@ func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationI
 	receipt, ok := actor.engine.Snapshot().PresentationMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return errors.New("chat rename lost its durable actor receipt")
+	}
+	return nil
+}
+
+// SettleChat is the agent twin of the sidebar Settle/Reactivar action
+// (renderer Store.settleChat): it files the chat into the settled shelf or
+// back into the live list and touches nothing else. A chat already in the
+// requested state keeps its settledAt, so a repeated settle never restarts the
+// archive clock; the operation still records a receipt so replays stay exact.
+func (r *providerChatRuntime) SettleChat(tabID, chatID string, settled bool, operationID providercontract.OperationID) error {
+	operationID = providercontract.NormalizeOperationID(string(operationID))
+	if operationID == "" {
+		return errors.New("chat settle requires a stable operation id")
+	}
+	digestRaw, err := json.Marshal(struct {
+		Kind    string `json:"kind"`
+		TabID   string `json:"tabId"`
+		ChatID  string `json:"chatId"`
+		Settled bool   `json:"settled"`
+	}{Kind: "chat-settle-v1", TabID: strings.TrimSpace(tabID), ChatID: strings.TrimSpace(chatID), Settled: settled})
+	if err != nil {
+		return err
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(digestRaw))
+	actor, _, err := r.exactActor(tabID, chatID)
+	if err != nil {
+		return err
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	state := actor.engine.Snapshot()
+	if receipt, exists := state.PresentationMutationReceipts[operationID]; exists {
+		if receipt.Digest != digest {
+			return errors.New("presentation operation id was reused for different content")
+		}
+		return nil
+	}
+	presentation := state.Presentation.Clone()
+	if settled && presentation.Settled != "settled" {
+		presentation.Settled = "settled"
+		presentation.SettledAt = time.Now().UnixMilli()
+	} else if !settled && presentation.Settled != "active" {
+		presentation.Settled = "active"
+		presentation.SettledAt = 0
+	}
+	// Filing a chat away also acknowledges how it ended, as in the sidebar.
+	if settled {
+		presentation.Unread = false
+	}
+	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
+		return err
+	}
+	receipt, ok := actor.engine.Snapshot().PresentationMutationReceipts[operationID]
+	if !ok || receipt.Digest != digest {
+		return errors.New("chat settle lost its durable actor receipt")
 	}
 	return nil
 }
