@@ -184,3 +184,55 @@ Children survive ordinary parent-turn completion by adoption into the exact
 chat. Live worker execution is not restart-durable: daemon replacement ends
 its managed processes and open waits. Actor state and bounded terminal receipts
 survive, but neither the worker nor a coordinator wait is automatically replayed.
+
+## Forkable subsessions
+
+For many short, independent jobs that share one long prefix (a brief plus
+example images, then one frame per job), fork a chat instead of spawning a
+fresh subagent per job. `workass_create_fork_point` marks an exact idle chat;
+`workass_fork_run` starts children from that point, each with its own message
+and up to 20 local image paths in ONE user message; `workass_wait_fork_run`
+(`timeout_ms:-1`) returns every child's final text, turns, wall time and usage
+(`input`, `output`, `cacheRead`, `cacheCreation` tokens). `workass_list_forks`,
+`workass_cancel_fork_child` and `workass_retry_fork_child` complete the set.
+Mutations take a caller-stable `operation_id`; the fork store keeps its own
+receipts, so a replay returns the original fork point, run or retry.
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_fork_run <<'JSON'
+{"fork_point_id":"FP_ID","operation_id":"frames-batch-1",
+ "children":[{"label":"frame_00","message":"Review frame 00; write /tmp/out/f00.json",
+              "attachments":["/abs/frame_00_r01.png","/abs/frame_00_r02.png"]}]}
+JSON
+```
+
+Only providers with a native session fork can do this; each provider's
+`fork` entry in `workass_agent_catalog` says whether it can and why. Claude
+uses `claude --resume <seal> --fork-session`. These rules keep the prefix in
+the provider's prompt cache (all measured 2026-10-15):
+
+- The fork point is sealed with two short resumed turns. A copy of the live
+  parent re-renders some content differently once resumed; the second turn
+  is itself resumed, so its cache entry sits exactly where children share.
+- Permission mode, effort and extra directories (`add_dirs`) belong to the
+  fork point and apply to the seal and every child. A child launched with
+  different flags sends a different prefix.
+- Children run with no MCP servers, so every request has the same tool list.
+- The API looks back only ~20 content blocks from its cache breakpoint.
+  Image labels ride in the message text, not as one block per image, and
+  throwaway children skip session persistence (a persisted session adds one
+  note block per image). Keep to 16 images per throwaway child, 8 per kept
+  child; runs above that carry a `warnings` entry.
+
+Images are validated before any child starts: regular PNG/JPEG/WebP/GIF
+files, at most 5 MiB each and 20 MiB per message, longest side at most
+`max_image_edge_px` (default 1000). Oversized images are rejected, never
+resized. Claude Code itself re-encodes PNG inputs above ~500 KB to JPEG at the
+same pixel size. `workass_send_chat_message` accepts the same `attachments`
+for ordinary turns (not with `steer`).
+
+Children are throw-away by default: no native session is kept, and Workass
+keeps a compact transcript (text, tool calls, per-call cache usage; no image
+bytes) for `retention_days` (default 7) plus the receipt. `retention:"keep"`
+keeps everything. Live children are not restart-durable: a daemon restart
+settles them as failed with that reason.

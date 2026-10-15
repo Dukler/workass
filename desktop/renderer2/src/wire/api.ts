@@ -59,7 +59,7 @@ export async function call<K extends keyof WorkassApi>(
 }
 
 /** Subscribe to an event channel if the bridge exposes it. */
-export function on<K extends 'onJobEvent' | 'onChatCatalog' | 'onChatSessionReplaced' | 'onChatPermissionRequest' | 'onChatPermissionResolved' | 'onChatPlanUsage' | 'onSpawnedWorkChanged' | 'onChatEnv' | 'onProcChanged' | 'onLanAccessRequest' | 'onLanAccessRequestClosed' | 'onProvidersList' | 'onProvidersUpdates' | 'onProvidersUpdateProgress' | 'onAppUpdate' | 'onChatCompacted' | 'onChatCheckpointRestored' | 'onNotify' | 'onNotifyBacklog' | 'onAgentApply' | 'onChatCommands' | 'onChatGoal' | 'onMachinesChanged'>(
+export function on<K extends 'onJobEvent' | 'onChatCatalog' | 'onChatSessionReplaced' | 'onChatPermissionRequest' | 'onChatPermissionResolved' | 'onChatPlanUsage' | 'onSpawnedWorkChanged' | 'onForkChanged' | 'onChatEnv' | 'onProcChanged' | 'onLanAccessRequest' | 'onLanAccessRequestClosed' | 'onProvidersList' | 'onProvidersUpdates' | 'onProvidersUpdateProgress' | 'onAppUpdate' | 'onChatCompacted' | 'onChatCheckpointRestored' | 'onNotify' | 'onNotifyBacklog' | 'onAgentApply' | 'onChatCommands' | 'onChatGoal' | 'onMachinesChanged'>(
   name: K,
   cb: Parameters<NonNullable<WorkassApi[K]>>[0],
 ): void {

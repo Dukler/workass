@@ -1128,6 +1128,13 @@ func agentSendReplayReceipt(state chat.State, actorOperationID, operationID prov
 }
 
 func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID, message, delivery string) (map[string]any, error) {
+	return r.QueueAgentMessageWithAttachments(ctx, tabID, chatID, operationID, message, delivery, nil)
+}
+
+// QueueAgentMessageWithAttachments carries validated local images inside the
+// same user message. Their digests join the queue identity, so a retry with
+// different images is rejected like a retry with different text.
+func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Context, tabID, chatID string, operationID providercontract.OperationID, message, delivery string, attachments []acp.ImageAttachment) (map[string]any, error) {
 	message = redactedSessionString(message)
 	if strings.TrimSpace(message) == "" {
 		return nil, errors.New("message is required")
@@ -1141,6 +1148,9 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 	if err != nil {
 		return nil, err
 	}
+	if len(attachments) > 0 && delivery == "steer" {
+		return nil, errors.New("image attachments are not supported with steer; use auto or queue")
+	}
 	actor, _, err := r.exactActor(tabID, chatID)
 	if err != nil {
 		return nil, err
@@ -1148,7 +1158,21 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 	// QueueAgentMessage is a stateless retry boundary. The digest-bearing
 	// identity is durable in the actor's semantic input, while the public
 	// result remains bounded and contains no message text.
-	queueID := agentSendQueueIdentity(operationID, tabID, chatID, message, delivery)
+	identityText := message
+	for _, attachment := range attachments {
+		identityText += "\x00attachment:" + attachment.SHA256
+	}
+	queueID := agentSendQueueIdentity(operationID, tabID, chatID, identityText, delivery)
+	var attachmentPlan providerAttachmentPlan
+	if len(attachments) > 0 {
+		images, err := acp.ImageAttachmentPayloads(attachments)
+		if err != nil {
+			return nil, err
+		}
+		if attachmentPlan, err = r.sessions.PlanProviderAttachments(images); err != nil {
+			return nil, err
+		}
+	}
 	actor.mu.Lock()
 	state := actor.engine.Snapshot()
 	if state.ChatID != strings.TrimSpace(chatID) || state.Presentation.TabID != strings.TrimSpace(tabID) {
@@ -1228,14 +1252,14 @@ func (r *providerChatRuntime) QueueAgentMessage(ctx context.Context, tabID, chat
 		err = r.commitLaneSelectionLocked(actor, selection, opts)
 	}
 	if err == nil {
-		err = actor.engine.Apply(chat.Submit{
-			OperationID: operationID, LaneID: selection.Identity.ID, Text: message,
+		err = actor.engine.ApplyPrepared(chat.Submit{
+			OperationID: operationID, LaneID: selection.Identity.ID, Text: message, Attachments: attachmentPlan.Attachments,
 			ModelID: selection.ModelID, ModeID: selection.ModeID,
 			Presentation: providercontract.TurnPresentation{
 				UserMessageID: stableAgentMessageIdentity("u", operationID), AssistantMessageID: stableAgentMessageIdentity("a", operationID), QueueID: queueID,
 				PromptText: message, Title: state.Presentation.Title, Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			},
-		})
+		}, attachmentPlan.Materialize)
 	}
 	if err != nil {
 		actor.mu.Unlock()

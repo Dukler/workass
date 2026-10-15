@@ -17,8 +17,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	tools := agentMCPTools()
 	// The full list is paid on every authenticated tools/list request. Pin the
 	// count so new recurring context cost remains an explicit decision.
-	if len(tools) != 29 {
-		t.Fatalf("tool count = %d, want 29", len(tools))
+	// 2026-10-15: +6 fork tools (create point, run, wait, list, cancel, retry),
+	// requested by the operator for cache-sharing fan-out of vision reviews.
+	if len(tools) != 35 {
+		t.Fatalf("tool count = %d, want 35", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

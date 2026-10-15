@@ -931,6 +931,7 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		"workass_wait_subagent": {}, "workass_wait_subagents": {}, "workass_message_subagent": {},
 		"workass_retry_subagent": {}, "workass_register_external_work": {}, "workass_settle_external_work": {},
 		"workass_cancel_subagent": {}, "workass_decide_subagent_permission": {}, "workass_ask_user_question": {},
+		"workass_create_fork_point": {}, "workass_fork_run": {}, "workass_cancel_fork_child": {}, "workass_retry_fork_child": {},
 	}
 	browserMutations := map[string]struct{}{
 		"workass_browser_open": {}, "workass_browser_navigate": {}, "workass_browser_click": {},

@@ -27,6 +27,8 @@ type providerAdapter struct {
 	catalog       providerCatalogStrategy
 	permission    providerPermissionPolicy
 	launch        providerLaunchStrategy
+	// fork is the provider's native session fork; nil means it cannot fork.
+	fork providerForkStrategy
 	// subagentEnvironment contains only provider-owned launch settings. The
 	// generic bridge adds its provider-neutral owner marker separately.
 	subagentEnvironment map[string]string
