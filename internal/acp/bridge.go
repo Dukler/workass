@@ -909,6 +909,11 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 			}
 		}
 	}
+	if job != nil && kind != "agent_thought_chunk" {
+		// A thought ends where anything else begins: publish all of it,
+		// including a last word a timed window held back, before what follows.
+		b.flushThinking(job, true)
+	}
 	if job != nil && kind != "agent_message_chunk" {
 		// Preserve the position of activity relative to all preceding text,
 		// including continuation body text after a typed final checkpoint.
@@ -929,8 +934,14 @@ func (b *Bridge) handleNotification(method string, params map[string]any) {
 			b.publishAssistantImages(job, toolImagesFromContent(update["content"]))
 		}
 	case "agent_thought_chunk":
-		if text := strings.TrimSpace(textFromContent(update["content"])); text != "" && job != nil && !job.internal {
-			b.manager.updateSubagentActivityForJob(job, "thinking", "Reasoning")
+		// Chunks are kept verbatim: a streamed thought arrives a few characters
+		// at a time, and trimming or padding them split words ("Star ting").
+		// A whitespace-only chunk is kept too: Codex separates reasoning parts
+		// with a bare "\n\n".
+		if text := textFromContent(update["content"]); text != "" && job != nil && !job.internal {
+			if strings.TrimSpace(text) != "" {
+				b.manager.updateSubagentActivityForJob(job, "thinking", "Reasoning")
+			}
 			b.queueThinking(job, text)
 		}
 	case "tool_call", "tool_call_update":
@@ -1449,14 +1460,10 @@ func (b *Bridge) publishAssistantImages(job *Job, images []any) {
 func (b *Bridge) queueThinking(job *Job, text string) {
 	text = redactSensitiveText(text)
 	b.manager.jobMu.Lock()
-	if job.thoughtBuf == "" {
-		job.thoughtBuf = text
-	} else {
-		job.thoughtBuf += " " + text
-	}
+	job.thoughtBuf += text
 	if job.thinkTimer == nil {
 		job.thinkTimer = time.AfterFunc(b.opts.ThoughtFlushInterval, func() {
-			b.flushThinking(job)
+			b.flushThinking(job, false)
 		})
 	}
 	b.manager.jobMu.Unlock()
@@ -1495,18 +1502,38 @@ func (b *Bridge) flushStdout(job *Job) {
 	}
 }
 
-func (b *Bridge) flushThinking(job *Job) {
+// flushThinking publishes the buffered thought as one window. A timed window
+// (all=false) ends at the last whitespace and keeps the partial word after it
+// for the next one: windows are joined with a line break, so a window cut
+// mid-word showed as two words ("fr ames"). Anything else the agent does
+// flushes all of it first (all=true).
+func (b *Bridge) flushThinking(job *Job, all bool) {
 	job.streamPublishMu.Lock()
 	defer job.streamPublishMu.Unlock()
 	b.manager.jobMu.Lock()
 	text := job.thoughtBuf
-	job.thoughtBuf = ""
+	if !all {
+		cut := strings.LastIndexAny(text, " \t\n")
+		if cut < 0 {
+			// One unbroken word so far; it waits for the rest of itself.
+			job.thinkTimer = nil
+			b.manager.jobMu.Unlock()
+			return
+		}
+		job.thoughtBuf, text = text[cut+1:], text[:cut+1]
+	} else {
+		job.thoughtBuf = ""
+	}
+	if all && job.thinkTimer != nil {
+		job.thinkTimer.Stop()
+	}
 	job.thinkTimer = nil
 	b.manager.jobMu.Unlock()
-	if text != "" {
-		b.manager.emit("job:event", map[string]any{"type": "acp", "id": job.ID, "event": map[string]any{"kind": "thinking", "text": text}})
-		job.startupTiming.mark(startupContentPublished)
+	if strings.TrimSpace(text) == "" {
+		return
 	}
+	b.manager.emit("job:event", map[string]any{"type": "acp", "id": job.ID, "event": map[string]any{"kind": "thinking", "text": text}})
+	job.startupTiming.mark(startupContentPublished)
 }
 
 func (b *Bridge) flushJobBuffers(job *Job) {

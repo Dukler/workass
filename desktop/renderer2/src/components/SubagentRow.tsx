@@ -36,6 +36,9 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
   const ownership = n.work?.kind === 'agent' ? 'Subagente nativo · solo lectura'
     : n.work?.kind === 'subagent' ? 'Subagente de Workass' : undefined;
   const settled = `${n.calls.length} ${n.calls.length === 1 ? 'llamada' : 'llamadas'}`;
+  // A group whose Agent call is out of reach (an earlier daemon's) has only its
+  // raw tool id; never print that as a name.
+  const label = n.label && n.label !== n.id ? n.label : 'Subagente';
   return (<>
     <details className="r-sa" data-status={st}>
       <summary>
@@ -44,7 +47,7 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
         <span className="r-mi" data-p={n.provider ?? undefined} title={ownership}><ModelIcon provider={n.provider} /></span>
         <span className="r-said">
           <span className="r-satop">
-            <span className="r-nm" title={n.label}>{n.label}</span>
+            <span className="r-nm" title={label}>{label}</span>
             {dur && <span className="r-el">{dur}</span>}
           </span>
           <span className="r-sasub">
@@ -68,7 +71,7 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
         {running && <span className="r-sa-controls">
           <span className="r-pulse" aria-label="En curso" />
           {canStop && <button type="button" className="bgr-stop" title={stopping ? 'Deteniendo…' : 'Detener'}
-            aria-label={`Detener ${n.label}`} disabled={stopping}
+            aria-label={`Detener ${label}`} disabled={stopping}
             onClick={(event) => { event.preventDefault(); event.stopPropagation(); void stop(); }}>
             <IcStopSquare />
           </button>}
