@@ -461,6 +461,10 @@ class ClaudeSession {
     this.turnStatus = 'idle';
     this.closed = false;
     this.toolCalls = new Map();
+    // A subagent's own tool calls (parent_tool_use_id set), kept apart from the
+    // main turn's ledger: they are attributed to their Agent call, never end
+    // with the main turn, and never veto its retries.
+    this.subagentToolCalls = new Map();
     // Tool ids of questions the user actually answered — see completeToolResults.
     this.answeredQuestions = new Set();
     this.partialTextSeen = false;
@@ -1000,16 +1004,16 @@ class ClaudeSession {
   // retry for the rest of the session (hostile-fixture findings, 2026-07-28).
   // Any tool still tracked at a turn boundary is dead by definition —
   // completed tools left the ledger via completeToolResults.
-  failOpenToolCalls(reason) {
-    for (const [id, tracked] of this.toolCalls) {
+  failOpenToolCalls(reason, ledger = this.toolCalls) {
+    for (const [id, tracked] of ledger) {
       notify(this.sessionId, {
         sessionUpdate: 'tool_call_update', toolCallId: id,
         title: toolTitle(tracked.name, tracked.input), kind: toolKind(tracked.name),
         status: 'failed', content: normalizeToolResultContent(reason),
-        _meta: { claudeCode: { toolName: tracked.name } },
+        _meta: toolMeta(tracked),
       });
     }
-    this.toolCalls.clear();
+    ledger.clear();
   }
 
   settlePrompt(result, error) {
@@ -1294,12 +1298,17 @@ class ClaudeSession {
       this.completeToolResults(message);
       return;
     }
+    // A subagent's messages carry parent_tool_use_id: the Agent call that
+    // started it. Without it every subagent tool call read as the main
+    // agent's own, so a labeling run filled the chat with 1,200 image reads
+    // (DepthVision speed, 2026-10-15).
+    const parentToolUseId = String(message.parent_tool_use_id || '').trim();
     if (message.type === 'stream_event') {
-      this.handleStreamEvent(message.event);
+      this.handleStreamEvent(message.event, parentToolUseId);
       return;
     }
     if (message.type === 'assistant') {
-      this.handleAssistantContent(message.message?.content);
+      this.handleAssistantContent(message.message?.content, parentToolUseId);
       return;
     }
     if (message.type === 'result') {
@@ -1380,12 +1389,14 @@ class ClaudeSession {
     }
   }
 
-  handleStreamEvent(event) {
+  handleStreamEvent(event, parentToolUseId = '') {
     if (!event || typeof event !== 'object') return;
     if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-      this.startTool(event.content_block);
+      this.startTool(event.content_block, parentToolUseId);
       return;
     }
+    // A subagent's text, thinking and token counts are not the main turn's.
+    if (parentToolUseId) return;
     if (event.type === 'message_start') {
       // The next assistant message opens: fold the previous one's cumulative
       // count into the settled total so the pulse never counts twice.
@@ -1411,9 +1422,10 @@ class ClaudeSession {
     }
   }
 
-  handleAssistantContent(content) {
+  handleAssistantContent(content, parentToolUseId = '') {
     for (const block of Array.isArray(content) ? content : []) {
-      if (block?.type === 'tool_use') this.startTool(block);
+      if (block?.type === 'tool_use') this.startTool(block, parentToolUseId);
+      else if (parentToolUseId) continue;
       else if (block?.type === 'text' && block.text && !this.partialTextSeen) {
         this.emitPromptUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: block.text } });
       } else if (block?.type === 'thinking' && block.thinking && !this.partialThoughtSeen) {
@@ -1422,10 +1434,10 @@ class ClaudeSession {
     }
   }
 
-  startTool(block) {
+  startTool(block, parentToolUseId = '') {
     const id = String(block?.id || '').trim();
     if (!id) return;
-    const tracked = this.toolCalls.get(id);
+    const tracked = this.toolCalls.get(id) || this.subagentToolCalls.get(id);
     if (tracked) {
       // A streamed call opens at content_block_start with an empty input; its
       // command, path and description only arrive with the assistant message.
@@ -1437,12 +1449,24 @@ class ClaudeSession {
         notify(this.sessionId, {
           sessionUpdate: 'tool_call_update', toolCallId: id, title: toolTitle(tracked.name, input),
           kind: toolKind(tracked.name), status: 'in_progress', rawInput: input, ...toolLocations(input),
-          _meta: { claudeCode: { toolName: tracked.name } },
+          _meta: toolMeta(tracked),
         });
       }
       return;
     }
     const name = String(block.name || 'Tool');
+    if (parentToolUseId) {
+      // A subagent's call: shown under its Agent row, and none of the main
+      // turn's phase, acceptance or retry state.
+      const child = { name, input: toolInput(block.input), parent: parentToolUseId };
+      this.subagentToolCalls.set(id, child);
+      notify(this.sessionId, {
+        sessionUpdate: 'tool_call', toolCallId: id, title: toolTitle(name, child.input),
+        kind: toolKind(name), status: 'in_progress', rawInput: child.input, ...toolLocations(child.input),
+        _meta: toolMeta(child),
+      });
+      return;
+    }
     this.noteTurnPhase('tool', name);
     this.acceptActivePrompt();
     const active = this.activePrompt;
@@ -1455,7 +1479,7 @@ class ClaudeSession {
     notify(this.sessionId, {
       sessionUpdate: 'tool_call', toolCallId: id, title: toolTitle(name, input),
       kind: toolKind(name), status: 'in_progress', rawInput: input, ...toolLocations(input),
-      _meta: { claudeCode: { toolName: name } },
+      _meta: toolMeta({ name }),
     });
   }
 
@@ -1463,7 +1487,8 @@ class ClaudeSession {
     for (const block of Array.isArray(message?.message?.content) ? message.message.content : []) {
       if (block?.type !== 'tool_result') continue;
       const id = String(block.tool_use_id || '').trim();
-      const tracked = this.toolCalls.get(id);
+      const ledger = this.toolCalls.has(id) ? this.toolCalls : this.subagentToolCalls;
+      const tracked = ledger.get(id);
       if (!id || !tracked) continue;
       // An answer to AskUserQuestion has no tool-result channel in the SDK, so it
       // travels as a denial (canUseTool above) and comes back as is_error — the
@@ -1474,9 +1499,9 @@ class ClaudeSession {
         sessionUpdate: 'tool_call_update', toolCallId: id, title: toolTitle(tracked.name, tracked.input),
         kind: toolKind(tracked.name), status: block.is_error && !answeredQuestion ? 'failed' : 'completed',
         content: normalizeToolResultContent(block.content),
-        _meta: { claudeCode: { toolName: tracked.name } },
+        _meta: toolMeta(tracked),
       });
-      this.toolCalls.delete(id);
+      ledger.delete(id);
     }
   }
 
@@ -1537,6 +1562,7 @@ class ClaudeSession {
     const previousInput = this.input;
     this.query = null;
     this.queryNeedsRestart = true;
+    this.failOpenToolCalls('La consulta al proveedor terminó con esta herramienta del subagente todavía corriendo.', this.subagentToolCalls);
     this.input = new AsyncInputQueue();
     previousInput.close();
     if (closeQuery && query.close) {
@@ -1625,6 +1651,7 @@ class ClaudeSession {
     this.closed = true;
     this.stopTurnPulse();
     this.failOpenToolCalls('La sesión Claude se cerró con esta herramienta todavía corriendo.');
+    this.failOpenToolCalls('La sesión Claude se cerró con esta herramienta todavía corriendo.', this.subagentToolCalls);
     ++this.generation;
     this.input.close();
     if (this.query?.close) this.query.close();
@@ -1672,6 +1699,14 @@ function normalizeToolResultContent(content) {
     }
     return block;
   });
+}
+
+// Every tool update names its tool; a subagent's also names the Agent call
+// that ran it, which is how the daemon files it under that subagent.
+function toolMeta(tracked) {
+  const claudeCode = { toolName: tracked.name };
+  if (tracked.parent) claudeCode.parentToolUseId = tracked.parent;
+  return { claudeCode };
 }
 
 function toolKind(name) {

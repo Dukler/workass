@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,5 +345,69 @@ func TestClaudeAgentRunningAtDaemonKillIsOrphanedOnRestart(t *testing.T) {
 	}
 	if got := state.Background["a-stranded"].Event.Status; got != "orphaned" {
 		t.Fatalf("an agent whose Claude process died with the daemon reads %q after restart", got)
+	}
+}
+
+// A subagent's tool calls reach the chat filed under its Agent call, so the
+// transcript (which shows only the main agent's own calls and images) leaves
+// them to the subagent's row. Unattributed, a labeling run filled the chat
+// with 1,200 image reads (DepthVision speed, 2026-10-15).
+func TestClaudeSubagentToolCallsReachTheChatUnderTheirAgent(t *testing.T) {
+	t.Parallel()
+	root, stateDir := repoRoot(t), t.TempDir()
+	var mu sync.Mutex
+	var reads []map[string]any
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "claude", InitTimeout: 10 * time.Second,
+		RSSSampleInterval: time.Hour, SpawnedWorkReconcileInterval: time.Hour,
+		Provider: acp.ProviderConfig{ID: "claude", Command: "node", Args: []string{filepath.Join(root, "scripts", "claude-native-host.mjs")}, CWD: root, Enabled: true,
+			Env: map[string]string{
+				"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+				"WORKASS_CLAUDE_EXECUTABLE": "/fixture/claude",
+				"WORKASS_CLAUDE_SESSION_ID": "fixture-subagent-reads-session",
+			}},
+		Broadcast: func(channel string, payload any) {
+			if channel != "job:event" {
+				return
+			}
+			event := mapFromAnyMain(mapFromAnyMain(payload)["event"])
+			if fieldString(event, "id") == "toolu_sub_read" {
+				mu.Lock()
+				reads = append(reads, event)
+				mu.Unlock()
+			}
+		},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := runtime.CreateRendererChat(map[string]any{"tabId": "sub-tab", "chatId": "sub-chat", "operationId": "sub-create", "cwd": root, "providerId": "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := runtime.Select(ctx, acp.SessionOptions{TabID: "sub-tab", ChatID: "sub-chat", ProviderID: "claude", CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Start(ctx, map[string]any{"kind": "app-chat", "tabId": "sub-tab", "chatId": "sub-chat", "sessionId": info.SessionID, "operationId": "sub-turn", "userMessageId": "sub-user", "assistantMessageId": "sub-assistant", "prompt": "[fixture:subagent-reads]"}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]map[string]any(nil), reads...)
+		mu.Unlock()
+		if len(got) > 0 {
+			for _, event := range got {
+				if fieldString(event, "subagentId") != "toolu_sub_agent" {
+					t.Fatalf("a subagent's read reached the chat as the main agent's own: %#v", event)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the subagent's read never reached the chat")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -890,3 +890,34 @@ test('Claude Code 2.1 accepts a steer into a turn it started itself', async (t) 
   await peer.waitFor(sessionUpdate('_workass_claude_steer_consumed', (update) => update.clientUserMessageId === 'client-harness-steer'));
   await peer.waitFor(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'ended'));
 });
+
+// A subagent's messages carry parent_tool_use_id. Without passing it on, every
+// subagent tool call read as the main agent's own, and a labeling run filled
+// the chat with 1,200 image reads (DepthVision speed, 2026-10-15). Its text is
+// not the main agent's either, and its open calls outlive the main turn.
+test('official Claude SDK host files a subagent tool call under its Agent call', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:subagent-reads] label' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  const read = (message) => message.method === 'session/update' && message.params.update.toolCallId === 'toolu_sub_read';
+  const done = await peer.waitFor((message) => read(message) && message.params.update.status === 'completed');
+  const updates = peer.messages.filter(read).map((message) => message.params.update);
+  for (const update of updates) {
+    assert.equal(update._meta?.claudeCode?.parentToolUseId, 'toolu_sub_agent', `unattributed: ${JSON.stringify(update)}`);
+  }
+  assert.equal(updates.filter((update) => update.status === 'failed').length, 0, 'the main turn ending failed a subagent call');
+  assert.equal(done.params.update.sessionUpdate, 'tool_call_update');
+  const agentCall = peer.messages.find((message) => message.method === 'session/update' && message.params.update.toolCallId === 'toolu_sub_agent');
+  assert.equal(agentCall.params.update._meta?.claudeCode?.parentToolUseId, undefined, 'the main agent call has no parent');
+  const text = peer.messages
+    .filter((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_message_chunk')
+    .map((message) => JSON.stringify(message.params.update.content)).join('');
+  assert.doesNotMatch(text, /SUBAGENT/, 'subagent text reached the main message');
+});
