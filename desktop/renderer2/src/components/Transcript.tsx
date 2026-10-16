@@ -13,6 +13,7 @@ import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
+import { forkStore } from '../store/forks';
 
 const HISTORY_PAGE = 40;
 // How long the streaming height hold outlives the last growth (see onResize).
@@ -285,10 +286,14 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     && message.status === 'running'
     && message.turnTerminal !== false
   ));
-  // Fork points carry no marker here anymore: the parent transcript never
-  // styles where children started, because the parent shows subsessions
-  // without fork distinction (user 2026-10-16). The sidebar nest and the
-  // child's own view carry the fork facts.
+  // Fork points carry no marker here — the parent transcript never styles
+  // where children started (user 2026-10-16). But the data fetch stays: the
+  // chat's full fork list is remote-routed while fork:summary is not, so this
+  // is the only way a chat owned by another machine ever gets its parent-side
+  // subsession chip and nest.
+  useEffect(() => {
+    if (chat?.id && chat.chatId) forkStore.ensure({ tabId: chat.id, chatId: chat.chatId });
+  }, [chat?.id, chat?.chatId]);
   const turnBlocks = assistantTurnBlockRanges(shown);
   const turnBlockStarts = new Map<number, number>();
   const turnBlockMembers = new Set<number>();
@@ -731,7 +736,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                       />
                     )];
                   }
-                  if (turnBlockMembers.has(index)) return [];                  return [(
+                  if (turnBlockMembers.has(index)) return [];
+                  return [(
                     <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
                         <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />

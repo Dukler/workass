@@ -167,7 +167,7 @@ test('a fork child and a spawned thread carry the SAME neutral row shape: no for
   assert.equal(spawn.fork, undefined, 'spawn rows reveal the rail; they never pose as fork children');
 });
 
-test('merged list: oldest row first, kinds interleaved, settled rows keep their wall time', () => {
+test('merged list: fork rows ride their run stamp, oldest first, stable across runs', () => {
   const groups = forkGroups({ points: [point()], runs: [run([
     child({ childId: 'f1', status: 'running', startedAt: t(10), label: 'rama' }),
     child({ childId: 'f0', startedAt: t(2), wallMs: 5000 }),
@@ -179,12 +179,41 @@ test('merged list: oldest row first, kinds interleaved, settled rows keep their 
     work({ id: 'sw-late', status: 'exited', startedAt: t(30), finishedAt: t(40), label: 'explorar' }),
   ].map((item) => spawnSubsessionRow(item));
   const merged = mergeSubsessionRows(forkRows, spawnRows);
-  assert.deepEqual(merged.map((row) => row.key), ['spawn:sw-early', 'fr-1:f0', 'fr-1:f1', 'spawn:sw-late']);
-  assert.deepEqual(merged.map((row) => row.kind), ['spawn', 'fork', 'fork', 'spawn']);
+  assert.deepEqual(merged.map((row) => row.key), ['fr-1:f1', 'fr-1:f0', 'spawn:sw-early', 'spawn:sw-late'],
+    'the run was created before every spawned thread; its children keep run order');
+  assert.deepEqual(merged.map((row) => row.kind), ['fork', 'fork', 'spawn', 'spawn']);
   assert.deepEqual(merged.map((row) => row.state), ['running', 'completed', 'running', 'completed']);
   assert.equal(merged[1].wallMs, 5000);
   assert.equal(merged[3].wallMs, 10_000);
   assert.deepEqual(mergeSubsessionRows([], []), []);
+});
+
+test('ordering is stable: a queued fork child waits at the run stamp, never leaps to the top', () => {
+  // Concurrency 1: a starts (stamped), b and c queue (no stamp), and an agent
+  // thread started before the run itself. The queued children must not outrank
+  // the agent, and must not jump again once they start.
+  const runAt = t(20);
+  const list = (kids: ForkChildView[]) => mergeSubsessionRows(
+    forkFlatKids(forkGroups({ points: [point()], runs: [run(kids, { concurrency: 1, createdAt: runAt })] }))
+      .map((kid) => forkSubsessionRow(kid, { label: kid.child.childId, brand: null }, Date.parse(t(60)))),
+    [spawnSubsessionRow(work({ id: 'sw-early', startedAt: t(1) }))],
+  );
+  const before = list([
+    child({ childId: 'a', status: 'running', startedAt: t(10) }),
+    child({ childId: 'b', status: 'queued', index: 2 }),
+    child({ childId: 'c', status: 'queued', index: 3 }),
+  ]);
+  assert.deepEqual(before.map((row) => row.key), ['spawn:sw-early', 'fr-1:a', 'fr-1:b', 'fr-1:c']);
+  assert.equal(before[2].wallMs, null, 'a queued row has no time claim');
+
+  const after = list([
+    child({ childId: 'a', status: 'running', startedAt: t(10) }),
+    child({ childId: 'b', status: 'running', startedAt: t(25), index: 2 }),
+    child({ childId: 'c', status: 'queued', index: 3 }),
+  ]);
+  assert.deepEqual(after.map((row) => row.key), before.map((row) => row.key),
+    'getting a start stamp never moves a row');
+  assert.equal(after[2].startedMs, Date.parse(t(25)), 'the stamp is for the running row\u2019s live clock only');
 });
 
 test('spawn rows speak the same outcome words the fork rows use', () => {

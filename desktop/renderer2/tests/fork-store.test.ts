@@ -42,10 +42,8 @@ type ForkStoreShape = {
   summary(): ReadonlyArray<{ tabId: string; children: number }>;
   selected: { tabId: string; runId: string; rootId: string } | null;
   select(next: { tabId: string; chatId: string; runId: string; rootId: string }): void;
-  points(tabId: string): ForkPointView[];
   slotChild(tabId: string, runId: string, rootId: string): ForkChildView | undefined;
   subscribe(cb: () => void): () => void;
-  subscribePoints(cb: () => void): () => void;
   retryChild(ref: { tabId: string; chatId: string }, runId: string, childId: string): Promise<void>;
   cancelChild(ref: { tabId: string; chatId: string }, runId: string, childId: string): Promise<void>;
 };
