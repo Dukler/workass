@@ -88,7 +88,12 @@ function rawArgumentObject(raw) {
 
 export function readConfig(path) {
   let info;
-  try { info = lstatSync(path); } catch { info = null; }
+  try { info = lstatSync(path); } catch (err) {
+    // Mirror internal/toolcli.ReadConfig: a nonexistent file means the chat
+    // that launched this process is gone, which callers must state truthfully.
+    if (err?.code === 'ENOENT') throw new ToolError('Workass context file does not exist');
+    info = null;
+  }
   if (!info || !info.isFile() || info.size > MAX_CONTEXT_BYTES) throw new ToolError('Workass context file is unavailable or invalid');
   let config;
   try { config = JSON.parse(readFileSync(path, 'utf8')); } catch { throw new ToolError('invalid Workass context file'); }
@@ -159,7 +164,12 @@ export function doRequest(config, name, call, { signal, requestImpl = httpsReque
         try { response = JSON.parse(Buffer.concat(chunks, total).toString('utf8')); } catch { response = undefined; }
         if (response === null || typeof response !== 'object' || Array.isArray(response)) { fail('invalid Workass tool response'); return; }
         if (typeof response.error !== 'string') response.error = '';
-        if ((reply.statusCode < 200 || reply.statusCode >= 300) && !response.error) response.error = 'Workass tool request rejected';
+        if (reply.statusCode < 200 || reply.statusCode >= 300) {
+          // Mirrors internal/toolcli.Response.Status: lets callers classify a
+          // credential rejection without matching error-message text.
+          response.status = reply.statusCode;
+          if (!response.error) response.error = 'Workass tool request rejected';
+        }
         settled = true;
         resolve(response);
       });
@@ -231,11 +241,27 @@ export async function run(args, { env = process.env, stdout = process.stdout, st
     }
     default: throw new ToolError('unknown tools command: use list or call');
   }
+  if (!contextFile || !String(contextFile).trim()) throw new ToolError('WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine');
   let config;
   try { config = readConfig(contextFile); }
-  catch (err) { throw new ToolError(`${err.message}; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history`); }
+  catch (err) {
+    // Mirrors internal/toolcommand/run.go: state what actually happened to this
+    // process's context, without ever echoing the private context file path.
+    if (err.message === 'Workass context file does not exist') {
+      throw new ToolError('Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message');
+    }
+    throw new ToolError(`${err.message}; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history`);
+  }
   const response = await doRequest(config, name, call, { signal, requestImpl });
-  if (response.error) throw new ToolError(redactSensitiveText(response.error));
+  if (response.error) {
+    if (response.status === 401) {
+      // A 401 means either the chat was deleted or this context's credential
+      // belonged to an engine (or an old pre-chat-token context) that a spare
+      // engine or daemon restart has since stopped.
+      throw new ToolError('Workass rejected this context\'s credential: the chat that launched this process was deleted, or the context was issued by an engine that has since stopped. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper');
+    }
+    throw new ToolError(redactSensitiveText(response.error));
+  }
   let result = response.result ?? null;
   if (Array.isArray(response.images) && response.images.length > 0) result = materializeImages(result, response.images, contextFile);
   stdout.write(`${JSON.stringify(result)}\n`);

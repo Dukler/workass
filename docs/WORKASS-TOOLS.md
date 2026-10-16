@@ -8,9 +8,9 @@ integrations remain supported by their provider hosts.
 
 Each provider process inherits the exact executable and a private context path
 through `WORKASS_TOOLS_COMMAND` and `WORKASS_TOOL_CONTEXT`. Use the current
-environment; paths quoted in earlier conversation turns expire when their
-attachment closes. Generic ACP prompts and native instructions both use this
-process binding. Do not guess the machine, active chat, or context file.
+environment, never a context reference from earlier conversation turns: a tool
+error names what happened to the owning chat without echoing the private path,
+and a stale path is both wrong and a private detail that must not be repeated.
 
 On production Windows, providers invoke the signed bundled Node runtime through
 the `workass-tools.cmd` shim and its packaged `workass-tools.mjs` client. The
@@ -70,6 +70,16 @@ gets a new process path. Context is removed on session close/reset. Old
 authority is rejected after detachment even if a caller retained the file.
 An explicit `--context` remains available for controlled CLI callers; an
 invalid explicit path fails instead of silently switching to another owner.
+Context errors never echo the private context file path. When
+`WORKASS_TOOL_CONTEXT` is unset the process was not launched by a Workass chat
+engine. A missing context file means the chat that launched the process was
+deleted, or the daemon cleaned up a context left over from before a restart:
+long-running helpers should not poll, ask the chat to use
+`workass_schedule_message` instead. A rejected credential (`401`) means either
+the chat that launched the process was deleted, or the context was issued by an
+engine that has since stopped (contexts written before chat-lifetime tokens
+carry an engine owner key that dies with its engine); for delayed work use
+`workass_schedule_message` instead of a detached helper.
 
 `workass_ask_user_question` is available to a foreground ACP turn even when
 its native manifest has no ask-question capability. It opens the existing
