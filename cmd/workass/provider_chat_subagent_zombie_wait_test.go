@@ -150,7 +150,7 @@ func TestTrackedSubagentNoticeSurvivesWaitThatOutlivesItsTurn(t *testing.T) {
 	for _, event := range state.Ledger {
 		if event.Role == "user" && event.OperationID == notice {
 			notices++
-			if !strings.Contains(event.Text, "Internal agent completion notice") || !strings.Contains(event.Text, childID) {
+			if !strings.HasPrefix(event.Text, "<task-notification>") || !strings.Contains(event.Text, "<task-id>"+childID+"</task-id>") {
 				t.Fatalf("notice does not name the finished subagent: %q", event.Text)
 			}
 		}

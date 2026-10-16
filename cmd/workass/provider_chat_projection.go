@@ -957,8 +957,8 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	if event.ContextExcluded || event.Inherited {
 		message["inherited"] = true
 	}
-	if event.NoticeKind != "" {
-		message["notice"] = projectNotice(event)
+	if notice := projectNotice(event); notice != nil {
+		message["notice"] = notice
 	}
 	if event.Result == "" {
 		delete(message, "result")
@@ -1415,13 +1415,52 @@ func projectActorUsage(target map[string]any, state chat.State) error {
 // projectNotice is the quiet transcript line for a Workass wake-up notice:
 // what finished, how, and its result folded (mock
 // desktop/docs/mocks/subsessions/completion-notice.html, approved 2026-10-16).
+// Rows from earlier builds carry no notice fields but have the deterministic
+// subagent-completion operation id; their legacy text names the agent and
+// outcome, so history draws them the same quiet way.
 func projectNotice(event chat.LedgerEvent) map[string]any {
-	notice := map[string]any{"kind": event.NoticeKind, "title": event.NoticeTitle, "status": event.NoticeStatus}
-	for _, marker := range []string{"\nResult:\n", "\nFailure:\n"} {
-		if index := strings.Index(event.Text, marker); index >= 0 {
-			notice["body"] = strings.TrimSpace(event.Text[index+len(marker):])
-			break
+	if event.Role != "user" {
+		return nil
+	}
+	kind, title, status := event.NoticeKind, event.NoticeTitle, event.NoticeStatus
+	if kind == "" {
+		if !strings.HasPrefix(string(event.OperationID), "subagent-completion:") ||
+			!strings.HasPrefix(event.Text, "Internal agent completion notice.") {
+			return nil
 		}
+		kind = "subagent"
+		title = legacyNoticeField(event.Text, "Agent: ")
+		status = legacyNoticeField(event.Text, "Outcome: ")
+	}
+	notice := map[string]any{"kind": kind, "title": title, "status": status}
+	if body := noticeBody(event.Text); body != "" {
+		notice["body"] = body
 	}
 	return notice
+}
+
+func legacyNoticeField(text, prefix string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func noticeBody(text string) string {
+	for _, tag := range []string{"result", "error"} {
+		open, close := "<"+tag+">", "</"+tag+">"
+		if start := strings.Index(text, open); start >= 0 {
+			if end := strings.LastIndex(text, close); end > start {
+				return strings.TrimSpace(text[start+len(open) : end])
+			}
+		}
+	}
+	for _, marker := range []string{"\nResult:\n", "\nFailure:\n"} {
+		if index := strings.Index(text, marker); index >= 0 {
+			return strings.TrimSpace(text[index+len(marker):])
+		}
+	}
+	return ""
 }

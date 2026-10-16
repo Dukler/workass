@@ -245,9 +245,10 @@ function promptContent(blocks) {
 // could never use ultracode (user request 2026-10-13). Wake-ups and messages
 // from other agents are never marked.
 // taskNotification marks a Workass wake-up notice (a tracked subagent
-// finished). Claude Code frames origin {kind:"task-notification"} as a
-// background notification, never as the user speaking — exactly how its own
-// background agents report back (user 2026-10-16).
+// finished). The SDK documents origin {kind:"task-notification"}, but Claude
+// Code 2.1.301 drops it from SDK input (verified 2026-10-16; "human" is kept):
+// the <task-notification> body the daemon writes is what frames the notice for
+// the model. The origin is still sent for builds that honour it.
 function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority, humanAuthored = false, taskNotification = false) {
   return {
     type: 'user',

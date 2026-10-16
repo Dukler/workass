@@ -56,8 +56,36 @@ func TestTrackedSubagentCompletionUsesExactActorAndReceiptIdempotency(t *testing
 	if _, ok := state.Operations[operationID]; !ok {
 		t.Fatal("idempotent retry lost the original actor operation")
 	}
-	if got := formatSubagentCompletion(receipt); !strings.Contains(got, "Internal agent completion notice") || !strings.Contains(got, "not a human message") {
-		t.Fatalf("completion did not carry internal attribution: %q", got)
+	// The wake-up input uses Claude Code's own background-notification shape,
+	// so the model reads it as a notification, never as the user speaking.
+	if got := formatSubagentCompletion(receipt); !strings.HasPrefix(got, "<task-notification>") ||
+		!strings.Contains(got, "<task-id>receipt-unique</task-id>") || !strings.Contains(got, "<status>completed</status>") ||
+		!strings.Contains(got, "<summary>Agent \"review\" finished</summary>") || !strings.Contains(got, "<result>finished review</result>") {
+		t.Fatalf("completion is not a task notification: %q", got)
+	}
+	failed := receipt
+	failed.Status, failed.Error = "failed", "boom"
+	if got := formatSubagentCompletion(failed); !strings.Contains(got, "<status>failed</status>") || !strings.Contains(got, "<error>boom</error>") {
+		t.Fatalf("failed completion = %q", got)
+	}
+}
+
+// A completion admitted by an earlier build (legacy text) still replays
+// idempotently, and its history row draws as the same quiet notice.
+func TestLegacySubagentCompletionReplaysAndDrawsAsNotice(t *testing.T) {
+	receipt := acp.SubagentReceipt{ReceiptID: "legacy-receipt", Label: "Revisión", Status: "done", Result: "todo bien"}
+	legacy := formatSubagentCompletionLegacy(receipt)
+	operationID := subagentCompletionOperationID("tab", "chat", receipt.ReceiptID)
+	state := chat.State{Ledger: []chat.LedgerEvent{{Role: "user", OperationID: operationID, Text: legacy}}}
+	if !actorHasSubagentCompletion(state, operationID, "", legacy) || actorHasSubagentCompletion(state, operationID, "", formatSubagentCompletion(receipt)) {
+		t.Fatal("legacy replay detection is wrong")
+	}
+	notice := projectNotice(state.Ledger[0])
+	if notice["kind"] != "subagent" || notice["title"] != "Revisión" || notice["status"] != "done" || notice["body"] != "todo bien" {
+		t.Fatalf("legacy notice = %#v", notice)
+	}
+	if projectNotice(chat.LedgerEvent{Role: "user", OperationID: "u-human", Text: "Internal agent completion notice. typed by a person"}) != nil {
+		t.Fatal("a human row that merely quotes the header became a notice")
 	}
 }
 
