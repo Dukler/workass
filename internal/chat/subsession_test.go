@@ -127,3 +127,56 @@ func TestForkedSubsessionInheritedHistoryReachesOtherEngines(t *testing.T) {
 		t.Fatalf("the seed must carry the inherited rows: %#v err=%v", seed.Messages, err)
 	}
 }
+
+// Review wa-subagent-1792184734224-6, correction 3: every user row a Workass
+// wake-up notice turn can leave — consumed, rejected, uncertain, cancelled —
+// keeps the notice, so none is ever drawn as the user speaking.
+func TestNoticeTurnRowsKeepTheNoticeOnEveryOutcome(t *testing.T) {
+	notice := func(id string) provider.TurnPresentation {
+		return provider.TurnPresentation{
+			Origin: "agent", UserMessageID: "user-" + id, AssistantMessageID: "assistant-" + id, PromptText: id,
+			NoticeKind: "subagent", NoticeTitle: "Revisión", NoticeStatus: "done",
+		}
+	}
+	ready := func() (State, provider.LaneIdentity) {
+		state, _ := NewState("chat")
+		lane := testLane("chat", "alpha")
+		state, _ = apply(t, state, SelectLane{Identity: lane})
+		state, _ = apply(t, state, LaneOpened{
+			LaneID: lane.ID, Thread: provider.ThreadRef{ProviderID: "alpha", RootID: "thread", HeadID: "thread", Lineage: 1},
+			ConnectionGeneration: 1, Context: exactContext(provider.ContextImportNonSampling),
+			Delivery: provider.DeliveryCapabilities{StableInputIdentity: true},
+		})
+		return state, lane
+	}
+	userRow := func(state State, id provider.OperationID) LedgerEvent {
+		for _, event := range state.Ledger {
+			if event.OperationID == id && event.Role == "user" {
+				return event
+			}
+		}
+		t.Fatalf("no user row for %s in %#v", id, state.Ledger)
+		return LedgerEvent{}
+	}
+	check := func(name string, row LedgerEvent, terminal string) {
+		if row.TerminalState != terminal || row.NoticeKind != "subagent" || row.NoticeTitle != "Revisión" || row.NoticeStatus != "done" {
+			t.Fatalf("%s: row = %#v", name, row)
+		}
+	}
+
+	state, _ := ready()
+	state, _ = apply(t, state, Submit{OperationID: "head", Text: "head", Presentation: provider.TurnPresentation{Origin: "human"}})
+	state, _ = apply(t, state, Submit{OperationID: "queued", Text: "<task-notification/>", Presentation: notice("queued")})
+	state, _ = apply(t, state, CancelPendingTurn{OperationID: "queued"})
+	check("cancelled before admission", userRow(state, "queued"), "cancelled_before_admission")
+
+	state, _ = ready()
+	state, _ = apply(t, state, Submit{OperationID: "uncertain", Text: "<task-notification/>", Presentation: notice("uncertain")})
+	state, _ = apply(t, state, TurnAdmitted{OperationID: "uncertain", Ambiguous: true})
+	check("delivery uncertain", userRow(state, "uncertain"), "delivery_uncertain")
+
+	state, _ = ready()
+	state, _ = apply(t, state, Submit{OperationID: "rejected", Text: "<task-notification/>", Presentation: notice("rejected")})
+	state, _ = apply(t, state, TurnAdmissionFailed{OperationID: "rejected", Kind: provider.ErrorProviderUnavailable, Reason: "auth expired"})
+	check("admission rejected", userRow(state, "rejected"), "admission_rejected")
+}

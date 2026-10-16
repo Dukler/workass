@@ -710,6 +710,10 @@ func projectActorMessagesWithLedgerWindow(state chat.State, history actorHistory
 					"id": userID, "role": "user", "content": foreground.Input.Text,
 					"status": "pending", "at": nilIfEmpty(foreground.StartedAt), "events": []any{},
 				}
+				presentation := foreground.Input.Presentation
+				if notice := providercontract.NoticeView(presentation.NoticeKind, presentation.NoticeTitle, presentation.NoticeStatus, foreground.Input.Text); notice != nil {
+					user["notice"] = notice
+				}
 				if queueID := strings.TrimSpace(foreground.Input.Presentation.QueueID); queueID != "" {
 					user[agentQueueMessageField] = queueID
 				}
@@ -870,6 +874,11 @@ func projectActorTerminalJob(state chat.State, operationID providercontract.Oper
 		"promptText": promptText, "result": nullableString(result), "error": nullableString(terminal.Error),
 		"stopReason": nullableString(terminal.StopReason), "crashInterrupted": terminal.CrashInterrupted,
 		"interrupted": terminal.Interrupted, "consumedSteerIds": consumedSteers,
+	}
+	if user != nil {
+		if notice := projectNotice(*user); notice != nil {
+			job["notice"] = notice
+		}
 	}
 	if strings.TrimSpace(terminal.DispositionState) != "" {
 		disposition := map[string]any{"state": terminal.DispositionState}
@@ -1264,6 +1273,9 @@ func projectActorQueue(staged []chat.StagedQueueEntry, queue []chat.QueueEntry) 
 		item := map[string]any{
 			"id": id, "text": entry.Text, "delivery": "queue",
 		}
+		if notice := providercontract.NoticeView(entry.Presentation.NoticeKind, entry.Presentation.NoticeTitle, entry.Presentation.NoticeStatus, entry.Text); notice != nil {
+			item["notice"] = notice
+		}
 		if entry.Presentation.Origin != "" {
 			source := entry.Presentation.Origin
 			if source == "human" {
@@ -1432,34 +1444,13 @@ func projectNotice(event chat.LedgerEvent) map[string]any {
 		title = legacyNoticeField(event.Text, "Agent: ")
 		status = legacyNoticeField(event.Text, "Outcome: ")
 	}
-	notice := map[string]any{"kind": kind, "title": title, "status": status}
-	if body := noticeBody(event.Text); body != "" {
-		notice["body"] = body
-	}
-	return notice
+	return providercontract.NoticeView(kind, title, status, event.Text)
 }
 
 func legacyNoticeField(text, prefix string) string {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, prefix) {
 			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		}
-	}
-	return ""
-}
-
-func noticeBody(text string) string {
-	for _, tag := range []string{"result", "error"} {
-		open, close := "<"+tag+">", "</"+tag+">"
-		if start := strings.Index(text, open); start >= 0 {
-			if end := strings.LastIndex(text, close); end > start {
-				return strings.TrimSpace(text[start+len(open) : end])
-			}
-		}
-	}
-	for _, marker := range []string{"\nResult:\n", "\nFailure:\n"} {
-		if index := strings.Index(text, marker); index >= 0 {
-			return strings.TrimSpace(text[index+len(marker):])
 		}
 	}
 	return ""

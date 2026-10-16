@@ -77,6 +77,8 @@ export interface MessageImage {
 export interface QueuedMsg {
   id: string;
   text: string;
+  // A queued Workass wake-up notice: drawn quietly, never edited or steered.
+  notice?: MsgNotice;
   source?: 'agent' | 'host';
   delivery?: 'auto' | 'queue' | 'steer';
   queuedAt?: string;

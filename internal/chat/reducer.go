@@ -2570,6 +2570,7 @@ func appendPreAdmissionCancellation(state *State, input QueueEntry) error {
 		OperationID: input.OperationID, QueueID: strings.TrimSpace(input.Presentation.QueueID),
 		TerminalState: "cancelled_before_admission",
 	}
+	applyNotice(&user, input.Presentation)
 	state.Ledger = append(state.Ledger, user)
 	if err := markLedgerExcluded(state, user, input.OperationID); err != nil {
 		return err
@@ -3576,6 +3577,7 @@ func terminalizeInterruptedForeground(
 			OperationID: foreground.OperationID, QueueID: strings.TrimSpace(foreground.Input.Presentation.QueueID),
 			NativeTurnID: foreground.Turn.NativeID, TerminalState: "delivery_uncertain",
 		}
+		applyNotice(&user, foreground.Input.Presentation)
 		state.Ledger = append(state.Ledger, user)
 		foreground.UserConsumed = true
 		if err := markLedgerExcluded(state, user, foreground.OperationID); err != nil {
@@ -4467,6 +4469,15 @@ func beginForegroundObligation(state *State, input QueueEntry) {
 	}
 }
 
+// applyNotice keeps a Workass wake-up notice on every user row its turn can
+// produce — consumed, rejected, uncertain or cancelled — so none of them is
+// ever drawn as the user speaking (review wa-subagent-1792184734224-6, corr 3).
+func applyNotice(event *LedgerEvent, presentation provider.TurnPresentation) {
+	event.NoticeKind = presentation.NoticeKind
+	event.NoticeTitle = presentation.NoticeTitle
+	event.NoticeStatus = presentation.NoticeStatus
+}
+
 func appendForegroundUser(state *State) (LedgerEvent, error) {
 	if state == nil || state.Foreground == nil {
 		return LedgerEvent{}, errors.New("foreground user has no turn owner")
@@ -4484,10 +4495,8 @@ func appendForegroundUser(state *State) (LedgerEvent, error) {
 		LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: foreground.Input.ModelID,
 		OperationID: foreground.OperationID, QueueID: strings.TrimSpace(foreground.Input.Presentation.QueueID),
 		NativeTurnID: foreground.Turn.NativeID, TerminalState: "consumed",
-		NoticeKind:   foreground.Input.Presentation.NoticeKind,
-		NoticeTitle:  foreground.Input.Presentation.NoticeTitle,
-		NoticeStatus: foreground.Input.Presentation.NoticeStatus,
 	}
+	applyNotice(&event, foreground.Input.Presentation)
 	state.Ledger = append(state.Ledger, event)
 	foreground.UserConsumed = true
 	if err := markLedgerNativeSeen(state, event, foreground.OperationID); err != nil {
@@ -4523,6 +4532,7 @@ func appendForegroundAdmissionFailure(state *State, kind provider.ErrorKind, rea
 		OperationID: foreground.OperationID, QueueID: strings.TrimSpace(foreground.Input.Presentation.QueueID),
 		TerminalState: "admission_rejected",
 	}
+	applyNotice(&user, foreground.Input.Presentation)
 	state.Ledger = append(state.Ledger, user)
 	if err := markLedgerExcluded(state, user, foreground.OperationID); err != nil {
 		return err

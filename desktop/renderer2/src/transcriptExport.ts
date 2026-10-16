@@ -54,6 +54,12 @@ export function chatToMarkdown(chat: Chat): string {
 
   for (const m of chat.messages) {
     if (m.status === 'pending') continue;
+    // A Workass wake-up notice is not the user speaking (review
+    // wa-subagent-1792184734224-6, correction 5).
+    if (m.notice) {
+      lines.push(`_${m.notice.title?.trim() || 'Subagente'} ${m.notice.status === 'failed' ? 'falló' : 'terminó'}_`, '');
+      continue;
+    }
     if (m.role === 'user') {
       lines.push('### Tú', '', m.content.trim() || '_(vacío)_', '');
     } else {

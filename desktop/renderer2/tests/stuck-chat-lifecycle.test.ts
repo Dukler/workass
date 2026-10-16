@@ -1049,3 +1049,20 @@ test('delayed submission owns its exact chat and leaves the newly active compose
   assert.equal(owner.draft, '');
   assert.equal(second.draft, 'second draft');
 });
+
+// Review wa-subagent-1792184734224-6, correction 1: a wake-up notice turn
+// reaches the renderer first as job:start. Its row must be the quiet notice
+// line from the first frame — never a user bubble that no rehydration fixes.
+test('a live wake-up notice job paints a notice row, never a user bubble', () => {
+  const notice = { kind: 'subagent', title: 'Revisión', status: 'done', body: 'ok' };
+  const { subject, owner } = subjectWithChat();
+  (subject as any).onJobEvent({ type: 'start', job: job({ promptText: '<task-notification>…', notice }) });
+  assert.deepEqual(owner.messages[0].notice, notice, 'the synthesized user row is a notice');
+
+  // A pending row that a projection drew without the notice is corrected by
+  // the job event too.
+  const second = subjectWithChat();
+  second.owner.messages.push({ id: 'user-canonical', role: 'user', content: '<task-notification>…', status: 'pending', at: null, events: [] } as Msg);
+  (second.subject as any).onJobEvent({ type: 'start', job: job({ notice }) });
+  assert.deepEqual(second.owner.messages.find((message: Msg) => message.id === 'user-canonical')?.notice, notice);
+});

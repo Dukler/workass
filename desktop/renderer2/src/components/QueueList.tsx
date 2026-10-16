@@ -50,7 +50,9 @@ export function QueueList({ chat }: { chat: Chat }) {
       )}
       {queue.map((q) => {
         const isEditing = editing === q.id;
-        const canSteer = store.isChatRunning(chat.id) && liveSteeringSupported(chat.deliveryCapabilities) && queuedAttachmentsReady(q);
+        // A queued wake-up notice is Workass's, not the user's: never edited or
+        // steered (review wa-subagent-1792184734224-6, suggestion 1).
+        const canSteer = !q.notice && store.isChatRunning(chat.id) && liveSteeringSupported(chat.deliveryCapabilities) && queuedAttachmentsReady(q);
         const overCls = over?.id === q.id ? (over.after ? 'over-after' : 'over-before') : '';
         return (
           <div
@@ -67,7 +69,7 @@ export function QueueList({ chat }: { chat: Chat }) {
             }}
             onDrop={(e) => { e.preventDefault(); drop(q.id); }}
             onDragEnd={() => { dragId.current = null; setOver(null); }}
-            onDoubleClick={() => { if (!isEditing) setEditing(q.id); }}
+            onDoubleClick={() => { if (!isEditing && !q.notice) setEditing(q.id); }}
           >
             {isEditing ? (
               <textarea
@@ -108,8 +110,10 @@ export function QueueList({ chat }: { chat: Chat }) {
                       ))}
                     </span>
                   )}
-                  <span className="qtext">{q.text}</span>
-                  {q.source === 'agent' && <span className="qattachstate">Enviado por agente</span>}
+                  {q.notice
+                    ? <span className="qtext qnotice">{q.notice.title?.trim() || 'Subagente'} {q.notice.status === 'failed' ? 'falló' : 'terminó'}</span>
+                    : <span className="qtext">{q.text}</span>}
+                  {q.source === 'agent' && !q.notice && <span className="qattachstate">Enviado por agente</span>}
                   {q.attachmentState === 'preparing' && <span className="qattachstate">Preparando adjuntos…</span>}
                   {q.attachmentState === 'failed' && !!q.draftImages?.length && (
                     <button className="qattachretry" title={q.attachmentError} onClick={() => store.retryQueuedAttachments(chat.id, q.id)}>

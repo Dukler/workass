@@ -866,9 +866,6 @@ class ClaudeSession {
         establishedBeforePrompt: this.conversation.snapshotEstablished(),
       inputSubmitted: false,
 	  clientUserMessageId: String(clientUserMessageId || '').trim(),
-        // Our own notice also carries origin task-notification; its result
-        // settles this prompt, never a turn Claude Code started itself.
-        taskNotification: taskNotification === true,
         earlySteers: [],
       };
     });
@@ -1333,8 +1330,7 @@ class ClaudeSession {
       // Otherwise it is that other turn's result and the prompt runs next.
       if (lifecycle
         ? !this.activePromptInTurn()
-        : ((originKind && originKind !== 'human' && !(originKind === 'task-notification' && this.activePrompt?.taskNotification))
-          || (!this.activePrompt && this.harnessTurnActive))) {
+        : ((originKind && originKind !== 'human') || (!this.activePrompt && this.harnessTurnActive))) {
         this.emitTurnEnded(message);
         return;
       }

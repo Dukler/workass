@@ -915,7 +915,7 @@ export class Store {
         pane: c.pane,
         draft: '', unread: c.unread, settled: c.settled, settledAt: c.settledAt,
         lastActivityAt: c.lastActivityAt,
-        queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, ...item }) => item) : undefined,
+        queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, notice: _notice, ...item }) => item) : undefined,
         providerId: c.providerId ?? null,
         contextUsageByProvider: c.contextUsageByProvider,
         messageCount: c.messageCount ?? c.messages.length,
@@ -1619,7 +1619,7 @@ export class Store {
     const receipt = await call('chatQueueReplace', {
       tabId, chatId, operationId,
       expectedRevision: live.agentQueueRevision ?? 0,
-      queue: (queued.value ?? []).map(({ draftImages: _draftImages, ...item }) => item),
+      queue: (queued.value ?? []).map(({ draftImages: _draftImages, notice: _notice, ...item }) => item),
     });
     if (!receipt?.ok || receipt.operationId !== operationId) {
       if (has('chatQueueReplace')) this.requestChatReadback(live);
@@ -5670,6 +5670,18 @@ export class Store {
   private resolveMsg(id: string): Msg | null {
     return this.msgForRef(this.jobRef.get(id));
   }
+  // A job that runs a Workass wake-up notice marks its user row as a notice,
+  // whichever path created the row first, so it is never drawn as the user
+  // speaking (review wa-subagent-1792184734224-6, corrections 1-2).
+  private applyJobNotice(chat: Chat, job: PublicJob) {
+    if (!job.notice || typeof job.userMessageId !== 'string') return;
+    const user = chat.messages.find((message) => message.id === job.userMessageId && message.role === 'user');
+    if (user && !user.notice) {
+      user.notice = job.notice;
+      this.bumpChat(chat);
+    }
+  }
+
   private synthesizeCanonicalJobRows(chat: Chat, job: PublicJob, terminal = false): Msg | null {
     const userID = typeof job.userMessageId === 'string' ? job.userMessageId.trim() : '';
     const assistantID = typeof job.assistantMessageId === 'string' ? job.assistantMessageId.trim() : '';
@@ -5685,6 +5697,7 @@ export class Store {
         status: 'done',
         at: startedAt,
         events: [],
+        ...(job.notice ? { notice: job.notice } : {}),
       };
       const assistantIndex = assistant ? chat.messages.indexOf(assistant) : -1;
       if (assistantIndex >= 0) chat.messages.splice(assistantIndex, 0, user);
@@ -5752,6 +5765,7 @@ export class Store {
           msg = this.synthesizeCanonicalJobRows(chat, e.job);
           if (!msg) this.scheduleScopedSync(['session', 'permissions']);
         }
+        if (chat) this.applyJobNotice(chat, e.job);
         if (msg && chat) {
           msg.jobId = e.job.id;
           if (!isTerminalMessage(msg)) msg.status = 'running';
@@ -5908,6 +5922,7 @@ export class Store {
           msg = this.synthesizeCanonicalJobRows(jobChat, e.job, true);
           if (!msg) this.scheduleScopedSync(['session', 'permissions']);
         }
+        if (jobChat) this.applyJobNotice(jobChat, e.job);
         if (jobChat) {
           const beforeSettlement = new Set(jobChat.messages.map((message) => message.id));
           const terminalRoots = new Set(jobChat.messages

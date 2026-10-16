@@ -2448,6 +2448,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .note.open .cv { transform: rotate(270deg); }
 .note[aria-expanded]:hover .nm { color: var(--ink); }
 .note-res { margin: -4px 0 14px 22px; padding: 8px 12px; border-left: 1px solid var(--line2); font-size: 12.5px; color: var(--ink2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.qtext.qnotice { color: var(--muted); }
 /* A forked subsession's inherited history: one quiet fold line, dimmed rows. */
 .inh { display: flex; align-items: center; gap: 9px; width: 100%; margin: 0 0 18px; padding: 0; border: 0; background: transparent; min-width: 0; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .inh .ig { flex: none; display: inline-flex; color: var(--faint); }
