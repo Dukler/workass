@@ -5,6 +5,7 @@ import { store, useApp, useProc } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
+import { NoticeLine } from './NoticeLine';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
@@ -792,7 +793,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                   return [(
                     <div className={`chatfind-message${inheritedFold && m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
-                        <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
+                        m.notice
+                          ? <NoticeLine notice={m.notice} />
+                          : <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
                       ) : (
                         <AssistantMessage
                           tabId={chat.id}

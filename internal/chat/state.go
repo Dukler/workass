@@ -65,6 +65,11 @@ type LedgerEvent struct {
 	// child switches to receives it as ordinary catch-up history (review
 	// wa-subagent-1792181911547-3, correction 2). Owned by no lane.
 	Inherited bool `json:",omitempty"`
+	// NoticeKind/Title/Status: this user row is a Workass wake-up notice (see
+	// provider.TurnPresentation), drawn as a quiet line, not a user bubble.
+	NoticeKind   string `json:",omitempty"`
+	NoticeTitle  string `json:",omitempty"`
+	NoticeStatus string `json:",omitempty"`
 	// WorkassNotice marks an assistant row whose text Workass wrote (an
 	// admission failure, an interruption explanation, a failure fallback),
 	// not the provider. UI and maintenance notices are never context events

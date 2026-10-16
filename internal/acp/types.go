@@ -502,6 +502,9 @@ type JobStartOptions struct {
 	// through the same queue, so only the caller knows which this is; getting it
 	// wrong would either lose the user's request or invent a new one.
 	HumanAuthored bool
+	// TaskNotification marks a Workass wake-up notice (a tracked subagent
+	// finished): never the user speaking.
+	TaskNotification bool
 	// ProviderLaneManaged routes attachment loss through the durable chat actor.
 	// The actor ends the interrupted UI turn immediately; Manager must never
 	// launch a retry, replacement, status poll, or provider-turn readback.

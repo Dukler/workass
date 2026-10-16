@@ -4484,6 +4484,9 @@ func appendForegroundUser(state *State) (LedgerEvent, error) {
 		LaneID: foreground.LaneID, ProviderID: lane.Identity.Realm.ProviderID, ModelID: foreground.Input.ModelID,
 		OperationID: foreground.OperationID, QueueID: strings.TrimSpace(foreground.Input.Presentation.QueueID),
 		NativeTurnID: foreground.Turn.NativeID, TerminalState: "consumed",
+		NoticeKind:   foreground.Input.Presentation.NoticeKind,
+		NoticeTitle:  foreground.Input.Presentation.NoticeTitle,
+		NoticeStatus: foreground.Input.Presentation.NoticeStatus,
 	}
 	state.Ledger = append(state.Ledger, event)
 	foreground.UserConsumed = true

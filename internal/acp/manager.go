@@ -1611,7 +1611,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	if promptText == "" {
 		promptText = strings.TrimSpace(opts.Message)
 	}
-	commandInput := providerCommandInput{Text: promptText, HumanAuthored: opts.HumanAuthored}
+	commandInput := providerCommandInput{Text: promptText, HumanAuthored: opts.HumanAuthored, TaskNotification: opts.TaskNotification}
 	if !activeBridge.hasLiveSession(job.SessionID) {
 		job.CrashInterrupted = true
 		job.Interrupted = true
@@ -3833,6 +3833,7 @@ func (b *Bridge) promptForJob(ctx context.Context, sessionID string, job *Job, o
 	if b.hasProviderCapability("workassNativeCommandInputV1") && len(commandInput) == 1 {
 		params["_meta"] = map[string]any{"workassCommandInput": map[string]any{
 			"text": commandInput[0].Text, "humanAuthored": commandInput[0].HumanAuthored,
+			"taskNotification": commandInput[0].TaskNotification,
 		}}
 	}
 	if operationID = strings.TrimSpace(operationID); operationID != "" {

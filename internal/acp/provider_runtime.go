@@ -1220,6 +1220,7 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 		InitialContextSeed:  append([]providercontract.ContextMessage(nil), input.InitialContext...),
 		ContextDelta:        append([]providercontract.ContextMessage(nil), input.ContextDelta...),
 		HumanAuthored:       humanAuthored,
+		TaskNotification:    strings.TrimSpace(presentation.NoticeKind) != "",
 		ProviderLaneManaged: true,
 		OperationID:         string(operationID),
 		UserMessageID:       firstNonEmpty(strings.TrimSpace(presentation.UserMessageID), string(operationID)),

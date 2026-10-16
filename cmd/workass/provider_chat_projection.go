@@ -957,6 +957,9 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	if event.ContextExcluded || event.Inherited {
 		message["inherited"] = true
 	}
+	if event.NoticeKind != "" {
+		message["notice"] = projectNotice(event)
+	}
 	if event.Result == "" {
 		delete(message, "result")
 	} else {
@@ -1407,4 +1410,18 @@ func projectActorUsage(target map[string]any, state chat.State) error {
 	}
 	delete(target, "usage")
 	return nil
+}
+
+// projectNotice is the quiet transcript line for a Workass wake-up notice:
+// what finished, how, and its result folded (mock
+// desktop/docs/mocks/subsessions/completion-notice.html, approved 2026-10-16).
+func projectNotice(event chat.LedgerEvent) map[string]any {
+	notice := map[string]any{"kind": event.NoticeKind, "title": event.NoticeTitle, "status": event.NoticeStatus}
+	for _, marker := range []string{"\nResult:\n", "\nFailure:\n"} {
+		if index := strings.Index(event.Text, marker); index >= 0 {
+			notice["body"] = strings.TrimSpace(event.Text[index+len(marker):])
+			break
+		}
+	}
+	return notice
 }

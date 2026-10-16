@@ -38,6 +38,7 @@ export function actorMessages(records: readonly MirrorMsg[]): Msg[] {
       turnStartedAt: record.turnStartedAt,
       interrupted: record.interrupted,
       inherited: record.inherited === true ? true : undefined,
+      notice: record.notice && typeof record.notice.kind === 'string' ? record.notice : undefined,
       images: record.images,
       events: (Array.isArray(record.events) ? record.events : []) as TimelineEvent[],
     };

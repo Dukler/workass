@@ -207,6 +207,10 @@ test('official Claude SDK host marks only human-typed prompts with a human origi
   assert.equal(await echo(3, { workassCommandInput: { text: 'ultracode', humanAuthored: true } }), 'origin={"kind":"human"}');
   assert.equal(await echo(4, { workassCommandInput: { text: 'wake', humanAuthored: false } }), 'origin=null');
   assert.equal(await echo(5, null), 'origin=null');
+  // A Workass wake-up notice (a subagent finished) reaches Claude Code the way
+  // its own background agents report back, and its prompt still settles
+  // (user 2026-10-16).
+  assert.equal(await echo(6, { workassCommandInput: { text: 'notice', humanAuthored: false, taskNotification: true } }), 'origin={"kind":"task-notification"}');
 });
 
 test('native Claude host preserves external MCP stdio configuration', async (t) => {
