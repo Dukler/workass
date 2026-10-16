@@ -10,7 +10,7 @@ import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 import { ForkKidsToggle, ForkNest } from './ForkSidebar';
 import { forkStore, useForks } from '../store/forks';
-import { forkChatBadge, forkSidebarOpen, forkSummaryForChat, subsessionBadge, type ForkChatBadge } from '../fork-sidebar';
+import { forkChatBadge, forkSidebarOpen, forkSummaryForChat, type ForkChatBadge } from '../fork-sidebar';
 
 // Sidebar v2 — port of T3 Code's "Sidebar v2" beta (nightly 0.0.29.20260724,
 // commit 41a430a8), read from the source maps it ships rather than copied by
@@ -229,8 +229,8 @@ function WorkingDuration({ since }: { since: number }) {
 type Row = {
   chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
   status: Status; since: number; bg: number; error: string; order: number;
-  // Subsessions under this chat — spawned threads and forked children count
-  // together, undistinguished (user 2026-10-16); null when it has none.
+  // Child sessions under this chat; null when it has none. Subagents are not
+  // counted here — they are turn work shown in the right rail.
   fork: ForkChatBadge | null;
 };
 
@@ -700,12 +700,7 @@ export function SidebarV2() {
         const project = workspaceLabelForChat(g, chat);
         if (needle && !`${chat.title} ${project}`.toLowerCase().includes(needle)) continue;
         const work = store.spawnedWork(chat);
-        // One subsession family on the parent row's chip: fork children and
-        // the threads its agents spawned count together (user 2026-10-16).
-        const fork = subsessionBadge(
-          forkChatBadge(forkSummaryForChat(forkStore.summary(), chat), forkStore.chat(chat.id)),
-          work,
-        );
+        const fork = forkChatBadge(forkSummaryForChat(forkStore.summary(), chat), forkStore.chat(chat.id));
         const live = chatHasLiveActivity(chat, work) || (fork?.running ?? 0) > 0;
         const active = chat.id === app.activeId;
         const touched = lastTouchedAt(chat);
