@@ -151,6 +151,22 @@ func TestClaudeBridgeLaunchUsesWorkassSDKHostAndOfficialExecutable(t *testing.T)
 		launch.Env["FIXTURE"] != "yes" || launch.Env["NODE_EXTRA_CA_CERTS"] != "" {
 		t.Fatalf("host env = %#v", launch.Env)
 	}
+	// Claude Code's forked subagent is on by default (user 2026-10-16); an
+	// explicit setting always wins.
+	if launch.Env["CLAUDE_CODE_FORK_SUBAGENT"] != "1" {
+		t.Fatalf("fork subagent gate = %q, want 1", launch.Env["CLAUDE_CODE_FORK_SUBAGENT"])
+	}
+	off, err := claudeNativeHostLaunch(ProviderConfig{
+		ID: "claude", Command: claude, CWD: root, Env: map[string]string{"CLAUDE_CODE_FORK_SUBAGENT": "0"},
+	}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
+	if err != nil || off.Env["CLAUDE_CODE_FORK_SUBAGENT"] != "0" {
+		t.Fatalf("an explicit provider setting must win: %#v err=%v", off.Env, err)
+	}
+	t.Setenv("CLAUDE_CODE_FORK_SUBAGENT", "0")
+	inherited, err := claudeNativeHostLaunch(ProviderConfig{ID: "claude", Command: claude, CWD: root}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
+	if _, set := inherited.Env["CLAUDE_CODE_FORK_SUBAGENT"]; err != nil || set {
+		t.Fatalf("a daemon environment setting must pass through untouched: %#v err=%v", inherited.Env, err)
+	}
 }
 
 func TestClaudeNativeTurnRecoversTransientOAuthRefreshWithoutFalseAssistantAnswer(t *testing.T) {
