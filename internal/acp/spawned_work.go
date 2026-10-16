@@ -794,6 +794,11 @@ func (m *Manager) reviveResumedAgentLocked(tabID, chatID, taskID string, candida
 	now := isoNow()
 	item.Status, item.FinishedAt, item.ExitCode = "running", "", nil
 	item.StartedAt, item.UpdatedAt = now, now
+	// Nothing of how the previous run ended belongs to this one. Above all the
+	// old output file: the liveness pass looks for a process holding it, none
+	// ever does for an agent, and the resumed agent was declared dead 4 s
+	// later — so the engine recycled under it (DepthVision speed, 2026-10-16).
+	item.OutputFile, item.PID, item.Summary, item.ResultExcerpt, item.LastToolName = "", nil, "", "", ""
 	m.spawnedWork[key] = &spawnedWorkRecord{Item: item, SessionID: candidate.SessionID}
 	delete(m.spawnedWorkSettled, key)
 	return true
@@ -1185,6 +1190,13 @@ func (m *Manager) reconcileSpawnedWork() {
 	for key, rec := range m.spawnedWork {
 		if rec.Item.Status == "running" {
 			liveness := spawnedWorkLivenessClassFor(rec.Item)
+			path := rec.Item.OutputFile
+			if liveness == spawnedWorkLivenessInProcess {
+				// An agent or workflow runs inside the provider process; no
+				// process ever holds its output file, so probing that file can
+				// only call a live agent dead. Its liveness is its session.
+				path = ""
+			}
 			if liveness == spawnedWorkLivenessSubagent {
 				// The in-memory subagent registry is the sole live authority.
 				// finishSubagent/cancel settles this record; reconciliation must
@@ -1192,7 +1204,7 @@ func (m *Manager) reconcileSpawnedWork() {
 				continue
 			}
 			items = append(items, probeItem{
-				key: key, path: rec.Item.OutputFile, tabID: rec.Item.TabID, chatID: rec.Item.ChatID,
+				key: key, path: path, tabID: rec.Item.TabID, chatID: rec.Item.ChatID,
 				doneFile: rec.ExternalDoneFile, liveness: liveness,
 			})
 		}

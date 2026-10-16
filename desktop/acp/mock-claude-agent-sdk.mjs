@@ -381,6 +381,24 @@ class FixtureQuery {
         this.emit({ ...sub, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: read.id, content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }] }] } });
         continue;
       }
+      // A background agent runs and finishes (first turn), then SendMessage
+      // resumes it under a new call (second turn), as in DepthVision speed on
+      // 2026-10-16: the resumed agent's task_started names the SendMessage.
+      if (text.includes('[fixture:resume-run-1]') || text.includes('[fixture:resume-run-2]')) {
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        const task = 'a6b1b14750726df64';
+        const system = (subtype, extra) => this.emit({ type: 'system', subtype, session_id: this.sessionId, uuid: randomUUID(), ...extra });
+        const first = text.includes('[fixture:resume-run-1]');
+        const toolUse = first
+          ? { type: 'tool_use', id: 'toolu_resume_launch', name: 'Agent', input: { description: 'Fast trainer lane', subagent_type: 'general-purpose', run_in_background: true, prompt: 'build' } }
+          : { type: 'tool_use', id: 'toolu_resume_send', name: 'SendMessage', input: { to: task, message: 'r6 round' } };
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [toolUse] } });
+        system('task_started', { task_id: task, tool_use_id: toolUse.id, description: 'Fast trainer lane', subagent_type: 'general-purpose', task_type: 'local_agent', is_backgrounded: true });
+        this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: first ? `Async agent launched successfully.\nagentId: ${task}` : `{"success":true,"message":"Resuming agent a6b1b14"}` }] } });
+        await this.endTurn(text);
+        if (first) await this.harnessTurn({ settles: { task_id: task, tool_use_id: toolUse.id, status: 'completed', output_file: `/private/tmp/claude-501/fixture/session/tasks/${task}.output`, summary: 'first run done' } });
+        continue;
+      }
       // Claude Code's live list of background tasks, as the real CLI sends it
       // (probe 2026-10-16): a background shell joins it, then it empties.
       if (text.includes('[fixture:live-list]')) {

@@ -411,3 +411,78 @@ func TestClaudeSubagentToolCallsReachTheChatUnderTheirAgent(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A finished background agent resumed by SendMessage is live work again: it
+// must count, so idle recycling cannot kill it the moment the turn ends
+// (DepthVision speed, 2026-10-16: hibernated 1 s after the resuming turn, and
+// the resumed agent died with no notice).
+func TestClaudeAgentResumedBySendMessageCountsAsLiveWork(t *testing.T) {
+	t.Parallel()
+	root, stateDir := repoRoot(t), t.TempDir()
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "claude", InitTimeout: 10 * time.Second,
+		RSSSampleInterval: time.Hour, SpawnedWorkReconcileInterval: 100 * time.Millisecond,
+		Provider: acp.ProviderConfig{ID: "claude", Command: "node", Args: []string{filepath.Join(root, "scripts", "claude-native-host.mjs")}, CWD: root, Enabled: true,
+			Env: map[string]string{
+				"WORKASS_CLAUDE_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-claude-agent-sdk.mjs"),
+				"WORKASS_CLAUDE_EXECUTABLE": "/fixture/claude",
+				"WORKASS_CLAUDE_SESSION_ID": "fixture-resume-session",
+			}},
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, sharedSessionStore(stateDir), stateDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if _, err := runtime.CreateRendererChat(map[string]any{"tabId": "resume-tab", "chatId": "resume-chat", "operationId": "resume-create", "cwd": root, "providerId": "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := runtime.Select(ctx, acp.SessionOptions{TabID: "resume-tab", ChatID: "resume-chat", ProviderID: "claude", CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const task = "a6b1b14750726df64"
+	status := func() (string, string) {
+		for _, item := range manager.ListSpawnedWork("resume-tab", "resume-chat") {
+			if item.TaskID == task {
+				return item.Status, item.ToolCallID
+			}
+		}
+		return "absent", ""
+	}
+	waitFor := func(what string, done func() bool) {
+		deadline := time.Now().Add(15 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				state, _ := runtime.Snapshot("resume-chat")
+				live, call := status()
+				t.Fatalf("%s: live=%s/%s saved=%#v", what, live, call, state.Background[task].Event)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	start := func(op, prompt string) {
+		if _, err := runtime.Start(ctx, map[string]any{"kind": "app-chat", "tabId": "resume-tab", "chatId": "resume-chat", "sessionId": info.SessionID, "operationId": op, "userMessageId": op + "-user", "assistantMessageId": op + "-assistant", "prompt": prompt}, "human"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start("resume-turn-1", "[fixture:resume-run-1]")
+	waitFor("the first run never finished", func() bool {
+		state, _ := runtime.Snapshot("resume-chat")
+		return state.Background[task].Event.Status == "exited"
+	})
+	waitFor("the first turn never ended", func() bool { _, busy := manager.RunningJobForChat("resume-tab", "resume-chat"); return !busy })
+
+	start("resume-turn-2", "[fixture:resume-run-2]")
+	waitFor("the resumed agent never counted as running", func() bool { live, _ := status(); return live == "running" })
+	waitFor("the resuming turn never ended", func() bool { _, busy := manager.RunningJobForChat("resume-tab", "resume-chat"); return !busy })
+	// Past the liveness passes (every 100 ms) and their 4 s missing grace.
+	time.Sleep(5 * time.Second)
+	if live, call := status(); live != "running" {
+		state, _ := runtime.Snapshot("resume-chat")
+		t.Fatalf("the resumed agent stopped counting as live work: live=%s/%s saved=%#v", live, call, state.Background[task].Event)
+	}
+	state, _ := runtime.Snapshot("resume-chat")
+	if got := state.Background[task].Event.Status; got != "running" {
+		t.Fatalf("the chat's saved state shows the resumed agent as %q", got)
+	}
+}
