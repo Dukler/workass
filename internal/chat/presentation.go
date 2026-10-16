@@ -104,6 +104,11 @@ type ParentLink struct {
 	// exactly this, never the parent's later history.
 	ForkSourceSessionID   string `json:",omitempty"`
 	ForkBeforeOperationID string `json:",omitempty"`
+	// ForkedSessionID is the child's own native fork, made BEFORE the child
+	// existed and pinned here, so binding it is a pure lookup on every retry
+	// (review wa-subagent-1792180415563-2). Empty only on forks made by the
+	// first build, whose binding already exists.
+	ForkedSessionID string `json:",omitempty"`
 }
 
 func (p *ParentLink) Clone() *ParentLink {
@@ -121,6 +126,7 @@ func (p *ParentLink) normalized() *ParentLink {
 	out := ParentLink{
 		ChatID: strings.TrimSpace(p.ChatID), TabID: strings.TrimSpace(p.TabID), Forked: p.Forked,
 		ForkSourceSessionID: strings.TrimSpace(p.ForkSourceSessionID), ForkBeforeOperationID: strings.TrimSpace(p.ForkBeforeOperationID),
+		ForkedSessionID: strings.TrimSpace(p.ForkedSessionID),
 	}
 	return &out
 }
@@ -139,8 +145,8 @@ func (p *ParentLink) Validate(childChatID string) error {
 	if p.Forked != (strings.TrimSpace(p.ForkSourceSessionID) != "") {
 		return errors.New("a forked subsession must name the parent session it forked, and only a forked one may")
 	}
-	if !p.Forked && strings.TrimSpace(p.ForkBeforeOperationID) != "" {
-		return errors.New("only a forked subsession has a fork boundary")
+	if !p.Forked && (strings.TrimSpace(p.ForkBeforeOperationID) != "" || strings.TrimSpace(p.ForkedSessionID) != "") {
+		return errors.New("only a forked subsession has a fork boundary or a native fork")
 	}
 	return nil
 }

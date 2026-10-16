@@ -43,77 +43,110 @@ func NativeSessionForkSupported(providerID string) bool {
 	return ok
 }
 
-// ForkSubsessionLane forks the parent's native session and records the new
-// session as the child's committed lane binding, so the child's first turn is
-// an exact resume of its own fork. It is idempotent per child lane: a retry
-// after a lost reply finds the committed binding and forks nothing.
-func (m *Manager) ForkSubsessionLane(ctx context.Context, req SubsessionForkRequest) error {
-	if m == nil || m.nativeSessions == nil || m.nativeSessions.path == "" {
-		return errors.New("durable provider lane storage is unavailable")
-	}
-	child := req.Child
-	child.TabID, child.ChatID = strings.TrimSpace(child.TabID), strings.TrimSpace(child.ChatID)
-	providerID := normalizeProviderID(child.ProviderID)
-	child.ProviderID = providerID
-	sourceChatID, sourceSessionID := strings.TrimSpace(req.SourceChatID), strings.TrimSpace(req.SourceSessionID)
-	if child.TabID == "" || child.ChatID == "" || sourceChatID == "" || sourceSessionID == "" || sourceChatID == child.ChatID {
-		return errors.New("a forked subsession needs the parent's native session and distinct child ids")
-	}
-	if !NativeSessionForkSupported(providerID) {
-		return unsupportedNativeSessionFork(providerID)
-	}
-	ledger := m.nativeSessions
-	if existing, exists := ledger.getForOptions(child); exists {
-		if existing.ThreadCommitted {
-			return nil
-		}
-		return errors.New("the subsession lane already holds an uncommitted provider candidate")
-	}
-	var source nativeSessionBinding
-	found := false
-	for _, binding := range ledger.bindingsForChat(sourceChatID) {
-		if binding.ProviderID == providerID && binding.ThreadCommitted &&
-			(bindingCurrentThreadID(binding) == sourceSessionID || binding.SessionID == sourceSessionID) {
-			source, found = binding, true
-			break
-		}
-	}
-	if !found {
-		return errors.New("the parent chat's native session is not a committed lane on this machine")
-	}
-	if strings.TrimSpace(child.CWD) == "" || !sameFilesystemPath(child.CWD, source.CWD) {
-		return errors.New("a forked subsession must keep its parent's workspace")
-	}
-	unlock := ledger.lock(child)
-	defer unlock()
-	if existing, exists := ledger.getForOptions(child); exists && existing.ThreadCommitted {
-		return nil
+// ForkSubsessionSession copies the parent's pinned native head into a new
+// native session and returns its id, binding nothing (review
+// wa-subagent-1792180415563-2, corrections 1-2): the caller pins the id in the
+// child's parent link BEFORE the child exists, so every check that can refuse
+// runs first and a retry re-binds the same copy instead of forking the
+// parent's later history.
+func (m *Manager) ForkSubsessionSession(ctx context.Context, req SubsessionForkRequest) (string, error) {
+	child, source, err := m.subsessionForkSource(req)
+	if err != nil {
+		return "", err
 	}
 	before := nativeForkBoundary{}
 	if strings.TrimSpace(req.BeforeOperationID) != "" {
-		before = nativeForkBoundary{OperationID: req.BeforeOperationID, SessionIDs: []string{source.SessionID, sourceSessionID}}
+		before = nativeForkBoundary{OperationID: req.BeforeOperationID, SessionIDs: []string{source.SessionID, strings.TrimSpace(req.SourceSessionID)}}
 	}
 	// Fork exactly the pinned head, never a later one the parent rotated to.
-	forked, err := m.forkNativeSessionCopy(ctx, providerID, sourceSessionID, source.CWD, before)
+	forked, err := m.forkNativeSessionCopy(ctx, child.ProviderID, strings.TrimSpace(req.SourceSessionID), source.CWD, before)
+	if err != nil {
+		return "", err
+	}
+	m.opts.Logf("acp native subsession fork", map[string]any{
+		"chatId": child.ChatID, "parentChatId": strings.TrimSpace(req.SourceChatID), "providerId": child.ProviderID,
+	})
+	return forked, nil
+}
+
+// BindForkedSubsessionLane records an already-forked native session as the
+// child's committed lane binding, so lane selection resumes it exactly. No
+// provider call: idempotent for the same session, a refusal for any other.
+func (m *Manager) BindForkedSubsessionLane(req SubsessionForkRequest, forkedSessionID string) error {
+	child, source, err := m.subsessionForkSource(req)
 	if err != nil {
 		return err
 	}
-	binding := nativeSessionBinding{
-		TabID: child.TabID, ChatID: child.ChatID, ProviderID: providerID,
+	forkedSessionID = strings.ToLower(strings.TrimSpace(forkedSessionID))
+	if forkedSessionID == "" {
+		return errors.New("a forked subsession needs its pinned native fork")
+	}
+	ledger := m.nativeSessions
+	unlock := ledger.lock(child)
+	defer unlock()
+	if existing, exists := ledger.getForOptions(child); exists {
+		if existing.ThreadCommitted && existing.SessionID == forkedSessionID {
+			return nil
+		}
+		return errors.New("the subsession lane is already bound to a different provider session")
+	}
+	return ledger.put(nativeSessionBinding{
+		TabID: child.TabID, ChatID: child.ChatID, ProviderID: child.ProviderID,
 		MachineID: source.MachineID, AccountScope: source.AccountScope, InstallScope: source.InstallScope,
 		RealmVerified: source.RealmVerified, WorkspaceEpoch: string(sessionWorkspaceEpoch(child)),
-		SessionID: forked, ThreadCommitted: true, CWD: source.CWD,
+		SessionID: forkedSessionID, ThreadCommitted: true, CWD: source.CWD,
 		ModelID: firstNonEmpty(strings.TrimSpace(child.ModelID), source.ModelID),
 		ModeID:  firstNonEmpty(strings.TrimSpace(child.ModeID), source.ModeID),
-	}
-	if err := ledger.put(binding); err != nil {
-		m.discardNativeSessionCopy(providerID, forked)
-		return err
-	}
-	m.opts.Logf("acp native subsession fork", map[string]any{
-		"chatId": child.ChatID, "parentChatId": sourceChatID, "providerId": providerID,
 	})
-	return nil
+}
+
+// DiscardForkedSubsessionSession deletes a native copy no child references
+// (the child chat could not be created).
+func (m *Manager) DiscardForkedSubsessionSession(providerID, sessionID string) {
+	m.discardNativeSessionCopy(normalizeProviderID(providerID), strings.TrimSpace(sessionID))
+}
+
+// subsessionForkSource validates a fork request and finds the parent's
+// committed binding: the pinned head when it is still known, otherwise any
+// committed lane of the parent on the same provider (same realm).
+func (m *Manager) subsessionForkSource(req SubsessionForkRequest) (SessionOptions, nativeSessionBinding, error) {
+	if m == nil || m.nativeSessions == nil || m.nativeSessions.path == "" {
+		return SessionOptions{}, nativeSessionBinding{}, errors.New("durable provider lane storage is unavailable")
+	}
+	child := req.Child
+	child.TabID, child.ChatID = strings.TrimSpace(child.TabID), strings.TrimSpace(child.ChatID)
+	child.ProviderID = normalizeProviderID(child.ProviderID)
+	sourceChatID, sourceSessionID := strings.TrimSpace(req.SourceChatID), strings.TrimSpace(req.SourceSessionID)
+	if child.TabID == "" || child.ChatID == "" || sourceChatID == "" || sourceSessionID == "" || sourceChatID == child.ChatID {
+		return SessionOptions{}, nativeSessionBinding{}, errors.New("a forked subsession needs the parent's native session and distinct child ids")
+	}
+	if !NativeSessionForkSupported(child.ProviderID) {
+		return SessionOptions{}, nativeSessionBinding{}, unsupportedNativeSessionFork(child.ProviderID)
+	}
+	var source, fallback nativeSessionBinding
+	found, sameProvider := false, false
+	for _, binding := range m.nativeSessions.bindingsForChat(sourceChatID) {
+		if binding.ProviderID != child.ProviderID || !binding.ThreadCommitted {
+			continue
+		}
+		if bindingCurrentThreadID(binding) == sourceSessionID || binding.SessionID == sourceSessionID {
+			source, found = binding, true
+			break
+		}
+		if !sameProvider {
+			fallback, sameProvider = binding, true
+		}
+	}
+	if !found && sameProvider {
+		source, found = fallback, true
+	}
+	if !found {
+		return SessionOptions{}, nativeSessionBinding{}, errors.New("the parent chat's native session is not a committed lane on this machine")
+	}
+	if strings.TrimSpace(child.CWD) == "" || !sameFilesystemPath(child.CWD, source.CWD) {
+		return SessionOptions{}, nativeSessionBinding{}, errors.New("a forked subsession must keep its parent's workspace")
+	}
+	return child, source, nil
 }
 
 func unsupportedNativeSessionFork(providerID string) error {

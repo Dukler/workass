@@ -220,6 +220,7 @@ test('the parent badge counts subsession chats like fork children; only running 
 
 test('the nest opens by itself while you are inside one of its subsessions', () => {
   assert.equal(forkSidebarOpen(undefined, false, false, true), true);
-  assert.equal(forkSidebarOpen(false, false, false, true), false, 'an explicit close still wins');
+  assert.equal(forkSidebarOpen(false, false, false, true), true, 'the chat you are in is never hidden by an earlier collapse');
+  assert.equal(forkSidebarOpen(false, true, true, false), false, 'otherwise an explicit close wins');
   assert.equal(forkSidebarOpen(undefined, false, true, false), false);
 });

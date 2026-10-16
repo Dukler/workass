@@ -778,13 +778,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
                     );
-                    return [messages[0].inherited
+                    return [inheritedFold && messages[0].inherited
                       ? <div className="inh-msg" key={`inh-block:${messages[0].id}`}>{block}</div>
                       : block];
                   }
                   if (turnBlockMembers.has(index)) return [];
                   return [(
-                    <div className={`chatfind-message${m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id} key={m.id}>
+                    <div className={`chatfind-message${inheritedFold && m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
                         <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
                       ) : (

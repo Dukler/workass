@@ -154,9 +154,9 @@ func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
 			Thread:   providercontract.ThreadRef{ProviderID: "claude", RootID: "root-id", HeadID: "head-id", Lineage: 2, Proof: "p"},
 		}},
 		Ledger: []chat.LedgerEvent{
-			{Role: "user", OperationID: "op1"}, {Role: "assistant", OperationID: "op1"},
-			{Role: "user", OperationID: "op2", SteerState: "consumed"},
-			{Role: "user", OperationID: "op3"}, {Role: "assistant", OperationID: "op3"},
+			{Role: "user", OperationID: "op1", LaneID: lane.ID}, {Role: "assistant", OperationID: "op1", LaneID: lane.ID},
+			{Role: "user", OperationID: "op2", SteerState: "consumed", LaneID: lane.ID},
+			{Role: "user", OperationID: "op3", LaneID: lane.ID}, {Role: "assistant", OperationID: "op3", LaneID: lane.ID},
 		},
 	}
 	whole, err := subsessionForkLink(state, "src-tab", state.Ledger, false)
@@ -166,6 +166,22 @@ func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
 	cut, err := subsessionForkLink(state, "src-tab", state.Ledger[:2], true)
 	if err != nil || cut.ForkBeforeOperationID != "op3" {
 		t.Fatalf("a cut must stop before the next real prompt, skipping steers: %#v err=%v", cut, err)
+	}
+	// Review correction 3: a turn another engine answered reaches this lane
+	// only inside a later prompt's catch-up history, so a cut there refuses.
+	crossed := state
+	crossed.Ledger = append([]chat.LedgerEvent(nil), state.Ledger...)
+	crossed.Ledger[1].LaneID = "lane-codex"
+	if _, err := subsessionForkLink(crossed, "src-tab", crossed.Ledger[:2], true); err == nil || !strings.Contains(err.Error(), "another engine") {
+		t.Fatalf("a cut across another engine's turn = %v", err)
+	}
+	if _, err := subsessionForkLink(crossed, "src-tab", crossed.Ledger, false); err != nil {
+		t.Fatalf("a whole-session fork carries catch-up history natively: %v", err)
+	}
+	inherited := crossed
+	inherited.ContextFloor = 2
+	if _, err := subsessionForkLink(inherited, "src-tab", inherited.Ledger[:2], true); err != nil {
+		t.Fatalf("rows inherited from a grandparent are native here: %v", err)
 	}
 	if got := turnsBeforeOperation(state.Ledger, "op3"); got != 1 {
 		t.Fatalf("turnsBeforeOperation = %d, want 1", got)
@@ -181,5 +197,50 @@ func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
 	empty := chat.State{ChatID: "src"}
 	if _, err := subsessionForkLink(empty, "src-tab", nil, false); err == nil {
 		t.Fatal("a chat with no provider session produced a fork link")
+	}
+}
+
+// Review wa-subagent-1792180415563-2, correction 1: a forked subsession whose
+// pinned native fork cannot be bound refuses lane selection — it never falls
+// through to session/new as a silent contextless copy.
+func TestForkedSubsessionNeverReachesAFreshLane(t *testing.T) {
+	_, runtime, _ := subsessionTestHandler(t)
+	parent, ok := runtime.Snapshot("sub-parent-chat")
+	if !ok {
+		t.Fatal("parent missing")
+	}
+	presentation := parent.Presentation.Clone()
+	presentation.TabID = "orphan-fork-tab"
+	actor, err := runtime.actorForFork("orphan-fork-chat", chat.InitializeFork{
+		Presentation: presentation, SourceChatID: "sub-parent-chat", OperationID: "test:orphan-fork", Digest: "orphan-digest",
+		Parent: &chat.ParentLink{
+			ChatID: "sub-parent-chat", TabID: "sub-parent-tab", Forked: true,
+			ForkSourceSessionID: "no-such-native-head", ForkedSessionID: "7a1c2b3d-4e5f-4061-8a9b-0c1d2e3f4a5b",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := runtime.attachForkChild(ctx, actor, "test:orphan-fork", "sub-parent-tab", ""); err == nil {
+		t.Fatal("a forked subsession without its native fork attached a lane")
+	}
+	if state, _ := runtime.Snapshot("orphan-fork-chat"); len(state.Lanes) != 0 {
+		t.Fatalf("a forked subsession got a lane anyway: %#v", state.Lanes)
+	}
+}
+
+func TestDerivedOperationIDsStayWithinTheLimit(t *testing.T) {
+	if got := derivedOperationID("focus:", "op-1", ""); got != "focus:op-1" {
+		t.Fatalf("short id = %q", got)
+	}
+	long := providercontract.OperationID(strings.Repeat("x", 250))
+	got := derivedOperationID("", long, ":first-message")
+	if _, err := providercontract.ValidateOperationID(string(got)); err != nil || !strings.HasSuffix(string(got), ":first-message") {
+		t.Fatalf("long derived id %q invalid: %v", got, err)
+	}
+	if derivedOperationID("", long, ":first-message") != got {
+		t.Fatal("a derived id must be stable across retries")
 	}
 }

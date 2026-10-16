@@ -1123,7 +1123,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		if err != nil {
 			return nil, err
 		}
-		if err := r.ensureSubsessionForkLane(ctx, actor); err != nil {
+		if err := r.ensureSubsessionForkLane(actor); err != nil {
 			return nil, err
 		}
 		return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
@@ -1161,7 +1161,9 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	}
 	prefix, _ := actorForkPrefix(sourceState.Ledger, atTurn, hasAtTurn)
 	var parent *chat.ParentLink
+	var sourceLane chat.LaneState
 	if subsession {
+		sourceLane = sourceState.Lanes[sourceState.ActiveLaneID]
 		if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" &&
 			(sourceState.Presentation.CWD == nil || !sameFilesystemPath(cwd, *sourceState.Presentation.CWD)) {
 			source.mu.Unlock()
@@ -1201,6 +1203,28 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 			presentation.ProviderID = lane.Identity.Realm.ProviderID
 		}
 	}
+	if parent != nil {
+		// Every check that can refuse runs before the child exists, and the
+		// native fork is made and pinned first (review
+		// wa-subagent-1792180415563-2, corrections 1-2): a refusal leaves
+		// nothing behind, and a retry re-binds this exact copy.
+		presentation.ProviderID = providercontract.NormalizeID(string(sourceLane.Identity.Realm.ProviderID))
+		if presentation.CWD == nil && strings.TrimSpace(sourceLane.CWD) != "" {
+			cwd := strings.TrimSpace(sourceLane.CWD)
+			presentation.CWD = &cwd
+		}
+		request := subsessionForkRequest(chat.State{ChatID: newChatID, Presentation: presentation, Parent: parent})
+		forked, err := r.manager.ForkSubsessionSession(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		parent.ForkedSessionID = forked
+		defer func() {
+			if parent.ForkedSessionID != "" {
+				r.manager.DiscardForkedSubsessionSession(request.Child.ProviderID, parent.ForkedSessionID)
+			}
+		}()
+	}
 	command := chat.InitializeFork{
 		Presentation: presentation, SourceChatID: sourceChatID, Messages: prefix, OperationID: operationID,
 		Parent: parent,
@@ -1210,7 +1234,14 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	if err != nil {
 		return nil, err
 	}
-	if err := r.ensureSubsessionForkLane(ctx, actor); err != nil {
+	if parent != nil {
+		// Keep the copy only when the committed child points at it; a concurrent
+		// identical request may have created the child with its own copy.
+		if stored := actor.engine.Snapshot().Parent; stored != nil && stored.ForkedSessionID == parent.ForkedSessionID {
+			parent.ForkedSessionID = ""
+		}
+	}
+	if err := r.ensureSubsessionForkLane(actor); err != nil {
 		return nil, err
 	}
 	return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
@@ -1238,30 +1269,54 @@ func subsessionForkLink(source chat.State, sourceTabID string, prefix []chat.Led
 			}
 		}
 	}
+	if cut {
+		// A cut keeps only what this lane's native session holds before the
+		// next prompt. Turns another engine answered reached this lane later,
+		// inside that prompt's catch-up history, so a cut would silently drop
+		// them (review wa-subagent-1792180415563-2, correction 3).
+		for index, event := range prefix {
+			if uint64(index) < source.ContextFloor || event.WorkassNotice {
+				continue
+			}
+			if event.LaneID != lane.Identity.ID {
+				return nil, errors.New("this point includes turns another engine answered; fork from the latest message instead")
+			}
+		}
+	}
 	return &chat.ParentLink{
 		ChatID: source.ChatID, TabID: sourceTabID, Forked: true,
 		ForkSourceSessionID: lane.Thread.Normalize().HeadID, ForkBeforeOperationID: before,
 	}, nil
 }
 
-// ensureSubsessionForkLane gives a forked subsession its native fork before
-// any lane is selected, so selection finds an established thread and resumes
-// it exactly. It is idempotent; a non-forked chat is left alone.
-func (r *providerChatRuntime) ensureSubsessionForkLane(ctx context.Context, actor *providerChatActor) error {
+// subsessionForkRequest is the manager request for a forked subsession's
+// state: the parent's pinned head and cut, and the child's exact lane options.
+func subsessionForkRequest(state chat.State) acp.SubsessionForkRequest {
+	request := acp.SubsessionForkRequest{
+		Child: effectiveSelectionOptions(state, acp.SessionOptions{TabID: state.Presentation.TabID, ChatID: state.ChatID}),
+	}
+	if state.Parent != nil {
+		request.SourceChatID = state.Parent.ChatID
+		request.SourceSessionID = state.Parent.ForkSourceSessionID
+		request.BeforeOperationID = state.Parent.ForkBeforeOperationID
+	}
+	return request
+}
+
+// ensureSubsessionForkLane binds a forked subsession's pinned native fork
+// before any lane is selected, so selection finds an established thread and
+// resumes it exactly. A pure lookup, idempotent; non-forked chats untouched.
+func (r *providerChatRuntime) ensureSubsessionForkLane(actor *providerChatActor) error {
 	if actor == nil {
 		return errors.New("subsession actor is unavailable")
 	}
 	actor.mu.Lock()
 	state := actor.engine.Snapshot()
 	actor.mu.Unlock()
-	if state.Parent == nil || !state.Parent.Forked {
+	if state.Parent == nil || !state.Parent.Forked || state.Parent.ForkedSessionID == "" {
 		return nil
 	}
-	opts := effectiveSelectionOptions(state, acp.SessionOptions{TabID: state.Presentation.TabID, ChatID: state.ChatID})
-	return r.manager.ForkSubsessionLane(ctx, acp.SubsessionForkRequest{
-		SourceChatID: state.Parent.ChatID, SourceSessionID: state.Parent.ForkSourceSessionID,
-		Child: opts, BeforeOperationID: state.Parent.ForkBeforeOperationID,
-	})
+	return r.manager.BindForkedSubsessionLane(subsessionForkRequest(state), state.Parent.ForkedSessionID)
 }
 
 // turnsBeforeOperation counts the semantic turns that precede the turn of
@@ -1467,6 +1522,25 @@ func (r *providerChatRuntime) resolveSelectionLocked(ctx context.Context, actor 
 	selection, err := r.manager.ResolveProviderLaneSelection(ctx, opts)
 	if err != nil {
 		return acp.ProviderLaneSelection{}, err
+	}
+	// A forked subsession's first lane must be its native fork; it can never
+	// reach session/new as a silent contextless copy (review
+	// wa-subagent-1792180415563-2, correction 1).
+	if state.Parent != nil && state.Parent.Forked && len(state.Lanes) == 0 && !selection.Established {
+		if pinned := state.Parent.ForkedSessionID; pinned != "" {
+			if err := r.manager.BindForkedSubsessionLane(subsessionForkRequest(state), pinned); err != nil {
+				return acp.ProviderLaneSelection{}, err
+			}
+			if selection, err = r.manager.ResolveProviderLaneSelection(ctx, opts); err != nil {
+				return acp.ProviderLaneSelection{}, err
+			}
+		}
+		if !selection.Established {
+			return acp.ProviderLaneSelection{}, &providercontract.Error{
+				Kind:    providercontract.ErrorNativeIdentityConflict,
+				Message: "this forked subsession has no native fork of its parent; Workass never starts it fresh",
+			}
+		}
 	}
 	return selection, nil
 }

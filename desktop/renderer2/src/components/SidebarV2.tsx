@@ -700,7 +700,15 @@ export function SidebarV2() {
     const needle = query.trim().toLowerCase();
     const manualOrder = new Map(app.chats.map((chat, index) => [chat.id, index]));
     // Subsessions nest under their parent; a search lists every match flat.
-    const children = subsessionChildren(app.chats);
+    // A child nests only when its parent is in the current view: under a
+    // project scope that excludes the parent it stays a row of its own
+    // (review wa-subagent-1792180415563-2, suggestion 3).
+    const inView = new Set<string>();
+    for (const g of groups) {
+      if (scope === null || scope === normalizeWorkspacePath(g.path)) for (const chat of g.chats) inView.add(chat.id);
+    }
+    const children = subsessionChildren(app.chats.filter((chat) => !chat.parentChatId || inView.has(chat.id)));
+    for (const parentTab of [...children.keys()]) if (!inView.has(parentTab)) children.delete(parentTab);
     const nested = nestedSubsessionIds(children);
     for (const g of groups) {
       const key = normalizeWorkspacePath(g.path);
