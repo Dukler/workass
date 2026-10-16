@@ -10,6 +10,7 @@ type TranscriptMessageIdentity = {
   id: string;
   role: string;
   steerState?: unknown;
+  notice?: unknown;
 };
 
 // A steer is rendered in the composer tray while its turn is active and moves
@@ -21,7 +22,9 @@ export function latestOrdinaryUserMessageId(
 ): string | null {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (message.role === 'user' && message.steerState === undefined) return message.id;
+    // A wake-up notice is not the user asking to follow a turn: a reader who
+    // scrolled up stays put (review wa-subagent-1792184734224-6, suggestion 2).
+    if (message.role === 'user' && message.steerState === undefined && !message.notice) return message.id;
   }
   return null;
 }

@@ -518,6 +518,9 @@ type JobStartOptions struct {
 	AssistantMessageID string
 	QueueID            string
 	PromptText         string
+	// Notice is the quiet-line view of a Workass wake-up notice turn
+	// (provider.NoticeView); nil for every other turn.
+	Notice map[string]any
 	// BeforeStart runs synchronously under the manager's per-chat lifecycle lock
 	// after the atomic busy gate and before the job becomes visible. The daemon
 	// uses it to durably prepare canonical turn rows without creating a false
@@ -737,6 +740,9 @@ func (j *Job) Public() map[string]any {
 		"userMessageId":      nullableString(j.startOpts.UserMessageID),
 		"assistantMessageId": nullableString(j.startOpts.AssistantMessageID),
 		"promptText":         j.startOpts.PromptText,
+	}
+	if j.startOpts.Notice != nil {
+		out["notice"] = j.startOpts.Notice
 	}
 	if j.startOpts.DeliveryCapabilities != nil {
 		out["deliveryCapabilities"] = DeliveryCapabilitiesForWire(*j.startOpts.DeliveryCapabilities)

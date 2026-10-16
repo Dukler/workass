@@ -231,7 +231,10 @@ class FixtureQuery {
       // turn, so a steer costs exactly one extra result.
       if (this.openTurn) {
         this.openTurn = false;
-        this.emit(this.result('success'));
+        // A turn Claude Code started on its own closes with its own origin,
+        // as the real CLI stamps it (review wa-subagent-1792184734224-6).
+        this.emit(this.result('success', this.openOrigin ? { origin: this.openOrigin } : {}));
+        this.openOrigin = null;
       }
       this.turnProducedContent = false;
       const text = pushedText;

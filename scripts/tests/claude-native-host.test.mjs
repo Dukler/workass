@@ -946,3 +946,32 @@ test('official Claude SDK host forwards Claude Code\'s live background task list
     [['bqcmiay84', 'local_bash', null, true], ['bdxmwhffy', 'local_bash', 'ac2d2c15473cccb4b', true]]);
   assert.deepEqual(snapshots[1].tasks, []);
 });
+
+// Review wa-subagent-1792184734224-6, correction 4: on a CLI without
+// command_lifecycle, a Workass notice pushed while a turn Claude Code started
+// on its own is open must not take that turn's result; it settles only on its
+// own answer. (Claude Code drops the origin we send, so our result never
+// carries task-notification; the host keeps the original rule.)
+test('a Workass notice never settles on a harness turn result (no command_lifecycle)', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_LEGACY_STEER: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  const sessionId = await openFixtureSession(peer);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-before-wake-3', prompt: [{ type: 'text', text: 'start work [fixture:harness-open]' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  await peer.waitFor(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'started' && update.humanAuthored === false));
+  const before = peer.messages.length;
+  peer.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'client-notice', prompt: [{ type: 'text', text: '<task-notification>notice</task-notification>' }],
+    _meta: { workassCommandInput: { text: 'notice', humanAuthored: false, taskNotification: true } },
+  } });
+  const settled = await peer.waitFor((message) => message.id === 5);
+  assert.equal(settled.result.stopReason, 'end_turn');
+  const after = peer.messages.slice(before);
+  const harnessEnded = after.findIndex(sessionUpdate('_workass_claude_turn', (update) => update.phase === 'ended' && update.originKind === 'task-notification'));
+  assert.ok(harnessEnded >= 0, 'the harness turn ended on its own result');
+  assert.ok(harnessEnded < after.indexOf(settled), 'the harness turn ended first');
+  const ownAnswer = after.findIndex(sessionUpdate('agent_message_chunk', (update) => update.content?.text === 'Fixture answer'));
+  assert.ok(ownAnswer >= 0 && ownAnswer < after.indexOf(settled), 'the notice settled only after its own answer, never on the harness result');
+});

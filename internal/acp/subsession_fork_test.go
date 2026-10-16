@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 // The vector comes from stableMessageUUID in scripts/claude-native-host.mjs;
@@ -102,5 +104,19 @@ func TestForkedSubsessionBindsItsPinnedForkAndSelectionResumesIt(t *testing.T) {
 		Child: SessionOptions{TabID: "elsewhere-tab", ChatID: "elsewhere-chat", ProviderID: "claude", CWD: t.TempDir()},
 	}, forked); err == nil {
 		t.Fatal("a forked subsession left its parent's workspace")
+	}
+}
+
+// Review wa-subagent-1792184734224-6, correction 1: the live job wire carries
+// the notice, so the renderer's first row for a wake-up turn is never a bubble.
+func TestJobPublicCarriesTheNotice(t *testing.T) {
+	notice := providercontract.NoticeView("subagent", "Revisión", "done", "<result>ok</result>")
+	job := &Job{ID: "job", startOpts: JobStartOptions{Notice: notice, PromptText: "<task-notification>…"}}
+	if got, ok := job.Public()["notice"].(map[string]any); !ok || got["title"] != "Revisión" {
+		t.Fatalf("job wire notice = %#v", job.Public()["notice"])
+	}
+	plain := &Job{ID: "plain", startOpts: JobStartOptions{PromptText: "hola"}}
+	if _, set := plain.Public()["notice"]; set {
+		t.Fatal("an ordinary job claimed a notice")
 	}
 }

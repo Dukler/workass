@@ -110,6 +110,8 @@ export interface PublicJob {
   userMessageId?: string | null;
   assistantMessageId?: string | null;
   promptText?: string | null;
+  // Set when this job runs a Workass wake-up notice (never the user speaking).
+  notice?: { kind: string; title?: string; status?: string; body?: string };
   result: string | null;
   error: string | null;
   stopReason: string | null;
