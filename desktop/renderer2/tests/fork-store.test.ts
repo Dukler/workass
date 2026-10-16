@@ -138,21 +138,18 @@ test('an older daemon that rejects fork:list reads as no forks, with no toast, l
 
 // ── fetch + fork:changed ────────────────────────────────────────────────────
 
-test('fork:changed refetches the chat, debounced, and markers re-render only when points move', async () => {
+test('fork:changed refetches the chat, debounced, through one coarse subscription', async () => {
   let reply: ForkListReply = { ok: true, forkPoints: [forkPoint()], runs: [forkRun([child({ childId: 'c1', status: 'running', activity: 'Write /tmp/a' })])] };
   const bridge = fakeBridge(() => reply);
   setMachineRouter(bridge.api);
   const forks = await freshForks();
-  let fine = 0;
-  let coarse = 0;
-  forks.subscribe(() => { fine += 1; });
-  forks.subscribePoints(() => { coarse += 1; });
+  let bumps = 0;
+  forks.subscribe(() => { bumps += 1; });
 
   forks.ensure(ref);
   await wait(20);
   assert.equal(forks.chat('tab-1').runs.length, 1);
-  assert.equal(coarse, 1, 'the first snapshot places the markers');
-  const pointsRef = forks.points('tab-1');
+  const firstBumps = bumps;
 
   // Activity-only churn: three signals inside the debounce window → one fetch.
   reply = { ...reply, runs: [forkRun([child({ childId: 'c1', status: 'running', activity: 'Read /tmp/b' })])] };
@@ -162,16 +159,15 @@ test('fork:changed refetches the chat, debounced, and markers re-render only whe
   await wait(250);
   assert.equal(bridge.calls.forkList?.length, 2, 'debounced to a single refetch');
   assert.equal(forks.chat('tab-1').runs[0].children[0].activity, 'Read /tmp/b');
-  assert.ok(fine >= 2);
-  assert.equal(coarse, 1, 'activity never re-renders the transcript markers');
-  assert.equal(forks.points('tab-1'), pointsRef, 'points keep their reference');
+  assert.ok(bumps > firstBumps, 'the one per-chat subscription carries every update');
 
-  // A new fork point does move markers.
+  // A new fork point is another snapshot on the same channel; with no
+  // transcript markers left there is no point-level subscription to tick
+  // (the parent carries no fork styling — user 2026-10-16).
   reply = { ...reply, forkPoints: [forkPoint(), forkPoint({ forkPointId: 'fp-2', createdAt: '2026-10-15T21:00:00Z' })] };
   bridge.emit({ tabId: 'tab-1', chatId: 'chat-1' });
   await wait(250);
-  assert.equal(coarse, 2);
-  assert.equal(forks.points('tab-1').length, 2);
+  assert.equal(forks.chat('tab-1').points.length, 2);
 });
 
 test('fork:changed for a chat this window never opened is ignored', async () => {

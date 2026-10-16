@@ -43,8 +43,8 @@ test('a running subagent defaults closed with model and live activity in its two
   }];
 
   const html = renderToStaticMarkup(React.createElement(loaded.TareasCard));
-  assert.match(html, /<details class="r-sa" data-status="running">/);
-  assert.doesNotMatch(html, /<details class="r-sa" data-status="running" open=""/);
+  assert.match(html, /<details class="r-sa" data-status="running" data-work-id="[^"]*">/);
+  assert.doesNotMatch(html, /<details class="r-sa" data-status="running" data-work-id="[^"]*" open=""/);
   assert.match(html, /class="r-mdl">Opus4\.8-max<\/span>/);
   // The live activity is named by the shared action vocabulary and carries the
   // action's own glyph (mock rail-actions, 2026-07-27) — the rail's old private

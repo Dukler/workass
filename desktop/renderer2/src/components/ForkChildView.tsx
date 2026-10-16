@@ -118,14 +118,17 @@ function Receipt({ child }: { child: ForkChild }) {
   );
 }
 
-function Prefix({ chat, point }: { chat: Chat; point: ForkPointView }) {
+function Prefix({ point }: { point: ForkPointView }) {
+  // A quiet note, not a link: the marker it used to scroll to is gone — the
+  // parent transcript carries no fork styling (user 2026-10-16), and the
+  // breadcrumb above already returns to the chat.
   return (
-    <button type="button" className="pfx" title="Mostrar el historial heredado" onClick={() => forkStore.returnToMarker(chat.id, point.forkPointId)}>
+    <div className="pfx" role="note">
       <span className="pg" aria-hidden="true"><IcFork /></span>
       <span className="pt">Prefijo heredado</span>
       <span className="pm">· {formatForkTokens(point.prefixSize)} tok · hasta «<span className="fn">{point.name}</span>»</span>
       <span className="rule" aria-hidden="true" />
-    </button>
+    </div>
   );
 }
 
@@ -252,7 +255,7 @@ export function ForkChildView({ chat }: { chat: Chat }) {
               <>
                 <Meta chat={chat} child={child} point={point} />
                 <Receipt child={child} />
-                {point && <Prefix chat={chat} point={point} />}
+                {point && <Prefix point={point} />}
                 <Body chatRef={chatRef} run={run} child={child} />
               </>
             )}

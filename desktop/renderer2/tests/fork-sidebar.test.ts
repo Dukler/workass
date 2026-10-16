@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat } from '../src/wire/types.ts';
+import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat, SpawnedWorkItem } from '../src/wire/types.ts';
+import { forkChildLabel } from '../src/fork-format.ts';
 import {
-  FORK_KID_PAGE, forkChatBadge, forkFlatKids, forkGroups, forkKidMeta, forkMarkerMeta, forkPage,
-  forkSelectionAfterActive, forkSelectionVisible, forkSidebarOpen, forkSummaryForChat, formatForkShortDuration,
+  FORK_KID_PAGE, forkChatBadge, forkFlatKids, forkGroups, forkKidMeta, forkPage,
+  forkSelectionAfterActive, forkSelectionVisible, forkSidebarOpen, forkSubsessionRow, forkSummaryForChat,
+  formatForkShortDuration, mergeSubsessionRows, spawnSubsessionRow, subsessionBadge,
 } from '../src/fork-sidebar.ts';
 
 function child(partial: Partial<ForkChildView> & Pick<ForkChildView, 'childId'>): ForkChildView {
@@ -59,14 +61,6 @@ test('sidebar list: subsessions sit directly under the session, oldest fork poin
   assert.deepEqual(flat.map((kid) => kid.child.childId), ['a1', 'a2', 'b1']);
   assert.deepEqual(flat.map((kid) => kid.point.forkPointId), ['p1', 'p1', 'p2']);
   assert.deepEqual(forkFlatKids([]), []);
-});
-
-test('transcript marker meta: count + cache when settled, what is moving otherwise', () => {
-  const done = forkGroups({ points: [point()], runs: [run([child({ childId: 'a' }), child({ childId: 'b' }), child({ childId: 'c' })])] })[0];
-  assert.equal(forkMarkerMeta(done), '3 hijos · 89 % caché');
-  const live = forkGroups({ points: [point()], runs: [run([child({ childId: 'a' }), child({ childId: 'b', status: 'running' })])] })[0];
-  assert.equal(forkMarkerMeta(live), '2 hijos · 1 en curso');
-  assert.equal(forkMarkerMeta({ point: point(), runs: [], kids: [] }), 'prefijo 41,9 k tok');
 });
 
 test('child row facts: live time while running, wall time once settled, a muted word for failures', () => {
@@ -141,4 +135,89 @@ test('selection routing: survives the switch to its parent, ends on any other ch
   assert.equal(forkSelectionVisible(selected, 'parent'), true);
   assert.equal(forkSelectionVisible(selected, 'other'), false, 'shown only while its parent is the active chat');
   assert.equal(forkSelectionVisible(null, 'parent'), false);
+});
+
+// ── one neutral subsession family (user, 2026-10-16) ─────────────────────────
+
+function work(partial: Partial<SpawnedWorkItem> & Pick<SpawnedWorkItem, 'id'>): SpawnedWorkItem {
+  return {
+    id: 'sw1', taskId: 'sw1', tabId: 'tab-1', chatId: 'chat-1', providerId: 'mock',
+    kind: 'subagent', label: 'opus-revisor', status: 'running',
+    startedAt: '2026-10-15T20:49:55Z', updatedAt: '2026-10-15T20:49:55Z',
+    ...partial,
+  };
+}
+
+test('a fork child and a spawned thread carry the SAME neutral row shape: no fork field in spawn rows', () => {
+  const groups = forkGroups({ points: [point()], runs: [run([child({ childId: 'f1', status: 'running', startedAt: t(0) })])] });
+  const fork = forkSubsessionRow(
+    forkFlatKids(groups)[0], { label: forkChildLabel({ label: 'revisor', index: 1 }), brand: 'claude' }, Date.parse(t(18)),
+  );
+  assert.deepEqual(
+    { kind: fork.kind, label: fork.label, state: fork.state, word: fork.word, brand: fork.brand, wallMs: fork.wallMs, startedMs: fork.startedMs },
+    { kind: 'fork', label: 'revisor', state: 'running', word: null, brand: 'claude', wallMs: null, startedMs: Date.parse(t(0)) },
+  );
+  assert.deepEqual(fork.fork, { runId: 'fr-1', rootId: 'f1' }, 'fork rows open the child view');
+
+  const spawn = spawnSubsessionRow(work({}));
+  assert.deepEqual(
+    { kind: spawn.kind, label: spawn.label, state: spawn.state, word: spawn.word, key: spawn.key, wallMs: spawn.wallMs, startedMs: spawn.startedMs },
+    { kind: 'spawn', label: 'opus-revisor', state: 'running', word: null, key: 'spawn:sw1', wallMs: null, startedMs: Date.parse('2026-10-15T20:49:55Z') },
+  );
+  assert.equal(spawn.fork, undefined, 'spawn rows reveal the rail; they never pose as fork children');
+});
+
+test('merged list: oldest row first, kinds interleaved, settled rows keep their wall time', () => {
+  const groups = forkGroups({ points: [point()], runs: [run([
+    child({ childId: 'f1', status: 'running', startedAt: t(10), label: 'rama' }),
+    child({ childId: 'f0', startedAt: t(2), wallMs: 5000 }),
+  ])] });
+  const forkRows = forkFlatKids(groups)
+    .map((kid) => forkSubsessionRow(kid, { label: kid.child.childId, brand: null }, Date.parse(t(60))));
+  const spawnRows = [
+    work({ id: 'sw-early', startedAt: t(1) }),
+    work({ id: 'sw-late', status: 'exited', startedAt: t(30), finishedAt: t(40), label: 'explorar' }),
+  ].map((item) => spawnSubsessionRow(item));
+  const merged = mergeSubsessionRows(forkRows, spawnRows);
+  assert.deepEqual(merged.map((row) => row.key), ['spawn:sw-early', 'fr-1:f0', 'fr-1:f1', 'spawn:sw-late']);
+  assert.deepEqual(merged.map((row) => row.kind), ['spawn', 'fork', 'fork', 'spawn']);
+  assert.deepEqual(merged.map((row) => row.state), ['running', 'completed', 'running', 'completed']);
+  assert.equal(merged[1].wallMs, 5000);
+  assert.equal(merged[3].wallMs, 10_000);
+  assert.deepEqual(mergeSubsessionRows([], []), []);
+});
+
+test('spawn rows speak the same outcome words the fork rows use', () => {
+  const failed = spawnSubsessionRow(work({ status: 'failed', startedAt: t(0), finishedAt: t(3) }));
+  assert.deepEqual(
+    { state: failed.state, word: failed.word, wallMs: failed.wallMs },
+    { state: 'failed', word: 'falló', wallMs: 3000 },
+  );
+  assert.equal(spawnSubsessionRow(work({ status: 'stopped', startedAt: t(0), finishedAt: t(1) })).word, 'detenido');
+  assert.equal(spawnSubsessionRow(work({ status: 'orphaned', startedAt: t(0), finishedAt: t(1) })).state, 'failed');
+  assert.equal(spawnSubsessionRow(work({ status: 'cancelled', startedAt: t(0), finishedAt: t(1) })).word, 'detenido');
+  assert.equal(spawnSubsessionRow(work({ status: 'exited', startedAt: t(0), finishedAt: t(1) })).state, 'completed');
+  assert.equal(spawnSubsessionRow(work({ label: '   ' })).label, 'Subsesión', 'daemon label wins, blank label falls back');
+});
+
+test('parent chip: the whole family counts together — fork facts plus spawned threads, shells excluded', () => {
+  const fork = forkChatBadge(
+    { chatId: 'chat-1', tabId: 'tab-1', forkPoints: 1, children: 2, counts: { running: 1 } },
+    undefined,
+  );
+  const badge = subsessionBadge(fork, [
+    work({ id: 'sw-a', status: 'running', startedAt: t(1) }),
+    work({ id: 'sw-b', status: 'exited', startedAt: t(2) }),
+    work({ id: 'sw-c', status: 'running', startedAt: t(0) }),
+    work({ id: 'sw-d', kind: 'bash', status: 'running', startedAt: t(3) }),
+  ]);
+  assert.deepEqual(badge, { points: 1, children: 5, running: 3, since: Date.parse(t(0)) },
+    'agents join the count and date the earliest running start; a running shell is work, not a subsession');
+  assert.deepEqual(
+    subsessionBadge(null, [work({ id: 'sw-a', status: 'running', startedAt: t(1) })]),
+    { points: 0, children: 1, running: 1, since: Date.parse(t(1)) },
+    'a chat whose agents spawned only plain threads gets the chip too',
+  );
+  assert.equal(subsessionBadge(null, []), null, 'no family, no chip');
+  assert.equal(subsessionBadge(null, [work({ id: 'sw-x', kind: 'bash', status: 'running' })]), null);
 });
