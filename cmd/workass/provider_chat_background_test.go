@@ -485,4 +485,22 @@ func TestClaudeAgentResumedBySendMessageCountsAsLiveWork(t *testing.T) {
 	if got := state.Background[task].Event.Status; got != "running" {
 		t.Fatalf("the chat's saved state shows the resumed agent as %q", got)
 	}
+	// A list load carries the brand a live event carries; without it the
+	// panel's model icon vanished on every reload (2026-10-16).
+	rows, err := runtime.ListBackground("resume-tab", "resume-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if row["taskId"] == task {
+			found = true
+			if row["assistantBrand"] != "claude" {
+				t.Fatalf("a loaded row lost its brand: %#v", row)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the resumed agent is missing from the loaded list: %#v", rows)
+	}
 }

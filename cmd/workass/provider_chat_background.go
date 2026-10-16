@@ -417,6 +417,11 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 			"toolCallId": item.ToolCallID, "finishedAt": item.FinishedAt, "exitCode": item.ExitCode,
 			"summary": item.Summary, "outputFile": item.OutputFile, "pid": item.PID,
 			"lastToolName": item.LastToolName, "modelLabel": item.ModelLabel, "resultExcerpt": item.ResultExcerpt,
+			// A list load must carry what live updates carry. Without the brand
+			// an agent row lost its model icon on every reload and regained it
+			// on the next live event (user 2026-10-16); without the parent, an
+			// agent's own shells stopped nesting under it.
+			"assistantBrand": item.AssistantBrand, "parentTaskId": item.ParentTaskID,
 		} {
 			if value != nil && fmt.Sprint(value) != "" {
 				row[key] = value

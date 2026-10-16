@@ -1136,3 +1136,22 @@ test('streaming chunks re-render the reply only when they finish a sentence or a
   assert.equal(subject.chat('tab-stream').messages[1].content, 'The original floor is clean, so the fill came from the labeler. Next I will render\n');
   assert.equal(renders, 2, 'one render when the sentence finished, one when the line did');
 });
+
+// The right pane is durable chat presentation. A chat reload arriving before
+// the debounced save carried the old pane and undid the click: the panel
+// "opened and closed by itself" and its toggle felt flaky (user 2026-10-16).
+test('a pane toggle survives a stale chat reload before its save', () => {
+  const owner = chat('tab-pane', { pane: null });
+  const subject = subjectWithChats([owner]);
+  const staleServer = subject.toMirror(false);
+
+  subject.toggleRail();
+  assert.equal(subject.active()?.pane, 'rail');
+  assert.equal(subject.restoreSessionSnapshot(staleServer), true);
+  assert.equal(subject.active()?.pane, 'rail', 'a reload older than the save undid the open');
+
+  subject.closeRail();
+  const staleOpen = { ...staleServer, chats: staleServer.chats.map((row: any) => ({ ...row, pane: 'rail' })) };
+  assert.equal(subject.restoreSessionSnapshot(staleOpen), true);
+  assert.equal(subject.active()?.pane, null, 'a reload older than the save undid the close');
+});

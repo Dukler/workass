@@ -5,7 +5,6 @@ import { IcExpand, IcClose } from '../icons';
 import { TareasCard } from './TareasCard';
 import { BrowserPanel } from './BrowserPanel';
 import { localBrowserOwnsChat } from '../browser';
-import { SpawnedWorkCard } from './SpawnedWorkCard';
 import { EnvCard } from './EnvCard';
 
 export function RightRail({ chat }: { chat: Chat | null }) {
@@ -38,7 +37,11 @@ export function RightRail({ chat }: { chat: Chat | null }) {
 
   // Turno-first, de-carded (mock b3, 2026-07-22): the rail is one flush column.
   // The live turn (intent + dots + live call + subagents) is the hero at the top;
-  // Archivos and Segundo plano are flush count rows beneath, each opening on tap.
+  // Archivos is a flush count row beneath. Background work shows only while it
+  // runs, inside the live turn — as Claude Code's own /tasks view does ("No
+  // tasks currently running"). The old "Segundo plano" fold listed every task
+  // the chat had ever finished (794 in DepthVision speed) as if it were current
+  // work (user 2026-10-16); finished results arrive in the conversation.
   return (
     <aside className="rail">
       <div className="railhead">
@@ -48,7 +51,6 @@ export function RightRail({ chat }: { chat: Chat | null }) {
 
       <TareasCard />
       {chat && <EnvCard chat={chat} />}
-      {chat && <SpawnedWorkCard chat={chat} />}
     </aside>
   );
 }
