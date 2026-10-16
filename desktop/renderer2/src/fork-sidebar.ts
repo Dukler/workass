@@ -2,17 +2,16 @@
 // desktop/docs/mocks/forks/sidebar-nested.html, as amended by the user on
 // 2026-10-16). No React, no store; tested by tests/fork-sidebar.test.ts.
 //
-// A subsession is a subsession: the threads a chat's agents spawned and the
-// threads forked from its sealed points form ONE undifferentiated family under
-// the parent row — the same single-line rows, no fork glyph in the parent.
-// The ⑂ fork icon lives only inside the child's own view (ForkChildView).
+// Only real child sessions live here. Subagents (workass_spawn_subagent,
+// Claude Code's Agent tool) are work of the parent's turn: they belong in the
+// right rail, NEVER in the left panel (user 2026-10-16, correcting 8dc1e66d).
+// No fork glyph on any parent-side row; ⑂ lives only inside the child's view.
 //
 // Shape: a parent chat row carries a neutral count + chevron; expanded, one
 // flat single-line list holds every child. Fork retries replace their original
 // (latest attempt only), so counts never double-count.
 
-import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat, SpawnedWorkItem } from './wire/types.ts';
-import { isAgentWork, subagentWorkId } from './subagent-layout.ts';
+import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat } from './wire/types.ts';
 import { collapseForkRetries, forkChildElapsedMs, forkRowState, type ForkRowState } from './fork-format.ts';
 
 /** Children shown per parent chat before "Mostrar N más". */
@@ -83,14 +82,12 @@ export function forkPage<T>(items: readonly T[], expanded: boolean, page = FORK_
 
 // ── one neutral subsession list (user, 2026-10-16) ───────────────────────────
 //
-// Parent-side rows never say "fork": a forked child and a spawned thread draw
-// the same line. They differ only in what OPENING them does — a fork child has
-// its own main-area view (fork selection); a spawned thread reveals its row in
-// the rail. `fork` marks which payload a row carries.
+// Parent-side rows never say "fork". `fork` carries what opening the row
+// selects (the child's main-area view).
 
 export interface SubsessionRow {
   key: string;
-  kind: 'fork' | 'spawn';
+  kind: 'fork';
   label: string;
   /** Model icon provider key; null → the generic glyph. */
   brand: string | null;
@@ -133,30 +130,9 @@ export function forkSubsessionRow(
   };
 }
 
-/** One spawned agent thread (the chat's own work record) as a neutral row. */
-export function spawnSubsessionRow(item: SpawnedWorkItem): SubsessionRow {
-  const running = item.status === 'running';
-  const failed = item.status === 'failed' || item.status === 'orphaned';
-  const cancelled = item.status === 'stopped' || item.status === 'cancelled';
-  const state: ForkRowState = running ? 'running' : failed ? 'failed' : cancelled ? 'cancelled' : 'completed';
-  const startedMs = stamp(item.startedAt);
-  const finishedMs = stamp(item.finishedAt);
-  return {
-    key: `spawn:${subagentWorkId(item)}`,
-    kind: 'spawn',
-    label: String(item.label || item.taskId).trim() || 'Subsesión',
-    brand: item.assistantBrand ?? null,
-    state,
-    word: failed ? 'falló' : cancelled ? 'detenido' : null,
-    startedMs,
-    orderMs: startedMs,
-    wallMs: !running && startedMs && finishedMs ? Math.max(0, finishedMs - startedMs) : null,
-  };
-}
-
-/** The nest's one list: oldest row first, both kinds visually identical. */
-export function mergeSubsessionRows(fork: readonly SubsessionRow[], spawn: readonly SubsessionRow[]): SubsessionRow[] {
-  return [...fork, ...spawn].sort((a, b) => a.orderMs - b.orderMs);
+/** The nest's one list: oldest row first. */
+export function sortSubsessionRows(rows: readonly SubsessionRow[]): SubsessionRow[] {
+  return [...rows].sort((a, b) => a.orderMs - b.orderMs);
 }
 
 // ── parent row badge ─────────────────────────────────────────────────────────
@@ -203,30 +179,6 @@ export function forkChatBadge(summary: ForkSummaryChat | undefined, list: ForkLi
     return { points: summary.forkPoints, children: summary.children || 0, running: summary.counts?.running || 0, since: 0 };
   }
   return null;
-}
-
-/**
- * The parent row's chip counts the WHOLE subsession family: fork children plus
- * the agent threads the chat spawned, undistinguished (user 2026-10-16). Fork
- * entries win the facts they carry; spawned threads add their statuses.
- */
-export function subsessionBadge(fork: ForkChatBadge | null | undefined, work: readonly SpawnedWorkItem[]): ForkChatBadge | null {
-  const spawn = work.filter(isAgentWork);
-  if (!fork && spawn.length === 0) return null;
-  let running = fork?.running ?? 0;
-  let since = fork?.since ?? 0;
-  for (const item of spawn) {
-    if (item.status !== 'running') continue;
-    running += 1;
-    const at = stamp(item.startedAt);
-    if (at && (!since || at < since)) since = at;
-  }
-  return {
-    points: fork?.points ?? 0,
-    children: (fork?.children ?? 0) + spawn.length,
-    running,
-    since,
-  };
 }
 
 /** Collapsed unless the user opened it, or it is the chat you are in and a subsession is running. */
