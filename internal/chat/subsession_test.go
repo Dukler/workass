@@ -81,10 +81,49 @@ func TestForkedSubsessionLaneNeverResendsTheInheritedPrefix(t *testing.T) {
 		CWD: "/workspace", Context: exactContext(provider.ContextImportUnsupported),
 	})
 	bound := state.Lanes[lane.ID]
-	if bound.CoveredThrough != 2 || len(bound.Coverage) != 2 || bound.Coverage[1].Status != CoverageExcluded {
+	if bound.CoveredThrough != 2 || len(bound.Coverage) != 2 || bound.Coverage[1].Status != CoverageNativeSeen || bound.Coverage[2].Status != CoverageNativeSeen {
 		t.Fatalf("forked lane coverage = through %d, %#v", bound.CoveredThrough, bound.Coverage)
 	}
 	if batch, err := buildContextDelta(state, bound); err != nil || len(batch.Messages) != 0 {
 		t.Fatalf("forked lane would resend the inherited prefix: %#v err=%v", batch.Messages, err)
+	}
+}
+
+// Review wa-subagent-1792181911547-3, correction 2: the inherited rows are
+// native only to the pinned fork. Another engine the child switches to gets
+// them as ordinary catch-up history, never a silent contextless lane.
+func TestForkedSubsessionInheritedHistoryReachesOtherEngines(t *testing.T) {
+	state, _ := NewState("child")
+	state, _ = apply(t, state, InitializeFork{
+		Presentation: PresentationState{TabID: "child-tab"}, SourceChatID: "source",
+		OperationID: "fork", Digest: "d",
+		Parent: &ParentLink{ChatID: "source", TabID: "source-tab", Forked: true, ForkSourceSessionID: "head", ForkedSessionID: "forked-session"},
+		Messages: []LedgerEvent{
+			{EventID: "e1", MessageID: "m1", Role: "user", Text: "remember AZUL", Status: "done", OperationID: "op1", LaneID: "src-lane", ProviderID: "claude"},
+			{EventID: "e2", MessageID: "m2", Role: "assistant", Text: "ok", Status: "done", OperationID: "op1", LaneID: "src-lane", ProviderID: "claude"},
+		},
+	})
+	if state.ContextFloor != 0 || state.NativeForkThrough != 2 || !state.Ledger[0].Inherited || state.Ledger[0].ContextExcluded || state.Ledger[0].LaneID != "" {
+		t.Fatalf("inherited rows = floor %d native %d rows %#v", state.ContextFloor, state.NativeForkThrough, state.Ledger)
+	}
+	// Any other thread is not the pinned fork: nothing counts as already seen.
+	other := testLane("child", "claude")
+	state, _ = apply(t, state, BindEstablishedLane{
+		Identity: other, Thread: provider.ThreadRef{ProviderID: "claude", RootID: "some-other-session", HeadID: "some-other-session", Lineage: 1},
+		Owner: provider.AttachmentOwner{TabID: "child-tab"}, CWD: "/workspace", Context: exactContext(provider.ContextImportUnsupported),
+	})
+	if lane := state.Lanes[other.ID]; len(lane.Coverage) != 0 {
+		t.Fatalf("a lane that is not the pinned fork claimed the inherited rows: %#v", lane.Coverage)
+	}
+	if batch, err := buildContextDelta(state, state.Lanes[other.ID]); err != nil || len(batch.Messages) != 2 {
+		t.Fatalf("another engine must receive the inherited rows: %#v err=%v", batch.Messages, err)
+	}
+	codex := testLane("child", "codex")
+	state, _ = apply(t, state, SelectLane{Identity: codex, Owner: provider.AttachmentOwner{TabID: "child-tab"}, CWD: "/workspace"})
+	if lane := state.Lanes[codex.ID]; lane.CoveredThrough != 0 || !lane.InitialSeedPending {
+		t.Fatalf("a new engine starts uncovered with a pending seed: through %d seed %v", lane.CoveredThrough, lane.InitialSeedPending)
+	}
+	if seed, err := buildInitialSeedBatch(state, 0, state.LedgerHead()); err != nil || len(seed.Messages) != 2 {
+		t.Fatalf("the seed must carry the inherited rows: %#v err=%v", seed.Messages, err)
 	}
 }

@@ -59,6 +59,12 @@ type LedgerEvent struct {
 	// has no child-lane ownership and is never imported into the fresh provider
 	// thread.
 	ContextExcluded bool
+	// Inherited marks a row a forked subsession copied from its parent. Unlike
+	// ContextExcluded it stays deliverable: only the lane bound to the pinned
+	// native fork already holds it (NativeForkThrough); any other engine the
+	// child switches to receives it as ordinary catch-up history (review
+	// wa-subagent-1792181911547-3, correction 2). Owned by no lane.
+	Inherited bool `json:",omitempty"`
 	// WorkassNotice marks an assistant row whose text Workass wrote (an
 	// admission failure, an interruption explanation, a failure fallback),
 	// not the provider. UI and maintenance notices are never context events
@@ -531,7 +537,7 @@ func providerActivityOwnerMatches(state State, owner ProviderActivityOwner) bool
 
 func providerActivityLedgerOwnsLane(state State, laneID provider.LaneID, event LedgerEvent) bool {
 	laneID = provider.LaneID(strings.TrimSpace(string(laneID)))
-	if event.ContextExcluded {
+	if event.ContextExcluded || event.Inherited {
 		return false
 	}
 	if laneID == "" {
@@ -780,7 +786,10 @@ type State struct {
 	Environment EnvironmentState
 	// ContextFloor is the contiguous visible prefix explicitly excluded from
 	// every lane created in this chat (currently only actor-native forks).
-	ContextFloor                   uint64
+	ContextFloor uint64
+	// NativeForkThrough: rows 1..N are inherited and already inside the pinned
+	// native fork of a forked subsession (see ParentLink.ForkedSessionID).
+	NativeForkThrough              uint64 `json:",omitempty"`
 	Ledger                         []LedgerEvent
 	Lanes                          map[provider.LaneID]LaneState
 	ActiveLaneID                   provider.LaneID
@@ -1251,6 +1260,9 @@ func (s State) Validate() error {
 	if err := s.Parent.Validate(s.ChatID); err != nil {
 		return err
 	}
+	if s.NativeForkThrough > s.LedgerHead() || (s.NativeForkThrough > 0 && (s.Parent == nil || !s.Parent.Forked)) {
+		return errors.New("native fork coverage belongs only to a forked subsession's inherited rows")
+	}
 	if s.ContextFloor > s.LedgerHead() {
 		return errors.New("chat context floor is ahead of the semantic ledger")
 	}
@@ -1288,9 +1300,9 @@ func (s State) Validate() error {
 				return errors.New("ledger steering row has an unknown state")
 			}
 		}
-		if event.ContextExcluded {
+		if event.ContextExcluded || event.Inherited {
 			if event.LaneID != "" {
-				return errors.New("context-excluded ledger event claims child lane ownership")
+				return errors.New("context-excluded or inherited ledger event claims child lane ownership")
 			}
 		} else {
 			if event.LaneID == "" || event.ProviderID == "" {
