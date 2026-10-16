@@ -1,8 +1,8 @@
 // Forkable subsessions — renderer state for the fork:* channels.
 //
 // Kept out of store.ts on purpose: forks are a self-contained read model.
-//  · fork:summary — one cheap line per local chat with fork points; drives the
-//    sidebar's collapsed "⑂ N" and the parent row's working pill.
+//  · fork:summary — one cheap line per local chat with fork points; feeds the
+//    parent row's neutral subsession chip and its working facts.
 //  · fork:list — the full snapshot of ONE chat, fetched when its sidebar group
 //    is expanded, when it is the active chat, or while a child of it runs.
 //  · the selected child (the main-area subsession view), the sidebar expansion
@@ -14,6 +14,10 @@
 // method or a failing call silently means "no forks" — no toast, no console
 // line, and no retry loop (a chat retries only when it is opened again or its
 // daemon raises fork:changed for it).
+//
+// The parent never carries fork styling in its own surface (user 2026-10-16):
+// there is no transcript marker and no fork glyph on parent rows. The fork
+// facts live in the child's own view.
 
 import { useSyncExternalStore } from 'react';
 import { callThrow, has, on } from '../wire/api';
@@ -33,7 +37,6 @@ export type ForkTranscriptState =
 /** `src` is a small thumbnail; `full` the original, decoded only when opened. */
 export interface ForkImageState { src?: string; full?: string; failed?: boolean }
 
-const EMPTY_POINTS: ForkPointView[] = [];
 const REFRESH_DEBOUNCE_MS = 120;
 const IMAGE_CONCURRENCY = 3;
 const IMAGE_CACHE_LIMIT = 48;
@@ -78,11 +81,6 @@ function operationId(): string {
   return `fork-op-${random}`;
 }
 
-/** Marker-relevant shape only: activity ticks never re-render the transcript. */
-function pointsSignature(points: readonly ForkPointView[]): string {
-  return points.map((point) => `${point.forkPointId}|${point.afterMessageId ?? ''}|${point.createdAt}`).join('\n');
-}
-
 function childSignature(child: ForkChildView | undefined): string {
   return child ? `${child.childId}|${child.status}|${child.turns}|${child.activity ?? ''}|${child.transcriptRetained}` : '';
 }
@@ -103,12 +101,10 @@ function loadUi(): ForkUiState {
 
 class ForkStore {
   private listeners = new Set<() => void>();
-  private pointListeners = new Set<() => void>();
   private imageListeners = new Set<() => void>();
   private versionValue = 0;
   private imageVersionValue = 0;
   private byTab = new Map<string, ForkChatState>();
-  private pointsByTab = new Map<string, ForkPointView[]>();
   private summaryEntries: ForkSummaryChat[] = [];
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private summaryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,20 +122,15 @@ class ForkStore {
   private shownAll = new Set<string>();
   private lastActiveId: string | null = null;
   selected: ForkSelection | null = null;
-  private marker: { tabId: string; forkPointId: string } | null = null;
 
   // ---- subscription plumbing --------------------------------------------
   subscribe = (cb: () => void) => { this.listeners.add(cb); return () => { this.listeners.delete(cb); }; };
-  subscribePoints = (cb: () => void) => { this.pointListeners.add(cb); return () => { this.pointListeners.delete(cb); }; };
   subscribeImages = (cb: () => void) => { this.imageListeners.add(cb); return () => { this.imageListeners.delete(cb); }; };
   version = () => this.versionValue;
   imageVersion = () => this.imageVersionValue;
   private bump() {
     this.versionValue += 1;
     for (const cb of Array.from(this.listeners)) cb();
-  }
-  private bumpPoints() {
-    for (const cb of Array.from(this.pointListeners)) cb();
   }
   private bumpImages() {
     this.imageVersionValue += 1;
@@ -188,9 +179,6 @@ class ForkStore {
     return tabId ? this.byTab.get(tabId) : undefined;
   }
   summary(): readonly ForkSummaryChat[] { return this.summaryEntries; }
-  points(tabId: string | null | undefined): ForkPointView[] {
-    return (tabId && this.pointsByTab.get(tabId)) || EMPTY_POINTS;
-  }
   run(tabId: string, runId: string): ForkRunView | undefined {
     return this.chat(tabId)?.runs.find((run) => run.runId === runId);
   }
@@ -251,14 +239,8 @@ class ForkStore {
   }
 
   private apply(tabId: string, next: ForkChatState) {
-    const hadSnapshot = this.byTab.has(tabId);
     const prev = this.byTab.get(tabId);
     this.byTab.set(tabId, next);
-    const prevPoints = this.pointsByTab.get(tabId) ?? EMPTY_POINTS;
-    if (!hadSnapshot || pointsSignature(prevPoints) !== pointsSignature(next.points)) {
-      this.pointsByTab.set(tabId, next.points.length ? next.points : EMPTY_POINTS);
-      this.bumpPoints();
-    }
     this.syncSelectedTranscript(prev);
     this.bump();
   }
@@ -316,17 +298,6 @@ class ForkStore {
     try { localStorage.setItem(UI_KEY, JSON.stringify(this.ui)); } catch { /* private mode */ }
   }
 
-  /** The parent transcript's marker: open this chat's subsessions in the sidebar, select nothing. */
-  reveal(ref: ForkChatRef) {
-    this.setChatOpen(ref, true);
-    if (!store.state.panes.side) store.toggleSide();
-    if (typeof document === 'undefined') return;
-    requestAnimationFrame(() => {
-      const row = document.querySelector(`[data-sv2-row="${CSS.escape(ref.tabId)}"]`);
-      row?.scrollIntoView({ block: 'nearest' });
-    });
-  }
-
   // ---- child selection (the main-area subsession view) ---------------------
   /** Pick a child: its parent becomes the active chat and the child view replaces the transcript. */
   select(next: ForkSelection) {
@@ -342,15 +313,6 @@ class ForkStore {
     this.selected = null;
     this.bump();
   }
-  /** Leave the child view for its parent, scrolled to where it forked. */
-  returnToMarker(tabId: string, forkPointId: string) {
-    this.marker = { tabId, forkPointId };
-    this.clearSelection();
-  }
-  pendingMarker(tabId: string | null | undefined): string | null {
-    return this.marker && this.marker.tabId === tabId ? this.marker.forkPointId : null;
-  }
-  clearPendingMarker() { this.marker = null; }
   isSelected(tabId: string, runId: string, rootId: string): boolean {
     const s = this.selected;
     return !!s && s.tabId === tabId && s.runId === runId && s.rootId === rootId;
@@ -495,9 +457,4 @@ export function useForks(): number {
 /** Thumbnails only, so twelve images arriving never repaint the sidebar. */
 export function useForkImages(): number {
   return useSyncExternalStore(forkStore.subscribeImages, forkStore.imageVersion, forkStore.imageVersion);
-}
-
-/** Coarse: the chat's fork points, by stable reference — for marker placement. */
-export function useForkPoints(tabId: string | null | undefined): ForkPointView[] {
-  return useSyncExternalStore(forkStore.subscribePoints, () => forkStore.points(tabId), () => forkStore.points(tabId));
 }

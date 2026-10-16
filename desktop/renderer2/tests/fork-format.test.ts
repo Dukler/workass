@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { ForkChildView, ForkPointView } from '../src/wire/types.ts';
+import type { ForkChildView } from '../src/wire/types.ts';
 import {
   collapseForkRetries, forkCacheBar, forkCacheShare, forkChildElapsedMs, forkChildLabel, forkInputTotal,
   forkRunSummary, forkRunWallMs, forkStatusWord, forkTokenTotal, forkTurnsLabel,
-  formatForkClock, formatForkDuration, formatForkPercent, formatForkTokens, placeForkPoints, splitForkActivity,
+  formatForkClock, formatForkDuration, formatForkPercent, formatForkTokens, splitForkActivity,
 } from '../src/fork-format.ts';
 
 function child(partial: Partial<ForkChildView> & Pick<ForkChildView, 'childId'>): ForkChildView {
@@ -144,29 +144,6 @@ test('activity splits tool lines from daemon prose', () => {
   assert.deepEqual(splitForkActivity('Iniciando'), { prose: 'Iniciando' });
   assert.deepEqual(splitForkActivity('Respondiendo'), { prose: 'Respondiendo' });
   assert.equal(splitForkActivity('  '), null);
-});
-
-function point(id: string, createdAt: string, afterMessageId?: string): Pick<ForkPointView, 'forkPointId' | 'createdAt' | 'afterMessageId'> {
-  return { forkPointId: id, createdAt, afterMessageId };
-}
-
-test('markers go after their message, else after the last earlier message, else at the end', () => {
-  const messages = [
-    { id: 'u1', at: '2026-10-15T20:40:00Z' },
-    { id: 'a1', at: '2026-10-15T20:41:00Z' },
-    { id: 'u2', at: '2026-10-15T20:45:00Z' },
-  ];
-  const placed = placeForkPoints(messages, [
-    point('late', '2026-10-15T20:43:00Z', 'a1'),
-    point('early', '2026-10-15T20:42:00Z', 'a1'),
-    point('fallback', '2026-10-15T20:44:00Z', 'not-rendered'),
-    point('orphan', '2026-10-15T20:30:00Z', 'gone'),
-  ]);
-  assert.deepEqual(placed.after.get('a1')?.map((p) => p.forkPointId), ['early', 'late', 'fallback'],
-    'same anchor stacks in createdAt order; a missing id falls back by timestamp');
-  assert.deepEqual(placed.tail.map((p) => p.forkPointId), ['orphan'], 'older than every rendered message → end');
-  const untimed = placeForkPoints([{ id: 'x', at: null }], [point('p', '2026-10-15T20:00:00Z')]);
-  assert.deepEqual(untimed.tail.map((p) => p.forkPointId), ['p']);
 });
 
 test('child transcript: each tool pairs with its result; a final result repeating the reply is not shown twice', async () => {

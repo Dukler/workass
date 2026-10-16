@@ -40,7 +40,7 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
   // raw tool id; never print that as a name.
   const label = n.label && n.label !== n.id ? n.label : 'Subagente';
   return (<>
-    <details className="r-sa" data-status={st}>
+    <details className="r-sa" data-status={st} data-work-id={n.id}>
       <summary>
         {/* No chevron: the model icon is the row's anchor, and it reads bigger
             without one (user, 2026-07-24). Hover + open body carry the affordance. */}

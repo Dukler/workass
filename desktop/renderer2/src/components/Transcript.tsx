@@ -13,9 +13,6 @@ import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
-import { forkStore, useForkPoints } from '../store/forks';
-import { placeForkPoints } from '../fork-format';
-import { ForkMarker } from './ForkMarker';
 
 const HISTORY_PAGE = 40;
 // How long the streaming height hold outlives the last growth (see onResize).
@@ -288,30 +285,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     && message.status === 'running'
     && message.turnTerminal !== false
   ));
-  // Fork points: ONE quiet marker line where the chat forked, after its message.
-  const forkPoints = useForkPoints(chat?.id);
-  const forkPlacement = forkPoints.length ? placeForkPoints(shown, forkPoints) : null;
-  useEffect(() => {
-    if (chat?.id && chat.chatId) forkStore.ensure({ tabId: chat.id, chatId: chat.chatId });
-  }, [chat?.id, chat?.chatId]);
-  // A child view's "Prefijo heredado" comes back here, at the fork point.
-  useEffect(() => {
-    const target = forkStore.pendingMarker(chat?.id);
-    if (!target) return;
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => {
-        const marker = docRef.current?.querySelector(`[data-fork-point="${CSS.escape(target)}"]`);
-        if (!marker) return;
-        forkStore.clearPendingMarker();
-        stick.current = false;
-        marker.scrollIntoView({ block: 'center' });
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [chat?.id, forkPoints]);
-  const forkMarkers = (ids: readonly string[]) => (forkPlacement && chat
-    ? ids.flatMap((id) => forkPlacement.after.get(id) ?? []).map((point) => <ForkMarker key={`fork:${point.forkPointId}`} chat={chat} point={point} />)
-    : []);
+  // Fork points carry no marker here anymore: the parent transcript never
+  // styles where children started, because the parent shows subsessions
+  // without fork distinction (user 2026-10-16). The sidebar nest and the
+  // child's own view carry the fork facts.
   const turnBlocks = assistantTurnBlockRanges(shown);
   const turnBlockStarts = new Map<number, number>();
   const turnBlockMembers = new Set<number>();
@@ -752,10 +729,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         artifactOrigin={artifactOrigin}
                         midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
-                    ), ...forkMarkers(messages.map((message) => message.id))];
+                    )];
                   }
-                  if (turnBlockMembers.has(index)) return [];
-                  return [(
+                  if (turnBlockMembers.has(index)) return [];                  return [(
                     <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
                         <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
@@ -769,9 +745,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         />
                       )}
                     </div>
-                  ), ...forkMarkers([m.id])];
+                  )];
                 })}
-                {forkPlacement && chat && forkPlacement.tail.map((point) => <ForkMarker key={`fork:${point.forkPointId}`} chat={chat} point={point} />)}
               </>
             )}
           </div>

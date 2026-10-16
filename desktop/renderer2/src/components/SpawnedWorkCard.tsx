@@ -93,7 +93,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
     }
   };
   return (
-    <div className="bgr" data-kind={item.kind}>
+    <div className="bgr" data-kind={item.kind} data-work-id={item.id}>
       <span className="bgr-ic" aria-hidden="true"><KindIcon item={item} /></span>
       <span className="bgr-info">
         <span className="bgr-top">

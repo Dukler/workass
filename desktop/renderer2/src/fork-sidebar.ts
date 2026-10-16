@@ -1,18 +1,21 @@
-// Pure logic for fork subsessions nested in the sidebar (approved mock
-// desktop/docs/mocks/forks/sidebar-nested.html). No React, no store; tested by
-// tests/fork-sidebar.test.ts.
+// Pure logic for subsessions nested in the sidebar (mock
+// desktop/docs/mocks/forks/sidebar-nested.html, as amended by the user on
+// 2026-10-16). No React, no store; tested by tests/fork-sidebar.test.ts.
 //
-// Shape: a parent chat row carries "⑂ N"; expanded, each fork point is a small
-// group header with its children as single-line rows underneath. Retries
-// replace their original (latest attempt only), so N never double-counts.
+// A subsession is a subsession: the threads a chat's agents spawned and the
+// threads forked from its sealed points form ONE undifferentiated family under
+// the parent row — the same single-line rows, no fork glyph in the parent.
+// The ⑂ fork icon lives only inside the child's own view (ForkChildView).
+//
+// Shape: a parent chat row carries a neutral count + chevron; expanded, one
+// flat single-line list holds every child. Fork retries replace their original
+// (latest attempt only), so counts never double-count.
 
-import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat, ForkUsage } from './wire/types.ts';
-import {
-  collapseForkRetries, forkCacheShare, forkChildCountLabel, forkChildElapsedMs, forkRowState,
-  formatForkPercent, formatForkTokens, type ForkRowState,
-} from './fork-format.ts';
+import type { ForkChildView, ForkPointView, ForkRunView, ForkSummaryChat, SpawnedWorkItem } from './wire/types.ts';
+import { isAgentWork, subagentWorkId } from './subagent-layout.ts';
+import { collapseForkRetries, forkChildElapsedMs, forkRowState, type ForkRowState } from './fork-format.ts';
 
-/** Children shown per fork point before "Mostrar N más". */
+/** Children shown per parent chat before "Mostrar N más". */
 export const FORK_KID_PAGE = 12;
 
 export interface ForkListState { points: readonly ForkPointView[]; runs: readonly ForkRunView[]; }
@@ -44,77 +47,14 @@ export function formatForkShortDuration(ms: number | null | undefined): string {
   return `${Math.floor(s / 3600)}h`;
 }
 
-function countStates(kids: readonly ForkKidRow[]): Map<ForkRowState, number> {
-  const counts = new Map<ForkRowState, number>();
-  for (const kid of kids) {
-    const state = forkRowState(kid.child.status);
-    counts.set(state, (counts.get(state) ?? 0) + 1);
-  }
-  return counts;
-}
-
-// Attention first: what needs a look, then what is moving, then what is done.
-const ATTENTION_ORDER: Array<[ForkRowState, string, string]> = [
-  ['failed', 'falló', 'fallaron'],
-  ['running', 'en curso', 'en curso'],
-  ['queued', 'en cola', 'en cola'],
-  ['completed', 'listo', 'listos'],
-  ['cancelled', 'detenido', 'detenidos'],
-];
-
-function phrase(counts: Map<ForkRowState, number>, states: readonly ForkRowState[]): string {
-  return ATTENTION_ORDER
-    .filter(([state]) => states.includes(state) && counts.has(state))
-    .map(([state, one, many]) => { const n = counts.get(state)!; return `${n} ${n === 1 ? one : many}`; })
-    .join(' · ');
-}
-
-/** A group still needs attention while anything failed, runs or waits. */
-export function forkGroupNeedsAttention(kids: readonly ForkKidRow[]): boolean {
-  return kids.some((kid) => { const s = forkRowState(kid.child.status); return s === 'failed' || s === 'running' || s === 'queued'; });
-}
-
-/** Token totals of every run under a fork point (superseded attempts included: that spend was real). */
-export function forkGroupUsage(group: Pick<ForkGroup, 'runs'>): ForkUsage {
-  const total: ForkUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
-  for (const run of group.runs) {
-    total.input += run.totals?.input || 0;
-    total.output += run.totals?.output || 0;
-    total.cacheRead += run.totals?.cacheRead || 0;
-    total.cacheCreation += run.totals?.cacheCreation || 0;
-  }
-  return total;
-}
-
-function groupShare(group: Pick<ForkGroup, 'runs'>): number {
-  if (group.runs.length === 1) return forkCacheShare(group.runs[0].totals, group.runs[0].totals?.cacheHitShare);
-  return forkCacheShare(forkGroupUsage(group));
-}
-
-function pointStateLine(point: ForkPointView): string {
-  if (point.status === 'sealing') return 'sellando el prefijo…';
-  if (point.status === 'failed') return 'no se pudo sellar';
-  return 'sin hijos todavía';
-}
-
 /**
  * Subsessions sit directly under their parent session: one flat list, oldest
- * fork point first, each child carrying its fork point (for its model glyph).
- * The fork point itself is not a sidebar row; the child's breadcrumb and the
- * parent's marker line name it.
+ * row first, whatever kind of thread it is. The fork point itself is never a
+ * sidebar row — the child's own breadcrumb names it (user 2026-10-16). The
+ * child carries its point (its provider brand and its child-side breadcrumb).
  */
 export function forkFlatKids(groups: readonly ForkGroup[]): Array<ForkKidRow & { point: ForkPointView }> {
   return groups.flatMap((group) => group.kids.map((kid) => ({ ...kid, point: group.point })));
-}
-
-/** The parent transcript's one marker line: "3 hijos · 89 % caché" (or what is still moving). */
-export function forkMarkerMeta(group: ForkGroup): string {
-  if (!group.kids.length) {
-    return group.point.status === 'ready' ? `prefijo ${formatForkTokens(group.point.prefixSize)} tok` : pointStateLine(group.point);
-  }
-  const head = forkChildCountLabel(group.kids.length);
-  if (forkGroupNeedsAttention(group.kids)) return `${head} · ${phrase(countStates(group.kids), ['failed', 'running', 'queued'])}`;
-  return `${head} · ${formatForkPercent(groupShare(group))} caché`;
 }
 
 export interface ForkKidMeta {
@@ -141,6 +81,75 @@ export function forkPage<T>(items: readonly T[], expanded: boolean, page = FORK_
   return { visible: items.slice(0, page), hidden: items.length - page };
 }
 
+// ── one neutral subsession list (user, 2026-10-16) ───────────────────────────
+//
+// Parent-side rows never say "fork": a forked child and a spawned thread draw
+// the same line. They differ only in what OPENING them does — a fork child has
+// its own main-area view (fork selection); a spawned thread reveals its row in
+// the rail. `fork` marks which payload a row carries.
+
+export interface SubsessionRow {
+  key: string;
+  kind: 'fork' | 'spawn';
+  label: string;
+  /** Model icon provider key; null → the generic glyph. */
+  brand: string | null;
+  state: ForkRowState;
+  /** Muted outcome word; the same palette for both kinds, never red. */
+  word: string | null;
+  /** Start stamp, the merge sort's key; 0 when unknown (sorts first). */
+  startedMs: number;
+  /** Settled wall time; a running row ticks from startedMs instead. */
+  wallMs: number | null;
+  /** Set for fork children: it opens the main-area subsession view. */
+  fork?: { runId: string; rootId: string };
+}
+
+/** One fork child as a neutral subsession row; label/brand resolve in the component. */
+export function forkSubsessionRow(
+  kid: ForkKidRow,
+  labels: { label: string; brand: string | null },
+  nowMs: number,
+): SubsessionRow {
+  const meta = forkKidMeta(kid.child, nowMs);
+  return {
+    key: `${kid.runId}:${kid.rootId}`,
+    kind: 'fork',
+    label: labels.label,
+    brand: labels.brand,
+    state: meta.state,
+    word: meta.word,
+    startedMs: stamp(kid.child.startedAt),
+    wallMs: meta.state === 'running' || meta.state === 'queued' ? null : forkChildElapsedMs(kid.child, nowMs),
+    fork: { runId: kid.runId, rootId: kid.rootId },
+  };
+}
+
+/** One spawned agent thread (the chat's own work record) as a neutral row. */
+export function spawnSubsessionRow(item: SpawnedWorkItem): SubsessionRow {
+  const running = item.status === 'running';
+  const failed = item.status === 'failed' || item.status === 'orphaned';
+  const cancelled = item.status === 'stopped' || item.status === 'cancelled';
+  const state: ForkRowState = running ? 'running' : failed ? 'failed' : cancelled ? 'cancelled' : 'completed';
+  const startedMs = stamp(item.startedAt);
+  const finishedMs = stamp(item.finishedAt);
+  return {
+    key: `spawn:${subagentWorkId(item)}`,
+    kind: 'spawn',
+    label: String(item.label || item.taskId).trim() || 'Subsesión',
+    brand: item.assistantBrand ?? null,
+    state,
+    word: failed ? 'falló' : cancelled ? 'detenido' : null,
+    startedMs,
+    wallMs: !running && startedMs && finishedMs ? Math.max(0, finishedMs - startedMs) : null,
+  };
+}
+
+/** The nest's one list: oldest row first, both kinds visually identical. */
+export function mergeSubsessionRows(fork: readonly SubsessionRow[], spawn: readonly SubsessionRow[]): SubsessionRow[] {
+  return [...fork, ...spawn].sort((a, b) => a.startedMs - b.startedMs);
+}
+
 // ── parent row badge ─────────────────────────────────────────────────────────
 
 export interface ForkChatBadge {
@@ -160,8 +169,8 @@ export function forkSummaryForChat(
 }
 
 /**
- * The parent row's "⑂ N" and working facts. A full fork:list snapshot (the
- * expanded or active chat, any machine) wins over the cheap summary.
+ * Fork-side facts: a full fork:list snapshot (the expanded or active chat, any
+ * machine) wins over the cheap fork:summary.
  */
 export function forkChatBadge(summary: ForkSummaryChat | undefined, list: ForkListState | undefined): ForkChatBadge | null {
   if (list && (list.points.length || list.runs.length)) {
@@ -187,7 +196,31 @@ export function forkChatBadge(summary: ForkSummaryChat | undefined, list: ForkLi
   return null;
 }
 
-/** Collapsed unless the user opened it, or it is the chat you are in and a child is running. */
+/**
+ * The parent row's chip counts the WHOLE subsession family: fork children plus
+ * the agent threads the chat spawned, undistinguished (user 2026-10-16). Fork
+ * entries win the facts they carry; spawned threads add their statuses.
+ */
+export function subsessionBadge(fork: ForkChatBadge | null | undefined, work: readonly SpawnedWorkItem[]): ForkChatBadge | null {
+  const spawn = work.filter(isAgentWork);
+  if (!fork && spawn.length === 0) return null;
+  let running = fork?.running ?? 0;
+  let since = fork?.since ?? 0;
+  for (const item of spawn) {
+    if (item.status !== 'running') continue;
+    running += 1;
+    const at = stamp(item.startedAt);
+    if (at && (!since || at < since)) since = at;
+  }
+  return {
+    points: fork?.points ?? 0,
+    children: (fork?.children ?? 0) + spawn.length,
+    running,
+    since,
+  };
+}
+
+/** Collapsed unless the user opened it, or it is the chat you are in and a subsession is running. */
 export function forkSidebarOpen(explicit: boolean | undefined, active: boolean, running: boolean): boolean {
   return explicit ?? (active && running);
 }

@@ -2393,7 +2393,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .fkview, .fkmeta { --sv2-working: #38bdf8; }
 :root[data-theme="light"] .fkview, :root[data-theme="light"] .fkmeta { --sv2-working: #0284c7; }
 .fk-ring { display: block; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--faint); box-sizing: border-box; }
-.sv2-kids svg, .fkmark svg, .crumbs svg, .pfx svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+.sv2-kids svg, .crumbs svg, .pfx svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
 
 /* sidebar · the parent's disclosure rides the title line, before the provider glyph */
 .sv2-kids { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 4px 0 5px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; cursor: pointer; }
@@ -2424,16 +2424,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-kid .kt { flex: none; min-width: 26px; text-align: right; font-size: 12px; line-height: 16px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .sv2-kid[data-st="running"] .kt { color: var(--sv2-working); }
 .sv2-nest .sv2-more { margin: 0; padding: 5px 8px 5px 26px; }
-
-/* parent transcript · the ONE marker line where it forked */
-.fkmark { display: flex; align-items: center; gap: 9px; width: 100%; height: 28px; margin: 6px 0 16px; padding: 0; min-width: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.fkmark .fg { flex: none; width: 14px; height: 14px; color: var(--acc); }
-.fkmark .fg svg { width: 14px; height: 14px; }
-.fkmark .ft { flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fkmark .ft .fn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--ink2); }
-.fkmark .rule { flex: 1 1 24px; min-width: 24px; height: 1px; background: var(--line2); }
-.fkmark .fm { flex: none; font: 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--faint); white-space: nowrap; }
-.fkmark:hover .ft, .fkmark:hover .fm { color: var(--ink2); }
 
 /* main column · a child, read-only */
 .crumbs { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto; }
@@ -2466,14 +2456,15 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .rc .rv { font: 500 13px/1.1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rc .sw { position: absolute; left: 0; top: 3px; width: 6px; height: 6px; border-radius: 2px; }
 @media (max-width: 980px) { .rcgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-.pfx { display: flex; align-items: center; gap: 9px; width: 100%; max-width: 620px; min-width: 0; margin: 16px 0 14px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+/* "Prefijo heredado" note in the child's own view (the fork glyph's only
+   sanctioned parent-adjacent placement is inside the child — user 2026-10-16). */
+.pfx { display: flex; align-items: center; gap: 9px; width: 100%; max-width: 620px; min-width: 0; margin: 16px 0 14px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
 .pfx .pg { flex: none; width: 14px; height: 14px; color: var(--faint); }
 .pfx .pg svg { width: 14px; height: 14px; }
-.pfx .pt { flex: none; font-size: 12px; color: var(--ink2); text-decoration: underline dotted color-mix(in srgb, var(--faint) 65%, transparent); text-underline-offset: 3px; }
+.pfx .pt { flex: none; font-size: 12px; color: var(--ink2); }
 .pfx .pm { flex: 0 1 auto; min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pfx .pm .fn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--ink2); }
 .pfx .rule { flex: 1 1 16px; min-width: 16px; height: 1px; background: var(--line); }
-.pfx:hover .pt { color: var(--ink); }
 .kthumbs { display: grid; grid-template-columns: repeat(4, 92px); gap: 8px 7px; margin: 1px 0 8px; }
 .kthumbs figure { display: flex; flex-direction: column; gap: 3px; margin: 0; min-width: 0; }
 .kthumbs img, .kthumb-ph { display: block; width: 92px; height: 83px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line2); background: var(--panel); }
