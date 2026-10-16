@@ -6,7 +6,7 @@
 // from — cache read (accent), cache write (muted amber), fresh input (ink2).
 // Output is never in the bar. "caché" = read ÷ (read + write + input).
 
-import type { ForkChildView, ForkPointView, ForkRunView, ForkTranscriptEntry, ForkUsage } from './wire/types.ts';
+import type { ForkChildView, ForkRunView, ForkTranscriptEntry, ForkUsage } from './wire/types.ts';
 import type { ToolEvent } from './store/types.ts';
 
 const n = (value: unknown): number => {
@@ -261,47 +261,6 @@ export function splitForkActivity(activity: string | null | undefined): { tool: 
   const match = /^([A-Za-z][A-Za-z0-9_]*)(?:\s+(.+))?$/s.exec(text);
   if (match && /^[A-Z]/.test(match[1]) && match[2]) return { tool: match[1], target: match[2].trim() };
   return { prose: text };
-}
-
-// ── Marker placement ─────────────────────────────────────────────────────────
-
-export interface ForkPlacement<P> {
-  /** Message id → fork points that render right after it (createdAt order). */
-  after: Map<string, P[]>;
-  /** Points with no rendered anchor; they render at the end. */
-  tail: P[];
-}
-
-/**
- * Where each fork point's marker goes among the RENDERED messages:
- *  1. right after the message whose id is the point's afterMessageId;
- *  2. else after the last rendered message stamped at or before createdAt;
- *  3. else at the end.
- * Several points on one message stack in createdAt order.
- */
-export function placeForkPoints<P extends Pick<ForkPointView, 'afterMessageId' | 'createdAt'>>(
-  messages: ReadonlyArray<{ id: string; at: string | null | undefined }>,
-  points: readonly P[],
-): ForkPlacement<P> {
-  const after = new Map<string, P[]>();
-  const tail: P[] = [];
-  const ids = new Set(messages.map((message) => message.id));
-  const stamps = messages.map((message) => (message.at ? Date.parse(message.at) : NaN));
-  const created = (point: P) => { const at = Date.parse(point.createdAt); return Number.isFinite(at) ? at : Infinity; };
-  const sorted = [...points].sort((a, b) => created(a) - created(b));
-  for (const point of sorted) {
-    let anchor = point.afterMessageId && ids.has(point.afterMessageId) ? point.afterMessageId : '';
-    if (!anchor) {
-      const at = created(point);
-      for (let index = messages.length - 1; index >= 0; index--) {
-        if (Number.isFinite(stamps[index]) && stamps[index] <= at) { anchor = messages[index].id; break; }
-      }
-    }
-    if (!anchor) { tail.push(point); continue; }
-    const list = after.get(anchor);
-    if (list) list.push(point); else after.set(anchor, [point]);
-  }
-  return { after, tail };
 }
 
 // ── Child transcript ─────────────────────────────────────────────────────────

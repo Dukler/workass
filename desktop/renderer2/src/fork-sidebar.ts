@@ -19,7 +19,7 @@ import { collapseForkRetries, forkChildElapsedMs, forkRowState, type ForkRowStat
 export const FORK_KID_PAGE = 12;
 
 export interface ForkListState { points: readonly ForkPointView[]; runs: readonly ForkRunView[]; }
-export interface ForkKidRow { runId: string; rootId: string; child: ForkChildView; attempts: number; }
+export interface ForkKidRow { runId: string; rootId: string; child: ForkChildView; attempts: number; runCreatedAt: string; }
 export interface ForkGroup { point: ForkPointView; runs: ForkRunView[]; kids: ForkKidRow[]; }
 
 const stamp = (iso: string | null | undefined) => { const at = iso ? Date.parse(iso) : NaN; return Number.isFinite(at) ? at : 0; };
@@ -33,7 +33,7 @@ export function forkGroups(state: ForkListState | null | undefined): ForkGroup[]
       .filter((run) => run.forkPointId === point.forkPointId)
       .sort((a, b) => stamp(a.createdAt) - stamp(b.createdAt));
     const kids = runs.flatMap((run) => collapseForkRetries(run.children)
-      .map((slot) => ({ runId: run.runId, rootId: slot.rootId, child: slot.child, attempts: slot.attempts })));
+      .map((slot) => ({ runId: run.runId, rootId: slot.rootId, child: slot.child, attempts: slot.attempts, runCreatedAt: run.createdAt })));
     return { point, runs, kids };
   });
 }
@@ -97,8 +97,15 @@ export interface SubsessionRow {
   state: ForkRowState;
   /** Muted outcome word; the same palette for both kinds, never red. */
   word: string | null;
-  /** Start stamp, the merge sort's key; 0 when unknown (sorts first). */
+  /** Start stamp; a running row ticks from it. Never a sort key. */
   startedMs: number;
+  /**
+   * Sort position, oldest first (stable: children of one run keep run order).
+   * Fork rows order by their run's creation stamp — the daemon stamps a child
+   * only when it starts, so a queued child would otherwise leap to the top and
+   * jump again when it starts (review wa-subagent-1792170055899-6, corr 2).
+   */
+  orderMs: number;
   /** Settled wall time; a running row ticks from startedMs instead. */
   wallMs: number | null;
   /** Set for fork children: it opens the main-area subsession view. */
@@ -120,6 +127,7 @@ export function forkSubsessionRow(
     state: meta.state,
     word: meta.word,
     startedMs: stamp(kid.child.startedAt),
+    orderMs: stamp(kid.runCreatedAt),
     wallMs: meta.state === 'running' || meta.state === 'queued' ? null : forkChildElapsedMs(kid.child, nowMs),
     fork: { runId: kid.runId, rootId: kid.rootId },
   };
@@ -141,13 +149,14 @@ export function spawnSubsessionRow(item: SpawnedWorkItem): SubsessionRow {
     state,
     word: failed ? 'falló' : cancelled ? 'detenido' : null,
     startedMs,
+    orderMs: startedMs,
     wallMs: !running && startedMs && finishedMs ? Math.max(0, finishedMs - startedMs) : null,
   };
 }
 
 /** The nest's one list: oldest row first, both kinds visually identical. */
 export function mergeSubsessionRows(fork: readonly SubsessionRow[], spawn: readonly SubsessionRow[]): SubsessionRow[] {
-  return [...fork, ...spawn].sort((a, b) => a.startedMs - b.startedMs);
+  return [...fork, ...spawn].sort((a, b) => a.orderMs - b.orderMs);
 }
 
 // ── parent row badge ─────────────────────────────────────────────────────────
