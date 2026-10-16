@@ -199,7 +199,7 @@ test('ordering is stable: a queued fork child waits at the run stamp, never leap
     [spawnSubsessionRow(work({ id: 'sw-early', startedAt: t(1) }))],
   );
   const before = list([
-    child({ childId: 'a', status: 'running', startedAt: t(10) }),
+    child({ childId: 'a', status: 'running', startedAt: t(21) }),
     child({ childId: 'b', status: 'queued', index: 2 }),
     child({ childId: 'c', status: 'queued', index: 3 }),
   ]);
@@ -207,7 +207,7 @@ test('ordering is stable: a queued fork child waits at the run stamp, never leap
   assert.equal(before[2].wallMs, null, 'a queued row has no time claim');
 
   const after = list([
-    child({ childId: 'a', status: 'running', startedAt: t(10) }),
+    child({ childId: 'a', status: 'running', startedAt: t(21) }),
     child({ childId: 'b', status: 'running', startedAt: t(25), index: 2 }),
     child({ childId: 'c', status: 'queued', index: 3 }),
   ]);
