@@ -1248,10 +1248,20 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 		promoted[queuedRowID(queued)] = struct{}{}
 	}
 	kept := make(map[string]struct{}, len(state.Queue))
+	started := startedQueueRowIDs(*state)
 	staged := entries[:0]
 	for _, entry := range entries {
-		if _, ok := promoted[strings.TrimSpace(entry.ID)]; ok {
-			kept[strings.TrimSpace(entry.ID)] = struct{}{}
+		id := strings.TrimSpace(entry.ID)
+		if _, ok := promoted[id]; ok {
+			kept[id] = struct{}{}
+			continue
+		}
+		// A stale echo of a row that already left the queue — it is running,
+		// ran, or is being steered — is never staged again: it would show raw
+		// (a notice as "<task-notification>…") and run a second time. Starting
+		// a row does not advance AgentQueueRevision, so the revision fence
+		// above cannot catch this (review wa-subagent-1792187130561-8).
+		if _, ok := started[id]; ok {
 			continue
 		}
 		staged = append(staged, entry)
@@ -1291,6 +1301,32 @@ func reduceReplaceStagedQueue(state *State, command ReplaceStagedQueue) error {
 	state.Presentation.AgentQueueRevision++
 	state.QueueMutationReceipts[operationID] = QueueMutationReceipt{Digest: digest, Revision: state.Presentation.AgentQueueRevision}
 	return nil
+}
+
+// startedQueueRowIDs are the public ids of rows that already left the queue:
+// operations this chat accepted (an agent row's id is its operation id), and
+// the queue ids on the transcript, the running turn and pending steers.
+// Renderer-made row ids are random, so a fresh row never collides.
+func startedQueueRowIDs(state State) map[string]struct{} {
+	ids := make(map[string]struct{}, len(state.Operations))
+	for operationID := range state.Operations {
+		ids[string(operationID)] = struct{}{}
+	}
+	add := func(id string) {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	for _, event := range state.Ledger {
+		add(event.QueueID)
+	}
+	if state.Foreground != nil {
+		add(state.Foreground.Input.Presentation.QueueID)
+	}
+	if state.PendingSteer != nil {
+		add(state.PendingSteer.Presentation.QueueID)
+	}
+	return ids
 }
 
 // queuedRowID is the public queue-row id of a provider FIFO entry, the same id
