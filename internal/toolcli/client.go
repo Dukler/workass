@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,12 +45,30 @@ type Response struct {
 	Result any     `json:"result,omitempty"`
 	Images []Image `json:"images,omitempty"`
 	Error  string  `json:"error,omitempty"`
+	// Status carries the HTTP status of a rejected request so callers can
+	// classify credential rejection without matching error message text. The
+	// daemon never sends it and it is never serialized.
+	Status int `json:"-"`
 }
+
+// ErrContextMissing reports that the private context file does not exist. It
+// is distinct from unreadable or invalid files so helper processes can state
+// what actually happened to their context.
+var ErrContextMissing = errors.New("Workass context file does not exist")
 
 func ReadConfig(path string) (Config, error) {
 	var config Config
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64*1024 {
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The path itself must never reach the agent: a helper copies the
+			// failing path into its own reply, which is how stale context paths
+			// spread through conversation history in the first place.
+			return config, ErrContextMissing
+		}
+		return config, errors.New("Workass context file is unavailable or invalid")
+	}
+	if !info.Mode().IsRegular() || info.Size() > 64*1024 {
 		return config, errors.New("Workass context file is unavailable or invalid")
 	}
 	f, err := os.Open(path)
@@ -128,6 +147,7 @@ func Do(ctx context.Context, config Config, name string, call *Call) (Response, 
 		return Response{}, errors.New("invalid Workass tool response")
 	}
 	if reply.StatusCode < 200 || reply.StatusCode >= 300 {
+		response.Status = reply.StatusCode
 		if response.Error == "" {
 			response.Error = "Workass tool request rejected"
 		}

@@ -11,8 +11,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"workass/internal/acp"
 	"workass/internal/toolcli"
@@ -100,8 +102,14 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	default:
 		return errors.New("unknown tools command: use list or call")
 	}
+	if strings.TrimSpace(*contextFile) == "" {
+		return errors.New("WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine")
+	}
 	config, err := toolcli.ReadConfig(*contextFile)
 	if err != nil {
+		if errors.Is(err, toolcli.ErrContextMissing) {
+			return fmt.Errorf("%w; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message", err)
+		}
 		return fmt.Errorf("%w; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history", err)
 	}
 	response, err := toolcli.Do(ctx, config, name, call)
@@ -109,6 +117,9 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		return err
 	}
 	if response.Error != "" {
+		if response.Status == http.StatusUnauthorized {
+			return errors.New("Workass rejected this context's credential: the chat that launched this process was deleted, or the context was issued by an engine that has since stopped. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper")
+		}
 		return errors.New(acp.RedactSensitiveText(response.Error))
 	}
 	result := response.Result
