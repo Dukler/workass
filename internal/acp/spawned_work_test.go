@@ -1691,3 +1691,89 @@ func TestResumedClaudeAgentKeepsItsLaunchCall(t *testing.T) {
 		}
 	}
 }
+
+// A foreground Agent call returns only when its agent ends, so an interrupt
+// that ends the call ends the agent. Its row stayed "running" for 806 minutes
+// because only foreground shells were settled this way (2026-10-16).
+func TestForegroundClaudeAgentEndsWithItsToolCall(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	b := &Bridge{providerID: "claude", manager: manager}
+	job := &Job{ID: "job-fga", TabID: "tab-fga", ChatID: "chat-fga", SessionID: "session-fga"}
+	observe := func(event map[string]any) {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-fga", "chat-fga", "session-fga", "claude", event)
+	}
+	status := func(taskID string) string {
+		for _, item := range manager.ListSpawnedWork("tab-fga", "chat-fga") {
+			if item.TaskID == taskID {
+				return item.Status
+			}
+		}
+		return "absent"
+	}
+	// Interrupted foreground agent.
+	observe(map[string]any{"type": "started", "taskId": "a9144e0e554c20cd4", "toolCallId": "toolu_fg_agent", "description": "Map Sol repair pipeline and outcomes", "subagentType": "Explore", "taskType": "local_agent"})
+	// Background agent: its launching call returns at once while it runs.
+	b.emitToolEvent(job, "tool_call", map[string]any{"toolCallId": "toolu_bg_agent", "title": "Agent", "status": "in_progress", "rawInput": map[string]any{"description": "Background", "run_in_background": true}}, "")
+	observe(map[string]any{"type": "started", "taskId": "abgagent", "toolCallId": "toolu_bg_agent", "description": "Background", "taskType": "local_agent", "backgrounded": true})
+	// Foreground agent whose own background shell still runs.
+	observe(map[string]any{"type": "started", "taskId": "awaiting", "toolCallId": "toolu_waiting", "description": "Waiting on its shell", "taskType": "local_agent"})
+	observe(map[string]any{"type": "started", "taskId": "bchild", "toolCallId": "toolu_child", "description": "Its sleep", "taskType": "local_bash", "parentTaskId": "awaiting", "backgrounded": true})
+
+	rejected := []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "The user doesn't want to proceed with this tool use."}}}
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_fg_agent", "title": "Map Sol repair pipeline and outcomes", "status": "failed", "content": rejected}, "")
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_bg_agent", "title": "Agent", "status": "completed"}, "")
+	b.emitToolEvent(job, "tool_call_update", map[string]any{"toolCallId": "toolu_waiting", "title": "Agent", "status": "completed"}, "")
+
+	if got := status("a9144e0e554c20cd4"); got == "running" {
+		t.Fatal("an interrupted foreground agent stayed running after its call ended")
+	}
+	if got := status("abgagent"); got != "running" {
+		t.Fatalf("a background agent was settled by its launch call returning: %q", got)
+	}
+	if got := status("awaiting"); got != "running" {
+		t.Fatalf("an agent waiting on its own running shell was settled: %q", got)
+	}
+}
+
+// Claude Code's live list (background_tasks_changed) holds only background
+// tasks. A background task missing from it is gone, even when no ended event
+// came; a foreground task is never in it and must never be judged by it.
+func TestClaudeLiveListSettlesOnlyMissingBackgroundWork(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	observe := func(event map[string]any) {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-live", "chat-live", "session-live", "claude", event)
+	}
+	observe(map[string]any{"type": "started", "taskId": "abg", "toolCallId": "toolu_abg", "description": "Background agent", "taskType": "local_agent", "backgrounded": true})
+	observe(map[string]any{"type": "started", "taskId": "afg", "toolCallId": "toolu_afg", "description": "Foreground agent", "taskType": "local_agent"})
+	observe(map[string]any{"type": "snapshot", "tasks": []any{map[string]any{"taskId": "abg", "taskType": "local_agent", "backgrounded": true}}})
+	// The background agent dies with no ended event; the list drops it.
+	observe(map[string]any{"type": "snapshot", "tasks": []any{}})
+	manager.spawnedWorkMu.Lock()
+	for _, rec := range manager.spawnedWork {
+		if !rec.MissingSince.IsZero() {
+			rec.MissingSince = time.Now().Add(-2 * spawnedWorkMissingGrace)
+		}
+	}
+	manager.spawnedWorkMu.Unlock()
+	manager.reconcileSpawnedWork()
+	status := map[string]string{}
+	for _, item := range manager.ListSpawnedWork("tab-live", "chat-live") {
+		status[item.TaskID] = item.Status
+	}
+	if status["abg"] == "running" {
+		t.Fatal("a background agent missing from Claude's live list stayed running")
+	}
+	if status["afg"] != "running" {
+		t.Fatalf("a foreground agent was settled by a list it is never in: %q", status["afg"])
+	}
+}

@@ -921,3 +921,24 @@ test('official Claude SDK host files a subagent tool call under its Agent call',
     .map((message) => JSON.stringify(message.params.update.content)).join('');
   assert.doesNotMatch(text, /SUBAGENT/, 'subagent text reached the main message');
 });
+
+// Claude Code's background_tasks_changed is its own live list of background
+// tasks. Workass needs it to know a background task is gone when no ended
+// event comes; it reaches the daemon as a snapshot.
+test('official Claude SDK host forwards Claude Code\'s live background task list', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: '[fixture:live-list] go' }] } });
+  await peer.waitFor((message) => message.id === 3);
+  const snapshots = peer.messages
+    .filter((message) => message.method === 'session/update' && message.params.update.sessionUpdate === '_workass_claude_spawned_work' && message.params.update.event?.type === 'snapshot')
+    .map((message) => message.params.update.event);
+  assert.equal(snapshots.length, 2);
+  assert.deepEqual(snapshots[0].tasks.map((task) => [task.taskId, task.taskType, task.parentTaskId ?? null, task.backgrounded]),
+    [['bqcmiay84', 'local_bash', null, true], ['bdxmwhffy', 'local_bash', 'ac2d2c15473cccb4b', true]]);
+  assert.deepEqual(snapshots[1].tasks, []);
+});

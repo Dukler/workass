@@ -601,17 +601,27 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 		}
 		changed := false
 		m.spawnedWorkMu.Lock()
+		// A snapshot is the provider's live set of BACKGROUND tasks (Claude
+		// Code's background_tasks_changed). It never lists foreground work —
+		// a foreground shell or agent is absent while it runs — so only a
+		// background task missing from it is gone; it then settles after the
+		// short missing grace. Claude Code sends no ended event for work an
+		// interrupt or a stop took down; this list is how it knows itself.
 		for taskID, task := range live {
 			candidate := m.candidateForTaskLocked(sessionID, task.ToolCallID, tabID, chatID, providerID)
 			rec, itemChanged := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
 			if rec != nil {
 				rec.LastLevelSeen = now
 				rec.MissingSince = time.Time{}
+				rec.Backgrounded = true
 			}
 			changed = changed || itemChanged
 		}
 		for _, rec := range m.spawnedWork {
 			if rec.SessionID != sessionID || rec.Item.TabID != tabID || rec.Item.ChatID != chatID || rec.Item.Status != "running" {
+				continue
+			}
+			if _, launched := m.spawnedBackgroundCalls[backgroundToolCallKey(tabID, chatID, rec.Item.ToolCallID)]; !rec.Backgrounded && !launched {
 				continue
 			}
 			if _, ok := live[rec.Item.TaskID]; !ok && rec.MissingSince.IsZero() {
@@ -905,11 +915,15 @@ func (m *Manager) settleSpawnedWorkLocked(rec *spawnedWorkRecord, status string,
 }
 
 // settleForegroundToolTasks ends the provider task a foreground tool call ran
-// as, when that call ends. Claude Code reports every Bash command as a task,
-// and an interrupted one never gets its task-ended event; with no PID or
-// output file the liveness pass cannot see it end either, so its row read
-// "running" for as long as the session lived. Background work is never
-// touched: it has an output file, and its tool call returns while it runs.
+// as, when that call ends. Claude Code reports every Bash command and every
+// Agent call as a task, and an interrupted one never gets its task-ended event;
+// with no PID or output file the liveness pass cannot see it end either, so its
+// row read "running" for as long as the session lived ("Map Sol repair
+// pipeline", 806 minutes, 2026-10-16). A foreground Agent call returns only
+// when its agent has finished, failed or been interrupted, so the call ending
+// ends the agent too. Background work is never touched: it has an output file,
+// is flagged backgrounded, or was launched by a call that said so, and its call
+// returns while it runs.
 func (m *Manager) settleForegroundToolTasks(tabID, chatID, toolCallID, toolStatus string) {
 	if tabID == "" || chatID == "" || toolCallID == "" {
 		return
@@ -924,10 +938,20 @@ func (m *Manager) settleForegroundToolTasks(tabID, chatID, toolCallID, toolStatu
 		if rec == nil || rec.Item.Status != "running" || rec.Item.TabID != tabID || rec.Item.ChatID != chatID || rec.Item.ToolCallID != toolCallID {
 			continue
 		}
-		if rec.Item.Kind != "bash" || rec.Item.OutputFile != "" || rec.Item.PID != nil || rec.Backgrounded {
+		if (rec.Item.Kind != "bash" && rec.Item.Kind != "agent") || rec.Item.OutputFile != "" || rec.Item.PID != nil || rec.Backgrounded {
 			continue
 		}
 		if _, launched := m.spawnedBackgroundCalls[backgroundToolCallKey(tabID, chatID, toolCallID)]; launched {
+			continue
+		}
+		if rec.Item.Kind == "agent" && m.agentHasRunningChildLocked(rec) {
+			// Its own background work still runs: it is waiting, exactly as when
+			// Claude Code reports it stopped (see observeProviderSpawnedWork).
+			if rec.InterimSince.IsZero() {
+				rec.InterimSince, rec.ChildrenDoneAt = time.Now().UTC(), time.Time{}
+				rec.Item.UpdatedAt = isoNow()
+				changed = true
+			}
 			continue
 		}
 		if m.settleSpawnedWorkLocked(rec, status, nil) {
