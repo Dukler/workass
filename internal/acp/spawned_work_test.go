@@ -1667,7 +1667,7 @@ func TestResumedClaudeAgentKeepsItsLaunchCall(t *testing.T) {
 			observeRawSpawnLifecycleFixture(t, manager, "tab-resume", "chat-resume", "session-resume", "claude", event)
 		}
 		observe(map[string]any{"type": "started", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_launch", "description": "Build fast batched CUDA trainer", "subagentType": "general-purpose", "taskType": "local_agent"})
-		observe(map[string]any{"type": "notification", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_launch", "status": "completed", "summary": "stopped"})
+		observe(map[string]any{"type": "notification", "taskId": "a281f4ed0610bdf38", "toolCallId": "toolu_launch", "status": "completed", "summary": "stopped", "outputFile": spawnedWorkTestOutput(t, "a281f4ed0610bdf38")})
 		if evicted {
 			// A restart orphans the row and it leaves the live set.
 			key := spawnedWorkKey("tab-resume", "chat-resume", "a281f4ed0610bdf38")
@@ -1688,6 +1688,11 @@ func TestResumedClaudeAgentKeepsItsLaunchCall(t *testing.T) {
 		}
 		if started, _ := time.Parse(time.RFC3339Nano, item.StartedAt); started.Before(resumedAt.Add(-time.Second)) {
 			t.Fatalf("evicted=%v: a resumed run kept the old clock: %s", evicted, item.StartedAt)
+		}
+		// Nothing of how the last run ended: its output file made the liveness
+		// pass declare the resumed agent dead 4 s later (2026-10-16).
+		if item.OutputFile != "" || item.Summary != "" {
+			t.Fatalf("evicted=%v: the resumed run kept the old run's ending: output=%q summary=%q", evicted, item.OutputFile, item.Summary)
 		}
 	}
 }
@@ -1775,5 +1780,35 @@ func TestClaudeLiveListSettlesOnlyMissingBackgroundWork(t *testing.T) {
 	}
 	if status["afg"] != "running" {
 		t.Fatalf("a foreground agent was settled by a list it is never in: %q", status["afg"])
+	}
+}
+
+// An agent runs inside the provider process: no process ever holds its output
+// file, so probing that file could only call a live agent dead.
+func TestRunningAgentIsNeverJudgedByAnOutputFileProbe(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), SpawnedWorkReconcileInterval: time.Hour,
+		// The probe works and finds no process holding any file.
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return map[string][]int{}, true },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	observe := func(event map[string]any) {
+		observeRawSpawnLifecycleFixture(t, manager, "tab-probe", "chat-probe", "session-probe", "claude", event)
+	}
+	observe(map[string]any{"type": "started", "taskId": "aprobe", "toolCallId": "toolu_probe", "description": "Agent with a file", "taskType": "local_agent", "backgrounded": true, "outputFile": spawnedWorkTestOutput(t, "aprobe")})
+	manager.reconcileSpawnedWork()
+	manager.spawnedWorkMu.Lock()
+	for _, rec := range manager.spawnedWork {
+		if !rec.MissingSince.IsZero() {
+			rec.MissingSince = time.Now().Add(-2 * spawnedWorkMissingGrace)
+		}
+	}
+	manager.spawnedWorkMu.Unlock()
+	manager.reconcileSpawnedWork()
+	for _, item := range manager.ListSpawnedWork("tab-probe", "chat-probe") {
+		if item.TaskID == "aprobe" && item.Status != "running" {
+			t.Fatalf("a live agent was declared dead by an output-file probe: %q", item.Status)
+		}
 	}
 }
