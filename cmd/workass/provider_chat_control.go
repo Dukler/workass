@@ -298,6 +298,10 @@ func (r *providerChatRuntime) rendererQueueEntries(rawEntries []any, presentatio
 		allowed := map[string]struct{}{
 			"id": {}, "text": {}, "source": {}, "delivery": {}, "queuedAt": {}, "images": {},
 			"attachmentNames": {}, "attachmentState": {}, "attachmentError": {},
+			// Display-only, owned by the daemon: renderers echo queued rows
+			// back whole (an older bundle never strips it), so it is accepted
+			// and ignored (review wa-subagent-1792186068644-7, correction 1).
+			"notice": {},
 		}
 		if err := requireOnlyKeys(item, allowed, fmt.Sprintf("renderer queue entry %d", index)); err != nil {
 			return nil, nil, err

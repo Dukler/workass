@@ -1179,3 +1179,38 @@ test('native Codex image tool events precede the turn terminal in wire order', a
     .map((m) => (m.id === 3 ? 'terminal' : m.params.update.sessionUpdate));
   assert.deepEqual(order, ['tool_call', 'tool_call_update', 'terminal']);
 });
+
+// Review wa-subagent-1792186068644-7, suggestion 4: Codex has no
+// <task-notification> convention, so a Workass wake-up notice opens with one
+// plain attribution line; an ordinary prompt is forwarded untouched.
+test('native Codex host attributes a Workass notice and leaves other prompts alone', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'workass-codex-notice-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const trace = path.join(temp, 'rpc.jsonl');
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_RPC_TRACE: trace, WORKASS_CODEX_FIXTURE_LARGE_RESUME: '1' /* traces turn/start input */ });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((m) => m.id === 1);
+  peer.send({ id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((m) => m.id === 2)).result.sessionId;
+  const notice = '<task-notification>\n<result>ok</result>\n</task-notification>';
+  peer.send({ id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: notice }], clientUserMessageId: 'notice-1',
+    _meta: { workassCommandInput: { text: notice, humanAuthored: false, taskNotification: true } },
+  } });
+  assert.equal((await peer.waitFor((m) => m.id === 3)).result.stopReason, 'end_turn');
+  peer.send({ id: 4, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: 'hola' }], clientUserMessageId: 'human-1',
+    _meta: { workassCommandInput: { text: 'hola', humanAuthored: true } },
+  } });
+  assert.equal((await peer.waitFor((m) => m.id === 4)).result.stopReason, 'end_turn');
+  const starts = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse).filter((c) => c.method === 'turn/start');
+  assert.equal(starts.length, 2);
+  const attributed = JSON.stringify([
+    { type: 'text', text: 'Workass background notification — a tracked subagent finished; this is not a message from the user.\n', text_elements: [] },
+    { type: 'text', text: notice, text_elements: [] },
+  ]);
+  assert.equal(starts[0].inputCount, 2);
+  assert.equal(starts[0].inputDigest, createHash('sha256').update(attributed).digest('hex'));
+  assert.equal(starts[1].inputCount, 1, 'a human prompt is forwarded as is');
+});

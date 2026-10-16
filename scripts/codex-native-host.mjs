@@ -1562,9 +1562,10 @@ async function handleWorkassRequest(message) {
   }
   if (method === 'session/prompt') {
     const command = nativeGoalCommand(params.prompt, params._meta?.workassCommandInput);
+    const prompt = attributeWorkassNotice(params.prompt, params._meta?.workassCommandInput);
     respond(id, await (command
-      ? session.startGoal(command, params.prompt, String(params.clientUserMessageId || '').trim())
-      : session.startPrompt(params.prompt, String(params.clientUserMessageId || '').trim())));
+      ? session.startGoal(command, prompt, String(params.clientUserMessageId || '').trim())
+      : session.startPrompt(prompt, String(params.clientUserMessageId || '').trim())));
 	return;
 	}
   if (method === 'session/set_config_option') { respond(id, session.setConfig(String(params.configId || ''), params.value)); return; }
@@ -1588,6 +1589,15 @@ async function handleWorkassRequest(message) {
     return;
   }
   throw Object.assign(new Error(`Codex host method not found: ${method}`), { rpcCode: -32601 });
+}
+
+// A Workass wake-up notice (a tracked subagent finished) is not the user
+// speaking. Codex has no <task-notification> convention, so the notice opens
+// with one plain attribution line (review wa-subagent-1792186068644-7,
+// suggestion 4).
+function attributeWorkassNotice(blocks, intent) {
+  if (intent?.taskNotification !== true || !Array.isArray(blocks)) return blocks;
+  return [{ type: 'text', text: 'Workass background notification — a tracked subagent finished; this is not a message from the user.\n' }, ...blocks];
 }
 
 function nativeGoalCommand(blocks, intent) {

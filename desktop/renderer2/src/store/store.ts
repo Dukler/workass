@@ -915,7 +915,7 @@ export class Store {
         pane: c.pane,
         draft: '', unread: c.unread, settled: c.settled, settledAt: c.settledAt,
         lastActivityAt: c.lastActivityAt,
-        queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, notice: _notice, ...item }) => item) : undefined,
+        queue: c.queue?.length ? c.queue.map(({ draftImages: _draftImages, ...item }) => item) : undefined,
         providerId: c.providerId ?? null,
         contextUsageByProvider: c.contextUsageByProvider,
         messageCount: c.messageCount ?? c.messages.length,
