@@ -359,3 +359,21 @@ func TestSubsessionCutNeverSkipsAnUncertainPrompt(t *testing.T) {
 		t.Fatalf("an unconsumed in-flight prompt must be the boundary: %#v err=%v", link, err)
 	}
 }
+
+// Review wa-subagent-1792186068644-7, correction 1: renderers echo queued rows
+// back whole, and a bundle older than the daemon never strips the display-only
+// notice. The save must accept and ignore it, not reject the whole queue.
+func TestQueueSaveAcceptsAnEchoedNotice(t *testing.T) {
+	_, runtime, _ := subsessionTestHandler(t)
+	state, ok := runtime.Snapshot("sub-parent-chat")
+	if !ok {
+		t.Fatal("parent missing")
+	}
+	rows := []any{map[string]any{
+		"id": "q-1", "text": "hola", "source": "host", "delivery": "queue",
+		"notice": map[string]any{"kind": "subagent", "title": "Revisión", "status": "done"},
+	}}
+	if _, err := runtime.ReplaceStagedQueue("sub-parent-tab", "sub-parent-chat", "echoed-notice", state.Presentation.AgentQueueRevision, rows); err != nil {
+		t.Fatalf("a queue save carrying an echoed notice was rejected: %v", err)
+	}
+}
