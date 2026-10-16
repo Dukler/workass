@@ -88,6 +88,10 @@ func (m *Manager) ownerBinding(ownerKey, chatID, tabID string) (string, string, 
 	}
 	m.mu.Lock()
 	binding, ok := m.agentOwners[ownerKey]
+	if !ok {
+		// A chat tool token authenticates as its chat, engine or no engine.
+		binding, ok = m.chatToolTokens[ownerKey]
+	}
 	m.mu.Unlock()
 	if !ok {
 		return "", "", false

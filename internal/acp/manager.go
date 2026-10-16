@@ -43,15 +43,18 @@ type Manager struct {
 	chatProviders             map[string]string
 	nativeSessions            *nativeSessionLedger
 	agentOwners               map[string]agentOwnerBinding
-	agentOwnerBySession       map[string]string
-	providers                 map[string]*providerRuntime
-	providerOrder             []string
-	providerRegistry          *providercontract.Registry
-	providerRegistryErr       error
-	providerLaneMu            sync.RWMutex
-	providerLanesBySession    map[string]*managerLane
-	providerLanesByJob        map[string]*managerLane
-	providerLaneManagedJobs   map[string]struct{}
+	// chatToolTokens outlive engines; see chat_tool_token.go.
+	chatToolTokens          map[string]agentOwnerBinding
+	chatToolTokenByChat     map[string]string
+	agentOwnerBySession     map[string]string
+	providers               map[string]*providerRuntime
+	providerOrder           []string
+	providerRegistry        *providercontract.Registry
+	providerRegistryErr     error
+	providerLaneMu          sync.RWMutex
+	providerLanesBySession  map[string]*managerLane
+	providerLanesByJob      map[string]*managerLane
+	providerLaneManagedJobs map[string]struct{}
 	// providerLaneClosedJobs retains only immutable ids, never lane/bridge
 	// pointers. Late provider callbacks must remain fail-closed for the daemon
 	// lifetime, but terminal tombstones must not pin every historical lane.
@@ -271,6 +274,14 @@ func (m *Manager) workassQuestionJobLocked(ownerKey, chatID, tabID string) (*Job
 		return nil, errNoRunningWorkassQuestionCaller
 	}
 	binding, bound := m.agentOwners[ownerKey]
+	perSessionBound := true
+	if !bound {
+		// A chat tool token stands in for its chat's engine. A detached helper
+		// is not a session owner, so it takes whichever single running
+		// foreground job of that chat owns the turn (chat_tool_token.go).
+		binding, bound = m.chatToolTokens[ownerKey]
+		perSessionBound = false
+	}
 	if !bound || binding.ChatID != chatID || binding.TabID != tabID {
 		return nil, errNoRunningWorkassQuestionCaller
 	}
@@ -279,7 +290,7 @@ func (m *Manager) workassQuestionJobLocked(ownerKey, chatID, tabID string) (*Job
 	for _, job := range m.jobs {
 		if job == nil || m.jobs[job.ID] != job || job.Status != "running" || job.admitting || job.cancelled || job.SubagentID != "" ||
 			strings.TrimSpace(job.ChatID) != chatID || strings.TrimSpace(job.TabID) != tabID ||
-			strings.TrimSpace(m.agentOwnerBySession[job.SessionID]) != ownerKey {
+			(perSessionBound && strings.TrimSpace(m.agentOwnerBySession[job.SessionID]) != ownerKey) {
 			continue
 		}
 		match = job
@@ -382,6 +393,8 @@ func NewManager(opts Options) *Manager {
 	m.initializePersistedProviderAuthenticationState()
 	m.emitMockAppUpdateFromEnv()
 	m.loadSpawnedWorkSnapshots()
+	m.loadChatToolTokens()
+	m.pruneToolBootstrap()
 	m.startManagerLoop(m.lifecycleLoop)
 	m.startManagerLoop(m.rssLoop)
 	m.startManagerLoop(m.providerUpdateLoop)
@@ -1011,6 +1024,8 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 	}
 	m.cancelAndDrainSubagentsForChat(chatID, tabID, 5*time.Second)
 	m.DropSpawnedWorkForChat(tabID, chatID)
+	chatToken := m.chatToolTokenForChat(chatID, tabID)
+	m.revokeChatToolToken(chatID, tabID)
 	changed := false
 	for _, live := range m.LiveSessions() {
 		if live.TabID == tabID && live.ChatID == chatID {
@@ -1043,6 +1058,10 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 	if removedBridge {
 		m.emit("proc:changed", map[string]any{"processes": m.Processes()})
 	}
+	// The token is dead; helper contexts that named it follow it. Dirs still
+	// attached to a live bridge stay (chat_tool_token.go), and are pruned once
+	// that engine finally stops.
+	m.forgetChatToolBootstrapDirs(chatToken)
 	return changed
 }
 

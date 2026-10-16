@@ -132,14 +132,27 @@ func (b *Bridge) bindNativeToolContext(owner, chatID, tabID string) error {
 	m := b.manager
 	m.mu.Lock()
 	binding, ok := m.agentOwners[owner]
+	// The file carries the chat's token, not this engine's owner capability,
+	// so helpers the chat launched outlive the engine (chat_tool_token.go).
+	credential := ""
+	if ok && owner != "" && binding.ChatID == chatID && binding.TabID == tabID {
+		if chatID == "" || tabID == "" {
+			// Spare warmup and chat-less probes have no chat yet. Keep the
+			// engine's owner capability there; adoption writes the chat token
+			// on the session's first real turn.
+			credential = owner
+		} else {
+			credential = m.chatToolTokenLocked(chatID, tabID)
+		}
+	}
 	m.mu.Unlock()
-	if !ok || owner == "" || binding.ChatID != chatID || binding.TabID != tabID {
+	if credential == "" {
 		return errors.New("Workass tools have no owner for this session")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return errors.New("cannot prepare Workass tool context directory")
 	}
-	config := toolcli.Config{Endpoint: strings.TrimRight(b.opts.WorkassToolsOrigin, "/") + "/workass/tools", CAFile: b.opts.WorkassToolsCAFile, Credential: owner, ChatID: chatID, TabID: tabID}
+	config := toolcli.Config{Endpoint: strings.TrimRight(b.opts.WorkassToolsOrigin, "/") + "/workass/tools", CAFile: b.opts.WorkassToolsCAFile, Credential: credential, ChatID: chatID, TabID: tabID}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return errors.New("cannot encode Workass tool context")
@@ -190,7 +203,25 @@ func (b *Bridge) removeNativeInstructions() {
 	b.nativeInstructionsDir = ""
 	b.nativeInstructionsEnabled = false
 	b.mu.Unlock()
-	if dir != "" {
+	if dir == "" {
+		return
+	}
+	// Helpers this engine launched hold WORKASS_TOOL_CONTEXT = dir/context.json.
+	// The directory stays only while its credential is a chat token the manager
+	// still knows: then the file outlives the engine and pruneToolBootstrap
+	// removes it once that chat is deleted. Anything else — a spare's engine
+	// owner key that died with the engine, or "{}" never bound — is dead weight
+	// removed now, so a revoked chat token leaves nothing behind either.
+	_ = os.Remove(filepath.Join(dir, "instructions.md"))
+	_ = os.Remove(filepath.Join(dir, "guide.md"))
+	m := b.manager
+	m.mu.Lock()
+	tokens := make(map[string]struct{}, len(m.chatToolTokens))
+	for token := range m.chatToolTokens {
+		tokens[token] = struct{}{}
+	}
+	m.mu.Unlock()
+	if !chatToolBootstrapDirIsLive(filepath.Join(dir, "context.json"), tokens) {
 		_ = os.RemoveAll(dir)
 	}
 }

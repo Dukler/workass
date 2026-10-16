@@ -65,8 +65,12 @@ func TestNativeInstructionsBindStableContextWithoutChangingUserConfig(t *testing
 		t.Fatal("did not refresh stable path")
 	}
 	b.Close(true, nil)
-	if _, err := os.Stat(contextPath); !os.IsNotExist(err) {
-		t.Fatal("retained context after close")
+	// The helper context names the chat token, not this engine's capability:
+	// stopping one engine must not destroy what surviving helpers still have
+	// in WORKASS_TOOL_CONTEXT (chat_tool_token.go).
+	kept, err := toolcli.ReadConfig(contextPath)
+	if err != nil || kept != second {
+		t.Fatal("engine close destroyed the chat's helper context")
 	}
 }
 
@@ -150,7 +154,9 @@ func TestGenericToolContextUsesFreshProcessEnvironmentAcrossAttachments(t *testi
 			t.Fatal("generic prompt cached an expiring path")
 		}
 		cfg, err := toolcli.ReadConfig(contextPath)
-		if err != nil || cfg.ChatID != "chat" || cfg.TabID != "tab" || cfg.Credential != owner {
+		// The context carries the chat's tool token now (chat_tool_token.go):
+		// it authenticates for the chat without this engine's owner key.
+		if err != nil || cfg.ChatID != "chat" || cfg.TabID != "tab" || cfg.Credential == owner || !m.ValidateAgentOwner(cfg.Credential, "chat", "tab") {
 			t.Fatal("context lost exact binding")
 		}
 		if err := os.Remove(contextPath); err != nil {
@@ -166,8 +172,10 @@ func TestGenericToolContextUsesFreshProcessEnvironmentAcrossAttachments(t *testi
 			t.Fatal("accepted wrong chat")
 		}
 		b.Close(true, nil)
-		if _, err := os.Stat(contextPath); !os.IsNotExist(err) {
-			t.Fatal("closed attachment retained context")
+		// The context names the chat token, so it survives every engine stop
+		// until the chat itself is deleted or pruned at daemon start.
+		if _, err := toolcli.ReadConfig(contextPath); err != nil {
+			t.Fatal("closed attachment lost the chat's helper context")
 		}
 		previousPath = contextPath
 	}
