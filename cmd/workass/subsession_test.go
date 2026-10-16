@@ -263,3 +263,48 @@ func TestDerivedOperationIDsStayWithinTheLimit(t *testing.T) {
 		t.Fatal("a derived id must be stable across retries")
 	}
 }
+
+// Review wa-subagent-1792182761893-4, correction 2: a cut stops before the next
+// prompt THIS lane received; a later turn another engine answered never
+// entered its session.
+func TestSubsessionCutSkipsTurnsAnotherEngineAnswered(t *testing.T) {
+	lane := providercontract.LaneIdentity{ID: "lane-a", ChatID: "src", Realm: providercontract.Realm{ProviderID: "claude"}}
+	const codex providercontract.LaneID = "lane-codex"
+	ledger := []chat.LedgerEvent{
+		{Role: "user", OperationID: "op1", LaneID: lane.ID}, {Role: "assistant", OperationID: "op1", LaneID: lane.ID},
+		{Role: "user", OperationID: "op2", LaneID: lane.ID}, {Role: "assistant", OperationID: "op2", LaneID: lane.ID},
+		{Role: "user", OperationID: "op3", LaneID: codex}, {Role: "assistant", OperationID: "op3", LaneID: codex},
+		{Role: "user", OperationID: "op4", LaneID: lane.ID}, {Role: "assistant", OperationID: "op4", LaneID: lane.ID},
+	}
+	coverage := map[uint64]chat.CoverageRecord{}
+	for sequence, event := range ledger {
+		status, delivery := chat.CoverageNativeSeen, event.OperationID
+		if event.LaneID == codex {
+			status, delivery = chat.CoveragePromptSeen, "op4"
+		}
+		coverage[uint64(sequence+1)] = chat.CoverageRecord{Sequence: uint64(sequence + 1), Status: status, DeliveryID: delivery}
+	}
+	state := func(rows []chat.LedgerEvent, covered map[uint64]chat.CoverageRecord) chat.State {
+		return chat.State{
+			ChatID: "src", ActiveLaneID: lane.ID, Ledger: rows,
+			Lanes: map[providercontract.LaneID]chat.LaneState{lane.ID: {
+				Identity: lane, Coverage: covered,
+				Thread: providercontract.ThreadRef{ProviderID: "claude", RootID: "root", HeadID: "root", Lineage: 1},
+			}},
+		}
+	}
+	link, err := subsessionForkLink(state(ledger, coverage), "src-tab", ledger[:4], true)
+	if err != nil || link.ForkBeforeOperationID != "op4" {
+		t.Fatalf("turns 1-2 must cut before op4 (this lane's next prompt), not op3: %#v err=%v", link, err)
+	}
+	pending := map[uint64]chat.CoverageRecord{1: coverage[1], 2: coverage[2], 3: coverage[3], 4: coverage[4]}
+	link, err = subsessionForkLink(state(ledger[:6], pending), "src-tab", ledger[:4], true)
+	if err != nil || link.ForkBeforeOperationID != "" {
+		t.Fatalf("no later turn reached this lane: the whole session is the prefix: %#v err=%v", link, err)
+	}
+	inherited := append([]chat.LedgerEvent(nil), ledger[:4]...)
+	inherited = append(inherited, chat.LedgerEvent{Role: "user", OperationID: "op-inh", Inherited: true})
+	if _, err := subsessionForkLink(state(inherited, pending), "src-tab", inherited[:4], true); err == nil || !strings.Contains(err.Error(), "inherited history") {
+		t.Fatalf("a cut inside inherited history must refuse, never widen: %v", err)
+	}
+}

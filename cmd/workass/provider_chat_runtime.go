@@ -1154,6 +1154,10 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		}
 		atTurn, hasAtTurn = turn, true
 	}
+	// A cut is an explicit point (message or turn). The agent's mid-turn fork
+	// below deliberately copies the live turn natively, so it is never a cut
+	// (review wa-subagent-1792182761893-4, suggestion 1).
+	explicitPoint := hasAtTurn
 	if subsession && !hasAtTurn && sourceState.Foreground != nil {
 		// An agent forking from inside its own turn: the visible copy stops at
 		// the last settled turn; the native fork still carries the live one.
@@ -1164,12 +1168,15 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	var sourceLane chat.LaneState
 	if subsession {
 		sourceLane = sourceState.Lanes[sourceState.ActiveLaneID]
-		if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" &&
-			(sourceState.Presentation.CWD == nil || !sameFilesystemPath(cwd, *sourceState.Presentation.CWD)) {
+		parentCWD := strings.TrimSpace(sourceLane.CWD)
+		if sourceState.Presentation.CWD != nil {
+			parentCWD = strings.TrimSpace(*sourceState.Presentation.CWD)
+		}
+		if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" && (parentCWD == "" || !sameFilesystemPath(cwd, parentCWD)) {
 			source.mu.Unlock()
 			return nil, errors.New("a forked subsession keeps its parent's workspace")
 		}
-		link, err := subsessionForkLink(sourceState, sourceTabID, prefix, atMessageID != "")
+		link, err := subsessionForkLink(sourceState, sourceTabID, prefix, explicitPoint)
 		if err != nil {
 			source.mu.Unlock()
 			return nil, err
@@ -1275,13 +1282,27 @@ func subsessionForkLink(source chat.State, sourceTabID string, prefix []chat.Led
 	if !acp.NativeSessionForkSupported(providerID) {
 		return nil, fmt.Errorf("provider %q cannot fork a session natively; create a fresh subsession instead", providerID)
 	}
+	// The cut stops before the next prompt THIS lane's session received. A
+	// later turn another engine answered never entered it; when no later turn
+	// reached this lane, the whole session is exactly the prefix (review
+	// wa-subagent-1792182761893-4, correction 2).
 	before := ""
 	if cut {
-		for _, event := range source.Ledger[len(prefix):] {
-			if event.Role == "user" && event.SteerState == "" {
-				before = string(event.OperationID)
-				break
+		for offset, event := range source.Ledger[len(prefix):] {
+			if event.Role != "user" || event.SteerState != "" {
+				continue
 			}
+			if event.LaneID == "" {
+				return nil, errors.New("this point is inside inherited history; fork from a later message")
+			}
+			if event.LaneID != lane.Identity.ID {
+				continue
+			}
+			if record, ok := lane.Coverage[uint64(len(prefix)+offset+1)]; !ok || record.Status == chat.CoverageExcluded {
+				continue
+			}
+			before = string(event.OperationID)
+			break
 		}
 	}
 	// The native copy holds exactly what this lane's session received. Every
@@ -1554,11 +1575,12 @@ func (r *providerChatRuntime) resolveSelectionLocked(ctx context.Context, actor 
 	// A forked subsession's first lane must be its native fork; it can never
 	// reach session/new as a silent contextless copy (review
 	// wa-subagent-1792180415563-2, correction 1).
-	// Children from the first build hold their inherited rows excluded
-	// (ContextFloor > 0): only their native fork has them, so every other lane
+	// Children from the first build (no pinned fork id) hold their inherited
+	// rows excluded: only their native fork has them, so every other lane
 	// would be contextless and is refused too (review
-	// wa-subagent-1792181911547-3, correction 2, minimum rule).
-	if state.Parent != nil && state.Parent.Forked && !selection.Established && (len(state.Lanes) == 0 || state.ContextFloor > 0) {
+	// wa-subagent-1792181911547-3, correction 2; scoped by
+	// wa-subagent-1792182761893-4, suggestion 2).
+	if state.Parent != nil && state.Parent.Forked && !selection.Established && (len(state.Lanes) == 0 || state.Parent.ForkedSessionID == "") {
 		if pinned := state.Parent.ForkedSessionID; pinned != "" && len(state.Lanes) == 0 && acp.NativeSessionForkSupported(opts.ProviderID) {
 			if err := r.manager.BindForkedSubsessionLane(subsessionForkRequest(state), pinned); err != nil {
 				return acp.ProviderLaneSelection{}, err

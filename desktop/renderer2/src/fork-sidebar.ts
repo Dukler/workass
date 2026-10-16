@@ -144,21 +144,38 @@ export function chatSubsessionRow(kid: ChildChatFacts, nowMs: number): Subsessio
 }
 
 /**
- * Subsession chats grouped under their parent's tab id. A chat nests only when
- * its parent is present (a deleted parent leaves the child top-level); order
- * is the chats' own order.
+ * Subsession chats grouped under the tab id of their top-level ancestor: the
+ * nearest one drawn as its own row. A subsession of a subsession joins the same
+ * single-level nest (review wa-subagent-1792182761893-4, correction 1). A chat
+ * nests only under a present, visible ancestor (`inView`); a deleted or
+ * out-of-scope parent leaves it top-level. Cycles never nest. Order is the
+ * chats' own order.
  */
 export function subsessionChildren<T extends { id: string; chatId?: string; parentChatId?: string }>(
   chats: readonly T[],
+  inView: (tabId: string) => boolean = () => true,
 ): Map<string, T[]> {
-  const parentTab = new Map<string, string>();
-  for (const chat of chats) if (chat.chatId) parentTab.set(chat.chatId, chat.id);
+  const byChatId = new Map<string, T>();
+  for (const chat of chats) if (chat.chatId) byChatId.set(chat.chatId, chat);
+  const parentOf = (chat: T): T | undefined => {
+    const parent = chat.parentChatId ? byChatId.get(chat.parentChatId) : undefined;
+    return parent && parent.id !== chat.id && inView(parent.id) ? parent : undefined;
+  };
   const out = new Map<string, T[]>();
   for (const chat of chats) {
-    const parent = chat.parentChatId ? parentTab.get(chat.parentChatId) : undefined;
-    if (!parent || parent === chat.id) continue;
-    const list = out.get(parent);
-    if (list) list.push(chat); else out.set(parent, [chat]);
+    if (!inView(chat.id)) continue;
+    let top = parentOf(chat);
+    const seen = new Set([chat.id]);
+    while (top) {
+      if (seen.has(top.id)) { top = undefined; break; }
+      seen.add(top.id);
+      const up = parentOf(top);
+      if (!up) break;
+      top = up;
+    }
+    if (!top) continue;
+    const list = out.get(top.id);
+    if (list) list.push(chat); else out.set(top.id, [chat]);
   }
   return out;
 }

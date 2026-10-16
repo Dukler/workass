@@ -224,3 +224,21 @@ test('the nest opens by itself while you are inside one of its subsessions', () 
   assert.equal(forkSidebarOpen(false, true, true, false), false, 'otherwise an explicit close wins');
   assert.equal(forkSidebarOpen(undefined, false, true, false), false);
 });
+
+// Review wa-subagent-1792182761893-4, correction 1: a subsession of a
+// subsession joins its top-level ancestor's single nest; it is never lost.
+test('nested subsessions all live under the nearest top-level ancestor', () => {
+  const chats = [
+    { id: 'tA', chatId: 'cA' },
+    { id: 'tB', chatId: 'cB', parentChatId: 'cA' },
+    { id: 'tC', chatId: 'cC', parentChatId: 'cB' },
+    { id: 'tX', chatId: 'cX', parentChatId: 'cY' },
+    { id: 'tY', chatId: 'cY', parentChatId: 'cX' },
+  ];
+  const all = subsessionChildren(chats);
+  assert.deepEqual(all.get('tA')!.map((chat) => chat.id), ['tB', 'tC'], 'C nests under A, beside B');
+  assert.deepEqual([...nestedSubsessionIds(all)].sort(), ['tB', 'tC'], 'a cycle never nests');
+  const scoped = subsessionChildren(chats, (tabId) => tabId !== 'tA');
+  assert.deepEqual([...scoped.keys()], ['tB'], 'with A out of scope, B is a row of its own');
+  assert.deepEqual(scoped.get('tB')!.map((chat) => chat.id), ['tC']);
+});
