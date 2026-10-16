@@ -1387,6 +1387,18 @@ class ClaudeSession {
     if (taskEvent) {
       notify(this.sessionId, { sessionUpdate: '_workass_claude_spawned_work', event: spawnedWorkEvent(message, taskEvent) });
     }
+    // Claude Code's own live list of background tasks. It is how Claude Code
+    // knows a task is gone when no ended event comes (an interrupt, a stop);
+    // Workass settles a background row missing from it (spawned_work.go).
+    if (message.type === 'system' && message.subtype === 'background_tasks_changed' && Array.isArray(message.tasks)) {
+      notify(this.sessionId, {
+        sessionUpdate: '_workass_claude_spawned_work',
+        event: { type: 'snapshot', tasks: message.tasks.map((task) => ({
+          taskId: task.task_id, taskType: task.task_type, description: task.description,
+          subagentType: task.subagent_type, parentTaskId: task.parent_task_id, backgrounded: true,
+        })) },
+      });
+    }
   }
 
   handleStreamEvent(event, parentToolUseId = '') {

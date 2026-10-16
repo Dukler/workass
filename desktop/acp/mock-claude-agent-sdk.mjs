@@ -381,6 +381,15 @@ class FixtureQuery {
         this.emit({ ...sub, type: 'user', uuid: randomUUID(), message: { content: [{ type: 'tool_result', tool_use_id: read.id, content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }] }] } });
         continue;
       }
+      // Claude Code's live list of background tasks, as the real CLI sends it
+      // (probe 2026-10-16): a background shell joins it, then it empties.
+      if (text.includes('[fixture:live-list]')) {
+        const live = (tasks) => this.emit({ type: 'system', subtype: 'background_tasks_changed', session_id: this.sessionId, uuid: randomUUID(), tasks });
+        live([{ task_id: 'bqcmiay84', run_id: 'r1', task_type: 'local_bash', description: 'Probe background shell' }, { task_id: 'bdxmwhffy', run_id: 'r2', task_type: 'local_bash', description: 'Agent own sleep', parent_task_id: 'ac2d2c15473cccb4b' }]);
+        live([]);
+        await this.endTurn(text);
+        continue;
+      }
       // A background agent still running when Workass stops: it never
       // finishes, because the Claude process running it dies with the daemon.
       if (text.includes('[fixture:stranded-agent]')) {
