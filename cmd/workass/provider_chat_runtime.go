@@ -1105,6 +1105,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		return nil, errors.New("app-chat:fork requires distinct child tab and chat ids")
 	}
 	operationID := providercontract.NormalizeOperationID(firstNonEmptyString(fieldString(arg, "operationId"), "fork:"+newChatID))
+	atMessageID := strings.TrimSpace(fieldString(arg, "atMessageId"))
 	digest, err := forkInitializationDigest(arg, sourceTabID, sourceChatID, newTabID, newChatID)
 	if err != nil {
 		return nil, err
@@ -1113,7 +1114,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		if err != nil {
 			return nil, err
 		}
-		return r.attachForkChild(ctx, actor, operationID, sourceTabID)
+		return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
 	}
 	source, err := r.actor(sourceChatID)
 	if err != nil {
@@ -1173,10 +1174,10 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	if err != nil {
 		return nil, err
 	}
-	return r.attachForkChild(ctx, actor, operationID, sourceTabID)
+	return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
 }
 
-func (r *providerChatRuntime) attachForkChild(ctx context.Context, actor *providerChatActor, operationID providercontract.OperationID, sourceTabID string) (map[string]any, error) {
+func (r *providerChatRuntime) attachForkChild(ctx context.Context, actor *providerChatActor, operationID providercontract.OperationID, sourceTabID string, atMessageID string) (map[string]any, error) {
 	if actor == nil {
 		return nil, errors.New("fork child actor is unavailable")
 	}
@@ -1223,7 +1224,7 @@ func (r *providerChatRuntime) attachForkChild(ctx context.Context, actor *provid
 		return nil, errors.New("fork child provider lane is not attached")
 	}
 	effectiveTurn := forkChildTurn(childState.Ledger)
-	return sessionInfoWithFork(info, sourceTabID, effectiveTurn), nil
+	return sessionInfoWithFork(info, sourceTabID, effectiveTurn, atMessageID), nil
 }
 
 func forkChildTurn(ledger []chat.LedgerEvent) int {
@@ -1246,7 +1247,10 @@ func forkInitializationDigest(arg map[string]any, sourceTabID, sourceChatID, new
 		CWD          string
 		AtTurn       int
 		HasAtTurn    bool
-		AtMessageID  string
+		// omitempty keeps requests without atMessageId hashing byte-identically
+		// to the pre-atMessageId binary: a durable lost-reply retry replays
+		// across an upgrade because CreationDigest is durable actor state.
+		AtMessageID string `json:",omitempty"`
 	}{
 		SourceTabID: strings.TrimSpace(sourceTabID), SourceChatID: strings.TrimSpace(sourceChatID),
 		NewTabID: strings.TrimSpace(newTabID), NewChatID: strings.TrimSpace(newChatID),

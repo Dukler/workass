@@ -738,7 +738,7 @@ export interface WorkassApi {
   // and gets a fresh provider lane. atMessageId names the transcript row whose
   // turn the prefix includes; the daemon resolves the semantic turn boundary on
   // its own ledger, so callers never have to count turns.
-  appChatFork?: (opts: { tabId: string; chatId: string; newTabId: string; newChatId: string; operationId: string; atMessageId?: string; atTurn?: number; cwd?: string | null }) => Promise<AcpSessionInfo & { forkedFrom?: { tabId: string; atTurn: number } }>;
+  appChatFork?: (opts: { tabId: string; chatId: string; newTabId: string; newChatId: string; operationId: string; atMessageId?: string; atTurn?: number; cwd?: string | null }) => Promise<AcpSessionInfo & { forkedFrom?: { tabId: string; atTurn: number; atMessageId?: string } }>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.
