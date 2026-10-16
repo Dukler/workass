@@ -4,7 +4,8 @@ import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
-import { IcStampCopy, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
+import { IcStampCopy, IcFork, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
+import { has } from '../wire/api';
 import { toolPresentation } from '../tool-names';
 import { isSubagentHeader } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
@@ -229,6 +230,16 @@ function AssistantSliceBody({
                 onClick={() => { void navigator.clipboard?.writeText(fullAssistantText(owner)); }}>
                 <IcStampCopy />
               </button>
+              {/* Fork from this point (user 2026-10-16): the new chat copies the
+                  visible history through this turn and continues on its own
+                  fresh provider lane. Old daemons have no fork channel → hide. */}
+              {has('appChatFork') && !interrupted && (
+                <button type="button" className="stamp-btn" title="Bifurcar desde aquí"
+                  aria-label="Bifurcar desde aquí: crea una conversación con el historial hasta este punto"
+                  onClick={() => { void store.forkFromMessage(tabId, owner.id); }}>
+                  <IcFork />
+                </button>
+              )}
               <span className="stamp-time"><RelStamp at={msg.at} /></span>
             </>
           )}

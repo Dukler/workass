@@ -4031,6 +4031,90 @@ export class Store {
     this.pendingChatCreatePromises.set(tabId, pending);
     return pending;
   }
+  // D5 explicit chat fork from a transcript hover affordance: a new chat copies
+  // the source's visible transcript through the hovered message's turn and gets
+  // a fresh provider lane. The daemon resolves the semantic turn boundary from
+  // atMessageId, so this method never counts turns itself. The copied prefix is
+  // visible history only — the child's provider starts with fresh context
+  // (reducer law: fork lanes mark the prefix ContextExcluded) — so the toast and
+  // titles must not promise a context-replaying clone.
+  async forkFromMessage(tabId: string, messageId: string): Promise<void> {
+    const chat = this.chat(tabId);
+    if (!chat) return;
+    if (this.isChatRunning(tabId)) {
+      this.addToast('No se pudo bifurcar', 'Esperá a que termine el turno en curso.');
+      return;
+    }
+    if (!chat.chatId) {
+      this.addToast('No se pudo bifurcar', 'La conversación todavía no tiene una identidad durable.');
+      return;
+    }
+    if (chat.pending && !(await this.ensureChatCreated(chat))) {
+      this.addToast('No se pudo bifurcar', 'El motor no confirmó la creación de la conversación.');
+      return;
+    }
+    const owner = this.chat(tabId);
+    if (!owner?.chatId) return;
+    const machineId = ownerMachineId(owner);
+    const attempt = owner._forkAttempt?.atMessageId === messageId ? owner._forkAttempt : undefined;
+    const nextSeq = this.state.seq + 1;
+    if (!machineId) this.state.seq = nextSeq;
+    const newTabId = attempt?.newTabId ?? `tab-${Date.now()}-${nextSeq}`;
+    const newChatId = attempt?.newChatId ?? newChatConvId();
+    const operationId = attempt?.operationId ?? rid('chat-fork');
+    const childTabId = tagId(machineId, newTabId);
+    const childChatId = tagId(machineId, newChatId);
+    let child = this.chat(childTabId);
+    if (!child) {
+      child = {
+        id: childTabId, chatId: childChatId, machineId: machineId || undefined, sessionId: null,
+        title: `Bifurcación de ${owner.title}`.trim().slice(0, 80), titleLocked: false,
+        group: owner.group, cwd: owner.cwd,
+        currentModelId: owner.currentModelId, currentModeId: owner.currentModeId,
+        providerId: owner.providerId, providerName: owner.providerName,
+        pane: null,
+        pending: false, messages: [], draft: '',
+      };
+      this.state.chats.unshift(child);
+      this.captureChatOrder();
+      this.bumpApp();
+    }
+    if (!attempt) owner._forkAttempt = { operationId, newTabId, newChatId, atMessageId: messageId };
+    const requested = {
+      tabId: owner.id, chatId: owner.chatId,
+      newTabId: String(newTabId), newChatId, operationId,
+      atMessageId: messageId, cwd: owner.cwd ?? null,
+    };
+    try {
+      const info = await callThrow('appChatFork', requested);
+      const liveChild = this.chat(childTabId);
+      if (!liveChild || !info?.sessionId) {
+        if (liveChild) liveChild.sessionError = 'La bifurcación no devolvió una sesión adjuntada.';
+        this.addToast('No se pudo bifurcar', info?.error ?? 'La bifurcación no devolvió una sesión adjuntada.');
+        return;
+      }
+      liveChild.sessionId = info.sessionId;
+      liveChild.sessionProviderId = info.providerId ?? null;
+      liveChild.pending = false;
+      liveChild.sessionError = undefined;
+      delete owner._forkAttempt;
+      this.bumpChat(liveChild);
+      void this.flushSession(true);
+      this.scheduleScopedSync(['session']);
+      // The child already owns durable rows; a forced recent read bypasses the
+      // all-zero early return a fresh row would otherwise take.
+      await this.ensureRecentHistory(childTabId, CHAT_INITIAL_HISTORY, true);
+      this.switchChat(childTabId);
+      this.addToast('Bifurcación creada', 'La conversación continúa en la copia nueva.');
+    } catch (error) {
+      const liveChild = this.chat(childTabId);
+      if (liveChild && !liveChild.sessionId) {
+        liveChild.sessionError = 'La bifurcación no se confirmó: reintentalo desde el mismo mensaje.';
+        this.bumpChat(liveChild);
+      }
+      this.addToast('No se pudo bifurcar', error instanceof Error ? error.message : 'El motor rechazó la bifurcación.');
+    }
+  }
   addWorkspace(path: string): Chat | null {
     const workspace = workspaceFromPath(path);
     if (!workspace) return null;

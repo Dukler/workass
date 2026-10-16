@@ -1130,6 +1130,17 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		return nil, errors.New("fork requires an idle semantic turn boundary")
 	}
 	atTurn, hasAtTurn := intFieldPresent(arg, "atTurn")
+	// The renderer names the fork point by the stable message id it hovered
+	// (D5 explicit fork from any point). Resolving the semantic turn boundary
+	// here, on the source ledger, keeps every other client turn-count free.
+	if messageID := fieldString(arg, "atMessageId"); messageID != "" {
+		turn, found := forkTurnForMessage(sourceState.Ledger, messageID)
+		if !found {
+			source.mu.Unlock()
+			return nil, fmt.Errorf("fork source message %q is not in the chat ledger", messageID)
+		}
+		atTurn, hasAtTurn = turn, true
+	}
 	prefix, _ := actorForkPrefix(sourceState.Ledger, atTurn, hasAtTurn)
 	presentation := sourceState.Presentation.Clone()
 	source.mu.Unlock()
@@ -1235,10 +1246,12 @@ func forkInitializationDigest(arg map[string]any, sourceTabID, sourceChatID, new
 		CWD          string
 		AtTurn       int
 		HasAtTurn    bool
+		AtMessageID  string
 	}{
 		SourceTabID: strings.TrimSpace(sourceTabID), SourceChatID: strings.TrimSpace(sourceChatID),
 		NewTabID: strings.TrimSpace(newTabID), NewChatID: strings.TrimSpace(newChatID),
 		CWD: strings.TrimSpace(fieldString(arg, "cwd")), AtTurn: atTurn, HasAtTurn: hasAtTurn,
+		AtMessageID: strings.TrimSpace(fieldString(arg, "atMessageId")),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -1272,6 +1285,25 @@ func actorForkPrefix(ledger []chat.LedgerEvent, atTurn int, hasAtTurn bool) ([]c
 		prefix = append(prefix, event)
 	}
 	return prefix, atTurn
+}
+
+// forkTurnForMessage maps a stable message id to the actorForkPrefix turn
+// boundary that includes exactly that row. Message ids are unique per ledger
+// (the projector rejects duplicates), so the first match is the only match.
+// The count follows the same rule the prefix reader uses: only canonical user
+// rows (non-steer) open a turn, and steered rows keep belonging to the turn
+// they interrupted.
+func forkTurnForMessage(ledger []chat.LedgerEvent, messageID string) (int, bool) {
+	turns := 0
+	for _, event := range ledger {
+		if event.Role == "user" && event.SteerState == "" {
+			turns++
+		}
+		if event.MessageID == messageID {
+			return turns, true
+		}
+	}
+	return 0, false
 }
 
 func (r *providerChatRuntime) resolveSelectionLocked(ctx context.Context, actor *providerChatActor, opts acp.SessionOptions) (acp.ProviderLaneSelection, error) {

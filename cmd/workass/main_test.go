@@ -3627,6 +3627,139 @@ func TestWireTraceForkChatSeedsPrefixAndDiverges(t *testing.T) {
 	t.Logf("trace mock prompts sourceThird=%q forkProviderReplay=false", sourceThirdPrompt)
 }
 
+// The hover affordance names the fork point by the stable message id the
+// renderer hovered (the user's answer to "fork from any point", 2026-10-16).
+// The daemon must resolve that id to the semantic turn boundary on its own
+// ledger — here the hovered first-turn reply yields a child archive that holds
+// exactly turn 1 and never the second turn.
+func TestWireTraceForkChatByHoveredMessageID(t *testing.T) {
+	repo := repoRoot(t)
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	traceFile := filepath.Join(root, "mock-prompts.jsonl")
+	renderer := t.TempDir()
+	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><head></head><body></body>"), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	hub := wire.NewHub()
+	manager := acp.NewManager(acp.Options{
+		RootDir:  root,
+		StateDir: stateDir,
+		Provider: acp.ProviderConfig{
+			ID:      "mock",
+			Command: "node",
+			Args:    []string{filepath.Join(repo, "desktop", "acp", "mock-server.mjs")},
+			CWD:     repo,
+			Env: map[string]string{
+				"WORKASS_MOCK_ACP_TRACE_FILE":    traceFile,
+				"WORKASS_MOCK_ACP_DELAY_MS":      "10",
+				"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json"),
+			},
+			Enabled: true,
+			Label:   "Workass Mock ACP",
+		},
+		DefaultProviderID:      "mock",
+		Broadcast:              hub.Broadcast,
+		StdoutFlushInterval:    10 * time.Millisecond,
+		ThoughtFlushInterval:   10 * time.Millisecond,
+		RSSSampleInterval:      time.Hour,
+		SpareSessions:          0,
+		CompactionEnabled:      false,
+		LifecycleCheckInterval: time.Hour,
+	})
+	sessionState := sharedSessionStore(stateDir)
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() {
+		_ = providerChats.Close(context.Background())
+		manager.Reset()
+	})
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
+
+	server := httptest.NewServer(httpserve.New(renderer, hub, nil))
+	defer server.Close()
+	client := dialTestWS(t, server.URL)
+	defer client.conn.Close()
+
+	sourceTabID := "wire-fork-msg-point-source"
+	forkTabID := "wire-fork-msg-point-child"
+	sourceChatID := "chat-wire-fork-msg-point-source"
+	createWireActorChat(t, client, 100, sourceTabID, sourceChatID, "mock")
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": sourceTabID, "chatId": sourceChatID, "providerId": "mock"})
+	sessionReply := client.waitReply(t, 1, 5*time.Second)
+	if sessionReply.Error != nil {
+		t.Fatalf("new-session error: %s", *sessionReply.Error)
+	}
+	sourceSession := sessionReply.Result.(map[string]any)
+	sourceSessionID := sourceSession["sessionId"].(string)
+
+	firstResult := runWireChatTurn(t, client, 2, sourceChatID, sourceTabID, sourceSessionID, "hover fork first")
+	appendWireArchiveTurn(t, client, 3, sourceTabID, "hover fork first", firstResult, "2026-10-16T00:00:01Z")
+	secondResult := runWireChatTurn(t, client, 4, sourceChatID, sourceTabID, sourceSessionID, "hover fork second")
+	appendWireArchiveTurn(t, client, 5, sourceTabID, "hover fork second", secondResult, "2026-10-16T00:00:02Z")
+
+	client.invoke(t, 6, "chat:archive-load", sourceTabID)
+	sourceArchiveReply := client.waitReply(t, 6, 2*time.Second)
+	if sourceArchiveReply.Error != nil {
+		t.Fatalf("source archive error: %s", *sourceArchiveReply.Error)
+	}
+	sourceArchive := anySlice(sourceArchiveReply.Result)
+	if len(sourceArchive) != 4 {
+		t.Fatalf("source archive rows = %d (%#v)", len(sourceArchive), sourceArchive)
+	}
+	var firstAssistantID string
+	for _, raw := range sourceArchive {
+		row := mapFromAnyMain(raw)
+		if fieldString(row, "role") == "assistant" {
+			firstAssistantID = fieldString(row, "id")
+			break
+		}
+	}
+	if firstAssistantID == "" {
+		t.Fatalf("first turn assistant id missing in archive %#v", sourceArchive)
+	}
+
+	forkRequest := map[string]any{
+		"tabId": sourceTabID, "chatId": sourceChatID, "newTabId": forkTabID,
+		"newChatId": "chat-wire-fork-msg-point-child", "cwd": root,
+		"atMessageId": firstAssistantID, "operationId": "wire-fork-msg-once",
+	}
+	client.invoke(t, 7, "app-chat:fork", forkRequest)
+	forkReply := client.waitReply(t, 7, 5*time.Second)
+	if forkReply.Error != nil {
+		t.Fatalf("fork by message id error: %s", *forkReply.Error)
+	}
+	forkSession := forkReply.Result.(map[string]any)
+	if forkSession["sessionId"] == "" || forkSession["sessionId"] == sourceSessionID {
+		t.Fatalf("fork by message id reply = %#v", forkSession)
+	}
+	forkedFrom := forkSession["forkedFrom"].(map[string]any)
+	if fmt.Sprint(forkedFrom["atTurn"]) != "1" || forkedFrom["tabId"] != sourceTabID {
+		t.Fatalf("message point did not resolve to turn 1: %#v", forkedFrom)
+	}
+
+	client.invoke(t, 8, "chat:archive-load", forkTabID)
+	forkArchiveReply := client.waitReply(t, 8, 2*time.Second)
+	forkArchive := anySlice(forkArchiveReply.Result)
+	if len(forkArchive) != 2 {
+		t.Fatalf("fork archive prefix rows = %d (%#v)", len(forkArchive), forkArchive)
+	}
+	if !archiveContainsText(forkArchive, "hover fork first") || archiveContainsText(forkArchive, "hover fork second") {
+		t.Fatalf("fork archive prefix by message id = %#v", forkArchive)
+	}
+
+	// The same hovered point retries byte-identically: a fenced replay returns
+	// the same child session instead of minting a second actor.
+	client.invoke(t, 9, "app-chat:fork", forkRequest)
+	forkRetryReply := client.waitReply(t, 9, 5*time.Second)
+	if forkRetryReply.Error != nil {
+		t.Fatalf("fork by message id retry error: %s", *forkRetryReply.Error)
+	}
+	if forkRetryReply.Result.(map[string]any)["sessionId"] != forkSession["sessionId"] {
+		t.Fatalf("fork by message lost-reply retry changed child = %#v vs %#v", forkRetryReply.Result, forkSession)
+	}
+}
+
 func TestWireTraceNotifyControllerOnlyRedactionAndNoTurnEndBacklog(t *testing.T) {
 	repo := repoRoot(t)
 	root := t.TempDir()

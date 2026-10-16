@@ -149,6 +149,7 @@ const HINTS = new Map([
   ["TestWireTraceAppChatSteer", 3.01],
   ["TestWireTraceChatEnvNumstat", 0.80],
   ["TestWireTraceForkChatSeedsPrefixAndDiverges", 4.83],
+  ["TestWireTraceForkChatByHoveredMessageID", 1.10],
   ["TestWireTraceGroupedCatalogAndInterleavedProviders", 3.19],
   ["TestWireTraceHibernatedCheckpointKeepsTurnBaseline", 5.78],
   ["TestWireTraceMockCrashNeverReplaysAndNextDistinctPromptRuns", 2.70],
