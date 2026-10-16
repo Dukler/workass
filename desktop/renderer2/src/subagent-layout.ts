@@ -24,6 +24,8 @@ export interface SubagentNode {
   header?: ToolEvent;
   calls: ToolEvent[];
   work?: SpawnedWorkItem;
+  // From the header event: the child is a native fork (no work item needed).
+  forked?: boolean;
 }
 
 // Steering continuations share one logical turn. All views use the same
@@ -61,6 +63,7 @@ export function nodeForSpawnedWork(item: SpawnedWorkItem, node?: SubagentNode): 
   return { id, label: item.label || node?.label || 'Subagente',
     provider: item.assistantBrand || node?.provider || null,
     model: item.modelLabel || node?.model || null, calls: node?.calls ?? [], work: item,
+    forked: item.forked === true || node?.forked === true || undefined,
     header: { ...header, status,
       output: item.resultExcerpt || (item.status !== 'running' ? item.summary : '') || header.output,
       startedAt: Number.isFinite(start) ? start : header.startedAt,
@@ -163,6 +166,7 @@ export function extractSubagents(tools: ToolEvent[]): { nodes: SubagentNode[]; m
     if (tool.subagentId && (tool.subagentHeader || tool.id === tool.subagentId)) {
       const node = ensure(tool.subagentId);
       node.header = tool;
+      if (tool.subagentForked) node.forked = true;
       if (tool.title) node.label = tool.title;
       if (!node.provider && tool.subagentProvider) node.provider = tool.subagentProvider;
       if (!node.model && tool.subagentModel) node.model = tool.subagentModel;

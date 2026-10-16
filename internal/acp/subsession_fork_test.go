@@ -22,3 +22,19 @@ func TestNativeSessionForkSupportIsClaudeOnly(t *testing.T) {
 		t.Fatal("codex has no native session fork")
 	}
 }
+
+// A forked subagent's header carries its fork mark into the typed event, so
+// the parent transcript keeps ⑂ on the child's row without a live work item.
+func TestSubagentHeaderCarriesTheForkMark(t *testing.T) {
+	forked := providerToolEvent(map[string]any{
+		"kind": "tool", "toolKind": "agent", "id": "wa-subagent-1", "subagentId": "wa-subagent-1",
+		"subagentHeader": true, "subagentForked": true,
+	}, nil)
+	if forked == nil || !forked.SubagentForked || !forked.SubagentHeader {
+		t.Fatalf("forked header = %#v", forked)
+	}
+	fresh := providerToolEvent(map[string]any{"kind": "tool", "id": "wa-subagent-2", "subagentId": "wa-subagent-2", "subagentHeader": true}, nil)
+	if fresh == nil || fresh.SubagentForked {
+		t.Fatalf("a fresh header claimed a fork: %#v", fresh)
+	}
+}

@@ -4808,6 +4808,9 @@ func mergeToolEvent(current, incoming provider.ToolEvent) provider.ToolEvent {
 	if incoming.SubagentHeader {
 		out.SubagentHeader = true
 	}
+	if incoming.SubagentForked {
+		out.SubagentForked = true
+	}
 	out.Attachments = mergeProviderAttachments(out.Attachments, incoming.Attachments)
 	if out.StartedAtUnixMS == 0 {
 		out.StartedAtUnixMS = incoming.StartedAtUnixMS

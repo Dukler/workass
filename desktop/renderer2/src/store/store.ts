@@ -6103,6 +6103,7 @@ export class Store {
         if (ev.subagentProvider != null && match.subagentProvider == null) match.subagentProvider = ev.subagentProvider;
         if (ev.subagentModel != null && match.subagentModel == null) match.subagentModel = ev.subagentModel;
         if (ev.subagentHeader != null) match.subagentHeader = ev.subagentHeader;
+        if (ev.subagentForked) match.subagentForked = true;
         // Stamp real end time the first time the call reaches a terminal status.
         if (match.endedAt == null && (isToolDone(match.status) || isToolFailed(match.status))) match.endedAt = Date.now();
       } else {
@@ -6116,6 +6117,7 @@ export class Store {
           subagentId: ev.subagentId ?? null, subagentLabel: ev.subagentLabel ?? null,
           subagentProvider: ev.subagentProvider ?? null, subagentModel: ev.subagentModel ?? null,
 		  subagentHeader: ev.subagentHeader ?? false,
+          ...(ev.subagentForked ? { subagentForked: true } : {}),
           startedAt: now,
           endedAt: (isToolDone(ev.status) || isToolFailed(ev.status)) ? now : undefined,
         });
