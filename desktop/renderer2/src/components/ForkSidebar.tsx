@@ -12,6 +12,7 @@ import { useClock, store } from '../store/store';
 import { forkStore } from '../store/forks';
 import { IcActAgent, IcChevron, ModelIcon } from '../icons';
 import { isAgentWork } from '../subagent-layout';
+import { chatPane } from '../store/right-pane';
 import { forkChildLabel } from '../fork-format';
 import {
   forkFlatKids, forkGroups, forkPage, forkSubsessionRow, formatForkShortDuration,
@@ -59,14 +60,17 @@ function KidRow({ chat, chatId, row }: { chat: Chat; chatId: string; row: Subses
       return;
     }
     // A spawned thread has no separate view of its own: its live row lives in
-    // the right rail, so this reveals it there — the parent-side row stays
-    // neutral either way (user 2026-10-16).
+    // the right rail (TareasCard stamps data-work-id anchors), so this brings
+    // it forward — open the column when the user had it closed, then look for
+    // the row two frames out (chat switch and pane opening both land on a
+    // task). No fork styling anywhere on this path (user 2026-10-16).
     if (store.state.activeId !== chat.id) store.switchChat(chat.id);
+    if (chatPane(chat) === null && typeof document !== 'undefined') store.toggleRail();
     if (typeof document === 'undefined') return;
-    requestAnimationFrame(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
       const id = row.key.slice('spawn:'.length);
       document.querySelector(`[data-work-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
-    });
+    }));
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
