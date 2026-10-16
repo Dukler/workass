@@ -1155,6 +1155,9 @@ func projectTimeline(entries []chat.TimelineEntry) ([]any, error) {
 			if tool.SubagentHeader {
 				item["subagentHeader"] = true
 			}
+			if tool.SubagentForked {
+				item["subagentForked"] = true
+			}
 		case providercontract.EventCompactionStarted, providercontract.EventCompactionCheckpoint:
 			if entry.Compaction == nil {
 				return nil, errors.New("compaction timeline entry lost its typed payload")

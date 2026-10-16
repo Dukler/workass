@@ -109,8 +109,10 @@ type ToolEvent struct {
 	SubagentProvider string
 	SubagentModel    string
 	SubagentHeader   bool
-	StartedAtUnixMS  int64
-	EndedAtUnixMS    int64
+	// SubagentForked marks a subagent header whose child is a native fork.
+	SubagentForked  bool `json:",omitempty"`
+	StartedAtUnixMS int64
+	EndedAtUnixMS   int64
 }
 
 type PlanEntry struct {

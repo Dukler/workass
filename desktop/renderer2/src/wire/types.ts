@@ -294,6 +294,7 @@ export type AcpEvent =
       subagentLabel?: string | null;
       subagentProvider?: string | null;
       subagentHeader?: boolean;
+      subagentForked?: boolean;
       // Friendly model+effort combo for the Turnos chip.
       subagentModel?: string | null;
     };

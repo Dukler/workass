@@ -378,7 +378,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	m.registerSubagentSpawnedWork(ownerTabID, ownerChatID, snapshot)
 	brand := brandForProvider(providerID)
 	if rootJobID != "" {
-		m.emitSubagentHeader(rootJobID, id, label, brand, modelLabel, "in_progress", "")
+		m.emitSubagentHeader(rootJobID, id, label, brand, modelLabel, "in_progress", "", opts.Fork)
 	}
 	go m.runSubagent(runCtx, run, prompt, brand)
 	return snapshot, nil
@@ -909,7 +909,7 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 		} else if status == "cancelled" {
 			headerStatus = "cancelled"
 		}
-		m.emitSubagentHeader(rootJobID, run.ID, run.Label, brandForProvider(run.ProviderID), run.ModelLabel, headerStatus, errorText)
+		m.emitSubagentHeader(rootJobID, run.ID, run.Label, brandForProvider(run.ProviderID), run.ModelLabel, headerStatus, errorText, run.Forked)
 	}
 	if done != nil {
 		close(done)
@@ -943,7 +943,7 @@ func (m *Manager) tryDeliverSubagentCompletion(run *SubagentRun) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, status, output string) {
+func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, status, output string, forked bool) {
 	event := map[string]any{
 		"kind": "tool", "toolKind": "agent", "id": id, "title": label,
 		"status": status, "subagentId": id, "subagentLabel": label,
@@ -951,6 +951,12 @@ func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, st
 	}
 	if model != "" {
 		event["subagentModel"] = model
+	}
+	// The header is the subagent's durable record in the parent transcript, so
+	// it carries the fork mark itself: the row shows ⑂ even when no live
+	// spawned-work item is attached (user 2026-10-16).
+	if forked {
+		event["subagentForked"] = true
 	}
 	if output != "" {
 		event["output"] = compactText(redactSensitiveText(output), 600)

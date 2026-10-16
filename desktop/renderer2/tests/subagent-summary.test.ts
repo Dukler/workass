@@ -170,3 +170,29 @@ test('a forked subagent carries the fork glyph beside its own name; a fresh one 
   const fresh = renderToStaticMarkup(React.createElement(loaded.SubagentRow, { n: node(false), nowMs: Date.parse('2026-10-16T20:00:10Z') }));
   assert.doesNotMatch(fresh, /r-fk/);
 });
+
+// Live repro 2026-10-16 (dev): a forked subagent whose row is drawn from its
+// transcript header alone — no spawned-work item attached — still shows ⑂,
+// because the header is the subagent's durable record in the parent.
+test('the fork mark rides the subagent header when no work item is attached', async (t) => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
+  const loaded = await server.ssrLoadModule('/src/components/TareasCard.tsx') as { TareasCard: React.ComponentType };
+  store = (await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown>; clearToastTimers(): void } }).store;
+  const header = (id: string, label: string, forked: boolean): ToolEvent => ({
+    key: id, at: 0, kind: 'tool', id, toolKind: 'agent', title: label, status: 'completed', command: null,
+    location: null, terminalId: null, input: null, output: null, subagentId: id, subagentHeader: true,
+    subagentProvider: 'claude', subagentModel: 'Haiku-low', startedAt: 1_000, ...(forked ? { subagentForked: true } : {}),
+  });
+  store.state.meta = { profile: 'dev' };
+  store.state.activeId = 'tab-h';
+  store.state.chats = [{ id: 'tab-h', chatId: 'chat-h', cwd: null, messages: [{
+    id: 'assistant-h', role: 'assistant', content: '', status: 'running', at: null,
+    events: [header('wa-subagent-3', 'Forked subagent 2', true), header('wa-subagent-4', 'Fresh subagent 2', false)],
+  }] }];
+  const html = renderToStaticMarkup(React.createElement(loaded.TareasCard));
+  assert.equal((html.match(/class="r-fk"/g) || []).length, 1, 'exactly the forked row carries the mark');
+  assert.ok(html.indexOf('class="r-fk"') < html.indexOf('Forked subagent 2</span>'));
+});

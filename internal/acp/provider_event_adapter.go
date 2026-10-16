@@ -734,7 +734,7 @@ func providerToolEvent(event map[string]any, attachments []providercontract.Atta
 		Output: asString(event["output"]), Location: asString(event["location"]), Attachments: attachments,
 		SubagentID: asString(event["subagentId"]), SubagentLabel: asString(event["subagentLabel"]),
 		SubagentProvider: asString(event["subagentProvider"]), SubagentModel: asString(event["subagentModel"]),
-		SubagentHeader: boolFromAny(event["subagentHeader"]),
+		SubagentHeader: boolFromAny(event["subagentHeader"]), SubagentForked: boolFromAny(event["subagentForked"]),
 	}
 }
 

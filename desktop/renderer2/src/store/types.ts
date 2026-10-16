@@ -31,6 +31,8 @@ export interface ToolEvent {
   // brand ('gpt' | 'claude') for its icon. Absent on main-thread calls.
   subagentId?: string | null; subagentLabel?: string | null; subagentProvider?: string | null;
   subagentHeader?: boolean;
+  // The subagent began as a native fork of this chat (⑂ on its own row).
+  subagentForked?: boolean;
   // Friendly model+effort combo for the Turnos chip, e.g. "Opus4.8-xhigh".
   // Additive: absent against an older daemon → the chip is simply hidden.
   subagentModel?: string | null;
