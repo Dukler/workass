@@ -267,6 +267,12 @@ export interface Chat {
   // selection. A lost app-chat:new-session reply must retry the same actor
   // operation instead of committing a second control mutation.
   _sessionOperationId?: string;
+  // Fork retry anchor, same law as _sessionOperationId: a lost app-chat:fork
+  // reply replays byte-identically (same child ids + operationId), and a
+  // partial child (the lane attach failed after its actor committed) reuses
+  // them on the next click. atMessageId keeps a different fork point from
+  // colliding with ids whose creation digest already bound other content.
+  _forkAttempt?: { operationId: string; newTabId: string; newChatId: string; atMessageId: string };
   // Monotonic runtime-only picker epoch. Session initialization snapshots it
   // so an older inherited-provider response cannot overwrite a newer explicit
   // model/provider/effort/permission selection.

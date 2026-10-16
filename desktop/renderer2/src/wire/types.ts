@@ -734,6 +734,11 @@ export interface WorkassApi {
   archiveLoad?: (tabId: string, options?: { tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean }) => Promise<unknown[]>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
+  // D5 explicit chat fork: a new chat copies the source's visible ledger prefix
+  // and gets a fresh provider lane. atMessageId names the transcript row whose
+  // turn the prefix includes; the daemon resolves the semantic turn boundary on
+  // its own ledger, so callers never have to count turns.
+  appChatFork?: (opts: { tabId: string; chatId: string; newTabId: string; newChatId: string; operationId: string; atMessageId?: string; atTurn?: number; cwd?: string | null }) => Promise<AcpSessionInfo & { forkedFrom?: { tabId: string; atTurn: number } }>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.
