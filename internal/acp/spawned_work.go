@@ -137,6 +137,9 @@ type SpawnedWorkReceipt struct {
 	Summary     string `json:"summary,omitempty"`
 	OutputTail  string `json:"outputTail,omitempty"`
 	TailLimited bool   `json:"tailLimited,omitempty"`
+	// ModelLabel lets a resumed agent keep its model after the in-memory
+	// record of its earlier run is gone.
+	ModelLabel string `json:"modelLabel,omitempty"`
 }
 
 type spawnedWorkRecord struct {
@@ -647,9 +650,17 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	if event.Kind == "progress" {
 		description = ""
 	}
+	// An agent starting again may be a resume; its earlier run's receipt is
+	// read before the registry lock (it takes the receipt lock).
+	var launched *SpawnedWorkReceipt
+	if event.Kind == "started" && strings.Contains(strings.ToLower(task.TaskType), "agent") {
+		if receipt, ok := m.findSpawnedWorkReceipt(tabID, chatID, taskID); ok && receipt.Kind == "agent" {
+			launched = &receipt
+		}
+	}
 	m.spawnedWorkMu.Lock()
 	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID)
-	revived := event.Kind == "started" && m.reviveResumedAgentLocked(tabID, chatID, taskID, &candidate)
+	revived := event.Kind == "started" && m.reviveResumedAgentLocked(tabID, chatID, taskID, &candidate, launched)
 	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, description, task.TaskType, task.SubagentType, task.OutputFile)
 	changed = changed || revived
 	if rec != nil {
@@ -772,13 +783,23 @@ func (m *Manager) rememberSettledSpawnedWorkLocked(key string, item SpawnedWorkI
 // back as a new run under the launch call; a fresh row keyed to the resume
 // call left its calls in a second, nameless group (DepthVision speed,
 // 2026-10-15). Reports whether the row was revived.
-func (m *Manager) reviveResumedAgentLocked(tabID, chatID, taskID string, candidate *spawnedWorkCandidate) bool {
+func (m *Manager) reviveResumedAgentLocked(tabID, chatID, taskID string, candidate *spawnedWorkCandidate, launched *SpawnedWorkReceipt) bool {
 	key := spawnedWorkKey(tabID, chatID, taskID)
 	prior, live := SpawnedWorkItem{}, m.spawnedWork[key]
 	if live != nil {
 		prior = live.Item
 	} else if settled, ok := m.spawnedWorkSettled[key]; ok {
 		prior = settled
+	} else if launched != nil {
+		// The in-memory record of the earlier run is gone (a restart, an
+		// engine recycle); its receipt on disk still names the agent. Without
+		// it the resumed agent read as its raw task id, with no model
+		// (DepthVision speed, 2026-10-16).
+		prior = SpawnedWorkItem{
+			ID: taskID, TaskID: taskID, ToolCallID: launched.ToolCallID, TabID: tabID, ChatID: chatID,
+			ProviderID: candidate.ProviderID, Kind: launched.Kind, Label: launched.Label, Role: launched.Role,
+			ModelLabel: launched.ModelLabel, Status: launched.Status,
+		}
 	} else {
 		return false
 	}
@@ -2332,7 +2353,7 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 	return SpawnedWorkReceipt{
 		ReceiptID: "spawned-" + item.TaskID, TaskID: item.TaskID, ToolCallID: item.ToolCallID,
 		TabID: item.TabID, ChatID: item.ChatID,
-		Kind: item.Kind, Label: publicItem.Label, Role: item.Role, Status: item.Status,
+		Kind: item.Kind, Label: publicItem.Label, Role: item.Role, Status: item.Status, ModelLabel: item.ModelLabel,
 		StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ElapsedMs: elapsed,
 		OutputFile: publicItem.OutputFile, PID: item.PID, ExitCode: item.ExitCode,
 		Summary: publicItem.Summary, OutputTail: tail, TailLimited: limited,

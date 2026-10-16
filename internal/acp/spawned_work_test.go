@@ -1812,3 +1812,41 @@ func TestRunningAgentIsNeverJudgedByAnOutputFileProbe(t *testing.T) {
 		}
 	}
 }
+
+// After an engine recycle or a restart the in-memory record of an agent's
+// earlier run is gone, and the resume event carried no description: the row
+// read as the raw task id, with no model (DepthVision speed, 2026-10-16). The
+// earlier run's receipt on disk still names it.
+func TestResumedClaudeAgentTakesItsNameFromTheLaunchReceipt(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	manager := NewManager(Options{
+		StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	receipt := SpawnedWorkReceipt{
+		ReceiptID: "spawned-a6b1b14750726df64", TaskID: "a6b1b14750726df64", ToolCallID: "toolu_01PqrykigBKvWkaSW6qXUJFU",
+		TabID: "tab-dv", ChatID: "chat-dv", Kind: "agent", Label: "Build fast trainer r5 (split encoder + sparse rows)",
+		Status: "exited", StartedAt: "2026-10-16T14:12:52Z", FinishedAt: "2026-10-16T15:23:42Z", ModelLabel: "opus",
+	}
+	line, _ := json.Marshal(receipt)
+	path := manager.spawnedWorkReceiptPath("tab-dv")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observeRawSpawnLifecycleFixture(t, manager, "tab-dv", "chat-dv", "session-dv", "claude", map[string]any{
+		"type": "started", "taskId": "a6b1b14750726df64", "toolCallId": "toolu_01NPbka5LVExMLSjHCCNVur2", "taskType": "local_agent", "backgrounded": true,
+	})
+	items := manager.ListSpawnedWork("tab-dv", "chat-dv")
+	if len(items) != 1 {
+		t.Fatalf("rows = %#v", items)
+	}
+	item := items[0]
+	if item.Label != receipt.Label || item.ModelLabel != "opus" || item.ToolCallID != receipt.ToolCallID || item.Status != "running" || item.Kind != "agent" {
+		t.Fatalf("resumed agent = label %q model %q call %q status %q kind %q", item.Label, item.ModelLabel, item.ToolCallID, item.Status, item.Kind)
+	}
+}
