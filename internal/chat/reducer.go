@@ -902,7 +902,13 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 		event.OperationID = operationID
 		event.LaneID = ""
 		event.NativeTurnID = ""
-		event.ContextExcluded = true
+		if command.Parent != nil {
+			// A forked subsession inherits the row as deliverable history; a
+			// row its source had excluded stays excluded.
+			event.Inherited = true
+		} else {
+			event.ContextExcluded = true
+		}
 		event.Attachments = append([]provider.Attachment(nil), source.Attachments...)
 		event.Timeline = cloneTimeline(source.Timeline)
 		event.Permission = clonePermission(source.Permission)
@@ -921,7 +927,24 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 	state.Presentation = presentation
 	state.Parent = parent
 	state.Ledger = ledger
-	state.ContextFloor = uint64(len(ledger))
+	if parent != nil {
+		floor := uint64(0)
+		for _, event := range ledger {
+			if !event.ContextExcluded {
+				break
+			}
+			floor++
+		}
+		for _, event := range ledger[floor:] {
+			if event.ContextExcluded {
+				return errors.New("a forked subsession's excluded rows must be one leading block")
+			}
+		}
+		state.ContextFloor = floor
+		state.NativeForkThrough = uint64(len(ledger))
+	} else {
+		state.ContextFloor = uint64(len(ledger))
+	}
 	state.CreationOperationID = operationID
 	state.CreationDigest = digest
 	for _, operationID := range operationIDs {
@@ -1616,13 +1639,23 @@ func reduceBindEstablishedLane(state *State, command BindEstablishedLane) error 
 			Thread: thread, Phase: LaneDetached, Coverage: make(map[uint64]CoverageRecord),
 			Context: command.Context, Creation: command.Creation,
 		}
-		// A forked subsession's lane is a native fork of its parent: the copied
-		// prefix is already in the native thread, so it is never sent again.
 		for sequence := uint64(1); sequence <= state.ContextFloor; sequence++ {
 			lane.Coverage[sequence] = CoverageRecord{
 				Sequence: sequence, EventID: state.Ledger[sequence-1].EventID, Status: CoverageExcluded,
 			}
 			lane.CoveredThrough = sequence
+		}
+		// Only the lane bound to a forked subsession's pinned native fork
+		// already holds the inherited rows; they are never sent to it again.
+		if state.Parent != nil && state.Parent.Forked &&
+			(state.Parent.ForkedSessionID == "" || thread.RootID == state.Parent.ForkedSessionID) {
+			for sequence := state.ContextFloor + 1; sequence <= state.NativeForkThrough; sequence++ {
+				lane.Coverage[sequence] = CoverageRecord{
+					Sequence: sequence, EventID: state.Ledger[sequence-1].EventID, Status: CoverageNativeSeen,
+					DeliveryID: state.CreationOperationID,
+				}
+				lane.CoveredThrough = sequence
+			}
 		}
 	}
 	state.Lanes[identity.ID] = lane

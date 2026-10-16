@@ -147,18 +147,25 @@ func TestAgentForkedSubsessionNeverFallsBackToAContextlessCopy(t *testing.T) {
 
 func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
 	lane := providercontract.LaneIdentity{ID: "lane-claude", ChatID: "src", Realm: providercontract.Realm{ProviderID: "claude"}}
-	state := chat.State{
-		ChatID: "src", ActiveLaneID: lane.ID,
-		Lanes: map[providercontract.LaneID]chat.LaneState{lane.ID: {
-			Identity: lane,
-			Thread:   providercontract.ThreadRef{ProviderID: "claude", RootID: "root-id", HeadID: "head-id", Lineage: 2, Proof: "p"},
-		}},
-		Ledger: []chat.LedgerEvent{
-			{Role: "user", OperationID: "op1", LaneID: lane.ID}, {Role: "assistant", OperationID: "op1", LaneID: lane.ID},
-			{Role: "user", OperationID: "op2", SteerState: "consumed", LaneID: lane.ID},
-			{Role: "user", OperationID: "op3", LaneID: lane.ID}, {Role: "assistant", OperationID: "op3", LaneID: lane.ID},
-		},
+	native := func(sequence uint64, op providercontract.OperationID) chat.CoverageRecord {
+		return chat.CoverageRecord{Sequence: sequence, Status: chat.CoverageNativeSeen, DeliveryID: op}
 	}
+	build := func(coverage map[uint64]chat.CoverageRecord) chat.State {
+		return chat.State{
+			ChatID: "src", ActiveLaneID: lane.ID,
+			Lanes: map[providercontract.LaneID]chat.LaneState{lane.ID: {
+				Identity: lane, Coverage: coverage,
+				Thread: providercontract.ThreadRef{ProviderID: "claude", RootID: "root-id", HeadID: "head-id", Lineage: 2, Proof: "p"},
+			}},
+			Ledger: []chat.LedgerEvent{
+				{Role: "user", OperationID: "op1", LaneID: lane.ID}, {Role: "assistant", OperationID: "op1", LaneID: lane.ID},
+				{Role: "user", OperationID: "op2", SteerState: "consumed", LaneID: lane.ID},
+				{Role: "user", OperationID: "op3", LaneID: lane.ID}, {Role: "assistant", OperationID: "op3", LaneID: lane.ID},
+			},
+		}
+	}
+	full := map[uint64]chat.CoverageRecord{1: native(1, "op1"), 2: native(2, "op1"), 3: native(3, "op2"), 4: native(4, "op3"), 5: native(5, "op3")}
+	state := build(full)
 	whole, err := subsessionForkLink(state, "src-tab", state.Ledger, false)
 	if err != nil || *whole != (chat.ParentLink{ChatID: "src", TabID: "src-tab", Forked: true, ForkSourceSessionID: "head-id"}) {
 		t.Fatalf("whole-session fork link = %#v err=%v", whole, err)
@@ -167,21 +174,33 @@ func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
 	if err != nil || cut.ForkBeforeOperationID != "op3" {
 		t.Fatalf("a cut must stop before the next real prompt, skipping steers: %#v err=%v", cut, err)
 	}
-	// Review correction 3: a turn another engine answered reaches this lane
-	// only inside a later prompt's catch-up history, so a cut there refuses.
-	crossed := state
-	crossed.Ledger = append([]chat.LedgerEvent(nil), state.Ledger...)
+
+	// Review wa-subagent-1792181911547-3, correction 1. Row 2 was answered by
+	// another engine and reached this lane inside op3's prompt as catch-up.
+	caughtUp := map[uint64]chat.CoverageRecord{}
+	for sequence, record := range full {
+		caughtUp[sequence] = record
+	}
+	caughtUp[2] = chat.CoverageRecord{Sequence: 2, Status: chat.CoveragePromptSeen, DeliveryID: "op3"}
+	crossed := build(caughtUp)
 	crossed.Ledger[1].LaneID = "lane-codex"
+	if _, err := subsessionForkLink(crossed, "src-tab", crossed.Ledger, true); err != nil {
+		t.Fatalf("a fork from the latest message after a cross-engine catch-up must succeed: %v", err)
+	}
 	if _, err := subsessionForkLink(crossed, "src-tab", crossed.Ledger[:2], true); err == nil || !strings.Contains(err.Error(), "another engine") {
-		t.Fatalf("a cut across another engine's turn = %v", err)
+		t.Fatalf("a cut that drops the catch-up prompt = %v, want a refusal", err)
 	}
-	if _, err := subsessionForkLink(crossed, "src-tab", crossed.Ledger, false); err != nil {
-		t.Fatalf("a whole-session fork carries catch-up history natively: %v", err)
+	gap := map[uint64]chat.CoverageRecord{1: full[1], 2: full[2], 3: full[3], 5: full[5]}
+	for name, cutHere := range map[string]bool{"whole": false, "cut": true} {
+		gapped := build(gap)
+		if _, err := subsessionForkLink(gapped, "src-tab", gapped.Ledger, cutHere); err == nil || !strings.Contains(err.Error(), "has not received every turn") {
+			t.Fatalf("%s fork over a coverage gap = %v, want a refusal", name, err)
+		}
 	}
-	inherited := crossed
-	inherited.ContextFloor = 2
-	if _, err := subsessionForkLink(inherited, "src-tab", inherited.Ledger[:2], true); err != nil {
-		t.Fatalf("rows inherited from a grandparent are native here: %v", err)
+	floored := build(map[uint64]chat.CoverageRecord{1: {Sequence: 1, Status: chat.CoverageExcluded}, 2: {Sequence: 2, Status: chat.CoverageExcluded}, 3: full[3], 4: full[4], 5: full[5]})
+	floored.ContextFloor = 2
+	if _, err := subsessionForkLink(floored, "src-tab", floored.Ledger, false); err != nil {
+		t.Fatalf("rows below the source's floor are not this lane's to deliver: %v", err)
 	}
 	if got := turnsBeforeOperation(state.Ledger, "op3"); got != 1 {
 		t.Fatalf("turnsBeforeOperation = %d, want 1", got)

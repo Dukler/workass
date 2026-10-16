@@ -50,7 +50,7 @@ func NativeSessionForkSupported(providerID string) bool {
 // runs first and a retry re-binds the same copy instead of forking the
 // parent's later history.
 func (m *Manager) ForkSubsessionSession(ctx context.Context, req SubsessionForkRequest) (string, error) {
-	child, source, err := m.subsessionForkSource(req)
+	child, source, err := m.subsessionForkSource(req, false)
 	if err != nil {
 		return "", err
 	}
@@ -73,7 +73,7 @@ func (m *Manager) ForkSubsessionSession(ctx context.Context, req SubsessionForkR
 // child's committed lane binding, so lane selection resumes it exactly. No
 // provider call: idempotent for the same session, a refusal for any other.
 func (m *Manager) BindForkedSubsessionLane(req SubsessionForkRequest, forkedSessionID string) error {
-	child, source, err := m.subsessionForkSource(req)
+	child, source, err := m.subsessionForkSource(req, true)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (m *Manager) DiscardForkedSubsessionSession(providerID, sessionID string) {
 // subsessionForkSource validates a fork request and finds the parent's
 // committed binding: the pinned head when it is still known, otherwise any
 // committed lane of the parent on the same provider (same realm).
-func (m *Manager) subsessionForkSource(req SubsessionForkRequest) (SessionOptions, nativeSessionBinding, error) {
+func (m *Manager) subsessionForkSource(req SubsessionForkRequest, allowRealmFallback bool) (SessionOptions, nativeSessionBinding, error) {
 	if m == nil || m.nativeSessions == nil || m.nativeSessions.path == "" {
 		return SessionOptions{}, nativeSessionBinding{}, errors.New("durable provider lane storage is unavailable")
 	}
@@ -137,7 +137,10 @@ func (m *Manager) subsessionForkSource(req SubsessionForkRequest) (SessionOption
 			fallback, sameProvider = binding, true
 		}
 	}
-	if !found && sameProvider {
+	// Forking needs the pinned head itself; re-binding an existing copy only
+	// needs the parent's realm, which survives a later head rotation (review
+	// wa-subagent-1792181911547-3, suggestion 3).
+	if !found && sameProvider && allowRealmFallback {
 		source, found = fallback, true
 	}
 	if !found {

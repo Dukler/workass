@@ -954,7 +954,7 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	message["content"] = event.Text
 	// Only fork initialization excludes rows: they are the history this chat
 	// inherited from the chat it was forked from (shown folded in the child).
-	if event.ContextExcluded {
+	if event.ContextExcluded || event.Inherited {
 		message["inherited"] = true
 	}
 	if event.Result == "" {
