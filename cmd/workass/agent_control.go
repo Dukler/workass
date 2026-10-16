@@ -166,6 +166,11 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return h.chats.cancel(params)
 		}
 		return nil, errors.New("unknown chat control method")
+	case "schedule.create", "schedule.list", "schedule.cancel":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
+			return nil, err
+		}
+		return h.scheduledMessageCall(request.Method, params, tabID, chatID)
 	case "agent.catalog":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err

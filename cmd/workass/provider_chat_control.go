@@ -1016,6 +1016,9 @@ func (r *providerChatRuntime) DeleteChat(ctx context.Context, tabID, chatID stri
 		actor.mu.Unlock()
 		return err
 	}
+	if r.scheduled != nil {
+		r.scheduled.CancelChat(strings.TrimSpace(tabID), strings.TrimSpace(chatID), "chat deleted")
+	}
 	drainErr := actor.coordinator.Drain(ctx)
 	closeErr := actor.coordinator.Close(ctx)
 	actor.mu.Unlock()

@@ -135,6 +135,19 @@ func agentMCPTools() []map[string]any {
 			"delivery":    enum(agenttext.Get("schema.agentMCPTools.guidance.39"), "auto", "queue", "steer"),
 			"attachments": imagePaths(agenttext.Get("schema.agentMCPTools.guidance.attachments")),
 		}, "tab_id", "chat_id", "message"), false, false, false, true),
+		tool("workass_schedule_message", agenttext.Get("tools.workass_schedule_message"), mutationObject(map[string]any{
+			"message":               str(agenttext.Get("schema.scheduledMessage.message")),
+			"at":                    str(agenttext.Get("schema.scheduledMessage.at")),
+			"after_seconds":         map[string]any{"type": "integer", "minimum": 1, "maximum": 604800, "description": agenttext.Get("schema.scheduledMessage.after_seconds")},
+			"when_tcp_up":           str(agenttext.Get("schema.scheduledMessage.when_tcp_up")),
+			"when_file_exists":      str(agenttext.Get("schema.scheduledMessage.when_file_exists")),
+			"when_pid_exits":        integer(agenttext.Get("schema.scheduledMessage.when_pid_exits"), 2),
+			"expires_after_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 604800, "description": agenttext.Get("schema.scheduledMessage.expires_after_seconds")},
+		}, "message"), false, false, false, false),
+		tool("workass_list_scheduled_messages", agenttext.Get("tools.workass_list_scheduled_messages"), object(map[string]any{}), true, false, true, false),
+		tool("workass_cancel_scheduled_message", agenttext.Get("tools.workass_cancel_scheduled_message"), mutationObject(map[string]any{
+			"scheduled_message_id": str(agenttext.Get("schema.scheduledMessage.id")),
+		}, "scheduled_message_id"), false, true, true, false),
 		tool("workass_cancel_chat_turn", agenttext.Get("tools.workass_cancel_chat_turn"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 		}, "tab_id", "chat_id"), false, true, false, false),
@@ -325,6 +338,12 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "chat.delete"
 	case "workass_send_chat_message":
 		method = "chat.send"
+	case "workass_schedule_message":
+		method = "schedule.create"
+	case "workass_list_scheduled_messages":
+		method = "schedule.list"
+	case "workass_cancel_scheduled_message":
+		method = "schedule.cancel"
 	case "workass_cancel_chat_turn":
 		method = "chat.cancel"
 	case "workass_agent_catalog":
