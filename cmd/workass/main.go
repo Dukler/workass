@@ -36,6 +36,7 @@ import (
 	"workass/internal/lease"
 	"workass/internal/machineid"
 	providercontract "workass/internal/provider"
+	"workass/internal/scheduledmessage"
 	"workass/internal/tlscert"
 	"workass/internal/toolcli"
 	"workass/internal/voice"
@@ -279,6 +280,12 @@ func main() {
 		os.Exit(1)
 	}
 	chatControl := newChatControlCoordinator(acpManager, hub.Broadcast, providerChats)
+	// Scheduled messages are best effort at start: a store that cannot be
+	// opened leaves the three tools reporting "unavailable", not the daemon down.
+	scheduledMessages, scheduledErr := chatControl.attachScheduledMessages(stateDir, scheduledmessage.Options{})
+	if scheduledErr != nil {
+		logger.Printf("[workass] scheduled messages unavailable: %v", scheduledErr)
+	}
 	artifactHosting, err := artifacthost.New(stateDir, "https://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)), identity.MachineID)
 	if err != nil {
 		acpManager.Reset()
@@ -359,9 +366,15 @@ func main() {
 	rendererAgentRouter := registerRendererAgentRouter(hub)
 	agentControl.remoteChats = rendererAgentRouter
 	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, identity.MachineID)
+	// The scheduled-message loop lives for the daemon's lifetime and is joined
+	// first on shutdown, so no delivery races the actors' detach below.
+	var scheduledRun sync.WaitGroup
+	stopScheduled := func() {}
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			stopScheduled()
+			scheduledRun.Wait()
 			forkService.CancelAll()
 			// Durable chat actors own the disposable provider-lane attachments.
 			// Detach those actors before the manager tears down its bridge maps so
@@ -441,6 +454,15 @@ func main() {
 		cleanup()
 		logger.Printf("[workass] release provider startup after tool listener readiness: %v", err)
 		os.Exit(1)
+	}
+	if scheduledMessages != nil {
+		scheduledCtx, cancelScheduled := context.WithCancel(signalCtx)
+		stopScheduled = cancelScheduled
+		scheduledRun.Add(1)
+		go func() {
+			defer scheduledRun.Done()
+			scheduledMessages.Run(scheduledCtx)
+		}()
 	}
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
 		Bind:   *bind,

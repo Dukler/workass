@@ -21,8 +21,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// requested by the operator for cache-sharing fan-out of vision reviews.
 	// 2026-10-15: +1 workass_settle_chat, so agents can file the helper chats
 	// they create the way the sidebar Settle button does.
-	if len(tools) != 36 {
-		t.Fatalf("tool count = %d, want 36", len(tools))
+	// 2026-10-16: +3 scheduled message tools (schedule, list, cancel), the
+	// daemon-owned replacement for detached sleep/poll scripts.
+	if len(tools) != 39 {
+		t.Fatalf("tool count = %d, want 39", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

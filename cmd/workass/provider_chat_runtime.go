@@ -17,6 +17,7 @@ import (
 	"workass/internal/acp"
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
+	"workass/internal/scheduledmessage"
 )
 
 var errActorChatNotFound = errors.New("durable chat actor does not exist")
@@ -29,6 +30,9 @@ type providerChatRuntime struct {
 	sessions *sessionStore
 	stateDir string
 	publish  func(string, any)
+	// scheduled is the daemon-owned scheduled-message store; nil until the
+	// daemon (or a test) attaches one. Set before the runtime serves requests.
+	scheduled *scheduledmessage.Scheduler
 
 	mu      sync.Mutex
 	closeMu sync.Mutex
