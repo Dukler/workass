@@ -684,6 +684,17 @@ export class Store {
     this.pendingQueueSnapshots.set(chat.id, { chatId: chat.chatId ?? '', value: chat.queue });
     this.pendingQueueOperationIds.set(chat.id, rid('queue-op'));
   }
+  // Every right-pane change goes through here. The pane is part of the chat's
+  // durable presentation, and an unregistered change lost to the next chat
+  // reload: a refetch arriving before the debounced save carried the old pane
+  // and undid the click — the panel "opened and closed by itself" and its
+  // buttons felt flaky (user 2026-10-16). Registering it fences the value
+  // until the daemon's receipt, as rename, settle and unread already were.
+  private setChatPane(chat: Chat, pane: Chat['pane']) {
+    if (chat.pane === pane) return;
+    chat.pane = pane;
+    this.markPresentationMutation(chat);
+  }
   private markPresentationMutation(chat: Chat) {
     const fingerprint = presentationFingerprint(chat);
     const pending = this.pendingPresentationOperations.get(chat.id);
@@ -2514,7 +2525,7 @@ export class Store {
       this.addToast('No se pudo abrir el artefacto', error instanceof Error ? error.message : 'El navegador no pudo navegar.');
     });
     if (this.browserPresentationFor(chat.id)) this.clearBrowserPresentation(chat.id);
-    chat.pane = 'browser';
+    this.setChatPane(chat, 'browser');
     this.bumpChat(chat);
     return true;
   }
@@ -3637,11 +3648,11 @@ export class Store {
   // occupant already shown closes the column for this chat.
   private setActivePane(pane: RightPane) {
     const chat = this.active(); if (!chat) return;
-    chat.pane = nextPane(chatPane(chat), pane);
+    this.setChatPane(chat, nextPane(chatPane(chat), pane));
     this.bumpChat(chat);
   }
   toggleRail() { this.setActivePane('rail'); }
-  closeRail() { const chat = this.active(); if (!chat) return; chat.pane = null; this.bumpChat(chat); }
+  closeRail() { const chat = this.active(); if (!chat) return; this.setChatPane(chat, null); this.bumpChat(chat); }
   toggleRailWide() { this.state.panes.railWide = !this.state.panes.railWide; this.bumpApp(); }
   // An agent's explicit browser.open (opt-in + per-chat, user law 2026-07-12)
   // marks the OWNING chat and nothing else: never the active tab, never another
@@ -3684,7 +3695,7 @@ export class Store {
   // The pane's "Flotante": the page leaves the right column and floats.
   floatBrowser() {
     const chat = this.active(); if (!chat) return;
-    if (chatPane(chat) === 'browser') chat.pane = null;
+    if (chatPane(chat) === 'browser') this.setChatPane(chat, null);
     this.setBrowserPresentation(chat.id, 'float');
     this.bumpChat(chat);
   }
@@ -3698,7 +3709,7 @@ export class Store {
   dockBrowser() {
     const chat = this.active(); if (!chat) return;
     this.clearBrowserPresentation(chat.id);
-    chat.pane = 'browser';
+    this.setChatPane(chat, 'browser');
     this.bumpChat(chat);
   }
   // Its own always-on-top window; closing that window floats it again.
@@ -3733,7 +3744,7 @@ export class Store {
   // Header bg-process chip → reveal + pulse the active chat's rail Tareas card.
   focusTareas() {
     const chat = this.active();
-    if (chat) chat.pane = 'rail';
+    if (chat) this.setChatPane(chat, 'rail');
     this.state.flashTareas = true;
     if (chat) this.bumpChat(chat);
     else this.bumpApp();   // flashTareas is transient (never mirrored)
