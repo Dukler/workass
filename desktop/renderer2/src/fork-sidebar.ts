@@ -264,7 +264,9 @@ export function withChildChats(fork: ForkChatBadge | null, kids: readonly ChildC
  * child must stay visible).
  */
 export function forkSidebarOpen(explicit: boolean | undefined, active: boolean, running: boolean, childActive = false): boolean {
-  return explicit ?? ((active && running) || childActive);
+  // The chat you are in is never hidden, even by an earlier explicit collapse
+  // (review wa-subagent-1792180415563-2, suggestion 4).
+  return childActive || (explicit ?? (active && running));
 }
 
 // ── selection ────────────────────────────────────────────────────────────────

@@ -396,7 +396,7 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 			return nil, errors.New("the forked subsession is not addressable")
 		}
 		if focus {
-			if err := c.providerChats.FocusChat(tabID, chatID, providercontract.OperationID("focus:"+string(operationID))); err != nil {
+			if err := c.providerChats.FocusChat(tabID, chatID, derivedOperationID("focus:", operationID, "")); err != nil {
 				return nil, err
 			}
 		}
@@ -439,7 +439,7 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 	created["parentTabId"], created["parentChatId"], created["forked"] = parentTabID, parentChatID, fork
 	if message := strings.TrimSpace(fieldString(params, "message")); message != "" {
 		receipt, err := c.providerChats.QueueAgentMessageWithAttachments(ctx, tabID, chatID,
-			providercontract.OperationID(string(operationID)+":first-message"), message, "auto", nil)
+			derivedOperationID("", operationID, ":first-message"), message, "auto", nil)
 		if err != nil {
 			return nil, fmt.Errorf("subsession created, but its first message failed: %w", err)
 		}
@@ -447,6 +447,18 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 	}
 	c.refreshCreated(tabID, chatID, focus)
 	return created, nil
+}
+
+// derivedOperationID names a follow-up step of one caller operation. A long
+// caller id is replaced by its digest so the derived id stays within the
+// operation-id limit (review wa-subagent-1792180415563-2, suggestion 2).
+func derivedOperationID(prefix string, operationID providercontract.OperationID, suffix string) providercontract.OperationID {
+	base := string(operationID)
+	if len(prefix)+len(base)+len(suffix) > 256 {
+		sum := sha256.Sum256([]byte(base))
+		base = fmt.Sprintf("h-%x", sum[:16])
+	}
+	return providercontract.OperationID(prefix + base + suffix)
 }
 
 func headlessCreateIntentDigest(parentTabID, parentChatID string, params map[string]any) (string, error) {

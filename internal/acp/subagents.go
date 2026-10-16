@@ -412,6 +412,9 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 		ProviderID: providerID, ForkedSessionID: forkedSessionID,
 	})
 	if err != nil {
+		if forkedSessionID != "" {
+			m.discardNativeSessionCopy(providerID, forkedSessionID)
+		}
 		m.finishSubagent(run, nil, err)
 		return
 	}
