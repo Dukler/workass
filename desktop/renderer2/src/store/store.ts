@@ -4083,6 +4083,12 @@ export class Store {
       this.captureChatOrder();
       this.bumpApp();
     }
+    // Create-fence law, same as the durable chat create: pin the optimistic row
+    // and its position until the authoritative projection echoes the committed
+    // child (local) or its machine hydrate merges it (remote). An early
+    // snapshot must never reorder or drop the row before the fork lands.
+    if (machineId) this.remoteChatCreateFences.add(childTabId);
+    else this.pendingChatCreates.add(childTabId);
     // The attempt is the exact durable create request; resending it verbatim
     // (cwd included) keeps the daemon's frame fence identical after a deploy,
     // where re-reading owner.cwd would hash a different fork.
@@ -4106,6 +4112,7 @@ export class Store {
           // landed, so do not leave a retry anchor for a second click.
           const committedOwner = this.chat(tabId);
           if (committedOwner?._forkAttempt?.operationId === operationId) delete committedOwner._forkAttempt;
+          this.releaseForkCreateFence(childTabId);
           this.requestChatReadback(owner);
           this.addToast('Bifurcación creada', 'La copia nueva aparecerá en la lista en unos instantes.');
           return;
@@ -4116,6 +4123,7 @@ export class Store {
         // Without a readback, a pre-commit refusal strands the renderer-only
         // row beside the real daemon projection (or alone until some
         // unrelated restore removes it).
+        this.releaseForkCreateFence(childTabId);
         this.requestChatReadback(liveChild ?? owner);
         this.addToast('No se pudo bifurcar', info?.error ?? 'La bifurcación no devolvió una sesión adjuntada.');
         return;
@@ -4138,10 +4146,12 @@ export class Store {
       await this.ensureRecentHistory(childTabId, CHAT_INITIAL_HISTORY, true);
       this.switchChat(childTabId);
       if (requested.atMessageId && info.forkedFrom?.atMessageId !== messageId) {
-        // A daemon older than the message-scoped fork silently ignored
-        // atMessageId and copied the whole conversation: say so instead of
-        // overstating how much was copied (review 2026-10-16).
-        this.addToast('Bifurcación creada', 'El daemon no reconoció la bifurcación por mensaje: la copia incluye toda la conversación.');
+        // The reply is missing the echo when the daemon did not honor the
+        // message-scoped request. The wording is true in every version mix:
+        // an older daemon copies the whole ledger, and a binary that honored
+        // the id before the echo existed (f58c6ddc height) still makes this
+        // cautious warning the only honest phrasing (review 2026-10-16).
+        this.addToast('Bifurcación creada', 'El daemon no confirmó la bifurcación por mensaje: la copia puede incluir todo el historial.');
       } else {
         this.addToast('Bifurcación creada', 'La conversación continúa en la copia nueva.');
       }
@@ -4154,9 +4164,17 @@ export class Store {
       // Reconcile the optimistic row with the daemon projection: it either
       // becomes the committed child (a durable retry stays possible via
       // _forkAttempt) or disappears instead of lingering whole.
+      this.releaseForkCreateFence(childTabId);
       this.requestChatReadback(liveChild ?? owner);
       this.addToast('No se pudo bifurcar', error instanceof Error ? error.message : 'El motor rechazó la bifurcación.');
     }
+  }
+
+  // Refused forks release the create fence so the next authoritative
+  // projection can drop the ghost row instead of pinning it forever.
+  private releaseForkCreateFence(childTabId: string) {
+    this.pendingChatCreates.delete(childTabId);
+    this.remoteChatCreateFences.delete(childTabId);
   }
 
   // Bounded wait for the daemon-projected fork child to land in the store

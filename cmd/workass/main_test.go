@@ -3737,6 +3737,12 @@ func TestWireTraceForkChatByHoveredMessageID(t *testing.T) {
 	if fmt.Sprint(forkedFrom["atTurn"]) != "1" || forkedFrom["tabId"] != sourceTabID {
 		t.Fatalf("message point did not resolve to turn 1: %#v", forkedFrom)
 	}
+	// The daemon must echo the message-scoped request on the create path: the
+	// renderer uses the echo to detect a daemon that copied the whole ledger
+	// instead of the hovered turn (review follow-up wa-subagent-1792166920817-4).
+	if forkedFrom["atMessageId"] != firstAssistantID {
+		t.Fatalf("fork reply did not echo atMessageId = %#v", forkedFrom)
+	}
 
 	client.invoke(t, 8, "chat:archive-load", forkTabID)
 	forkArchiveReply := client.waitReply(t, 8, 2*time.Second)
@@ -3757,6 +3763,54 @@ func TestWireTraceForkChatByHoveredMessageID(t *testing.T) {
 	}
 	if forkRetryReply.Result.(map[string]any)["sessionId"] != forkSession["sessionId"] {
 		t.Fatalf("fork by message lost-reply retry changed child = %#v vs %#v", forkRetryReply.Result, forkSession)
+	}
+	retryForkedFrom, ok := forkRetryReply.Result.(map[string]any)["forkedFrom"].(map[string]any)
+	if !ok || retryForkedFrom["atMessageId"] != firstAssistantID {
+		t.Fatalf("fork retry reply did not echo atMessageId = %#v", forkRetryReply.Result)
+	}
+}
+
+// A request without atMessageId must hash byte-identically to the struct the
+// pre-atMessageId binary marshalled, in field order: CreationDigest is durable
+// actor state, so a lost-reply retry replays exact requested content across a
+// daemon upgrade. The local legacy struct below pins that byte contract
+// (review follow-up wa-subagent-1792166920817-4).
+func TestForkInitializationDigestWithoutAtMessageIDIsUpgradeCompatible(t *testing.T) {
+	arg := map[string]any{
+		"tabId": "tab-src", "chatId": "chat-src", "newTabId": "tab-dst", "newChatId": "chat-dst",
+		"cwd": "/tmp/workass-fork-digest",
+	}
+	digest, err := forkInitializationDigest(arg, "tab-src", "chat-src", "tab-dst", "chat-dst")
+	if err != nil {
+		t.Fatalf("fork digest: %v", err)
+	}
+	legacy := struct {
+		SourceTabID  string
+		SourceChatID string
+		NewTabID     string
+		NewChatID    string
+		CWD          string
+		AtTurn       int
+		HasAtTurn    bool
+	}{
+		SourceTabID: "tab-src", SourceChatID: "chat-src", NewTabID: "tab-dst", NewChatID: "chat-dst",
+		CWD: "/tmp/workass-fork-digest",
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy digest payload: %v", err)
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256(raw))
+	if digest != want {
+		t.Fatalf("upgrade digest drift = %s want %s", digest, want)
+	}
+	arg["atMessageId"] = "msg-1"
+	bound, err := forkInitializationDigest(arg, "tab-src", "chat-src", "tab-dst", "chat-dst")
+	if err != nil {
+		t.Fatalf("bound fork digest: %v", err)
+	}
+	if bound == digest {
+		t.Fatalf("atMessageId is not bound into the fork digest")
 	}
 }
 
