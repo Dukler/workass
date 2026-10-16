@@ -112,14 +112,14 @@ func (m *Manager) hibernateCandidate(b *Bridge, now time.Time) (hibernateCandida
 	}
 	if recycleAtIdle {
 		reason := firstNonEmpty(recycleReason, "recycle")
-		if m.hasRunningSpawnedWorkForChat(tabID, chatID) {
+		if m.engineHoldsLiveWork(tabID, chatID) {
 			m.opts.Logf("acp hibernate aborted", map[string]any{"key": key, "reason": reason, "state": string(state), "pinned": false, "spawnedWork": true})
 			return hibernateCandidate{}, false
 		}
 		return hibernateCandidate{bridge: b, reason: reason, lastActivity: lastActivity, now: now}, true
 	}
 	if m.opts.HibernateTTL > 0 && now.Sub(lastActivity) >= m.opts.HibernateTTL {
-		if m.hasRunningSpawnedWorkForChat(tabID, chatID) {
+		if m.engineHoldsLiveWork(tabID, chatID) {
 			m.opts.Logf("acp hibernate aborted", map[string]any{"key": key, "reason": hibernateReasonIdleTTL, "state": string(state), "pinned": false, "spawnedWork": true})
 			return hibernateCandidate{}, false
 		}
@@ -143,7 +143,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 		tabID := b.tabID
 		chatID := b.chatID
 		b.mu.Unlock()
-		spawnedWork = m.hasRunningSpawnedWorkForChat(tabID, chatID)
+		spawnedWork = m.engineHoldsLiveWork(tabID, chatID)
 	}
 
 	b.mu.Lock()
@@ -706,4 +706,21 @@ func durationSinceMillis(start, end time.Time) any {
 		return nil
 	}
 	return end.Sub(start).Milliseconds()
+}
+
+// engineHoldsLiveWork is what an engine may not be stopped under: background
+// work it is running, and session timers it is holding (CronCreate,
+// ScheduleWakeup, /loop). Those timers live only inside the provider process.
+// Claude Code never stops that process while its terminal is open, so they
+// fire; idle sleep here killed them silently, and the agent learned only from
+// a later "lost to the restart" notice — or never (lagspace, 2026-10-16).
+func (m *Manager) engineHoldsLiveWork(tabID, chatID string) bool {
+	if m.hasRunningSpawnedWorkForChat(tabID, chatID) {
+		return true
+	}
+	if m.harnessTurns == nil {
+		return false
+	}
+	evidence := m.harnessTurns.getByChat(tabID, chatID)
+	return evidence != nil && evidence.CronsKnown && len(evidence.Crons) > 0
 }

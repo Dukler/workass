@@ -1850,3 +1850,46 @@ func TestResumedClaudeAgentTakesItsNameFromTheLaunchReceipt(t *testing.T) {
 		t.Fatalf("resumed agent = label %q model %q call %q status %q kind %q", item.Label, item.ModelLabel, item.ToolCallID, item.Status, item.Kind)
 	}
 }
+
+// Session timers (CronCreate, ScheduleWakeup, /loop) live only inside the
+// provider process. Claude Code keeps that process alive, so they fire; idle
+// sleep here killed them silently (lagspace "cleanup", 2026-10-16). An engine
+// holding a pending timer stays awake; once the timers are gone it may sleep.
+func TestLifecyclePendingSessionTimersBlockIdleTTLHibernation(t *testing.T) {
+	t.Parallel()
+	manager, events := newFakeManager(t, "echo-prompt", Options{
+		HibernateTTL:                 time.Millisecond,
+		LifecycleCheckInterval:       time.Hour,
+		RSSSampleInterval:            time.Hour,
+		SpawnedWorkReconcileInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+
+	const tabID = "timer-pin-idle-tab"
+	chatID := "chat-" + tabID
+	session := newFakeSession(t, manager, tabID)
+	job := startAppChatJob(t, manager, session.SessionID, tabID, "finish with a timer set")
+	assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+	_ = waitProcState(t, manager, StateIdle, 500*time.Millisecond)
+	bridge := bridgeForTestSession(t, manager, session.SessionID, tabID, chatID)
+
+	manager.harnessTurns.record(session.SessionID, &harnessTurnEvidence{
+		HookEvidence: true, TasksKnown: true, CronsKnown: true, At: time.Now(), TabID: tabID, ChatID: chatID,
+		Crons: []harnessSessionCron{{Schedule: "in 3h", Recurring: false}},
+	})
+	setBridgeLastActivityForTest(bridge, time.Now().Add(-time.Hour))
+	manager.SweepLifecycle()
+	if procHasState(manager, StateHibernated) {
+		t.Fatalf("an engine holding a pending session timer was put to sleep: %#v", manager.Processes())
+	}
+
+	// The timer fired or was deleted: the next turn-end report lists none.
+	manager.harnessTurns.record(session.SessionID, &harnessTurnEvidence{
+		HookEvidence: true, TasksKnown: true, CronsKnown: true, At: time.Now(), TabID: tabID, ChatID: chatID,
+	})
+	setBridgeLastActivityForTest(bridge, time.Now().Add(-time.Hour))
+	manager.SweepLifecycle()
+	if !procHasState(manager, StateHibernated) {
+		t.Fatalf("an idle engine with no timers left was kept awake: %#v", manager.Processes())
+	}
+}
