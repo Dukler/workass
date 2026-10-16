@@ -78,6 +78,9 @@ func (strategy claudeProviderSpawnedWorkStrategy) decodeTask(raw map[string]any)
 		Status:       asString(raw["status"]),
 		Backgrounded: raw["backgrounded"] == true,
 	}
+	// Claude Code's Agent tool forks with subagent_type "fork": the child
+	// inherits the full conversation.
+	task.Forked = strings.EqualFold(strings.TrimSpace(task.SubagentType), "fork")
 	if path := asString(raw["outputFile"]); path != "" {
 		if safe, ok := strategy.ValidateOutputPath(task.TaskID, path); ok {
 			task.OutputFile = safe

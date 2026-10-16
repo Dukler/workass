@@ -24,6 +24,8 @@ export interface CatalogGroup {
   latencyMs?: number;
   error?: string;
   badge?: string;
+  // The provider can fork a chat natively (a forked subsession remembers it).
+  nativeFork?: boolean;
 }
 
 // Typed delivery semantics negotiated by the exact attached provider lane.
@@ -388,6 +390,9 @@ export interface SpawnedWorkItem {
   label: string;
   // The agent task that started this work (Claude Code's parent_task_id).
   parentTaskId?: string;
+  // A native fork of its parent's conversation (Workass fork:true, or Claude
+  // Code's subagent_type "fork"). Drawn only on this child's own row.
+  forked?: boolean;
   // Lifecycle, not shape: 'service' is a process expected never to finish (a
   // dev server), and absent or 'work' is work whose completion is news. A
   // service is alive without the chat being busy, so it never drives the
@@ -738,7 +743,7 @@ export interface WorkassApi {
   // and gets a fresh provider lane. atMessageId names the transcript row whose
   // turn the prefix includes; the daemon resolves the semantic turn boundary on
   // its own ledger, so callers never have to count turns.
-  appChatFork?: (opts: { tabId: string; chatId: string; newTabId: string; newChatId: string; operationId: string; atMessageId?: string; atTurn?: number; cwd?: string | null }) => Promise<AcpSessionInfo & { forkedFrom?: { tabId: string; atTurn: number; atMessageId?: string } }>;
+  appChatFork?: (opts: { tabId: string; chatId: string; newTabId: string; newChatId: string; operationId: string; atMessageId?: string; atTurn?: number; cwd?: string | null; subsession?: boolean; title?: string }) => Promise<AcpSessionInfo & { forkedFrom?: { tabId: string; atTurn: number; atMessageId?: string } }>;
   // Account-scoped metadata read. It never binds/replaces a chat session and
   // never sends a provider prompt; the resulting snapshot arrives through the
   // existing chat:plan-usage event.

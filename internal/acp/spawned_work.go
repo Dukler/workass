@@ -110,6 +110,10 @@ type SpawnedWorkItem struct {
 	// subagents. Both are redacted and bounded before they are stored.
 	ModelLabel    string `json:"modelLabel,omitempty"`
 	ResultExcerpt string `json:"resultExcerpt,omitempty"`
+	// Forked marks an agent that started as a native fork of its parent's
+	// conversation (a forked Workass subagent, or Claude Code's
+	// subagent_type "fork"). Only the child's own row shows it.
+	Forked bool `json:"forked,omitempty"`
 	// Immutable actor ownership is persisted with the runtime record so later
 	// progress/settlement cannot be rebound to whichever provider turn happens
 	// to be live when the snapshot is emitted.
@@ -579,7 +583,7 @@ func (m *Manager) observeSpawnToolEvent(obs spawnToolObservation) {
 			OriginLaneID: strings.TrimSpace(obs.LaneID), OriginOperationID: strings.TrimSpace(obs.OperationID), OriginTurnID: strings.TrimSpace(obs.JobID),
 		}
 	}
-	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, "", "", "", outputFile)
+	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, "", "", "", outputFile, false)
 	delete(m.spawnedCandidates, candidateKey)
 	m.spawnedWorkMu.Unlock()
 	if changed && rec != nil {
@@ -612,7 +616,7 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 		// interrupt or a stop took down; this list is how it knows itself.
 		for taskID, task := range live {
 			candidate := m.candidateForTaskLocked(sessionID, task.ToolCallID, tabID, chatID, providerID)
-			rec, itemChanged := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile)
+			rec, itemChanged := m.upsertSpawnedWorkLocked(candidate, taskID, task.Description, task.TaskType, task.SubagentType, task.OutputFile, task.Forked)
 			if rec != nil {
 				rec.LastLevelSeen = now
 				rec.MissingSince = time.Time{}
@@ -661,7 +665,7 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	m.spawnedWorkMu.Lock()
 	candidate := m.candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, providerID)
 	revived := event.Kind == "started" && m.reviveResumedAgentLocked(tabID, chatID, taskID, &candidate, launched)
-	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, description, task.TaskType, task.SubagentType, task.OutputFile)
+	rec, changed := m.upsertSpawnedWorkLocked(candidate, taskID, description, task.TaskType, task.SubagentType, task.OutputFile, task.Forked)
 	changed = changed || revived
 	if rec != nil {
 		rec.LastLevelSeen = now
@@ -837,7 +841,7 @@ func (m *Manager) candidateForTaskLocked(sessionID, toolCallID, tabID, chatID, p
 	}
 }
 
-func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID, description, taskType, subagentType, outputFile string) (*spawnedWorkRecord, bool) {
+func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID, description, taskType, subagentType, outputFile string, forked bool) (*spawnedWorkRecord, bool) {
 	taskID = normalizeSpawnedWorkTaskID(taskID)
 	if candidate.TabID == "" || candidate.ChatID == "" || taskID == "" {
 		return nil, false
@@ -879,6 +883,10 @@ func (m *Manager) upsertSpawnedWorkLocked(candidate spawnedWorkCandidate, taskID
 	}
 	if rec.SessionID == "" {
 		rec.SessionID = candidate.SessionID
+	}
+	if !rec.Item.Forked && forked {
+		rec.Item.Forked = true
+		changed = true
 	}
 	if rec.Item.ToolCallID == "" && candidate.ToolCallID != "" {
 		rec.Item.ToolCallID = candidate.ToolCallID
@@ -1036,6 +1044,7 @@ func (m *Manager) registerSubagentSpawnedWork(tabID, chatID string, run Subagent
 		LastToolName: compactText(redactSensitiveText(run.Phase), 120),
 		OriginTurnID: strings.TrimSpace(run.RootJobID),
 		OriginLaneID: strings.TrimSpace(run.originLaneID), OriginOperationID: strings.TrimSpace(run.originOperationID),
+		Forked: run.Forked,
 	}
 	if (item.OriginLaneID == "" || item.OriginOperationID == "") && run.RootJobID != "" {
 		if lane := m.providerLaneForJob(run.RootJobID); lane != nil {

@@ -85,6 +85,9 @@ type CatalogGroup struct {
 	Error             string            `json:"error,omitempty"`
 	FixHint           string            `json:"fixHint,omitempty"`
 	Badge             string            `json:"badge,omitempty"`
+	// NativeFork: a chat on this provider can start a forked subsession that
+	// remembers the conversation (a native session fork, never a replay).
+	NativeFork bool `json:"nativeFork,omitempty"`
 }
 
 // Provider is the small provider-specific seam used before any ACP/native
@@ -2451,6 +2454,7 @@ func (r *providerRuntime) catalogGroupLocked() CatalogGroup {
 		Modes:             append([]Mode(nil), r.Modes...),
 		PermissionIntents: permissionIntentModes(r.Config.ID, r.Modes),
 		AssistantBrand:    providerAdapterForID(r.Config.ID).model.AssistantBrand,
+		NativeFork:        NativeSessionForkSupported(r.Config.ID),
 		Status:            status,
 		LatencyMs:         r.LatencyMs,
 		Error:             r.Error,

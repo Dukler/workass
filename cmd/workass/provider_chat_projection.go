@@ -501,6 +501,25 @@ type actorLedgerWindow struct {
 	count          int
 }
 
+// projectSubsessionParent names the chat a subsession lives under. A forked
+// subsession says so only about itself (subsessionForked); the parent's own
+// projection never distinguishes its children (user 2026-10-16).
+func projectSubsessionParent(out map[string]any, parent *chat.ParentLink) {
+	if parent == nil {
+		delete(out, "parentChatId")
+		delete(out, "parentTabId")
+		delete(out, "subsessionForked")
+		return
+	}
+	out["parentChatId"] = parent.ChatID
+	out["parentTabId"] = parent.TabID
+	if parent.Forked {
+		out["subsessionForked"] = true
+	} else {
+		delete(out, "subsessionForked")
+	}
+}
+
 func projectActorChatWithHistoryWindow(out map[string]any, state chat.State, history actorHistoryProjection, tailLimit int, window actorLedgerWindow) error {
 	state = state.PresentationState()
 	if out == nil {
@@ -519,6 +538,7 @@ func projectActorChatWithHistoryWindow(out map[string]any, state chat.State, his
 	out["id"] = p.TabID
 	out["chatId"] = state.ChatID
 	out["actorRevision"] = state.Revision
+	projectSubsessionParent(out, state.Parent)
 	out["title"] = p.Title
 	out["titleLocked"] = p.TitleLocked
 	setOptionalProjectionString(out, "group", p.Group)
@@ -932,6 +952,11 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	message["id"] = event.MessageID
 	message["role"] = event.Role
 	message["content"] = event.Text
+	// Only fork initialization excludes rows: they are the history this chat
+	// inherited from the chat it was forked from (shown folded in the child).
+	if event.ContextExcluded {
+		message["inherited"] = true
+	}
 	if event.Result == "" {
 		delete(message, "result")
 	} else {

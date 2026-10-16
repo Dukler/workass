@@ -5,7 +5,7 @@ import { store } from '../store/store';
 import { nodeState, nodeDuration, ToolDetail } from './messages';
 import { subagentActivity, type SubagentNode } from '../subagent-layout';
 import { spawnedWorkActivity } from '../tool-names';
-import { ActionGlyph, IcStopSquare, ModelIcon } from '../icons';
+import { ActionGlyph, IcFork, IcStopSquare, ModelIcon } from '../icons';
 
 // One subagent as a compact disclosure: model icon + label + elapsed on top, then
 // model id + a human live activity. Long labels and model ids ellipsize; the
@@ -47,6 +47,9 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
         <span className="r-mi" data-p={n.provider ?? undefined} title={ownership}><ModelIcon provider={n.provider} /></span>
         <span className="r-said">
           <span className="r-satop">
+            {/* ⑂ only on the forked child itself (user 2026-10-16): it began
+                as a native fork and remembers the conversation. */}
+            {n.work?.forked && <span className="r-fk" title="Bifurcado: recuerda la conversación del chat" aria-label="Subagente bifurcado"><IcFork /></span>}
             <span className="r-nm" title={label}>{label}</span>
             {dur && <span className="r-el">{dur}</span>}
           </span>

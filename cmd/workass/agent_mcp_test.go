@@ -23,8 +23,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// they create the way the sidebar Settle button does.
 	// 2026-10-16: +3 scheduled message tools (schedule, list, cancel), the
 	// daemon-owned replacement for detached sleep/poll scripts.
-	if len(tools) != 39 {
-		t.Fatalf("tool count = %d, want 39", len(tools))
+	// 2026-10-16: +1 workass_create_subsession, permanent child chats (fresh
+	// or forked) that are not subagents (user order).
+	if len(tools) != 40 {
+		t.Fatalf("tool count = %d, want 40", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

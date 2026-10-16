@@ -2,10 +2,12 @@
 // desktop/docs/mocks/forks/sidebar-nested.html, as amended by the user on
 // 2026-10-16). No React, no store; tested by tests/fork-sidebar.test.ts.
 //
-// Only real child sessions live here. Subagents (workass_spawn_subagent,
-// Claude Code's Agent tool) are work of the parent's turn: they belong in the
-// right rail, NEVER in the left panel (user 2026-10-16, correcting 8dc1e66d).
-// No fork glyph on any parent-side row; ⑂ lives only inside the child's view.
+// Only real child sessions live here: SUBSESSIONS (permanent child chats,
+// fresh or forked, user 2026-10-16) and the children of agent fork runs.
+// Subagents (workass_spawn_subagent, Claude Code's Agent tool) are work of the
+// parent's turn: they belong in the right rail, NEVER in the left panel
+// (correcting 8dc1e66d). No fork glyph on any parent-side row; ⑂ lives only on
+// the child itself.
 //
 // Shape: a parent chat row carries a neutral count + chevron; expanded, one
 // flat single-line list holds every child. Fork retries replace their original
@@ -82,12 +84,12 @@ export function forkPage<T>(items: readonly T[], expanded: boolean, page = FORK_
 
 // ── one neutral subsession list (user, 2026-10-16) ───────────────────────────
 //
-// Parent-side rows never say "fork". `fork` carries what opening the row
-// selects (the child's main-area view).
+// Parent-side rows never say "fork", and a fresh and a forked subsession draw
+// the same line. `fork` / `chatTabId` carry what opening the row selects.
 
 export interface SubsessionRow {
   key: string;
-  kind: 'fork';
+  kind: 'fork' | 'chat';
   label: string;
   /** Model icon provider key; null → the generic glyph. */
   brand: string | null;
@@ -107,6 +109,65 @@ export interface SubsessionRow {
   wallMs: number | null;
   /** Set for fork children: it opens the main-area subsession view. */
   fork?: { runId: string; rootId: string };
+  /** Set for subsession chats: opening switches to that chat. */
+  chatTabId?: string;
+}
+
+/** A subsession chat as the nest sees it (computed by the sidebar). */
+export interface ChildChatFacts {
+  tabId: string;
+  title: string;
+  brand: string | null;
+  running: boolean;
+  /** Start of the running turn; 0 when idle or unknown. */
+  since: number;
+  /** Last activity; the idle row shows its age. */
+  touched: number;
+  /** Earliest known stamp of the chat (its first message), for ordering. */
+  createdMs: number;
+}
+
+/** One subsession chat as the same neutral row a fork child uses. */
+export function chatSubsessionRow(kid: ChildChatFacts, nowMs: number): SubsessionRow {
+  return {
+    key: `chat:${kid.tabId}`,
+    kind: 'chat',
+    label: kid.title.trim() || 'Subsesión',
+    brand: kid.brand,
+    state: kid.running ? 'running' : 'completed',
+    word: null,
+    startedMs: kid.running ? kid.since : 0,
+    orderMs: kid.createdMs || kid.touched,
+    wallMs: kid.running || !kid.touched ? null : Math.max(0, nowMs - kid.touched),
+    chatTabId: kid.tabId,
+  };
+}
+
+/**
+ * Subsession chats grouped under their parent's tab id. A chat nests only when
+ * its parent is present (a deleted parent leaves the child top-level); order
+ * is the chats' own order.
+ */
+export function subsessionChildren<T extends { id: string; chatId?: string; parentChatId?: string }>(
+  chats: readonly T[],
+): Map<string, T[]> {
+  const parentTab = new Map<string, string>();
+  for (const chat of chats) if (chat.chatId) parentTab.set(chat.chatId, chat.id);
+  const out = new Map<string, T[]>();
+  for (const chat of chats) {
+    const parent = chat.parentChatId ? parentTab.get(chat.parentChatId) : undefined;
+    if (!parent || parent === chat.id) continue;
+    const list = out.get(parent);
+    if (list) list.push(chat); else out.set(parent, [chat]);
+  }
+  return out;
+}
+
+/** Tab ids of every chat that nests under a present parent. */
+export function nestedSubsessionIds(children: ReadonlyMap<string, readonly { id: string }[]>): Set<string> {
+  const out = new Set<string>();
+  for (const kids of children.values()) for (const kid of kids) out.add(kid.id);
+  return out;
 }
 
 /** One fork child as a neutral subsession row; label/brand resolve in the component. */
@@ -181,9 +242,29 @@ export function forkChatBadge(summary: ForkSummaryChat | undefined, list: ForkLi
   return null;
 }
 
-/** Collapsed unless the user opened it, or it is the chat you are in and a subsession is running. */
-export function forkSidebarOpen(explicit: boolean | undefined, active: boolean, running: boolean): boolean {
-  return explicit ?? (active && running);
+/**
+ * The parent badge counts every child the same: fork children plus subsession
+ * chats. Null when there is none.
+ */
+export function withChildChats(fork: ForkChatBadge | null, kids: readonly ChildChatFacts[]): ForkChatBadge | null {
+  if (!kids.length) return fork;
+  let running = fork?.running ?? 0;
+  let since = fork?.since ?? 0;
+  for (const kid of kids) {
+    if (!kid.running) continue;
+    running += 1;
+    if (kid.since && (!since || kid.since < since)) since = kid.since;
+  }
+  return { points: fork?.points ?? 0, children: (fork?.children ?? 0) + kids.length, running, since };
+}
+
+/**
+ * Collapsed unless the user opened it, or it is the chat you are in and a
+ * subsession is running, or you are inside one of its subsessions (the open
+ * child must stay visible).
+ */
+export function forkSidebarOpen(explicit: boolean | undefined, active: boolean, running: boolean, childActive = false): boolean {
+  return explicit ?? ((active && running) || childActive);
 }
 
 // ── selection ────────────────────────────────────────────────────────────────

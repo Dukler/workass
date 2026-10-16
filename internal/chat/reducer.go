@@ -844,7 +844,15 @@ func reduceInitializeChat(state *State, command InitializeChat) error {
 	if operationID == "" || digest == "" {
 		return errors.New("new chat initialization requires immutable operation identity and digest")
 	}
+	parent := command.Parent.normalized()
+	if err := parent.Validate(state.ChatID); err != nil {
+		return err
+	}
+	if parent != nil && parent.Forked {
+		return errors.New("a forked subsession is created by fork initialization, not as a fresh chat")
+	}
 	state.Presentation = presentation
+	state.Parent = parent
 	state.CreationOperationID = operationID
 	state.CreationDigest = digest
 	state.Initialized = true
@@ -900,7 +908,18 @@ func reduceInitializeFork(state *State, command InitializeFork) error {
 		event.Permission = clonePermission(source.Permission)
 		ledger = append(ledger, event)
 	}
+	parent := command.Parent.normalized()
+	if err := parent.Validate(state.ChatID); err != nil {
+		return err
+	}
+	if parent != nil && !parent.Forked {
+		return errors.New("a subsession made by fork initialization must be a native fork")
+	}
+	if parent != nil && parent.ChatID != sourceChatID {
+		return errors.New("a forked subsession's parent must be its fork source")
+	}
 	state.Presentation = presentation
+	state.Parent = parent
 	state.Ledger = ledger
 	state.ContextFloor = uint64(len(ledger))
 	state.CreationOperationID = operationID
@@ -1596,6 +1615,14 @@ func reduceBindEstablishedLane(state *State, command BindEstablishedLane) error 
 			ModelID: strings.TrimSpace(command.ModelID), ModeID: strings.TrimSpace(command.ModeID),
 			Thread: thread, Phase: LaneDetached, Coverage: make(map[uint64]CoverageRecord),
 			Context: command.Context, Creation: command.Creation,
+		}
+		// A forked subsession's lane is a native fork of its parent: the copied
+		// prefix is already in the native thread, so it is never sent again.
+		for sequence := uint64(1); sequence <= state.ContextFloor; sequence++ {
+			lane.Coverage[sequence] = CoverageRecord{
+				Sequence: sequence, EventID: state.Ledger[sequence-1].EventID, Status: CoverageExcluded,
+			}
+			lane.CoveredThrough = sequence
 		}
 	}
 	state.Lanes[identity.ID] = lane

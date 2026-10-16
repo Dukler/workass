@@ -358,6 +358,97 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	return created, nil
 }
 
+// subsession creates a SUBSESSION of the calling chat (user 2026-10-16): a
+// permanent child chat listed under it that people and agents keep writing
+// into. fork=false (default) starts it fresh; fork=true starts it as a native
+// fork of the caller's provider session, so it remembers this conversation.
+// It is never a subagent. An optional message becomes its first turn.
+func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, parentChatID string, params map[string]any) (map[string]any, error) {
+	operationID, err := requiredChatOperation(params, "subsession")
+	if err != nil {
+		return nil, err
+	}
+	if err := c.validateMutationTarget(parentTabID, parentChatID, operationID, "subsession"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(fieldString(params, "title")) == "" {
+		return nil, errors.New("a subsession needs a title")
+	}
+	fork, _ := boolField(params, "fork")
+	focus, _ := boolField(params, "focus")
+	var created map[string]any
+	if fork {
+		for _, key := range []string{"provider_id", "model_id", "effort", "mode_id", "permission_intent", "cwd"} {
+			if fieldString(params, key) != "" {
+				return nil, errors.New("a forked subsession keeps its parent's provider, model, permissions and workspace")
+			}
+		}
+		tabID, chatID := stableAgentChatIdentity("tab", operationID), stableAgentChatIdentity("chat", operationID)
+		if _, err := c.providerChats.Fork(ctx, map[string]any{
+			"tabId": parentTabID, "chatId": parentChatID, "newTabId": tabID, "newChatId": chatID,
+			"operationId": string(operationID), "subsession": true,
+			"title": normalizedHeadlessChatTitle(fieldString(params, "title")),
+		}); err != nil {
+			return nil, err
+		}
+		state, ok := c.providerChats.Snapshot(chatID)
+		if !ok {
+			return nil, errors.New("the forked subsession is not addressable")
+		}
+		if focus {
+			if err := c.providerChats.FocusChat(tabID, chatID, providercontract.OperationID("focus:"+string(operationID))); err != nil {
+				return nil, err
+			}
+		}
+		created = headlessCreateResult(state, operationID, focus)
+	} else {
+		base, err := headlessCreateIntentDigest(parentTabID, parentChatID, params)
+		if err != nil {
+			return nil, err
+		}
+		intentDigest := "subsession-v1:" + base
+		if existing, found, err := c.providerChats.existingHeadlessCreate(operationID, intentDigest, focus); found {
+			if err != nil {
+				return nil, err
+			}
+			created = existing
+		} else {
+			parent, err := c.providerChats.ReadChat(parentTabID, parentChatID, 1, false)
+			if err != nil {
+				return nil, errors.New("calling chat no longer exists")
+			}
+			controls, err := c.resolveControls(ctx, parent, params)
+			if err != nil {
+				return nil, err
+			}
+			cwd := fieldString(params, "cwd")
+			if cwd == "" || cwd == "inherit" {
+				cwd = fieldString(parent, "cwd")
+			}
+			if err := validateChatCWD(cwd); err != nil {
+				return nil, err
+			}
+			created, err = c.providerChats.CreateSubsessionWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest,
+				chat.ParentLink{ChatID: parentChatID, TabID: parentTabID})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
+	created["parentTabId"], created["parentChatId"], created["forked"] = parentTabID, parentChatID, fork
+	if message := strings.TrimSpace(fieldString(params, "message")); message != "" {
+		receipt, err := c.providerChats.QueueAgentMessageWithAttachments(ctx, tabID, chatID,
+			providercontract.OperationID(string(operationID)+":first-message"), message, "auto", nil)
+		if err != nil {
+			return nil, fmt.Errorf("subsession created, but its first message failed: %w", err)
+		}
+		created["message"] = receipt
+	}
+	c.refreshCreated(tabID, chatID, focus)
+	return created, nil
+}
+
 func headlessCreateIntentDigest(parentTabID, parentChatID string, params map[string]any) (string, error) {
 	cwd := strings.TrimSpace(fieldString(params, "cwd"))
 	if cwd == "" || cwd == "inherit" {

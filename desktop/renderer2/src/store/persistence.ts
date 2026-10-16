@@ -22,11 +22,16 @@ export interface MirrorMsg {
   permission?: PermissionState;
   turnStartedAt?: number;
   interrupted?: boolean;
+  // History this chat inherited from the chat it was forked from.
+  inherited?: boolean;
   images?: MessageImage[];
   events: unknown[];
 }
 export interface MirrorChat {
   id: string; chatId?: string; actorRevision?: number; title: string; titleLocked: boolean; group: string | null; cwd: string | null;
+  // Daemon-owned and immutable (session:get only; never saved back): the chat
+  // this SUBSESSION lives under, and whether it began as a native fork of it.
+  parentChatId?: string; parentTabId?: string; subsessionForked?: boolean;
   currentModelId: string | null; currentModeId: string | null; draft: string; unread?: boolean;
   settled?: 'settled' | 'active';
   settledAt?: number;

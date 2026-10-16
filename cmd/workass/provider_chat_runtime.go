@@ -1110,12 +1110,20 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	}
 	operationID := providercontract.NormalizeOperationID(firstNonEmptyString(fieldString(arg, "operationId"), "fork:"+newChatID))
 	atMessageID := strings.TrimSpace(fieldString(arg, "atMessageId"))
+	// subsession=true makes the child a FORKED SUBSESSION: a permanent child
+	// chat under its source whose provider lane is a native fork of the
+	// source's session, so it remembers the conversation (user 2026-10-16).
+	// Without it this stays the original top-level, contextless copy.
+	subsession := boolFieldValue(arg, "subsession")
 	digest, err := forkInitializationDigest(arg, sourceTabID, sourceChatID, newTabID, newChatID)
 	if err != nil {
 		return nil, err
 	}
 	if actor, found, err := r.existingForkActor(newChatID, operationID, digest); found {
 		if err != nil {
+			return nil, err
+		}
+		if err := r.ensureSubsessionForkLane(ctx, actor); err != nil {
 			return nil, err
 		}
 		return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
@@ -1130,7 +1138,7 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		source.mu.Unlock()
 		return nil, errors.New("fork source tab attachment is stale")
 	}
-	if sourceState.Foreground != nil || sourceState.PendingSteer != nil || sourceState.PendingCancel != nil {
+	if !subsession && (sourceState.Foreground != nil || sourceState.PendingSteer != nil || sourceState.PendingCancel != nil) {
 		source.mu.Unlock()
 		return nil, errors.New("fork requires an idle semantic turn boundary")
 	}
@@ -1146,7 +1154,26 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 		}
 		atTurn, hasAtTurn = turn, true
 	}
+	if subsession && !hasAtTurn && sourceState.Foreground != nil {
+		// An agent forking from inside its own turn: the visible copy stops at
+		// the last settled turn; the native fork still carries the live one.
+		atTurn, hasAtTurn = turnsBeforeOperation(sourceState.Ledger, sourceState.Foreground.OperationID), true
+	}
 	prefix, _ := actorForkPrefix(sourceState.Ledger, atTurn, hasAtTurn)
+	var parent *chat.ParentLink
+	if subsession {
+		if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" &&
+			(sourceState.Presentation.CWD == nil || !sameFilesystemPath(cwd, *sourceState.Presentation.CWD)) {
+			source.mu.Unlock()
+			return nil, errors.New("a forked subsession keeps its parent's workspace")
+		}
+		link, err := subsessionForkLink(sourceState, sourceTabID, prefix, atMessageID != "")
+		if err != nil {
+			source.mu.Unlock()
+			return nil, err
+		}
+		parent = link
+	}
 	presentation := sourceState.Presentation.Clone()
 	source.mu.Unlock()
 	presentation.TabID = newTabID
@@ -1164,6 +1191,10 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	if cwd := strings.TrimSpace(fieldString(arg, "cwd")); cwd != "" {
 		presentation.CWD = &cwd
 	}
+	if title := strings.TrimSpace(fieldString(arg, "title")); title != "" {
+		presentation.Title = title
+		presentation.TitleLocked = true
+	}
 
 	if strings.TrimSpace(string(presentation.ProviderID)) == "" {
 		if lane, ok := sourceState.Lanes[sourceState.ActiveLaneID]; ok {
@@ -1172,13 +1203,81 @@ func (r *providerChatRuntime) Fork(ctx context.Context, arg map[string]any) (map
 	}
 	command := chat.InitializeFork{
 		Presentation: presentation, SourceChatID: sourceChatID, Messages: prefix, OperationID: operationID,
+		Parent: parent,
 	}
 	command.Digest = digest
 	actor, err := r.actorForFork(newChatID, command)
 	if err != nil {
 		return nil, err
 	}
+	if err := r.ensureSubsessionForkLane(ctx, actor); err != nil {
+		return nil, err
+	}
 	return r.attachForkChild(ctx, actor, operationID, sourceTabID, atMessageID)
+}
+
+// subsessionForkLink pins what a forked subsession forks: the source's active
+// native head and, when the copy stops before a later turn, that turn's
+// operation. Only a provider with a native session fork qualifies; there is no
+// contextless fallback.
+func subsessionForkLink(source chat.State, sourceTabID string, prefix []chat.LedgerEvent, cut bool) (*chat.ParentLink, error) {
+	lane, ok := source.Lanes[source.ActiveLaneID]
+	if !ok || lane.Thread.IsZero() {
+		return nil, errors.New("the parent chat has no provider session to fork yet; send it a message first")
+	}
+	providerID := string(lane.Identity.Realm.ProviderID)
+	if !acp.NativeSessionForkSupported(providerID) {
+		return nil, fmt.Errorf("provider %q cannot fork a session natively; create a fresh subsession instead", providerID)
+	}
+	before := ""
+	if cut {
+		for _, event := range source.Ledger[len(prefix):] {
+			if event.Role == "user" && event.SteerState == "" {
+				before = string(event.OperationID)
+				break
+			}
+		}
+	}
+	return &chat.ParentLink{
+		ChatID: source.ChatID, TabID: sourceTabID, Forked: true,
+		ForkSourceSessionID: lane.Thread.Normalize().HeadID, ForkBeforeOperationID: before,
+	}, nil
+}
+
+// ensureSubsessionForkLane gives a forked subsession its native fork before
+// any lane is selected, so selection finds an established thread and resumes
+// it exactly. It is idempotent; a non-forked chat is left alone.
+func (r *providerChatRuntime) ensureSubsessionForkLane(ctx context.Context, actor *providerChatActor) error {
+	if actor == nil {
+		return errors.New("subsession actor is unavailable")
+	}
+	actor.mu.Lock()
+	state := actor.engine.Snapshot()
+	actor.mu.Unlock()
+	if state.Parent == nil || !state.Parent.Forked {
+		return nil
+	}
+	opts := effectiveSelectionOptions(state, acp.SessionOptions{TabID: state.Presentation.TabID, ChatID: state.ChatID})
+	return r.manager.ForkSubsessionLane(ctx, acp.SubsessionForkRequest{
+		SourceChatID: state.Parent.ChatID, SourceSessionID: state.Parent.ForkSourceSessionID,
+		Child: opts, BeforeOperationID: state.Parent.ForkBeforeOperationID,
+	})
+}
+
+// turnsBeforeOperation counts the semantic turns that precede the turn of
+// operationID (all turns when it is not in the ledger yet).
+func turnsBeforeOperation(ledger []chat.LedgerEvent, operationID providercontract.OperationID) int {
+	turns := 0
+	for _, event := range ledger {
+		if event.Role != "user" || event.SteerState != "" {
+			continue
+		}
+		if event.OperationID == operationID {
+			break
+		}
+		turns++
+	}
+	return turns
 }
 
 func (r *providerChatRuntime) attachForkChild(ctx context.Context, actor *providerChatActor, operationID providercontract.OperationID, sourceTabID string, atMessageID string) (map[string]any, error) {
@@ -1255,11 +1354,15 @@ func forkInitializationDigest(arg map[string]any, sourceTabID, sourceChatID, new
 		// to the pre-atMessageId binary: a durable lost-reply retry replays
 		// across an upgrade because CreationDigest is durable actor state.
 		AtMessageID string `json:",omitempty"`
+		Subsession  bool   `json:",omitempty"`
+		Title       string `json:",omitempty"`
 	}{
 		SourceTabID: strings.TrimSpace(sourceTabID), SourceChatID: strings.TrimSpace(sourceChatID),
 		NewTabID: strings.TrimSpace(newTabID), NewChatID: strings.TrimSpace(newChatID),
 		CWD: strings.TrimSpace(fieldString(arg, "cwd")), AtTurn: atTurn, HasAtTurn: hasAtTurn,
 		AtMessageID: strings.TrimSpace(fieldString(arg, "atMessageId")),
+		Subsession:  boolFieldValue(arg, "subsession"),
+		Title:       strings.TrimSpace(fieldString(arg, "title")),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

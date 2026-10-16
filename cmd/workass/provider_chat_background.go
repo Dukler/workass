@@ -39,6 +39,7 @@ func (r *providerChatRuntime) executeBackgroundAction(ctx context.Context, actio
 				OriginLaneID: string(action.Owner.LaneID), OriginOperationID: string(action.Owner.OperationID),
 				ProviderID: value.ProviderID, ModelID: value.ModelID, Effort: value.Effort,
 				ModeID: value.ModeID, CWD: value.CWD, Profile: value.Profile, PermissionIntent: value.PermissionIntent,
+				Fork: value.Fork,
 			})
 		case chat.BackgroundMessageAgent:
 			return r.manager.MessageSubagent(ownerKey, action.ChatID, action.TabID, action.Message.WorkID, action.Message.Message)
@@ -360,6 +361,7 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt, ExitCode: item.ExitCode,
 		Summary: item.Summary, OutputFile: item.OutputFile, PID: item.PID, LastToolName: item.LastToolName,
 		ModelLabel: item.ModelLabel, ResultExcerpt: item.ResultExcerpt, ParentTaskID: item.ParentTaskID,
+		Forked: item.Forked,
 	}
 }
 
@@ -413,6 +415,9 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 		}
 		lane := state.Lanes[state.Background[id].Owner.LaneID]
 		row["providerId"] = string(lane.ProviderID)
+		if item.Forked {
+			row["forked"] = true
+		}
 		for key, value := range map[string]any{
 			"toolCallId": item.ToolCallID, "finishedAt": item.FinishedAt, "exitCode": item.ExitCode,
 			"summary": item.Summary, "outputFile": item.OutputFile, "pid": item.PID,

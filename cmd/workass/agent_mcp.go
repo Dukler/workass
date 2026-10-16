@@ -105,6 +105,17 @@ func agentMCPTools() []map[string]any {
 			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.18"), "read", "edit", "full"),
 			"focus":             boolean(agenttext.Get("schema.agentMCPTools.guidance.19")),
 		}), false, false, false, false),
+		tool("workass_create_subsession", agenttext.Get("tools.workass_create_subsession"), mutationObject(map[string]any{
+			"title":             str(agenttext.Get("schema.agentMCPTools.subsession.title")),
+			"fork":              boolean(agenttext.Get("schema.agentMCPTools.subsession.fork")),
+			"message":           str(agenttext.Get("schema.agentMCPTools.subsession.message")),
+			"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.14")),
+			"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.15")),
+			"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.16")),
+			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.17")),
+			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.18"), "read", "edit", "full"),
+			"focus":             boolean(agenttext.Get("schema.agentMCPTools.guidance.19")),
+		}, "title"), false, false, false, false),
 		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
 		}, "tab_id", "chat_id", "title"), false, false, false, false),
@@ -172,6 +183,7 @@ func agentMCPTools() []map[string]any {
 				"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.51")),
 				"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.52"), "inherit", "read", "edit", "full"),
 				"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.53")),
+				"fork":              boolean(agenttext.Get("schema.agentMCPTools.subagent.fork")),
 			},
 		}, false, true, false, true),
 		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(map[string]any{}), true, false, true, false),
@@ -326,6 +338,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "chat.read"
 	case "workass_create_chat":
 		method = "chat.create"
+	case "workass_create_subsession":
+		method = "chat.subsession"
 	case "workass_rename_chat":
 		method = "chat.rename"
 	case "workass_settle_chat":

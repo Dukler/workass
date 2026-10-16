@@ -94,6 +94,8 @@ export interface QueuedMsg {
 export interface Msg {
   id: string;
   role: 'user' | 'assistant';
+  // History a forked subsession inherited from its parent (folded by default).
+  inherited?: boolean;
   content: string;
   // Provider-typed final answer. It is absent for phase-less/older providers;
   // when present it renders once as the turn's transcript-native conclusion.
@@ -171,6 +173,12 @@ export interface Chat {
   // know — and toMirror() excludes these, because another machine persists them.
   machineId?: string;
   id: string;              // stable tabId
+  // A SUBSESSION (user 2026-10-16) is a permanent child chat under the chat
+  // parentChatId/parentTabId names. Fresh or forked, the parent shows it the
+  // same; only the child itself shows ⑂ (subsessionForked). Not a subagent.
+  parentChatId?: string;
+  parentTabId?: string;
+  subsessionForked?: boolean;
   // Stable conversation id (R4). Persisted and reused across turns so the daemon
   // accumulates checkpoints + increments turnSeq under one chatId. Distinct from
   // `id` (the UI tab). Older mirrors lack it → backfilled on load.
@@ -272,7 +280,7 @@ export interface Chat {
   // partial child (the lane attach failed after its actor committed) reuses
   // them on the next click. atMessageId keeps a different fork point from
   // colliding with ids whose creation digest already bound other content.
-  _forkAttempt?: { operationId: string; newTabId: string; newChatId: string; atMessageId: string; cwd: string | null };
+  _forkAttempt?: { operationId: string; newTabId: string; newChatId: string; atMessageId: string; cwd: string | null; title: string };
   // Monotonic runtime-only picker epoch. Session initialization snapshots it
   // so an older inherited-provider response cannot overwrite a newer explicit
   // model/provider/effort/permission selection.

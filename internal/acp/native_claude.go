@@ -54,6 +54,13 @@ func claudeNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecuta
 		env = make(map[string]string)
 	}
 	env["WORKASS_CLAUDE_EXECUTABLE"] = launchCommand(provider)
+	// Claude Code's Agent tool can fork (subagent_type "fork": the child inherits
+	// the whole conversation) only when this gate is on, and Claude Code turns
+	// it off in some modes. Subagents stay fresh unless the agent asks for a fork, as in
+	// Claude Code itself (user 2026-10-16). An explicit setting wins.
+	if _, set := env["CLAUDE_CODE_FORK_SUBAGENT"]; !set && os.Getenv("CLAUDE_CODE_FORK_SUBAGENT") == "" {
+		env["CLAUDE_CODE_FORK_SUBAGENT"] = "1"
+	}
 	env["WORKASS_CLAUDE_SDK_MODULE"] = sdkModule
 	provider.Command = node
 	provider.ResolvedCommand = ""

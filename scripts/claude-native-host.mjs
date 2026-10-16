@@ -1873,32 +1873,78 @@ function handleNotification(message) {
   }
 }
 
-const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-lines.on('line', (line) => {
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    diagnostic('Claude host received invalid JSON', 'parse failure');
-    return;
+// One-shot native fork (no ACP loop, no sampling): copies a Claude session into
+// a new resumable session with the official SDK and prints exactly one JSON
+// object on stdout. Used for forked subsessions and forked subagents
+// (user 2026-10-16). Input on stdin: {sessionId, dir, beforeUserMessageIds?};
+// with beforeUserMessageIds (candidate uuids of ONE user prompt) the copy ends
+// at the message right before that prompt, otherwise it is a full copy. Never falls back to a full copy
+// when a requested boundary cannot be found.
+async function forkSessionCommand() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const request = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  const sessionId = String(request.sessionId || '').trim();
+  const dir = String(request.dir || '').trim();
+  const before = (Array.isArray(request.beforeUserMessageIds) ? request.beforeUserMessageIds : [])
+    .map((id) => String(id || '').trim()).filter(Boolean);
+  if (!sessionId || !dir) throw new Error('fork requires sessionId and dir');
+  const sdk = await loadSDK();
+  if (typeof sdk.forkSession !== 'function') throw new Error('this Claude Agent SDK cannot fork sessions');
+  let upToMessageId;
+  if (before.length) {
+    const messages = await sdk.getSessionMessages(sessionId, { dir });
+    const index = messages.findIndex((message) => before.includes(message?.uuid));
+    if (index <= 0) throw new Error('fork boundary message is not in the Claude session');
+    upToMessageId = messages[index - 1].uuid;
   }
-  if (message && Object.hasOwn(message, 'id') && !message.method) {
-    const pending = pendingPeerRequests.get(String(message.id));
-    if (pending) {
-      pendingPeerRequests.delete(String(message.id));
-      pending(message);
-    }
-    return;
-  }
-  if (!message?.method) return;
-  if (!Object.hasOwn(message, 'id')) {
-    handleNotification(message);
-    return;
-  }
-  void handleRequest(message).catch((error) => fail(message.id, error?.rpcCode || -32603, error));
-});
+  const result = await sdk.forkSession(sessionId, { dir, ...(upToMessageId ? { upToMessageId } : {}) });
+  const forked = String(result?.sessionId || '').trim();
+  if (!forked) throw new Error('Claude Agent SDK returned no forked session id');
+  process.stdout.write(JSON.stringify({ sessionId: forked }) + '\n');
+}
 
-lines.on('close', () => {
-  for (const session of sessions.values()) session.close();
-  sessions.clear();
-});
+function serveACP() {
+  const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  lines.on('line', (line) => {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      diagnostic('Claude host received invalid JSON', 'parse failure');
+      return;
+    }
+    if (message && Object.hasOwn(message, 'id') && !message.method) {
+      const pending = pendingPeerRequests.get(String(message.id));
+      if (pending) {
+        pendingPeerRequests.delete(String(message.id));
+        pending(message);
+      }
+      return;
+    }
+    if (!message?.method) return;
+    if (!Object.hasOwn(message, 'id')) {
+      handleNotification(message);
+      return;
+    }
+    void handleRequest(message).catch((error) => fail(message.id, error?.rpcCode || -32603, error));
+  });
+
+  lines.on('close', () => {
+    for (const session of sessions.values()) session.close();
+    sessions.clear();
+  });
+
+}
+
+if (process.argv.includes('--workass-fork-session')) {
+  forkSessionCommand().then(
+    () => process.exit(0),
+    (error) => {
+      process.stderr.write(`Claude fork failed: ${String(error?.message || error)}\n`);
+      process.exit(1);
+    },
+  );
+} else {
+  serveACP();
+}

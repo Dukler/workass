@@ -5,7 +5,7 @@ import { store, useApp, useProc } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
-import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcSearch } from '../icons';
+import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
@@ -34,12 +34,25 @@ export function Topbar({ chat, onFind, title }: { chat: Chat | null; onFind?: ()
   // reads "<chat title> [workspace]" — ONE quiet chip with the workspace's
   // short name, not a path + group cluster repeating "workass" everywhere.
   const ws = (chat?.cwd ?? app.meta?.workspaceDir ?? '').split('/').filter(Boolean).slice(-1)[0] || null;
+  // A subsession names its parent (user 2026-10-16); a forked one carries ⑂
+  // before its own title — the only place the fork is shown.
+  const parent = !title && chat?.parentChatId ? app.chats.find((c) => c.chatId === chat.parentChatId) : undefined;
+  const subsessionTitle = parent && chat ? (
+    <span className="crumbs">
+      <button type="button" className="c cpar" title="Ir al chat padre" onClick={() => store.switchChat(parent.id)}>{parent.title}</button>
+      <span className="sep" aria-hidden="true"><IcChevron /></span>
+      {chat.subsessionForked && (
+        <span className="fkg" title={`Bifurcada de «${parent.title}»`} aria-label="Subsesión bifurcada"><IcFork /></span>
+      )}
+      <b title={chat.title}>{chat.title}</b>
+    </span>
+  ) : null;
   return (
     <div className="tbar">
       {/* No reopen toggle here: the single sticky .side-toggle (App.tsx) owns
           show/hide in both pane states (user law 2026-07-11). */}
       <IcDoc />
-      {title ?? <b>{chat?.title ?? 'workass'}</b>}
+      {title ?? subsessionTitle ?? <b>{chat?.title ?? 'workass'}</b>}
       {ws && <span className="provbadge" title={chat?.cwd ?? 'Workspace'}>{ws}</span>}
       {/* Provider chip removed by user request (2026-07-11) — the bound agent
           is visible in the composer's model selector; the titlebar stays
@@ -245,7 +258,7 @@ function prefersReducedMotion(): boolean {
 export function Transcript({ chat }: { chat: Chat | null }) {
   // Subscribe to app so the per-turn Deshacer/Revisar affordances appear once
   // this chat's checkpoints load (they bump `app`).
-  useApp();
+  const app = useApp();
   const scrollRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -266,7 +279,20 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const findReturnFocusRef = useRef<HTMLElement | null>(null);
 
-  const visibleMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
+  // A forked subsession starts with its parent's history folded (user
+  // 2026-10-16): inherited rows stay hidden until "Historial heredado" opens.
+  const [inheritedOpenFor, setInheritedOpenFor] = useState<string | null>(null);
+  const allMessages = projectSteeringPresentation(chat?.messages ?? []).transcriptMessages;
+  const inheritedFold = !!chat?.subsessionForked && allMessages.some((message) => message.inherited);
+  const inheritedOpen = inheritedFold && inheritedOpenFor === chat?.id;
+  const inheritedCount = allMessages.filter((message) => message.inherited).length;
+  // Inherited rows are the oldest: once the first loaded row is inherited, the
+  // child's own history is fully loaded and only folded history is older.
+  const ownHistoryLoaded = inheritedFold && !!allMessages[0]?.inherited;
+  const inheritedParent = inheritedFold ? app.chats.find((c) => c.chatId === chat?.parentChatId) : undefined;
+  const visibleMessages = inheritedFold && !inheritedOpen
+    ? allMessages.filter((message) => !message.inherited)
+    : allMessages;
   const artifactOrigin = store.browserArtifactMachineId(chat?.machineId);
   const total = visibleMessages.length;
   const knownTotal = chat?.historyComplete === false
@@ -280,7 +306,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     ? visibleMessages.slice(Math.max(0, searchEnd - SEARCH_WINDOW), searchEnd)
     : visibleMessages.slice(transcriptWindowStart(visibleMessages, reveal));
   const residentHidden = selectedFindMatch ? 0 : total - shown.length;
-  const hidden = selectedFindMatch ? 0 : Math.max(0, knownTotal - shown.length);
+  const hidden = selectedFindMatch || (inheritedFold && !inheritedOpen && ownHistoryLoaded && residentHidden === 0)
+    ? 0
+    : Math.max(0, knownTotal - shown.length);
   const runningMessage = [...shown].reverse().find((message) => (
     message.role === 'assistant'
     && message.status === 'running'
@@ -709,8 +737,23 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           onTouchCancel={onTouchEnd}
         >
           <div className="doc" ref={docRef}>
+            {inheritedFold && chat && (
+              <button
+                type="button" className="inh" aria-expanded={inheritedOpen}
+                title={inheritedOpen ? 'Ocultar el historial heredado' : 'Mostrar el historial heredado'}
+                onClick={() => setInheritedOpenFor(inheritedOpen ? null : chat.id)}
+              >
+                <span className="ig" aria-hidden="true"><IcFork /></span>
+                <span className="it">Historial heredado</span>
+                <span className="im">
+                  {chat.historyComplete === false ? '' : `· ${inheritedCount} ${inheritedCount === 1 ? 'mensaje' : 'mensajes'} `}
+                  {inheritedParent ? `de «${inheritedParent.title}»` : ''}
+                </span>
+                <span className="rule" aria-hidden="true" />
+              </button>
+            )}
             {!chat || total === 0 ? (
-              <EmptyChat chat={chat} />
+              inheritedFold ? null : <EmptyChat chat={chat} />
             ) : (
               <>
                 {hidden > 0 && (
@@ -725,7 +768,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                   const blockEnd = turnBlockStarts.get(index);
                   if (blockEnd != null) {
                     const messages = shown.slice(index, blockEnd);
-                    return [(
+                    const block = (
                       <AssistantTurnBlock
                         key={`turn-block:${messages[0].id}`}
                         tabId={chat.id}
@@ -734,11 +777,14 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         artifactOrigin={artifactOrigin}
                         midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
-                    )];
+                    );
+                    return [messages[0].inherited
+                      ? <div className="inh-msg" key={`inh-block:${messages[0].id}`}>{block}</div>
+                      : block];
                   }
                   if (turnBlockMembers.has(index)) return [];
                   return [(
-                    <div className="chatfind-message" data-chat-find-message={m.id} key={m.id}>
+                    <div className={`chatfind-message${m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id} key={m.id}>
                       {m.role === 'user' ? (
                         <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
                       ) : (

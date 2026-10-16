@@ -1537,6 +1537,8 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .r-sa .r-said { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .r-sa .r-satop { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .r-sa .r-nm { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-sa .r-fk { flex: none; align-self: center; display: inline-flex; color: var(--muted); }
+.r-sa .r-fk svg { width: 12px; height: 12px; }
 .r-sa .r-el { flex: none; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--faint); }
 .r-sa .r-sasub { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .r-sa .r-mdl { flex: 0 1 auto; max-width: 62%; min-width: 0; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2434,6 +2436,18 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .crumbs .c.fk svg { width: 12px; height: 12px; flex: none; }
 .crumbs .sep { flex: none; display: inline-flex; color: var(--faint); }
 .crumbs .sep svg { width: 11px; height: 11px; stroke-width: 1.5; }
+/* A forked subsession's inherited history: one quiet fold line, dimmed rows. */
+.inh { display: flex; align-items: center; gap: 9px; width: 100%; margin: 0 0 18px; padding: 0; border: 0; background: transparent; min-width: 0; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.inh .ig { flex: none; display: inline-flex; color: var(--faint); }
+.inh .ig svg { width: 14px; height: 14px; }
+.inh .it { flex: none; color: var(--ink2); text-decoration: underline dotted color-mix(in srgb, var(--faint) 65%, transparent); text-underline-offset: 3px; white-space: nowrap; }
+.inh .im { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inh .rule { flex: 1 1 16px; min-width: 16px; height: 1px; background: var(--line); }
+.inh:hover .it { color: var(--ink); }
+.inh-msg { opacity: .62; }
+/* ⑂ on a forked subsession's own title (user 2026-10-16) */
+.crumbs .fkg { flex: none; display: inline-flex; color: var(--muted); }
+.crumbs .fkg svg { width: 13px; height: 13px; }
 .fkview .doc { padding-top: 22px; padding-bottom: var(--doc-pad-b); }
 .ssmeta { display: flex; align-items: center; gap: 7px; margin: 0 0 12px 1px; font-size: 12px; line-height: 16px; color: var(--muted); }
 .ssmeta .sep { color: var(--line2); }

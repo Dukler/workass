@@ -82,6 +82,67 @@ type InitializeChat struct {
 	Presentation PresentationState
 	OperationID  provider.OperationID
 	Digest       string
+	// Parent makes the new chat a subsession of an existing chat; nil for an
+	// ordinary top-level chat.
+	Parent *ParentLink
+}
+
+// ParentLink makes a chat a SUBSESSION: a permanent child chat that lives
+// under its parent and that people and agents can keep writing into (user
+// 2026-10-16). It is not a subagent — subagents are one-shot turn work. The
+// link is fixed at creation and never changes.
+type ParentLink struct {
+	ChatID string
+	TabID  string
+	// Forked is true when the child's provider lane began as a native fork of
+	// the parent's session, so the child remembers the parent's conversation.
+	// False is a fresh subsession (the default, as in Claude Code).
+	Forked bool
+	// ForkSourceSessionID and ForkBeforeOperationID pin what was forked: the
+	// parent's native head at fork time and the turn whose prompt the copy
+	// stops before (empty = whole session). A retry after a lost reply forks
+	// exactly this, never the parent's later history.
+	ForkSourceSessionID   string `json:",omitempty"`
+	ForkBeforeOperationID string `json:",omitempty"`
+}
+
+func (p *ParentLink) Clone() *ParentLink {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	return &out
+}
+
+func (p *ParentLink) normalized() *ParentLink {
+	if p == nil {
+		return nil
+	}
+	out := ParentLink{
+		ChatID: strings.TrimSpace(p.ChatID), TabID: strings.TrimSpace(p.TabID), Forked: p.Forked,
+		ForkSourceSessionID: strings.TrimSpace(p.ForkSourceSessionID), ForkBeforeOperationID: strings.TrimSpace(p.ForkBeforeOperationID),
+	}
+	return &out
+}
+
+// Validate checks the link against the child's own chat id.
+func (p *ParentLink) Validate(childChatID string) error {
+	if p == nil {
+		return nil
+	}
+	if strings.TrimSpace(p.ChatID) == "" || strings.TrimSpace(p.TabID) == "" {
+		return errors.New("subsession parent link requires the parent's tab and chat ids")
+	}
+	if strings.TrimSpace(p.ChatID) == strings.TrimSpace(childChatID) {
+		return errors.New("a chat cannot be its own subsession parent")
+	}
+	if p.Forked != (strings.TrimSpace(p.ForkSourceSessionID) != "") {
+		return errors.New("a forked subsession must name the parent session it forked, and only a forked one may")
+	}
+	if !p.Forked && strings.TrimSpace(p.ForkBeforeOperationID) != "" {
+		return errors.New("only a forked subsession has a fork boundary")
+	}
+	return nil
 }
 
 func (InitializeChat) chatCommand() {}
@@ -95,6 +156,9 @@ type InitializeFork struct {
 	Messages     []LedgerEvent
 	OperationID  provider.OperationID
 	Digest       string
+	// Parent makes the fork a subsession of its source; nil keeps the
+	// original top-level, contextless fork.
+	Parent *ParentLink
 }
 
 func (InitializeFork) chatCommand() {}

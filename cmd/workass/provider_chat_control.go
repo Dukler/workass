@@ -633,6 +633,12 @@ func (r *providerChatRuntime) ListChats() ([]map[string]any, error) {
 			// over settledAt, not stored state.
 			"settled": fieldString(item, "settled"), "settledAt": max(0, intField(item, "settledAt")),
 		}
+		// A subsession names its parent so agents can find a chat's children.
+		if parentChatID := fieldString(item, "parentChatId"); parentChatID != "" {
+			listed["parentChatId"] = parentChatID
+			listed["parentTabId"] = fieldString(item, "parentTabId")
+			listed["forked"] = item["subsessionForked"] == true
+		}
 		state, ok := r.Snapshot(chatID)
 		if ok && actorForegroundRunning(state.Foreground) {
 			listed["running"] = true
@@ -674,7 +680,7 @@ func (r *providerChatRuntime) CreateChat(title, cwd string, controls resolvedCha
 	if err != nil {
 		return nil, err
 	}
-	return r.createChatWithIntentDigest(presentation, focus, operationID, digest)
+	return r.createChatWithIntentDigest(presentation, focus, operationID, digest, nil)
 }
 
 func (r *providerChatRuntime) CreateChatWithIntentDigest(title, cwd string, controls resolvedChatControls, focus bool, operationID providercontract.OperationID, digest string) (map[string]any, error) {
@@ -682,7 +688,7 @@ func (r *providerChatRuntime) CreateChatWithIntentDigest(title, cwd string, cont
 	if err != nil {
 		return nil, err
 	}
-	return r.createChatWithIntentDigest(presentation, focus, operationID, digest)
+	return r.createChatWithIntentDigest(presentation, focus, operationID, digest, nil)
 }
 
 func normalizedHeadlessChatTitle(title string) string {
@@ -715,7 +721,18 @@ func headlessChatPresentation(title, cwd string, controls resolvedChatControls) 
 	return presentation, nil
 }
 
-func (r *providerChatRuntime) createChatWithIntentDigest(presentation chat.PresentationState, focus bool, operationID providercontract.OperationID, digest string) (map[string]any, error) {
+// CreateSubsessionWithIntentDigest creates a FRESH subsession: an ordinary
+// new chat whose actor records the chat it lives under (user 2026-10-16).
+func (r *providerChatRuntime) CreateSubsessionWithIntentDigest(title, cwd string, controls resolvedChatControls, focus bool, operationID providercontract.OperationID, digest string, parent chat.ParentLink) (map[string]any, error) {
+	presentation, err := headlessChatPresentation(normalizedHeadlessChatTitle(title), cwd, controls)
+	if err != nil {
+		return nil, err
+	}
+	parent.Forked = false
+	return r.createChatWithIntentDigest(presentation, focus, operationID, digest, &parent)
+}
+
+func (r *providerChatRuntime) createChatWithIntentDigest(presentation chat.PresentationState, focus bool, operationID providercontract.OperationID, digest string, parent *chat.ParentLink) (map[string]any, error) {
 	if r == nil {
 		return nil, errors.New("provider chat runtime is unavailable")
 	}
@@ -727,7 +744,7 @@ func (r *providerChatRuntime) createChatWithIntentDigest(presentation chat.Prese
 	tabID, chatID := stableAgentChatIdentity("tab", operationID), stableAgentChatIdentity("chat", operationID)
 	presentation = presentation.Clone()
 	presentation.TabID = tabID
-	actor, err := r.openActor(chatID, &chat.InitializeChat{Presentation: presentation, OperationID: operationID, Digest: digest})
+	actor, err := r.openActor(chatID, &chat.InitializeChat{Presentation: presentation, OperationID: operationID, Digest: digest, Parent: parent.Clone()})
 	if err != nil {
 		return nil, err
 	}

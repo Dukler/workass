@@ -112,7 +112,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, errors.New("Workass updater MCP router has no local renderer")
 		}
 		return h.remoteChats.Call(r.Context(), request.Method, copyRemoteAgentRouteParams(params))
-	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.rename", "chat.settle", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
+	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.subsession", "chat.rename", "chat.settle", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err
 		}
@@ -150,6 +150,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return h.chats.read(params)
 		case "chat.create":
 			return h.chats.create(r.Context(), tabID, chatID, params)
+		case "chat.subsession":
+			return h.chats.subsession(r.Context(), tabID, chatID, params)
 		case "chat.rename":
 			return h.chats.rename(params)
 		case "chat.settle":
@@ -203,6 +205,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 				Effort: fieldString(params, "effort"), ModeID: fieldString(params, "mode_id"),
 				CWD: fieldString(params, "cwd"), Profile: fieldString(params, "profile"),
 				PermissionIntent: fieldString(params, "permission_intent"),
+				Fork:             boolFieldValue(params, "fork"),
 			},
 		})
 	case "agent.list":
