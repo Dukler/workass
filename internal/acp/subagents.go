@@ -205,6 +205,15 @@ type SubagentRun struct {
 	receiptCommitted           bool
 	attentionDeliveredSequence int64
 	completionWaiters          int
+	// waiterTurns records, per registering parent job id, how many completion
+	// waiters were registered while that exact Workass turn was alive. The
+	// empty key is a registration made with no running turn. Ended turns are
+	// deleted from m.jobs, so only a still-running registering turn counts as
+	// live. Law (2026-10-16, swallowed-wake incident): a zombie waiter left by
+	// a finished turn — e.g. a background-shell workass_wait_subagent with
+	// timeout_ms -1 that outlived its parent turn — must neither block nor
+	// consume the parent chat's settle notice.
+	waiterTurns                map[string]int
 	completionSuppressed       bool
 	completionPending          bool
 	completionDeliveryInFlight bool
@@ -890,7 +899,7 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 
 func (m *Manager) tryDeliverSubagentCompletion(run *SubagentRun) {
 	m.mu.Lock()
-	if run == nil || !run.receiptCommitted || !run.completionPending || run.completionSuppressed || run.completionWaiters != 0 || run.completionDeliveryInFlight || m.resetting {
+	if run == nil || !run.receiptCommitted || !run.completionPending || run.completionSuppressed || m.subagentWaiterTurnBlockedLocked(run) || run.completionDeliveryInFlight || m.resetting {
 		m.mu.Unlock()
 		return
 	}
@@ -921,6 +930,60 @@ func (m *Manager) emitSubagentHeader(parentJobID, id, label, provider, model, st
 		event["output"] = compactText(redactSensitiveText(output), 600)
 	}
 	m.emit("job:event", map[string]any{"type": "acp", "id": parentJobID, "event": event})
+}
+
+// subagentWaiterTurnBlockedLocked reports whether at least one completion
+// waiter was registered by a still-running parent turn. Waiters attributed to
+// turns that have since ended (their jobs were deleted from m.jobs) or that
+// registered with no running turn are zombies: their owning turn can never
+// read their wait result, so they must neither block delivery nor consume the
+// pending completion. Runs without any turn attribution (preset/legacy
+// waiters) keep the conservative historical suppression.
+func (m *Manager) subagentWaiterTurnBlockedLocked(run *SubagentRun) bool {
+	if run == nil || run.completionWaiters <= 0 {
+		return false
+	}
+	if len(run.waiterTurns) == 0 {
+		return true
+	}
+	for turnID := range run.waiterTurns {
+		if m.subagentWaiterTurnLiveLocked(turnID) {
+			return true
+		}
+	}
+	return false
+}
+
+// subagentWaiterTurnLiveLocked reports whether the turn that registered a
+// waiter is still running. Only such a waiter can hand its wait result to the
+// model, so only such a waiter may consume the pending completion notice.
+func (m *Manager) subagentWaiterTurnLiveLocked(turnID string) bool {
+	if turnID == "" {
+		return false
+	}
+	job := m.jobs[turnID]
+	return job != nil && job.Status == "running"
+}
+
+func (run *SubagentRun) addCompletionWaiterTurnLocked(turnID string) {
+	if run.waiterTurns == nil {
+		run.waiterTurns = make(map[string]int)
+	}
+	run.waiterTurns[turnID]++
+}
+
+// releaseCompletionWaiterLocked releases exactly one waiter and that same
+// waiter's own turn attribution, so an expired live-turn wait can never leave
+// a stale entry that makes a different (zombie) waiter look live.
+func (run *SubagentRun) releaseCompletionWaiterLocked(turnID string) {
+	if run.completionWaiters > 0 {
+		run.completionWaiters--
+	}
+	if n := run.waiterTurns[turnID]; n > 1 {
+		run.waiterTurns[turnID] = n - 1
+	} else if n == 1 {
+		delete(run.waiterTurns, turnID)
+	}
 }
 
 // subagentModelName resolves a model's catalog display name (e.g. "Opus 4.8")
@@ -1134,15 +1197,20 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 	}
 	id = strings.TrimSpace(id)
 	waiting := false
+	turnID := ""
+	if parent != nil {
+		turnID = parent.ID
+	}
 	m.mu.Lock()
 	if run := m.subagents[id]; run != nil && m.addressSubagentLocked(run, parent, chatID, tabID) && !subagentRunSettled(run) {
 		run.completionWaiters++
+		run.addCompletionWaiterTurnLocked(turnID)
 		waiting = true
 	}
 	m.mu.Unlock()
 	defer func() {
 		if waiting {
-			m.releaseSubagentCompletionWaiter(id)
+			m.releaseSubagentCompletionWaiterFor(id, turnID)
 		}
 	}()
 	deadline, stop := subagentWaitDeadline(timeout)
@@ -1161,20 +1229,37 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 			run.attentionDeliveredSequence = run.Attention.Sequence
 		}
 		consumedCompletion := settled && snapshot.Status != "cancelled" && !run.completionSuppressed
+		// Consumption is per waiter: a zombie waiter (registered from a turn
+		// that has since ended) or a turnless waiter observes the settle
+		// without consuming it, because its owning turn can never read the
+		// wait result. The pending completion then stays deliverable to the
+		// parent chat.
+		if consumedCompletion && !m.subagentWaiterTurnLiveLocked(turnID) {
+			consumedCompletion = false
+		}
+		retryDelivery := false
 		if settled || snapshot.NeedsAttention {
-			if waiting && run.completionWaiters > 0 {
-				run.completionWaiters--
+			if waiting {
+				run.releaseCompletionWaiterLocked(turnID)
 				waiting = false
 			}
 			if consumedCompletion {
 				run.completionPending = false
 				run.completionSuppressed = true
 				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
+			} else {
+				// The settle gate may have been shut by this waiter's turn; if
+				// that turn ended before the waiter could consume, nobody else
+				// retries the pending notice.
+				retryDelivery = m.subagentDeliveryRetryEligibleLocked(run)
 			}
 		}
 		m.mu.Unlock()
 		if consumedCompletion {
 			m.markSubagentCompletionConsumed(snapshot)
+		}
+		if retryDelivery {
+			m.tryDeliverSubagentCompletion(run)
 		}
 		if settled || snapshot.NeedsAttention {
 			return snapshot, nil
@@ -1190,16 +1275,29 @@ func (m *Manager) WaitSubagent(ctx context.Context, ownerKey, parentChatID, pare
 }
 
 func (m *Manager) releaseSubagentCompletionWaiter(id string) {
+	m.releaseSubagentCompletionWaiterFor(id, "")
+}
+
+func (m *Manager) releaseSubagentCompletionWaiterFor(id, turnID string) {
 	m.mu.Lock()
 	run := m.subagents[id]
-	if run != nil && run.completionWaiters > 0 {
-		run.completionWaiters--
+	if run != nil {
+		run.releaseCompletionWaiterLocked(turnID)
 	}
-	eligible := run != nil && run.completionWaiters == 0 && run.completionPending
+	eligible := m.subagentDeliveryRetryEligibleLocked(run)
 	m.mu.Unlock()
 	if eligible {
 		m.tryDeliverSubagentCompletion(run)
 	}
+}
+
+// subagentDeliveryRetryEligibleLocked reports whether a waiter that just
+// released should retry the pending settle notice. A zombie waiter that is
+// still registered keeps completionWaiters above zero forever, so the retry
+// keys on whether any registered waiter's turn is still running instead;
+// tryDeliverSubagentCompletion re-checks every other guard.
+func (m *Manager) subagentDeliveryRetryEligibleLocked(run *SubagentRun) bool {
+	return run != nil && run.completionPending && !run.completionSuppressed && !m.subagentWaiterTurnBlockedLocked(run)
 }
 
 func (m *Manager) markSubagentCompletionConsumed(run SubagentRun) {
@@ -1236,11 +1334,16 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	if len(cleanIDs) == 0 {
 		return nil, errors.New("at least one subagent id is required")
 	}
+	turnID := ""
+	if parent != nil {
+		turnID = parent.ID
+	}
 	waitingIDs := make(map[string]bool)
 	m.mu.Lock()
 	for _, id := range cleanIDs {
 		if run := m.subagents[id]; run != nil && m.addressSubagentLocked(run, parent, chatID, tabID) && !subagentRunSettled(run) {
 			run.completionWaiters++
+			run.addCompletionWaiterTurnLocked(turnID)
 			waitingIDs[id] = true
 		}
 	}
@@ -1248,7 +1351,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	defer func() {
 		for id, waiting := range waitingIDs {
 			if waiting {
-				m.releaseSubagentCompletionWaiter(id)
+				m.releaseSubagentCompletionWaiterFor(id, turnID)
 			}
 		}
 	}()
@@ -1263,7 +1366,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 		attention := subagentsNeedingAttention(running)
 		ready := len(attention) > 0 || returnWhen == "first" && len(completed) > 0 || returnWhen == "all" && len(running) == 0
 		if ready {
-			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs, true)
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, turnID, cleanIDs, waitingIDs, true)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": false,
@@ -1274,7 +1377,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 			return nil, ctx.Err()
 		case <-wake:
 		case <-deadline:
-			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, cleanIDs, waitingIDs, false)
+			completed, running, attention = m.finishSubagentWait(parent, chatID, tabID, turnID, cleanIDs, waitingIDs, false)
 			return map[string]any{
 				"completed": completed, "running": running, "attention": attention,
 				"needsAttention": len(attention) > 0, "timedOut": true,
@@ -1283,7 +1386,7 @@ func (m *Manager) WaitSubagents(ctx context.Context, ownerKey, parentChatID, par
 	}
 }
 
-func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []string, waitingIDs map[string]bool, consumeCompletion bool) ([]SubagentRun, []SubagentRun, []SubagentRun) {
+func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID, turnID string, ids []string, waitingIDs map[string]bool, consumeCompletion bool) ([]SubagentRun, []SubagentRun, []SubagentRun) {
 	m.mu.Lock()
 	completed := make([]SubagentRun, 0, len(ids))
 	running := make([]SubagentRun, 0, len(ids))
@@ -1300,7 +1403,9 @@ func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []st
 		}
 		if subagentRunSettled(run) {
 			completed = append(completed, snapshot)
-			if consumeCompletion && waitingIDs[id] && !run.completionSuppressed {
+			// Zombie and turnless waiters must not consume the pending
+			// completion either; it stays deliverable to the parent chat.
+			if consumeCompletion && waitingIDs[id] && !run.completionSuppressed && m.subagentWaiterTurnLiveLocked(turnID) {
 				run.completionPending = false
 				run.completionSuppressed = true
 				snapshot.parentChatID, snapshot.parentTabID = run.parentChatID, run.parentTabID
@@ -1312,11 +1417,11 @@ func (m *Manager) finishSubagentWait(parent *Job, chatID, tabID string, ids []st
 	}
 	for id, waiting := range waitingIDs {
 		if waiting {
-			if run := m.subagents[id]; run != nil && run.completionWaiters > 0 {
-				run.completionWaiters--
+			if run := m.subagents[id]; run != nil {
+				run.releaseCompletionWaiterLocked(turnID)
 			}
 			waitingIDs[id] = false
-			if run := m.subagents[id]; run != nil && run.completionWaiters == 0 && run.completionPending {
+			if run := m.subagents[id]; m.subagentDeliveryRetryEligibleLocked(run) {
 				released = append(released, run)
 			}
 		}
