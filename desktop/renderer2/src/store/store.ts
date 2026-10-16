@@ -1664,6 +1664,10 @@ export class Store {
     restored.draft = previous.draft;
     restored._sessionOperationId = previous._sessionOperationId;
     restored._controlRevision = previous._controlRevision;
+    // The fork retry anchor binds the exact create request (ids, hovered row,
+    // cwd). Hydration replaces the Chat object, so it must be carried verbatim
+    // like _sessionOperationId or a lost-reply retry mints a second child.
+    restored._forkAttempt = previous._forkAttempt;
     restored.commandCatalog ??= previous.commandCatalog;
 
     // Capabilities are transient but authoritative for one exact attached
@@ -4079,17 +4083,40 @@ export class Store {
       this.captureChatOrder();
       this.bumpApp();
     }
-    if (!attempt) owner._forkAttempt = { operationId, newTabId, newChatId, atMessageId: messageId };
+    // The attempt is the exact durable create request; resending it verbatim
+    // (cwd included) keeps the daemon's frame fence identical after a deploy,
+    // where re-reading owner.cwd would hash a different fork.
+    if (!attempt) owner._forkAttempt = { operationId, newTabId, newChatId, atMessageId: messageId, cwd: owner.cwd ?? null };
     const requested = {
       tabId: owner.id, chatId: owner.chatId,
       newTabId: String(newTabId), newChatId, operationId,
-      atMessageId: messageId, cwd: owner.cwd ?? null,
+      atMessageId: messageId, cwd: owner._forkAttempt?.cwd ?? null,
     };
     try {
       const info = await callThrow('appChatFork', requested);
-      const liveChild = this.chat(childTabId);
+      let liveChild: Chat | null = this.chat(childTabId);
+      if (!liveChild && info?.sessionId) {
+        // A restore can drop the renderer-only optimistic row before the
+        // daemon commits the child actor. The reply proves the child is real:
+        // read the daemon projection back and adopt the projected row.
+        this.requestChatReadback(owner);
+        liveChild = await this.waitForForkChildRow(childTabId);
+        if (!liveChild) {
+          // Degenerate: the fork is durably real but the projection never
+          // landed, so do not leave a retry anchor for a second click.
+          const committedOwner = this.chat(tabId);
+          if (committedOwner?._forkAttempt?.operationId === operationId) delete committedOwner._forkAttempt;
+          this.requestChatReadback(owner);
+          this.addToast('Bifurcación creada', 'La copia nueva aparecerá en la lista en unos instantes.');
+          return;
+        }
+      }
       if (!liveChild || !info?.sessionId) {
         if (liveChild) liveChild.sessionError = 'La bifurcación no devolvió una sesión adjuntada.';
+        // Without a readback, a pre-commit refusal strands the renderer-only
+        // row beside the real daemon projection (or alone until some
+        // unrelated restore removes it).
+        this.requestChatReadback(liveChild ?? owner);
         this.addToast('No se pudo bifurcar', info?.error ?? 'La bifurcación no devolvió una sesión adjuntada.');
         return;
       }
@@ -4097,23 +4124,51 @@ export class Store {
       liveChild.sessionProviderId = info.providerId ?? null;
       liveChild.pending = false;
       liveChild.sessionError = undefined;
-      delete owner._forkAttempt;
+      // Adopt only the live row's matching anchor; a stale captured owner must
+      // never be mutated after a restore replaced it.
+      const committedOwner = this.chat(tabId);
+      if (committedOwner?._forkAttempt?.operationId === operationId) delete committedOwner._forkAttempt;
       this.bumpChat(liveChild);
       void this.flushSession(true);
-      this.scheduleScopedSync(['session']);
+      // Read the child back from its daemon: local children refresh the scoped
+      // session projection; remote children hydrate through their machine.
+      this.requestChatReadback(liveChild);
       // The child already owns durable rows; a forced recent read bypasses the
       // all-zero early return a fresh row would otherwise take.
       await this.ensureRecentHistory(childTabId, CHAT_INITIAL_HISTORY, true);
       this.switchChat(childTabId);
-      this.addToast('Bifurcación creada', 'La conversación continúa en la copia nueva.');
+      if (requested.atMessageId && info.forkedFrom?.atMessageId !== messageId) {
+        // A daemon older than the message-scoped fork silently ignored
+        // atMessageId and copied the whole conversation: say so instead of
+        // overstating how much was copied (review 2026-10-16).
+        this.addToast('Bifurcación creada', 'El daemon no reconoció la bifurcación por mensaje: la copia incluye toda la conversación.');
+      } else {
+        this.addToast('Bifurcación creada', 'La conversación continúa en la copia nueva.');
+      }
     } catch (error) {
       const liveChild = this.chat(childTabId);
       if (liveChild && !liveChild.sessionId) {
         liveChild.sessionError = 'La bifurcación no se confirmó: reintentalo desde el mismo mensaje.';
         this.bumpChat(liveChild);
       }
+      // Reconcile the optimistic row with the daemon projection: it either
+      // becomes the committed child (a durable retry stays possible via
+      // _forkAttempt) or disappears instead of lingering whole.
+      this.requestChatReadback(liveChild ?? owner);
       this.addToast('No se pudo bifurcar', error instanceof Error ? error.message : 'El motor rechazó la bifurcación.');
     }
+  }
+
+  // Bounded wait for the daemon-projected fork child to land in the store
+  // after a readback (a restore can drop the optimistic row mid-fork).
+  private async waitForForkChildRow(childTabId: string, timeoutMs = 3000): Promise<Chat | null> {
+    const deadline = Date.now() + timeoutMs;
+    let child = this.chat(childTabId) ?? null;
+    while (!child && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      child = this.chat(childTabId) ?? null;
+    }
+    return child;
   }
   addWorkspace(path: string): Chat | null {
     const workspace = workspaceFromPath(path);

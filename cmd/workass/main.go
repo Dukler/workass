@@ -1734,7 +1734,7 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func sessionInfoWithFork(info acp.SessionInfo, sourceTabID string, atTurn int) map[string]any {
+func sessionInfoWithFork(info acp.SessionInfo, sourceTabID string, atTurn int, atMessageID string) map[string]any {
 	data, _ := json.Marshal(info)
 	var out map[string]any
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -1743,7 +1743,14 @@ func sessionInfoWithFork(info acp.SessionInfo, sourceTabID string, atTurn int) m
 	if out == nil {
 		out = map[string]any{}
 	}
-	out["forkedFrom"] = map[string]any{"tabId": sourceTabID, "atTurn": atTurn}
+	forkedFrom := map[string]any{"tabId": sourceTabID, "atTurn": atTurn}
+	// Echo the message-scoped request only when the daemon honored it: a
+	// daemon older than atMessageId drops the key, and its absence in the
+	// reply proves the child copied the whole ledger.
+	if atMessageID != "" {
+		forkedFrom["atMessageId"] = atMessageID
+	}
+	out["forkedFrom"] = forkedFrom
 	return out
 }
 

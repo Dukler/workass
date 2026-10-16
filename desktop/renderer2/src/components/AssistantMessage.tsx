@@ -6,6 +6,7 @@ import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
 import { IcStampCopy, IcFork, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
 import { has } from '../wire/api';
+import { machineOf } from '../wire/machineIds';
 import { toolPresentation } from '../tool-names';
 import { isSubagentHeader } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
@@ -232,8 +233,10 @@ function AssistantSliceBody({
               </button>
               {/* Fork from this point (user 2026-10-16): the new chat copies the
                   visible history through this turn and continues on its own
-                  fresh provider lane. Old daemons have no fork channel → hide. */}
-              {has('appChatFork') && !interrupted && (
+                  fresh provider lane. Old daemons have no fork channel, and
+                  remote mounts hide too: an older remote daemon would silently
+                  ignore atMessageId and copy the whole conversation. */}
+              {has('appChatFork') && !machineOf(tabId) && !interrupted && (
                 <button type="button" className="stamp-btn" title="Bifurcar desde aquí"
                   aria-label="Bifurcar desde aquí: crea una conversación con el historial hasta este punto"
                   onClick={() => { void store.forkFromMessage(tabId, owner.id); }}>

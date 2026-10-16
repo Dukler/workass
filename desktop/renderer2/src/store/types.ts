@@ -272,7 +272,7 @@ export interface Chat {
   // partial child (the lane attach failed after its actor committed) reuses
   // them on the next click. atMessageId keeps a different fork point from
   // colliding with ids whose creation digest already bound other content.
-  _forkAttempt?: { operationId: string; newTabId: string; newChatId: string; atMessageId: string };
+  _forkAttempt?: { operationId: string; newTabId: string; newChatId: string; atMessageId: string; cwd: string | null };
   // Monotonic runtime-only picker epoch. Session initialization snapshots it
   // so an older inherited-provider response cannot overwrite a newer explicit
   // model/provider/effort/permission selection.
