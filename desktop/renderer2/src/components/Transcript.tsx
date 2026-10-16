@@ -46,6 +46,12 @@ export function Topbar({ chat, onFind, title }: { chat: Chat | null; onFind?: ()
       )}
       <b title={chat.title}>{chat.title}</b>
     </span>
+  ) : chat?.subsessionForked && !title ? (
+    // Parent gone: the fork mark is the child's only provenance, keep it.
+    <span className="crumbs">
+      <span className="fkg" title="Subsesión bifurcada" aria-label="Subsesión bifurcada"><IcFork /></span>
+      <b title={chat.title}>{chat.title}</b>
+    </span>
   ) : null;
   return (
     <div className="tbar">

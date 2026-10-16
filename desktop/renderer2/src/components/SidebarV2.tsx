@@ -707,8 +707,7 @@ export function SidebarV2() {
     for (const g of groups) {
       if (scope === null || scope === normalizeWorkspacePath(g.path)) for (const chat of g.chats) inView.add(chat.id);
     }
-    const children = subsessionChildren(app.chats.filter((chat) => !chat.parentChatId || inView.has(chat.id)));
-    for (const parentTab of [...children.keys()]) if (!inView.has(parentTab)) children.delete(parentTab);
+    const children = subsessionChildren(app.chats, (tabId) => inView.has(tabId));
     const nested = nestedSubsessionIds(children);
     for (const g of groups) {
       const key = normalizeWorkspacePath(g.path);

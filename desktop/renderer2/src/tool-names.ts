@@ -141,6 +141,7 @@ const WORKASS_MCP_LABEL: Record<string, [string, string]> = {
   workass_apply_update: ['Actualizar Workass', 'write'],
   workass_read_chat: ['Leer un chat', 'read'],
   workass_create_chat: ['Crear un chat', 'chat'],
+  workass_create_subsession: ['Crear una subsesión', 'chat'],
   workass_rename_chat: ['Renombrar un chat', 'chat'],
   workass_delete_chat: ['Borrar un chat', 'delete'],
   workass_configure_chat: ['Configurar un chat', 'chat'],
