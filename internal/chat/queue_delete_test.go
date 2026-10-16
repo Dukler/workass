@@ -322,3 +322,46 @@ func TestLateSteerReceiptUpgradesTheUnconsumedRow(t *testing.T) {
 		t.Fatalf("late receipt did not mark the direction delivered: row=%#v", row)
 	}
 }
+
+// 2026-10-16: a renderer save built from a queue snapshot taken before a
+// notice started echoed it back and re-staged it, so the same wake-up ran
+// twice. An echoed id that already started (operation, ledger row, foreground
+// or pending steer) is never staged again; genuinely new rows still are.
+func TestQueueReplacementNeverRestagesAStartedRow(t *testing.T) {
+	f := newProviderTurnFixture(t)
+	f.state, _ = apply(t, f.state, Submit{
+		OperationID: "subagent-completion:n1", Text: "<task-notification>…</task-notification>",
+		Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "subagent-completion:n1", NoticeKind: "subagent", NoticeTitle: "Review", NoticeStatus: "done"},
+	})
+	if f.state.Foreground == nil || f.state.Foreground.Input.OperationID != "subagent-completion:n1" {
+		t.Fatalf("notice did not start: %#v", f.state.Foreground)
+	}
+	f.state, _ = apply(t, f.state, ReplaceStagedQueue{
+		OperationID: "stale-echo", Digest: "d-stale-echo", ExpectedRevision: f.state.Presentation.AgentQueueRevision,
+		Entries: []StagedQueueEntry{{ID: "subagent-completion:n1", Text: "<task-notification>…</task-notification>"}, {ID: "u1", Text: "typed later"}},
+	})
+	if len(f.state.StagedQueue) != 1 || f.state.StagedQueue[0].ID != "u1" {
+		t.Fatalf("a started notice was re-staged: %#v", f.state.StagedQueue)
+	}
+
+	// The same holds once the row only survives as a ledger QueueID.
+	f.state, _ = apply(t, f.state, TurnAdmitted{OperationID: "subagent-completion:n1", Accepted: true, Turn: provider.TurnRef{OperationID: "subagent-completion:n1", NativeID: "job-n1"}})
+	f.state, _ = apply(t, f.state, ProviderEventReceived{ConnectionGeneration: 1, Event: f.event("subagent-completion:n1", "job-n1", completed())})
+	ledgerQueueID := ""
+	for _, event := range f.state.Ledger {
+		if event.Role == "user" && event.QueueID != "" {
+			ledgerQueueID = event.QueueID
+		}
+	}
+	if ledgerQueueID == "" {
+		t.Fatal("fixture: the started notice left no ledger QueueID")
+	}
+	delete(f.state.Operations, provider.OperationID(ledgerQueueID))
+	f.state, _ = apply(t, f.state, ReplaceStagedQueue{
+		OperationID: "stale-echo-2", Digest: "d-stale-echo-2", ExpectedRevision: f.state.Presentation.AgentQueueRevision,
+		Entries: []StagedQueueEntry{{ID: ledgerQueueID, Text: "<task-notification>…</task-notification>"}, {ID: "u1", Text: "typed later"}},
+	})
+	if len(f.state.StagedQueue) != 1 || f.state.StagedQueue[0].ID != "u1" {
+		t.Fatalf("a ledger-only started row was re-staged: %#v", f.state.StagedQueue)
+	}
+}
