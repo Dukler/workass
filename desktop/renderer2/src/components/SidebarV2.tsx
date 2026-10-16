@@ -725,7 +725,9 @@ export function SidebarV2() {
         const kids = needle ? [] : (children.get(chat.id) ?? []).map((kid): ChildChatFacts => {
           const kidWork = store.spawnedWork(kid);
           const running = chatHasLiveActivity(kid, kidWork);
-          const first = kid.messages.find((message) => message.at)?.at;
+          // A forked child's inherited rows carry the parent's dates: order by
+          // its own first message (else its last activity).
+          const first = kid.messages.find((message) => message.at && !message.inherited)?.at;
           const createdMs = first ? Date.parse(first) : NaN;
           return {
             tabId: kid.id, title: kid.title, brand: store.providerBrand(kid.providerId, kid), running,
