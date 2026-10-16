@@ -1288,7 +1288,7 @@ func subsessionForkLink(source chat.State, sourceTabID string, prefix []chat.Led
 	// wa-subagent-1792182761893-4, correction 2).
 	before := ""
 	if cut {
-		for offset, event := range source.Ledger[len(prefix):] {
+		for _, event := range source.Ledger[len(prefix):] {
 			if event.Role != "user" || event.SteerState != "" {
 				continue
 			}
@@ -1298,11 +1298,21 @@ func subsessionForkLink(source chat.State, sourceTabID string, prefix []chat.Led
 			if event.LaneID != lane.Identity.ID {
 				continue
 			}
-			if record, ok := lane.Coverage[uint64(len(prefix)+offset+1)]; !ok || record.Status == chat.CoverageExcluded {
+			// Skip only a prompt that provably never reached the session. A
+			// delivery_uncertain one may have: it stays the boundary, so the host
+			// cuts exactly before it or refuses — never a wider copy (review
+			// wa-subagent-1792183828094-5, correction 1).
+			if event.TerminalState == "admission_rejected" || event.TerminalState == "cancelled_before_admission" {
 				continue
 			}
 			before = string(event.OperationID)
 			break
+		}
+		// A prompt already dispatched on this lane but not yet consumed has no
+		// ledger row; it may be in the session, so it is the boundary too
+		// (same review, suggestion 2).
+		if foreground := source.Foreground; before == "" && foreground != nil && foreground.LaneID == lane.Identity.ID && !foreground.UserConsumed {
+			before = string(foreground.OperationID)
 		}
 	}
 	// The native copy holds exactly what this lane's session received. Every
