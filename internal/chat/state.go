@@ -772,6 +772,8 @@ type State struct {
 	Deleted             bool
 	DeletionOperationID provider.OperationID
 	Presentation        PresentationState
+	// Parent is set only on a subsession, once, at creation (see ParentLink).
+	Parent *ParentLink `json:",omitempty"`
 	// Environment is the durable actor projection for the Entorno rail. The
 	// manager may observe Git and execute filesystem operations, but it is not
 	// allowed to be the post-cutover authority for this chat-scoped state.
@@ -838,6 +840,7 @@ func (s State) Clone() State {
 	out.Presentation = s.Presentation.Clone()
 	out.Environment = s.Environment.Clone()
 	out.Obligation = s.Obligation.Clone()
+	out.Parent = s.Parent.Clone()
 	out.Ledger = cloneLedgerEvents(s.Ledger)
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
@@ -983,6 +986,7 @@ func (s State) cloneReadProjection(ledgerStart int) State {
 		Initialized:   s.Initialized,
 		Deleted:       s.Deleted,
 		Presentation:  s.Presentation.Clone(),
+		Parent:        s.Parent.Clone(),
 		Ledger:        cloneLedgerEvents(s.Ledger[ledgerStart:]),
 		ActiveLaneID:  s.ActiveLaneID,
 		DesiredLaneID: s.DesiredLaneID,
@@ -1243,6 +1247,9 @@ func (s State) Validate() error {
 		if err := s.Obligation.Validate(); err != nil {
 			return err
 		}
+	}
+	if err := s.Parent.Validate(s.ChatID); err != nil {
+		return err
 	}
 	if s.ContextFloor > s.LedgerHead() {
 		return errors.New("chat context floor is ahead of the semantic ledger")

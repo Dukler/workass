@@ -212,6 +212,8 @@ type BackgroundEvent struct {
 	ResultExcerpt  string
 	// ParentTaskID links work an agent started to that agent's task.
 	ParentTaskID string `json:",omitempty"`
+	// Forked marks an agent started as a native fork of its parent.
+	Forked bool `json:",omitempty"`
 }
 
 type TransportHealthEvent struct {

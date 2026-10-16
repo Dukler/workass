@@ -231,14 +231,14 @@ function AssistantSliceBody({
                 onClick={() => { void navigator.clipboard?.writeText(fullAssistantText(owner)); }}>
                 <IcStampCopy />
               </button>
-              {/* Fork from this point (user 2026-10-16): the new chat copies the
-                  visible history through this turn and continues on its own
-                  fresh provider lane. Old daemons have no fork channel, and
-                  remote mounts hide too: an older remote daemon would silently
-                  ignore atMessageId and copy the whole conversation. */}
-              {has('appChatFork') && !machineOf(tabId) && !interrupted && (
+              {/* Fork from this point (user 2026-10-16): a forked subsession
+                  under this chat that remembers the conversation up to here —
+                  only where the provider can fork natively. Old daemons have no
+                  fork channel, and remote mounts hide too: an older remote
+                  daemon would silently ignore atMessageId. */}
+              {has('appChatFork') && !machineOf(tabId) && !interrupted && store.canForkNatively(store.chat(tabId)) && (
                 <button type="button" className="stamp-btn" title="Bifurcar desde aquí"
-                  aria-label="Bifurcar desde aquí: crea una conversación con el historial hasta este punto"
+                  aria-label="Bifurcar desde aquí: crea una subsesión que recuerda la conversación hasta este punto"
                   onClick={() => { void store.forkFromMessage(tabId, owner.id); }}>
                   <IcFork />
                 </button>

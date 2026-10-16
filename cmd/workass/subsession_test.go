@@ -1,0 +1,185 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"workass/internal/acp"
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
+)
+
+func subsessionTestHandler(t *testing.T) (*agentControlHandler, *providerChatRuntime, map[string]any) {
+	t.Helper()
+	root := repoRoot(t)
+	store := newSessionStore(filepath.Join(t.TempDir(), sessionStateFilename))
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"),
+		Provider:          acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP"},
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-subsession-parent",
+		"tabId":       "sub-parent-tab", "chatId": "sub-parent-chat",
+		"title": "Subsession parent", "cwd": root, "providerId": "mock",
+		"currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := manager.NewSession(ctx, acp.SessionOptions{
+		ChatID: "sub-parent-chat", TabID: "sub-parent-tab", CWD: root, AgentOwnerKey: "sub-owner",
+	}); err != nil {
+		t.Fatalf("new owner session: %v", err)
+	}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
+	owner := map[string]any{"owner_key": "sub-owner", "parent_chat_id": "sub-parent-chat", "parent_tab_id": "sub-parent-tab"}
+	return handler, runtime, owner
+}
+
+func withOwner(owner map[string]any, params map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range owner {
+		out[key] = value
+	}
+	for key, value := range params {
+		out[key] = value
+	}
+	return out
+}
+
+// A fresh subsession (user 2026-10-16) is a permanent child chat linked to the
+// caller: the link is durable, projected for the sidebar, listed for agents,
+// and a lost reply replays to the same child.
+func TestAgentFreshSubsessionIsLinkedListedAndReplayable(t *testing.T) {
+	handler, runtime, owner := subsessionTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
+	params := withOwner(owner, map[string]any{"operation_id": "test:fresh-subsession", "title": "Revisar la API"})
+	createdRaw, err := handler.call(request, agentControlRequest{Method: "chat.subsession", Params: params})
+	if err != nil {
+		t.Fatalf("chat.subsession: %v", err)
+	}
+	created := mapFromAnyMain(createdRaw)
+	tabID, chatID := fieldString(created, "tabId"), fieldString(created, "chatId")
+	if tabID == "" || chatID == "" || fieldString(created, "parentChatId") != "sub-parent-chat" || created["forked"] != false {
+		t.Fatalf("fresh subsession receipt = %#v", created)
+	}
+	state, ok := runtime.Snapshot(chatID)
+	if !ok || state.Parent == nil || *state.Parent != (chat.ParentLink{ChatID: "sub-parent-chat", TabID: "sub-parent-tab"}) {
+		t.Fatalf("durable parent link = %#v", state.Parent)
+	}
+	if state.Presentation.Title != "Revisar la API" || len(state.Ledger) != 0 {
+		t.Fatalf("fresh subsession must start empty under its own title: %#v ledger=%d", state.Presentation.Title, len(state.Ledger))
+	}
+
+	session, err := runtime.ProjectSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected map[string]any
+	for _, raw := range anySlice(session["chats"]) {
+		if item := mapFromAnyMain(raw); fieldString(item, "chatId") == chatID {
+			projected = item
+		}
+	}
+	if fieldString(projected, "parentChatId") != "sub-parent-chat" || fieldString(projected, "parentTabId") != "sub-parent-tab" {
+		t.Fatalf("projection lacks the parent link: %#v", projected)
+	}
+	if _, forked := projected["subsessionForked"]; forked {
+		t.Fatalf("a fresh subsession projected as forked: %#v", projected)
+	}
+
+	listedRaw, err := handler.call(request, agentControlRequest{Method: "chat.list", Params: owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, raw := range anySlice(mapFromAnyMain(listedRaw)["chats"]) {
+		if item := mapFromAnyMain(raw); fieldString(item, "chatId") == chatID {
+			found = fieldString(item, "parentChatId") == "sub-parent-chat" && item["forked"] == false
+		}
+	}
+	if !found {
+		t.Fatalf("chat.list does not name the subsession's parent: %#v", listedRaw)
+	}
+
+	replayRaw, err := handler.call(request, agentControlRequest{Method: "chat.subsession", Params: params})
+	if err != nil || fieldString(mapFromAnyMain(replayRaw), "chatId") != chatID {
+		t.Fatalf("replay = %#v err=%v, want the same child", replayRaw, err)
+	}
+	changed := withOwner(owner, map[string]any{"operation_id": "test:fresh-subsession", "title": "Otro título"})
+	if _, err := handler.call(request, agentControlRequest{Method: "chat.subsession", Params: changed}); err == nil {
+		t.Fatal("the same operation with a different request was accepted")
+	}
+	if _, err := handler.call(request, agentControlRequest{Method: "chat.subsession", Params: withOwner(owner, map[string]any{"operation_id": "test:untitled"})}); err == nil {
+		t.Fatal("a subsession without a title was accepted")
+	}
+}
+
+// A forked subsession is a native fork or nothing: no provider session, a
+// provider without native forks, or a request to change the provider all
+// fail before any child exists — never a contextless copy.
+func TestAgentForkedSubsessionNeverFallsBackToAContextlessCopy(t *testing.T) {
+	handler, runtime, owner := subsessionTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
+	for name, params := range map[string]map[string]any{
+		"no native fork": {"operation_id": "test:forked-subsession", "title": "Probar tokens", "fork": true},
+		"other provider": {"operation_id": "test:forked-other", "title": "Probar tokens", "fork": true, "provider_id": "codex"},
+	} {
+		_, err := handler.call(request, agentControlRequest{Method: "chat.subsession", Params: withOwner(owner, params)})
+		if err == nil {
+			t.Fatalf("%s: forked subsession accepted", name)
+		}
+		operationID := providercontract.OperationID(fieldString(params, "operation_id"))
+		if _, exists := runtime.Snapshot(stableAgentChatIdentity("chat", operationID)); exists {
+			t.Fatalf("%s: a child chat was created despite the refusal: %v", name, err)
+		}
+	}
+}
+
+func TestSubsessionForkLinkPinsTheNativeHeadAndTheCut(t *testing.T) {
+	lane := providercontract.LaneIdentity{ID: "lane-claude", ChatID: "src", Realm: providercontract.Realm{ProviderID: "claude"}}
+	state := chat.State{
+		ChatID: "src", ActiveLaneID: lane.ID,
+		Lanes: map[providercontract.LaneID]chat.LaneState{lane.ID: {
+			Identity: lane,
+			Thread:   providercontract.ThreadRef{ProviderID: "claude", RootID: "root-id", HeadID: "head-id", Lineage: 2, Proof: "p"},
+		}},
+		Ledger: []chat.LedgerEvent{
+			{Role: "user", OperationID: "op1"}, {Role: "assistant", OperationID: "op1"},
+			{Role: "user", OperationID: "op2", SteerState: "consumed"},
+			{Role: "user", OperationID: "op3"}, {Role: "assistant", OperationID: "op3"},
+		},
+	}
+	whole, err := subsessionForkLink(state, "src-tab", state.Ledger, false)
+	if err != nil || *whole != (chat.ParentLink{ChatID: "src", TabID: "src-tab", Forked: true, ForkSourceSessionID: "head-id"}) {
+		t.Fatalf("whole-session fork link = %#v err=%v", whole, err)
+	}
+	cut, err := subsessionForkLink(state, "src-tab", state.Ledger[:2], true)
+	if err != nil || cut.ForkBeforeOperationID != "op3" {
+		t.Fatalf("a cut must stop before the next real prompt, skipping steers: %#v err=%v", cut, err)
+	}
+	if got := turnsBeforeOperation(state.Ledger, "op3"); got != 1 {
+		t.Fatalf("turnsBeforeOperation = %d, want 1", got)
+	}
+
+	codex := state
+	codexLane := lane
+	codexLane.Realm.ProviderID = "codex"
+	codex.Lanes = map[providercontract.LaneID]chat.LaneState{lane.ID: {Identity: codexLane, Thread: providercontract.ThreadRef{ProviderID: "codex", RootID: "r", HeadID: "r", Lineage: 1}}}
+	if _, err := subsessionForkLink(codex, "src-tab", nil, false); err == nil || !strings.Contains(err.Error(), "cannot fork") {
+		t.Fatalf("codex fork link err = %v", err)
+	}
+	empty := chat.State{ChatID: "src"}
+	if _, err := subsessionForkLink(empty, "src-tab", nil, false); err == nil {
+		t.Fatal("a chat with no provider session produced a fork link")
+	}
+}

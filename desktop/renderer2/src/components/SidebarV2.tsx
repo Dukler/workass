@@ -10,7 +10,10 @@ import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 import { ForkKidsToggle, ForkNest } from './ForkSidebar';
 import { forkStore, useForks } from '../store/forks';
-import { forkChatBadge, forkSidebarOpen, forkSummaryForChat, type ForkChatBadge } from '../fork-sidebar';
+import {
+  forkChatBadge, forkSidebarOpen, forkSummaryForChat, nestedSubsessionIds, subsessionChildren, withChildChats,
+  type ChildChatFacts, type ForkChatBadge,
+} from '../fork-sidebar';
 
 // Sidebar v2 — port of T3 Code's "Sidebar v2" beta (nightly 0.0.29.20260724,
 // commit 41a430a8), read from the source maps it ships rather than copied by
@@ -229,9 +232,12 @@ function WorkingDuration({ since }: { since: number }) {
 type Row = {
   chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
   status: Status; since: number; bg: number; error: string; order: number;
-  // Child sessions under this chat; null when it has none. Subagents are not
-  // counted here — they are turn work shown in the right rail.
+  // Child sessions under this chat — subsession chats and fork children,
+  // counted alike; null when it has none. Subagents are not counted here —
+  // they are turn work shown in the right rail.
   fork: ForkChatBadge | null;
+  // The subsession chats nested under this row (user 2026-10-16).
+  kids: ChildChatFacts[];
 };
 
 // Port of T3's effectiveSettled. Live work, pending approval, parked work, and
@@ -491,7 +497,7 @@ function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefo
           </>
         )}
       </div>
-      {forkOpen && row.fork && <ForkNest chat={chat} />}
+      {forkOpen && row.fork && <ForkNest chat={chat} kids={row.kids} activeId={store.state.activeId} />}
     </li>
   );
 }
@@ -693,15 +699,33 @@ export function SidebarV2() {
     const now = lifecycleNow;
     const needle = query.trim().toLowerCase();
     const manualOrder = new Map(app.chats.map((chat, index) => [chat.id, index]));
+    // Subsessions nest under their parent; a search lists every match flat.
+    const children = subsessionChildren(app.chats);
+    const nested = nestedSubsessionIds(children);
     for (const g of groups) {
       const key = normalizeWorkspacePath(g.path);
       if (scope !== null && scope !== key) continue;
       for (const chat of g.chats) {
         const project = workspaceLabelForChat(g, chat);
         if (needle && !`${chat.title} ${project}`.toLowerCase().includes(needle)) continue;
+        if (!needle && nested.has(chat.id)) continue;
         const work = store.spawnedWork(chat);
-        const fork = forkChatBadge(forkSummaryForChat(forkStore.summary(), chat), forkStore.chat(chat.id));
-        const live = chatHasLiveActivity(chat, work) || (fork?.running ?? 0) > 0;
+        const forkRuns = forkChatBadge(forkSummaryForChat(forkStore.summary(), chat), forkStore.chat(chat.id));
+        // A running subsession is its own chat's work, not the parent's: only
+        // fork-run children make the parent row live.
+        const live = chatHasLiveActivity(chat, work) || (forkRuns?.running ?? 0) > 0;
+        const kids = needle ? [] : (children.get(chat.id) ?? []).map((kid): ChildChatFacts => {
+          const kidWork = store.spawnedWork(kid);
+          const running = chatHasLiveActivity(kid, kidWork);
+          const first = kid.messages.find((message) => message.at)?.at;
+          const createdMs = first ? Date.parse(first) : NaN;
+          return {
+            tabId: kid.id, title: kid.title, brand: store.providerBrand(kid.providerId, kid), running,
+            since: running ? workingSince(kid, kidWork) : 0, touched: lastTouchedAt(kid),
+            createdMs: Number.isFinite(createdMs) ? createdMs : 0,
+          };
+        });
+        const fork = withChildChats(forkRuns, kids);
         const active = chat.id === app.activeId;
         const touched = lastTouchedAt(chat);
         const status = resolveStatus(chat, live, active, store.obligation(chat));
@@ -710,14 +734,14 @@ export function SidebarV2() {
         const archived = resolveArchived(chat, status, now, touched);
         out.push({
           chat, project, touched, status, settled, archived,
-          since: status === 'working' ? (workingSince(chat, work) || fork?.since || touched) : 0,
+          since: status === 'working' ? (workingSince(chat, work) || forkRuns?.since || touched) : 0,
           bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
           order: manualOrder.get(chat.id) ?? Number.MAX_SAFE_INTEGER,
           // Density follows lifecycle, never age or selection. Every ordinary
           // thread stays full-size; only settled/archive rows are compact.
           card: isFullSizeSidebarRow(settled, archived),
-          fork,
+          fork, kids,
         });
       }
     }
@@ -768,6 +792,7 @@ export function SidebarV2() {
   const isActiveRow = (row: Row) => row.chat.id === app.activeId && !forkStore.selectedFor(row.chat.id);
   const isForkOpen = (row: Row) => !!row.fork && forkSidebarOpen(
     forkStore.chatOpenExplicit(row.chat.id), row.chat.id === app.activeId, row.fork.running > 0,
+    row.kids.some((kid) => kid.tabId === app.activeId),
   );
   const rowProps = {
     drag, setDrag, onDropBefore: dropChatBefore, onTip: setTip,

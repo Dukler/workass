@@ -40,6 +40,10 @@ type SubagentSpawnOptions struct {
 	Profile           string `json:"profile,omitempty"`
 	PermissionIntent  string `json:"permissionIntent,omitempty"`
 	RetryOf           string `json:"retryOf,omitempty"`
+	// Fork starts the subagent as a native fork of the calling chat's provider
+	// session, so it remembers the conversation; false (default) starts fresh,
+	// as in Claude Code (user 2026-10-16).
+	Fork bool `json:"fork,omitempty"`
 }
 
 type subagentFollowup struct {
@@ -163,7 +167,9 @@ type SubagentRun struct {
 	CWD        string `json:"cwd"`
 	Profile    string `json:"profile,omitempty"`
 	RetryOf    string `json:"retryOf,omitempty"`
-	Phase      string `json:"phase"`
+	// Forked marks a subagent started as a native fork of its parent's session.
+	Forked bool   `json:"forked,omitempty"`
+	Phase  string `json:"phase"`
 	// NeedsAttention is true when the coordinator must stop waiting and surface
 	// a child-owned decision to the user. Permission requests are the first
 	// attention kind; Phase and LatestActivity retain the exact bounded reason.
@@ -219,6 +225,7 @@ type SubagentRun struct {
 	completionDeliveryInFlight bool
 	originLaneID               string
 	originOperationID          string
+	forkSourceSessionID        string
 }
 
 // AgentCatalog exposes the exact daemon-owned provider/model/effort/mode
@@ -275,6 +282,14 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	info, statErr := os.Stat(cwd)
 	if statErr != nil || !info.IsDir() {
 		return SubagentRun{}, fmt.Errorf("subagent cwd is not a readable directory: %s", cwd)
+	}
+	forkSource := ""
+	if opts.Fork {
+		source, err := m.subagentForkSource(defaults, parent, providerID, cwd)
+		if err != nil {
+			return SubagentRun{}, err
+		}
+		forkSource = source
 	}
 	label := SanitizeDisplayText(opts.Label, 80)
 	if label == "" {
@@ -354,6 +369,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		ProgressSequence: 1, cancel: cancel, done: make(chan struct{}), prompt: prompt,
 		parentChatID: ownerChatID, parentTabID: ownerTabID,
 		acceptingMessages: true,
+		Forked:            opts.Fork, forkSourceSessionID: forkSource,
 	}
 	m.subagents[id] = run
 	snapshot := copySubagentRun(run)
@@ -381,9 +397,19 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 
 	childChatID := subagentChatIDPrefix + id
 	childTabID := childChatID
+	forkedSessionID := ""
+	if run.Forked {
+		m.updateSubagentActivity(id, "initializing", "Forking the parent conversation")
+		forked, forkErr := m.forkNativeSessionCopy(runCtx, providerID, run.forkSourceSessionID, cwd, nativeForkBoundary{})
+		if forkErr != nil {
+			m.finishSubagent(run, nil, forkErr)
+			return
+		}
+		forkedSessionID = forked
+	}
 	info, err := m.NewSession(runCtx, SessionOptions{
 		CWD: cwd, BridgeKey: childChatID, ChatID: childChatID, TabID: childTabID,
-		ProviderID: providerID,
+		ProviderID: providerID, ForkedSessionID: forkedSessionID,
 	})
 	if err != nil {
 		m.finishSubagent(run, nil, err)
@@ -1612,6 +1638,7 @@ func (m *Manager) RetrySubagent(ctx context.Context, ownerKey, parentChatID, par
 		Prompt: prompt, Label: original.Label, ProviderID: original.ProviderID,
 		ModelID: original.ModelID, Effort: original.Effort, ModeID: original.ModeID,
 		CWD: original.CWD, Profile: original.Profile, RetryOf: original.ID,
+		Fork: original.Forked,
 	}
 	m.mu.Unlock()
 	return m.SpawnSubagent(ctx, opts)
@@ -1898,4 +1925,38 @@ func copySubagentRun(run *SubagentRun) SubagentRun {
 		copy.ElapsedMs = end.Sub(start).Milliseconds()
 	}
 	return copy
+}
+
+// subagentForkSource is the calling chat's current native head, the only
+// thing a forked subagent may copy. The child keeps the parent's provider and
+// workspace: a native session lives in its provider's per-workspace store.
+func (m *Manager) subagentForkSource(defaults, parent *Job, providerID, cwd string) (string, error) {
+	if !NativeSessionForkSupported(providerID) {
+		return "", unsupportedNativeSessionFork(providerID)
+	}
+	originSessionID := ""
+	if defaults != nil {
+		originSessionID = defaults.SessionID
+	}
+	if parent != nil {
+		originSessionID = parent.SessionID
+	}
+	lane := m.providerLaneForSessionID(originSessionID)
+	if lane == nil {
+		return "", errors.New("a forked subagent needs the calling chat's live provider session")
+	}
+	lane.mu.Lock()
+	thread := lane.thread.Normalize()
+	laneCWD := lane.info.CWD
+	lane.mu.Unlock()
+	if string(thread.ProviderID) != normalizeProviderID(providerID) {
+		return "", errors.New("a forked subagent keeps the calling chat's provider")
+	}
+	if thread.HeadID == "" {
+		return "", errors.New("the calling chat has no native session to fork yet")
+	}
+	if strings.TrimSpace(laneCWD) != "" && !sameFilesystemPath(laneCWD, cwd) {
+		return "", errors.New("a forked subagent keeps the calling chat's workspace")
+	}
+	return thread.HeadID, nil
 }

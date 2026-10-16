@@ -5,7 +5,7 @@ import { forkChildLabel } from '../src/fork-format.ts';
 import {
   FORK_KID_PAGE, forkChatBadge, forkFlatKids, forkGroups, forkKidMeta, forkPage,
   forkSelectionAfterActive, forkSelectionVisible, forkSidebarOpen, forkSubsessionRow, forkSummaryForChat,
-  formatForkShortDuration, sortSubsessionRows,
+  formatForkShortDuration, sortSubsessionRows, chatSubsessionRow, nestedSubsessionIds, subsessionChildren, withChildChats,
 } from '../src/fork-sidebar.ts';
 
 function child(partial: Partial<ForkChildView> & Pick<ForkChildView, 'childId'>): ForkChildView {
@@ -175,4 +175,51 @@ test('ordering is stable: a queued fork child waits at the run stamp, never leap
   assert.deepEqual(after.map((row) => row.key), before.map((row) => row.key), 'getting a start stamp never moves a row');
   assert.equal(after[2].startedMs, Date.parse(t(25)));
   assert.deepEqual(sortSubsessionRows([]), []);
+});
+
+// Subsessions (user 2026-10-16): permanent child chats nest under their
+// parent, fresh and forked alike; subagents never do.
+test('subsession chats nest under a present parent; an orphan stays top-level', () => {
+  const chats = [
+    { id: 'tab-parent', chatId: 'chat-parent' },
+    { id: 'tab-fresh', chatId: 'chat-fresh', parentChatId: 'chat-parent' },
+    { id: 'tab-forked', chatId: 'chat-forked', parentChatId: 'chat-parent' },
+    { id: 'tab-orphan', chatId: 'chat-orphan', parentChatId: 'chat-deleted' },
+    { id: 'tab-self', chatId: 'chat-self', parentChatId: 'chat-self' },
+  ];
+  const children = subsessionChildren(chats);
+  assert.deepEqual([...children.keys()], ['tab-parent']);
+  assert.deepEqual(children.get('tab-parent')!.map((chat) => chat.id), ['tab-fresh', 'tab-forked']);
+  assert.deepEqual([...nestedSubsessionIds(children)].sort(), ['tab-forked', 'tab-fresh']);
+});
+
+test('a subsession chat draws the same neutral row as a fork child, and opens its chat', () => {
+  const now = Date.parse(t(100));
+  const idle = chatSubsessionRow({ tabId: 'tab-a', title: 'Probar tokens', brand: 'claude', running: false, since: 0, touched: Date.parse(t(40)), createdMs: Date.parse(t(10)) }, now);
+  assert.deepEqual(
+    { kind: idle.kind, label: idle.label, state: idle.state, word: idle.word, wallMs: idle.wallMs, orderMs: idle.orderMs, chatTabId: idle.chatTabId, fork: idle.fork },
+    { kind: 'chat', label: 'Probar tokens', state: 'completed', word: null, wallMs: 60_000, orderMs: Date.parse(t(10)), chatTabId: 'tab-a', fork: undefined },
+  );
+  const live = chatSubsessionRow({ tabId: 'tab-b', title: '  ', brand: null, running: true, since: Date.parse(t(90)), touched: Date.parse(t(95)), createdMs: 0 }, now);
+  assert.equal(live.state, 'running');
+  assert.equal(live.startedMs, Date.parse(t(90)));
+  assert.equal(live.wallMs, null);
+  assert.equal(live.label, 'Subsesión');
+  assert.equal(live.orderMs, Date.parse(t(95)), 'no first message: the last activity orders it');
+});
+
+test('the parent badge counts subsession chats like fork children; only running ones date it', () => {
+  const kid = (running: boolean, since: number) => ({ tabId: 'k', title: 'k', brand: null, running, since, touched: 0, createdMs: 0 });
+  assert.equal(withChildChats(null, []), null);
+  assert.deepEqual(withChildChats(null, [kid(false, 0), kid(true, 50)]), { points: 0, children: 2, running: 1, since: 50 });
+  assert.deepEqual(
+    withChildChats({ points: 1, children: 3, running: 1, since: 80 }, [kid(true, 20)]),
+    { points: 1, children: 4, running: 2, since: 20 },
+  );
+});
+
+test('the nest opens by itself while you are inside one of its subsessions', () => {
+  assert.equal(forkSidebarOpen(undefined, false, false, true), true);
+  assert.equal(forkSidebarOpen(false, false, false, true), false, 'an explicit close still wins');
+  assert.equal(forkSidebarOpen(undefined, false, true, false), false);
 });

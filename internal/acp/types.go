@@ -324,6 +324,9 @@ type SessionOptions struct {
 	AgentOwnerKey string
 	Spare         bool
 	Ephemeral     bool
+	// ForkedSessionID opens an existing native fork by exact resume instead of
+	// session/new (a forked subagent, user 2026-10-16). Delegated bridges only.
+	ForkedSessionID string
 	// ProviderLaneManaged means provider selection is owned by the durable chat
 	// actor. A chat may retain multiple provider lanes, so a single-provider
 	// chat binding must not reject an explicit lane selection.

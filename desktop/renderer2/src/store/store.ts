@@ -805,6 +805,13 @@ export class Store {
     return machineId ? this.remoteCatalogGroups.get(machineId) ?? [] : this.state.groups;
   }
 
+  // A forked subsession needs a native session fork from the provider that
+  // owns this chat's live session (user 2026-10-16); none, no fork button.
+  canForkNatively(chat: Chat | null | undefined): boolean {
+    if (!chat) return false;
+    return this.providerGroup(chat.sessionProviderId ?? chat.providerId, chat)?.nativeFork === true;
+  }
+
   private providerGroup(
     providerId: string | null | undefined,
     chat?: Pick<Chat, 'id' | 'machineId'> | string | null,
@@ -1136,6 +1143,9 @@ export class Store {
         : messages.length;
       return {
         id: c.id, chatId: c.chatId ?? newChatConvId(), actorRevision: Number.isInteger(c.actorRevision) ? c.actorRevision : 0, sessionId: c.liveSession?.sessionId ?? null,
+        parentChatId: typeof c.parentChatId === 'string' && c.parentChatId ? c.parentChatId : undefined,
+        parentTabId: typeof c.parentTabId === 'string' && c.parentTabId ? c.parentTabId : undefined,
+        subsessionForked: c.subsessionForked === true ? true : undefined,
         sessionProviderId: binding.sessionProviderId,
         title: c.title, titleLocked: !!c.titleLocked,
         group: c.group ?? null, cwd: c.liveSession?.cwd ?? c.cwd ?? null,
@@ -4046,13 +4056,12 @@ export class Store {
     this.pendingChatCreatePromises.set(tabId, pending);
     return pending;
   }
-  // D5 explicit chat fork from a transcript hover affordance: a new chat copies
-  // the source's visible transcript through the hovered message's turn and gets
-  // a fresh provider lane. The daemon resolves the semantic turn boundary from
-  // atMessageId, so this method never counts turns itself. The copied prefix is
-  // visible history only — the child's provider starts with fresh context
-  // (reducer law: fork lanes mark the prefix ContextExcluded) — so the toast and
-  // titles must not promise a context-replaying clone.
+  // Fork from a transcript hover affordance: creates a FORKED SUBSESSION (user
+  // 2026-10-16) — a permanent child chat under this one whose provider lane is
+  // a native fork of this chat's session cut after the hovered message's turn,
+  // so it remembers the conversation up to there. The daemon resolves the turn
+  // boundary from atMessageId and refuses (never a contextless copy) when the
+  // provider cannot fork natively.
   async forkFromMessage(tabId: string, messageId: string): Promise<void> {
     const chat = this.chat(tabId);
     if (!chat) return;
@@ -4083,7 +4092,8 @@ export class Store {
     if (!child) {
       child = {
         id: childTabId, chatId: childChatId, machineId: machineId || undefined, sessionId: null,
-        title: `Bifurcación de ${owner.title}`.trim().slice(0, 80), titleLocked: false,
+        title: attempt?.title ?? `Bifurcación de ${owner.title}`.trim().slice(0, 80), titleLocked: true,
+        parentChatId: owner.chatId, parentTabId: owner.id, subsessionForked: true,
         group: owner.group, cwd: owner.cwd,
         currentModelId: owner.currentModelId, currentModeId: owner.currentModeId,
         providerId: owner.providerId, providerName: owner.providerName,
@@ -4103,11 +4113,17 @@ export class Store {
     // The attempt is the exact durable create request; resending it verbatim
     // (cwd included) keeps the daemon's frame fence identical after a deploy,
     // where re-reading owner.cwd would hash a different fork.
-    if (!attempt) owner._forkAttempt = { operationId, newTabId, newChatId, atMessageId: messageId, cwd: owner.cwd ?? null };
+    if (!attempt) {
+      owner._forkAttempt = {
+        operationId, newTabId, newChatId, atMessageId: messageId, cwd: owner.cwd ?? null,
+        title: `Bifurcación de ${owner.title}`.trim().slice(0, 80),
+      };
+    }
     const requested = {
       tabId: owner.id, chatId: owner.chatId,
       newTabId: String(newTabId), newChatId, operationId,
       atMessageId: messageId, cwd: owner._forkAttempt?.cwd ?? null,
+      subsession: true, title: owner._forkAttempt?.title ?? child.title,
     };
     try {
       const info = await callThrow('appChatFork', requested);
@@ -4164,7 +4180,7 @@ export class Store {
         // cautious warning the only honest phrasing (review 2026-10-16).
         this.addToast('Bifurcación creada', 'El daemon no confirmó la bifurcación por mensaje: la copia puede incluir todo el historial.');
       } else {
-        this.addToast('Bifurcación creada', 'La conversación continúa en la copia nueva.');
+        this.addToast('Bifurcación creada', 'La subsesión recuerda la conversación hasta ese mensaje.');
       }
     } catch (error) {
       const liveChild = this.chat(childTabId);

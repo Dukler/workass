@@ -37,6 +37,9 @@ type providerSpawnedWorkTask struct {
 	Description  string
 	TaskType     string
 	SubagentType string
+	// Forked is the adapter's verdict that this agent inherits its parent's
+	// whole conversation (a native fork), shown only on the child's own row.
+	Forked       bool
 	OutputFile   string
 	Summary      string
 	LastToolName string

@@ -446,7 +446,7 @@ func actorSubagentRun(state chat.State, item chat.BackgroundState) acp.SubagentR
 		ProviderID: providerID, ModelLabel: acp.RedactSensitiveText(event.ModelLabel),
 		Phase: acp.RedactSensitiveText(event.LastToolName), LatestActivity: acp.RedactSensitiveText(event.Summary),
 		LastActivityAt: event.UpdatedAt, ElapsedMs: elapsed, StartedAt: event.StartedAt, FinishedAt: finished,
-		Result: result, RootJobID: item.Owner.TurnID, ReceiptID: id,
+		Result: result, RootJobID: item.Owner.TurnID, ReceiptID: id, Forked: event.Forked,
 	}
 	if status == "failed" {
 		run.Error = result
@@ -565,7 +565,7 @@ func actorBackgroundWorkItem(state chat.State, background chat.BackgroundState) 
 		OutputFile: acp.RedactSensitiveText(event.OutputFile), PID: cloneIntPointer(event.PID), ExitCode: cloneIntPointer(event.ExitCode),
 		Summary: acp.RedactSensitiveText(event.Summary), LastToolName: acp.RedactSensitiveText(event.LastToolName),
 		ModelLabel: acp.RedactSensitiveText(event.ModelLabel), ResultExcerpt: acp.RedactSensitiveText(event.ResultExcerpt),
-		ParentTaskID: event.ParentTaskID,
+		ParentTaskID: event.ParentTaskID, Forked: event.Forked,
 		OriginLaneID: string(background.Owner.LaneID), OriginOperationID: string(background.Owner.OperationID), OriginTurnID: background.Owner.TurnID,
 	}
 }

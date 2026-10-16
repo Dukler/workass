@@ -297,6 +297,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/provider_chat_runtime.go:ChatDiff:ChatDiffFromCheckpoints":                                          {1, "checkpoint projection read"},
 		"cmd/workass/provider_chat_runtime.go:cancelQueuedSubagentCompletionsLocked:SubagentCompletionReceiptsForParent": {1, "read-only exact-parent tracked-child Stop receipt identity lookup"},
 		"cmd/workass/provider_chat_runtime.go:Fork:ResolveProviderLaneSelection":                                         {1, "known child selection before child actor attachment"},
+		"cmd/workass/provider_chat_runtime.go:ensureSubsessionForkLane:ForkSubsessionLane":                               {1, "a forked subsession binds its native fork before lane selection"},
 		"cmd/workass/provider_chat_runtime.go:attachForkChild:LiveProviderLaneInfo":                                      {1, "fork attachment projection"},
 		"cmd/workass/provider_chat_runtime.go:resolveSelectionLocked:ResolveProviderLaneSelection":                       {1, "actor selection command bridge"},
 		"cmd/workass/provider_chat_runtime.go:selectLocked:ReattachProviderLane":                                         {1, "actor selection effect bridge"},
@@ -925,7 +926,7 @@ func TestPhaseCStatelessMCPMutationBoundaryIsExplicit(t *testing.T) {
 // JSON-RPC request ids are intentionally absent from this boundary.
 func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 	agentMutations := map[string]struct{}{
-		"workass_create_chat": {}, "workass_rename_chat": {}, "workass_settle_chat": {}, "workass_configure_chat": {},
+		"workass_create_chat": {}, "workass_create_subsession": {}, "workass_rename_chat": {}, "workass_settle_chat": {}, "workass_configure_chat": {},
 		"workass_focus_chat": {}, "workass_delete_chat": {}, "workass_send_chat_message": {},
 		"workass_schedule_message": {}, "workass_cancel_scheduled_message": {},
 		"workass_cancel_chat_turn": {}, "workass_host_artifact": {}, "workass_apply_update": {}, "workass_spawn_subagent": {},

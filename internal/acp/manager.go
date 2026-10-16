@@ -676,6 +676,9 @@ func (m *Manager) NewSession(ctx context.Context, opts SessionOptions) (SessionI
 			return SessionInfo{}, restoreErr
 		}
 	}
+	if strings.TrimSpace(opts.ForkedSessionID) != "" {
+		return m.openForkedSession(ctx, opts, providerID)
+	}
 	if !opts.ProviderLaneCreate {
 		if info, ok := m.adoptSpareSession(opts); ok {
 			info, err = m.applySessionStartupControls(ctx, opts, info)

@@ -96,11 +96,17 @@ test('a message-scoped fork adopts the reply, clears the retry anchor, and toast
     assert.equal(calls[0].atMessageId, 'msg-1');
     assert.equal(calls[0].cwd, owner.cwd);
     assert.ok(String(calls[0].newTabId).startsWith('tab-'), 'renderer-minted child tab id');
+    // A forked SUBSESSION (user 2026-10-16): the daemon forks natively or refuses.
+    assert.equal(calls[0].subsession, true);
+    assert.equal(calls[0].title, 'Bifurcación de tab-fork-ok');
 
     const child = childRowOf(subject, owner.id);
     assert.ok(child, 'optimistic child row present');
     assert.equal(child!.sessionId, 'ses-child-1');
     assert.equal(child!.pending, false);
+    assert.equal(child!.parentChatId, owner.chatId, 'the child nests under its parent');
+    assert.equal(child!.parentTabId, owner.id);
+    assert.equal(child!.subsessionForked, true);
     assert.equal((owner as any)._forkAttempt, undefined);
     // The create fence survives until the authoritative projection echoes the
     // committed child row.
@@ -109,7 +115,7 @@ test('a message-scoped fork adopts the reply, clears the retry anchor, and toast
     assert.equal(subject.state.activeId, child!.id);
     const toast = subject.state.toasts.at(-1);
     assert.equal(toast.title, 'Bifurcación creada');
-    assert.equal(toast.body, 'La conversación continúa en la copia nueva.');
+    assert.equal(toast.body, 'La subsesión recuerda la conversación hasta ese mensaje.');
   });
 });
 
@@ -162,11 +168,15 @@ test('a refused fork releases the create fence and keeps the retry anchor', asyn
     assert.equal(attempt.atMessageId, 'msg-3');
     assert.equal(attempt.cwd, owner.cwd);
 
-    // A retry re-sends the exact tracked request (ids + hovered point + cwd).
+    // A retry re-sends the exact tracked request (ids + hovered point + cwd +
+    // title), even after the parent was renamed: the title is in the digest.
+    owner.title = 'renamed meanwhile';
     await subject.forkFromMessage(owner.id, 'msg-3');
     assert.equal(calls.length, 2);
     assert.equal(calls[1].operationId, calls[0].operationId);
     assert.equal(calls[1].cwd, calls[0].cwd);
     assert.equal(calls[1].atMessageId, 'msg-3');
+    assert.equal(calls[1].title, calls[0].title);
+    assert.equal(calls[1].subsession, true);
   });
 });

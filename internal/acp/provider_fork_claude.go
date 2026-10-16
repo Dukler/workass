@@ -2,7 +2,10 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	providercontract "workass/internal/provider"
 )
 
 // claudeForkStrategy forks a Claude Code session with the official CLI:
@@ -296,4 +301,81 @@ func (claudeForkStrategy) RunTurn(ctx context.Context, spec forkTurnSpec) (forkT
 		return result, fmt.Errorf("provider exited without a result: %s", compactText(tail, 600))
 	}
 	return result, nil
+}
+
+const nativeSessionForkTimeout = 60 * time.Second
+
+// ForkNativeSession runs the Claude Agent SDK host in its one-shot fork mode
+// (scripts/claude-native-host.mjs --workass-fork-session). The host prints one
+// JSON object on stdout; diagnostics go to stderr.
+func (claudeForkStrategy) ForkNativeSession(ctx context.Context, launch ProviderConfig, sourceSessionID, dir string, before nativeForkBoundary) (string, error) {
+	if len(launch.Args) == 0 || !strings.HasSuffix(strings.TrimSpace(launch.Args[0]), "claude-native-host.mjs") {
+		return "", &providercontract.Error{
+			Kind:    providercontract.ErrorUnsupportedCapability,
+			Message: "a native session fork needs the Workass Claude Agent SDK host",
+		}
+	}
+	request, err := json.Marshal(map[string]any{
+		"sessionId": strings.TrimSpace(sourceSessionID), "dir": strings.TrimSpace(dir),
+		"beforeUserMessageIds": claudeUserMessageUUIDs(before.OperationID, before.SessionIDs...),
+	})
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, nativeSessionForkTimeout)
+	defer cancel()
+	args := append(append([]string(nil), launch.Args...), "--workass-fork-session")
+	cmd := managedCommandContext(ctx, launch.Command, args...)
+	cmd.Dir = strings.TrimSpace(dir)
+	cmd.Env = mergedEnv(os.Environ(), launch.Env, providerEnvironmentPolicy{})
+	cmd.Stdin = bytes.NewReader(request)
+	var stdout bytes.Buffer
+	stderr := &boundedTail{limit: forkStderrTailBytes}
+	cmd.Stdout = &stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		detail := RedactSensitiveText(strings.TrimSpace(stderr.String()))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", fmt.Errorf("native session fork failed: %s", detail)
+	}
+	var reply struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &reply); err != nil {
+		return "", fmt.Errorf("native session fork returned an unreadable reply: %w", err)
+	}
+	forked := strings.ToLower(strings.TrimSpace(reply.SessionID))
+	if !claudeSessionIDPattern.MatchString(forked) {
+		return "", errors.New("native session fork returned an invalid session id")
+	}
+	return forked, nil
+}
+
+// claudeUserMessageUUIDs are the ids the Claude host stamps on a turn's user
+// prompt: stableMessageUUID(hostSessionId, operationId) in
+// scripts/claude-native-host.mjs. The host session id is the lane's root or,
+// after a native rotation, its head, so both are candidates.
+func claudeUserMessageUUIDs(operationID string, sessionIDs ...string) []string {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return nil
+	}
+	out := make([]string, 0, len(sessionIDs))
+	seen := map[string]bool{}
+	for _, sessionID := range sessionIDs {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" || seen[sessionID] {
+			continue
+		}
+		seen[sessionID] = true
+		sum := sha256.Sum256([]byte(sessionID + "\x00" + operationID))
+		b := sum[:16]
+		b[6] = (b[6] & 0x0f) | 0x50
+		b[8] = (b[8] & 0x3f) | 0x80
+		h := hex.EncodeToString(b)
+		out = append(out, h[0:8]+"-"+h[8:12]+"-"+h[12:16]+"-"+h[16:20]+"-"+h[20:])
+	}
+	return out
 }

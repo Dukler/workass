@@ -144,3 +144,29 @@ test('steering keeps every subagent from the same logical turn visible', async (
   assert.equal((stagedHtml.match(/class="r-sa"/g) ?? []).length, 2);
   assert.match(stagedHtml, /class="r-lbl">Ahora<\/span>/);
 });
+
+// ⑂ marks a forked subagent on its OWN row only (user 2026-10-16): fresh is
+// the default and draws nothing extra.
+test('a forked subagent carries the fork glyph beside its own name; a fresh one does not', async (t) => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  let store: { clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
+  const loaded = await server.ssrLoadModule('/src/components/SubagentRow.tsx') as {
+    SubagentRow: React.ComponentType<{ n: unknown; nowMs: number }>;
+  };
+  store = (await server.ssrLoadModule('/src/store/store.ts') as { store: { clearToastTimers(): void } }).store;
+  const node = (forked: boolean) => ({
+    id: 'wa-subagent-1', label: 'Revisar el diff', provider: 'claude', model: 'Opus5.5-xhigh', calls: [],
+    work: {
+      id: 'wa-subagent-1', taskId: 'wa-subagent-1', tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude',
+      kind: 'subagent', label: 'Revisar el diff', status: 'exited', startedAt: '2026-10-16T20:00:00Z',
+      updatedAt: '2026-10-16T20:00:09Z', finishedAt: '2026-10-16T20:00:09Z', ...(forked ? { forked: true } : {}),
+    },
+  });
+  const forked = renderToStaticMarkup(React.createElement(loaded.SubagentRow, { n: node(true), nowMs: Date.parse('2026-10-16T20:00:10Z') }));
+  assert.match(forked, /<span class="r-fk" title="Bifurcado: recuerda la conversación del chat" aria-label="Subagente bifurcado"><svg/);
+  assert.ok(forked.indexOf('class="r-fk"') < forked.indexOf('class="r-nm"'), 'the glyph precedes the name');
+  const fresh = renderToStaticMarkup(React.createElement(loaded.SubagentRow, { n: node(false), nowMs: Date.parse('2026-10-16T20:00:10Z') }));
+  assert.doesNotMatch(fresh, /r-fk/);
+});

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Subsesiones y subagentes, bifurcados o no</title>
+<!--
+  MOCK — not product code. subsessions.html#dark / #light renders one theme.
+  Base: .dev/mocks/forks/sidebar-nested.html (tokens verbatim from tokens.css),
+  SidebarV2.tsx (.sv2-*), ForkSidebar.tsx (.sv2-kids/.sv2-nest/.sv2-kid),
+  Transcript.tsx (.tbar/.crumbs), SubagentRow.tsx (.r-sa summary).
+  Terms (user 2026-10-16): SUBSESSION = permanent child chat you and agents can
+  keep writing into; SUBAGENT = one-shot turn work in the right rail. Either one
+  can be forked (inherits the parent's conversation) or not (fresh); fresh is
+  the default, like Claude Code. The parent never shows the difference; the ⑂
+  lives only on the child itself.
+  New vs today: nested rows can be real chats; ⑂ before a forked child's title;
+  "Historial heredado" fold; ⑂ beside a forked subagent's name in the rail.
+-->
+<style>
+.th-dark {
+  color-scheme: dark;
+  --bg: #0f0e0d; --side: #151413; --panel: #1d1c1a; --card: #1a1918; --field: #252320;
+  --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #908b82;
+  --line: rgba(255, 255, 255, .075); --line2: rgba(255, 255, 255, .14);
+  --acc: #4fa583; --link: #8fb0ea; --amber: #d8a05a;
+  --shell: #0b0a09;
+  --sv2-hover: color-mix(in srgb, var(--ink) 8%, transparent);
+  --sv2-active: color-mix(in srgb, var(--ink) 11%, transparent);
+  --sv2-working: #38bdf8; --sv2-done: #6ee7b7;
+  --winshadow: 0 30px 80px -30px #000;
+}
+.th-light {
+  color-scheme: light;
+  --bg: #f2f0ed; --side: #faf9f7; --panel: #ffffff; --card: #ffffff; --field: #f1efeb;
+  --ink: #23211e; --ink2: #47443e; --muted: #5f5b55; --faint: #6d685f;
+  --line: rgba(0, 0, 0, .08); --line2: rgba(0, 0, 0, .15);
+  --acc: #177353; --link: #3861b0; --amber: #8b5f1a;
+  --shell: #eceae6;
+  --sv2-hover: color-mix(in srgb, var(--ink) 4%, transparent);
+  --sv2-active: var(--card);
+  --sv2-working: #0284c7; --sv2-done: #047857;
+  --winshadow: 0 24px 60px -28px rgba(0, 0, 0, .28);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: #0b0a09; }
+body { font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+:root { --mono: ui-monospace, "SF Mono", Menlo, monospace; }
+code { font-family: var(--mono); }
+svg.g { display: block; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+button { font: inherit; }
+ul { list-style: none; }
+body.only-dark .th-light, body.only-light .th-dark { display: none; }
+
+.sheet { background: var(--shell); color: var(--ink); padding: 30px 32px 36px; width: 1504px; }
+.sh-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 20px; }
+.sh-head h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3; }
+.sh-head .lede { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-top: 4px; max-width: 1100px; }
+.sh-head .lede b { color: var(--ink2); font-weight: 550; }
+.sh-head .tag { margin-left: auto; flex: none; font: 600 10px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 10px; }
+.cap { font: 600 10px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px 2px; }
+.cap b { color: var(--ink2); font-weight: 600; }
+.gap { height: 26px; }
+
+.win { width: 1440px; display: grid; grid-template-columns: 288px 1fr; background: var(--bg); border: 1px solid var(--line2); border-radius: 12px; overflow: hidden; box-shadow: var(--winshadow); height: 640px; }
+.win.rail { grid-template-columns: 288px 1fr 320px; }
+
+/* sidebar (app.css verbatim where it exists) */
+.side { background: var(--side); border-right: 1px solid var(--line); padding: 0 8px 10px; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.titlebar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 5px 0 9px; flex: none; }
+.tl { display: flex; gap: 7px; }
+.tl span { width: 11px; height: 11px; border-radius: 50%; }
+.tl span:nth-child(1) { background: #ff5f57; } .tl span:nth-child(2) { background: #febc2e; } .tl span:nth-child(3) { background: #28c840; }
+.sv2-list { flex: 1; min-height: 0; overflow: hidden; padding: 8px 0; margin: 0 -2px; }
+.sv2-list > ul { display: flex; flex-direction: column; gap: 1px; padding: 0 2px; }
+.sv2-li.card { padding: 2px 0; }
+.sv2-row { position: relative; width: 100%; border-radius: 6px; color: var(--ink2); }
+.sv2-row.on { background: var(--sv2-active); color: var(--ink); }
+.sv2-row.card { min-height: 60px; padding: 8px 10px; }
+.sv2-l1 { display: flex; align-items: center; gap: 6px; height: 20px; min-width: 0; }
+.sv2-l2 { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 4px; height: 20px; }
+.sv2-fav { display: inline-flex; flex: none; color: var(--muted); }
+.sv2-fav svg { width: 16px; height: 16px; opacity: .8; }
+.sv2-proj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--muted); }
+.sv2-when { margin-left: auto; font-size: 12px; line-height: 16px; color: var(--faint); white-space: nowrap; }
+.sv2-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; color: var(--sv2-working); }
+.sv2-pill svg { width: 14px; height: 14px; }
+.sv2-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 20px; font-weight: 500; color: color-mix(in srgb, var(--ink) 90%, transparent); }
+.sv2-prov { display: inline-flex; align-items: center; flex: none; opacity: .55; }
+.sv2-prov svg { width: 14px; height: 14px; }
+.sv2-kids { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 4px 0 5px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.sv2-kids .kg, .sv2-kids .kg svg { width: 12px; height: 12px; display: inline-flex; }
+.sv2-kids .kc { display: inline-flex; transform: rotate(90deg); }
+.sv2-kids .kc svg { width: 11px; height: 11px; stroke-width: 1.5; }
+.sv2-kids.open { background: var(--sv2-hover); color: var(--ink2); }
+.sv2-kids.open .kc { transform: rotate(270deg); }
+.sv2-nest { position: relative; display: flex; flex-direction: column; gap: 1px; padding: 1px 0 4px 24px; }
+.sv2-nest::before { content: ''; position: absolute; left: 17.5px; top: 0; bottom: 8px; width: 1px; background: var(--line2); }
+.sv2-kid { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px 0 6px; border-radius: 6px; min-width: 0; color: var(--ink2); }
+.sv2-kid.on { background: var(--sv2-active); color: var(--ink); }
+.sv2-kid .ks { flex: none; width: 13px; height: 13px; display: grid; place-items: center; }
+.sv2-kid .kl { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-kid .kmi { flex: none; display: inline-flex; opacity: .55; } .sv2-kid .kmi svg { width: 13px; height: 13px; }
+.sv2-kid .kt { flex: none; min-width: 26px; text-align: right; font-size: 12px; line-height: 16px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.sv2-kid[data-st="running"] .kt { color: var(--sv2-working); }
+.kpulse { width: 6px; height: 6px; border-radius: 50%; background: var(--sv2-working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sv2-working) 22%, transparent); }
+.kdot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.sv2-shelf { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; padding: 0 10px; }
+.sv2-shelf-label { font-size: 12px; color: color-mix(in srgb, var(--muted) 70%, transparent); }
+.sv2-shelf-rule { flex: 1; height: 1px; background: color-mix(in srgb, var(--line2) 60%, transparent); }
+
+/* main */
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tbar { display: flex; align-items: center; gap: 10px; padding: 0 20px 0 24px; height: 40px; flex: none; min-width: 0; }
+.tbar > svg { display: block; flex: none; width: 14px; height: 14px; color: var(--muted); }
+.tbar b { font-size: 13.5px; line-height: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbar .provbadge { display: inline-flex; align-items: center; height: 18px; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line2); border-radius: 6px; padding: 0 7px; font-family: var(--mono); white-space: nowrap; flex: none; }
+.crumbs { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.crumbs .c { font-size: 13.5px; line-height: 1; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.crumbs .sep { flex: none; display: inline-flex; color: var(--faint); }
+.crumbs .sep svg { width: 11px; height: 11px; stroke-width: 1.5; }
+/* NEW: the fork mark on the CHILD's own title — nowhere on the parent side */
+.crumbs .fkg { flex: none; display: inline-flex; color: var(--muted); }
+.crumbs .fkg svg { width: 13px; height: 13px; }
+.scroll { flex: 1; min-height: 0; overflow: hidden; }
+.doc { max-width: 900px; margin: 0 auto; padding: 22px 36px 18px; }
+.userpill { display: flex; justify-content: flex-end; margin: 6px 0 16px; }
+.userpill-text { background: var(--field); border: 1px solid var(--line); border-radius: 14px; padding: 7px 13px; max-width: 78%; font-size: 13px; color: var(--ink); }
+.p { margin: 0 0 14px; color: var(--ink); }
+.p b { font-weight: 600; }
+.p code, .userpill code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11.5px; color: var(--ink2); }
+.evt { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 6px 0 12px; min-width: 0; }
+.evt .ic { flex: none; display: inline-flex; width: 14px; height: 14px; color: var(--faint); }
+.evt .ic svg { width: 14px; height: 14px; }
+.evt .t { color: var(--ink2); white-space: nowrap; text-decoration: underline dotted color-mix(in srgb, var(--faint) 65%, transparent); text-underline-offset: 3px; }
+.evt .l { color: var(--faint); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* NEW: inherited history fold, first line of a forked child */
+.inh { display: flex; align-items: center; gap: 9px; margin: 0 0 18px; min-width: 0; color: var(--muted); font-size: 12px; }
+.inh .ig { flex: none; display: inline-flex; color: var(--faint); } .inh .ig svg { width: 14px; height: 14px; }
+.inh .it { color: var(--ink2); text-decoration: underline dotted color-mix(in srgb, var(--faint) 65%, transparent); text-underline-offset: 3px; white-space: nowrap; }
+.inh .im { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inh .rule { flex: 1 1 16px; min-width: 16px; height: 1px; background: var(--line); }
+.compwrap { padding: 8px 24px 14px; flex: none; }
+.comp { max-width: 900px; margin: 0 auto; background: var(--panel); border: 1px solid var(--line2); border-radius: 15px; padding: 11px 13px 11px; position: relative; }
+.comp .ph { color: var(--faint); font-size: 13.5px; }
+.send { position: absolute; right: 9px; bottom: 8px; width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: var(--bg); border: 0; display: grid; place-items: center; opacity: .4; }
+.send svg { width: 13px; height: 13px; stroke-width: 1.6; }
+
+/* right rail (SubagentRow summary) */
+.rail-col { border-left: 1px solid var(--line); background: var(--bg); padding: 14px 16px; min-width: 0; }
+.rail-h { font-size: 12px; font-weight: 600; color: var(--ink2); margin: 2px 0 8px; }
+.r-sa { display: flex; align-items: center; gap: 9px; padding: 7px 6px; margin: 0 -6px; border-radius: 8px; }
+.r-mi { flex: none; width: 22px; height: 22px; display: grid; place-items: center; }
+.r-mi svg { width: 22px; height: 22px; }
+.r-said { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.r-satop { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.r-nm { flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* NEW: fork mark beside a forked subagent's own name */
+.r-fk { flex: none; display: inline-flex; color: var(--muted); } .r-fk svg { width: 12px; height: 12px; }
+.r-el { margin-left: auto; flex: none; font: 10.5px/1 var(--mono); color: var(--faint); }
+.r-sasub { font: 10.5px/1.2 var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-pulse { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--sv2-working); }
+
+.notes { width: 1440px; margin-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.note { border: 1px solid var(--line2); border-radius: 10px; padding: 12px 14px; font-size: 12px; color: var(--muted); line-height: 1.55; background: var(--bg); }
+.note b { color: var(--ink2); font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="out"></div>
+<script>
+const G = (d) => `<svg class="g" viewBox="0 0 16 16">${d}</svg>`;
+const FORK = G('<path d="M8 2.2v4"/><path d="M8 6.2c0 2.8-4 3-4 6v1.6"/><path d="M8 6.2c0 2.8 4 3 4 6v1.6"/>');
+const AGENT = G('<circle cx="8" cy="5.2" r="2.4"/><path d="M3 13.2a5 5 0 0110 0"/>');
+const CHEV = G('<path d="M6 4l4 4-4 4"/>');
+const FOLDER = G('<path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/>');
+const DOC = G('<rect x="2" y="4" width="12" height="8" rx="1.5"/><path d="M5 14h6"/>');
+const UP = G('<path d="M8 13V3.5M4 7.5l4-4 4 4"/>');
+const CHAT = G('<path d="M2.6 4.4a1.6 1.6 0 011.6-1.6h7.6a1.6 1.6 0 011.6 1.6v4.8a1.6 1.6 0 01-1.6 1.6H6.4l-3 2.4v-2.4H4.2a1.6 1.6 0 01-1.6-1.6z"/>');
+const DASHED = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.4" stroke-dasharray="2.6 2.4" stroke-linecap="round"/></svg>';
+const CLAUDE = `<svg viewBox="0 0 20 20" fill="none"><g stroke="#cc7a52" stroke-width="1.5" stroke-linecap="round">${
+  [[10,3.5],[13.25,4.37],[15.63,6.75],[16.5,10],[15.63,13.25],[13.25,15.63],[10,16.5],[6.75,15.63],[4.37,13.25],[3.5,10],[4.37,6.75],[6.75,4.37]]
+  .map(([x, y]) => `<line x1="10" y1="10" x2="${x}" y2="${y}"/>`).join('')}</g></svg>`;
+
+const PARENT = 'Migración del login';
+const PROJ = 'workass';
+
+const kid = ({ label, st = 'done', t = '', on = false }) =>
+  `<div class="sv2-kid ${on ? 'on' : ''}" data-st="${st}"><span class="ks">${st === 'running' ? '<i class="kpulse"></i>' : '<i class="kdot"></i>'}</span><span class="kl">${label}</span><span class="kmi">${CLAUDE}</span>${t ? `<span class="kt">${t}</span>` : ''}</div>`;
+const card = ({ title, slot, on = false, kids = null, nest = '' }) => `
+  <li class="sv2-li card"><div class="sv2-row card ${on ? 'on' : ''}">
+    <div class="sv2-l1"><span class="sv2-fav">${FOLDER}</span><span class="sv2-proj">${PROJ}</span>${slot}</div>
+    <div class="sv2-l2"><span class="sv2-title">${title}</span>${kids ? `<span class="sv2-kids ${kids.open ? 'open' : ''}"><span class="kg">${AGENT}</span>${kids.n}<span class="kc">${CHEV}</span></span>` : ''}<span class="sv2-prov">${CLAUDE}</span></div>
+  </div>${nest}</li>`;
+const when = (s) => `<span class="sv2-when">${s}</span>`;
+const working = (d) => `<span class="sv2-pill">${DASHED}Trabajando ${d}</span>`;
+
+/* The three children: one fresh subsession, one forked subsession, one fork-run
+   child. Identical rows in the parent — no way to tell them apart from here. */
+const sidebar = (sel) => `
+  <aside class="side">
+    <div class="titlebar"><span class="tl"><span></span><span></span><span></span></span></div>
+    <div class="sv2-list"><ul>
+      ${card({ title: PARENT, slot: sel ? when('2m') : working('41s'), on: !sel, kids: { n: 3, open: true }, nest: `<div class="sv2-nest">
+        ${kid({ label: 'Revisar la API de sesiones', st: 'running', t: '41s', on: sel === 'fresh' })}
+        ${kid({ label: 'Probar el enfoque con tokens', t: '3m', on: sel === 'fork' })}
+        ${kid({ label: 'frame_00 · hijo 1', t: '10s' })}
+      </div>` })}
+      ${card({ title: 'Subsesiones: contrato del daemon', slot: when('1h') })}
+      ${card({ title: 'gold-auto clip_8 · recortes', slot: when('3h') })}
+      <li><div class="sv2-shelf"><span class="sv2-shelf-label">En reposo (12)</span><span class="sv2-shelf-rule"></span></div></li>
+    </ul></div>
+  </aside>`;
+
+const composer = `<div class="compwrap"><div class="comp"><div class="ph">Contale a tu agente qué sigue…</div><button class="send">${UP}</button></div></div>`;
+
+const mainParent = () => `
+  <main>
+    <div class="tbar">${DOC}<b>${PARENT}</b><span class="provbadge">${PROJ}</span></div>
+    <div class="scroll"><div class="doc">
+      <div class="userpill"><div class="userpill-text">Abrí una subsesión para revisar la API de sesiones y otra que siga desde acá probando el enfoque con tokens.</div></div>
+      <div class="evt"><span class="ic">${CHAT}</span><span class="t">Crear subsesión</span><span class="l">Revisar la API de sesiones</span></div>
+      <div class="evt"><span class="ic">${CHAT}</span><span class="t">Crear subsesión</span><span class="l">Probar el enfoque con tokens</span></div>
+      <p class="p">Listo: las dos subsesiones están abiertas debajo de este chat. Mientras tanto lancé dos subagentes para mapear el código; aparecen a la derecha.</p>
+    </div></div>
+    ${composer}
+  </main>`;
+
+const rail = () => `
+  <aside class="rail-col">
+    <div class="rail-h">Turnos</div>
+    <div class="r-sa"><span class="r-mi">${CLAUDE}</span><span class="r-said"><span class="r-satop"><span class="r-nm">Mapear los usos de forkStore</span><span class="r-el">0:38</span></span><span class="r-sasub">Opus 5.5 · Leer un archivo</span></span><span class="r-pulse"></span></div>
+    <div class="r-sa"><span class="r-mi">${CLAUDE}</span><span class="r-said"><span class="r-satop"><span class="r-fk" title="Bifurcado: hereda la conversación">${FORK}</span><span class="r-nm">Revisar el diff con contexto</span><span class="r-el">0:12</span></span><span class="r-sasub">Opus 5.5 · Buscar en archivos</span></span><span class="r-pulse"></span></div>
+  </aside>`;
+
+const mainChild = (forked) => `
+  <main>
+    <div class="tbar">${DOC}
+      <span class="crumbs"><span class="c">${PARENT}</span><span class="sep">${CHEV}</span>${forked ? `<span class="fkg" title="Bifurcada de «${PARENT}»">${FORK}</span>` : ''}<b>${forked ? 'Probar el enfoque con tokens' : 'Revisar la API de sesiones'}</b></span>
+      <span class="provbadge">${PROJ}</span>
+    </div>
+    <div class="scroll"><div class="doc">
+      ${forked ? `<div class="inh"><span class="ig">${FORK}</span><span class="it">Historial heredado</span><span class="im">· 42 mensajes de «${PARENT}»</span><span class="rule"></span></div>` : ''}
+      <div class="userpill"><div class="userpill-text">${forked ? 'Seguí desde acá: probá reemplazar la cookie por tokens de corta duración.' : 'Revisá la API de sesiones y listá los endpoints que tocan el login.'}</div></div>
+      <p class="p">${forked ? 'Con lo que veníamos hablando, el cambio mínimo es <code>issueToken()</code> en el handler del login y renovar en <code>refresh()</code>. Lo pruebo.' : 'Encontré 6 endpoints. Los dos que importan para la migración son <code>POST /session</code> y <code>DELETE /session</code>.'}</p>
+    </div></div>
+    ${composer}
+  </main>`;
+
+const sheet = (theme, tag) => `
+  <section class="sheet th-${theme}">
+    <div class="sh-head"><div>
+      <h1>Subsesiones y subagentes — bifurcados o no</h1>
+      <p class="lede"><b>Subsesión</b> = un chat permanente debajo de su padre, en el que vos y los agentes pueden seguir escribiendo. <b>Subagente</b> = trabajo de un turno, vive en el panel derecho y termina. Los dos pueden crearse <b>frescos</b> (por defecto) o <b>bifurcados</b> (heredan la conversación del padre), como en Claude Code. En el padre no hay diferencia: el <b>⑂</b> aparece solo en el hijo.</p>
+    </div><span class="tag">${tag}</span></div>
+    <div class="cap"><b>1</b> — chat padre: tres subsesiones iguales a la izquierda · subagentes a la derecha (uno bifurcado lleva ⑂ junto a su nombre)</div>
+    <div class="win rail">${sidebar(null)}${mainParent()}${rail()}</div>
+    <div class="gap"></div>
+    <div class="cap"><b>2</b> — subsesión bifurcada abierta: ⑂ antes de su título · historial heredado plegado · se puede escribir</div>
+    <div class="win">${sidebar('fork')}${mainChild(true)}</div>
+    <div class="gap"></div>
+    <div class="cap"><b>3</b> — subsesión fresca abierta: sin ⑂ · sin historial heredado</div>
+    <div class="win">${sidebar('fresh')}${mainChild(false)}</div>
+    <div class="notes">
+      <div class="note"><b>Fila en la barra lateral</b> · idéntica para fresca, bifurcada o hijo de una bifurcación de agente. Clic = abre el chat hijo. Los subagentes nunca aparecen acá.</div>
+      <div class="note"><b>Botón de bifurcar al pasar el mouse</b> (junto a copiar) · sin cambio visual; ahora crea una <b>subsesión bifurcada</b> que recuerda la conversación hasta ese mensaje (hoy crea una copia sin memoria).</div>
+      <div class="note"><b>«Historial heredado»</b> · plegado por defecto; al desplegarlo muestra los mensajes del padre hasta el punto de bifurcación, en gris.</div>
+    </div>
+  </section>`;
+
+const h = location.hash.replace('#', '');
+if (h === 'dark') document.body.classList.add('only-dark');
+if (h === 'light') { document.body.classList.add('only-light'); document.documentElement.style.background = document.body.style.background = '#eceae6'; }
+document.getElementById('out').innerHTML = sheet('dark', 'oscuro') + sheet('light', 'claro');
+</script>
+</body>
+</html>

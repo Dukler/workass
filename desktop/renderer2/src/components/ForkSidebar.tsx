@@ -2,8 +2,9 @@
 // desktop/docs/mocks/forks/sidebar-nested.html, as amended by the user on
 // 2026-10-16): the parent's title line carries a neutral count chip + chevron;
 // expanded, one quiet indent level holds the single-line child-session rows
-// (no fork glyph on any parent-side row; ⑂ lives only inside the child's own
-// view). Subagents never appear here — they live in the right rail.
+// (no fork glyph on any parent-side row; ⑂ lives only on the child itself):
+// subsession chats and fork children alike. Subagents never appear here —
+// they live in the right rail.
 
 import { useEffect, type KeyboardEvent } from 'react';
 import type { Chat } from '../store/types';
@@ -13,7 +14,7 @@ import { IcActAgent, IcChevron, ModelIcon } from '../icons';
 import { forkChildLabel } from '../fork-format';
 import {
   forkFlatKids, forkGroups, forkPage, forkSubsessionRow, formatForkShortDuration,
-  sortSubsessionRows, type ForkKidRow, type SubsessionRow,
+  sortSubsessionRows, chatSubsessionRow, type ChildChatFacts, type ForkKidRow, type SubsessionRow,
 } from '../fork-sidebar';
 
 /** The parent row's disclosure: a neutral children glyph, the count, the sidebar's own chevron. */
@@ -49,9 +50,17 @@ function KidDot({ state }: { state: string }) {
   return <i className="fk-dot" aria-hidden="true" />;
 }
 
-function KidRow({ chat, chatId, row }: { chat: Chat; chatId: string; row: SubsessionRow }) {
-  const selected = !!(row.fork && forkStore.isSelected(chat.id, row.fork.runId, row.fork.rootId));
+function KidRow({ chat, chatId, row, activeId }: { chat: Chat; chatId: string; row: SubsessionRow; activeId: string | null }) {
+  const selected = row.chatTabId
+    ? row.chatTabId === activeId
+    : !!(row.fork && forkStore.isSelected(chat.id, row.fork.runId, row.fork.rootId));
   const open = () => {
+    if (row.chatTabId) {
+      // A subsession is a chat of its own: open it like any other chat.
+      forkStore.clearSelection();
+      store.switchChat(row.chatTabId);
+      return;
+    }
     if (row.fork) forkStore.select({ tabId: chat.id, chatId, runId: row.fork.runId, rootId: row.fork.rootId });
   };
   const onKey = (event: KeyboardEvent) => {
@@ -75,8 +84,11 @@ function KidRow({ chat, chatId, row }: { chat: Chat; chatId: string; row: Subses
   );
 }
 
-/** The expanded nest under a parent row. Fetches the full fork list on open. */
-export function ForkNest({ chat }: { chat: Chat }) {
+/**
+ * The expanded nest under a parent row: subsession chats and fork children,
+ * one undifferentiated list. Fetches the full fork list on open.
+ */
+export function ForkNest({ chat, kids = [], activeId = null }: { chat: Chat; kids?: readonly ChildChatFacts[]; activeId?: string | null }) {
   const chatId = chat.chatId ?? '';
   useEffect(() => { forkStore.ensure({ tabId: chat.id, chatId }); }, [chat.id, chatId]);
   const nowMs = Date.now();
@@ -84,12 +96,12 @@ export function ForkNest({ chat }: { chat: Chat }) {
     .map((kid: ForkKidRow & { point: { providerId: string } }) => forkSubsessionRow(
       kid, { label: forkChildLabel(kid.child), brand: store.providerBrand(kid.point.providerId, chat) }, nowMs,
     ));
-  const rows = sortSubsessionRows(forkRows);
+  const rows = sortSubsessionRows([...forkRows, ...kids.map((kid) => chatSubsessionRow(kid, nowMs))]);
   if (!rows.length) return null;
   const { visible, hidden } = forkPage(rows, forkStore.allShown(chat.id));
   return (
     <div className="sv2-nest" role="group" aria-label={`Subsesiones de ${chat.title}`}>
-      {visible.map((row) => <KidRow key={row.key} chat={chat} chatId={chatId} row={row} />)}
+      {visible.map((row) => <KidRow key={row.key} chat={chat} chatId={chatId} row={row} activeId={activeId} />)}
       {hidden > 0 && (
         <button type="button" className="sv2-more" onClick={() => forkStore.showAll(chat.id)}>Mostrar {hidden} más</button>
       )}
