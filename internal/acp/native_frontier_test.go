@@ -135,6 +135,8 @@ func TestClaudeBridgeLaunchUsesWorkassSDKHostAndOfficialExecutable(t *testing.T)
 	t.Setenv("WORKASS_NODE", node)
 	t.Setenv("WORKASS_CLAUDE_HOST", "")
 	t.Setenv("WORKASS_CLAUDE_SDK_MODULE", "")
+	// The default below must not depend on the developer's shell.
+	t.Setenv("CLAUDE_CODE_FORK_SUBAGENT", "")
 
 	claude := filepath.Join(t.TempDir(), executableName("claude"))
 	writeExecutable(t, claude, nativeNoopScript())

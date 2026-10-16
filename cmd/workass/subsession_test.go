@@ -308,3 +308,54 @@ func TestSubsessionCutSkipsTurnsAnotherEngineAnswered(t *testing.T) {
 		t.Fatalf("a cut inside inherited history must refuse, never widen: %v", err)
 	}
 }
+
+// Review wa-subagent-1792183828094-5, correction 1: only a prompt that provably
+// never reached the session is skipped; an uncertain one stays the boundary,
+// so a fork never silently carries a prompt the child does not show.
+func TestSubsessionCutNeverSkipsAnUncertainPrompt(t *testing.T) {
+	lane := providercontract.LaneIdentity{ID: "lane-a", ChatID: "src", Realm: providercontract.Realm{ProviderID: "claude"}}
+	row := func(role string, op providercontract.OperationID, terminal string) chat.LedgerEvent {
+		return chat.LedgerEvent{Role: role, OperationID: op, LaneID: lane.ID, TerminalState: terminal}
+	}
+	build := func(rows []chat.LedgerEvent, foreground *chat.ForegroundTurn) chat.State {
+		coverage := map[uint64]chat.CoverageRecord{}
+		for index, event := range rows {
+			status := chat.CoverageNativeSeen
+			if event.TerminalState != "" && event.TerminalState != "consumed" {
+				status = chat.CoverageExcluded
+			}
+			coverage[uint64(index+1)] = chat.CoverageRecord{Sequence: uint64(index + 1), Status: status, DeliveryID: event.OperationID}
+		}
+		return chat.State{
+			ChatID: "src", ActiveLaneID: lane.ID, Ledger: rows, Foreground: foreground,
+			Lanes: map[providercontract.LaneID]chat.LaneState{lane.ID: {
+				Identity: lane, Coverage: coverage,
+				Thread: providercontract.ThreadRef{ProviderID: "claude", RootID: "root", HeadID: "root", Lineage: 1},
+			}},
+		}
+	}
+	base := []chat.LedgerEvent{row("user", "op1", "consumed"), row("assistant", "op1", ""), row("user", "op2", "consumed"), row("assistant", "op2", "")}
+	cases := []struct {
+		name  string
+		later []chat.LedgerEvent
+		want  providercontract.OperationID
+	}{
+		{"uncertain prompt is the boundary", []chat.LedgerEvent{row("user", "op3", "delivery_uncertain"), row("user", "op4", "consumed")}, "op3"},
+		{"failed prompt is the boundary", []chat.LedgerEvent{row("user", "op3", "failed"), row("user", "op4", "consumed")}, "op3"},
+		{"rejected prompt never reached it", []chat.LedgerEvent{row("user", "op3", "admission_rejected"), row("user", "op4", "consumed")}, "op4"},
+		{"cancelled before admission never reached it", []chat.LedgerEvent{row("user", "op3", "cancelled_before_admission")}, ""},
+	}
+	for _, tc := range cases {
+		state := build(append(append([]chat.LedgerEvent(nil), base...), tc.later...), nil)
+		link, err := subsessionForkLink(state, "src-tab", state.Ledger[:4], true)
+		if err != nil || providercontract.OperationID(link.ForkBeforeOperationID) != tc.want {
+			t.Fatalf("%s: cut = %#v err=%v, want before %q", tc.name, link, err, tc.want)
+		}
+	}
+	// Suggestion 2: a prompt dispatched on this lane but not yet consumed has
+	// no row yet; it may be in the session, so it is the boundary.
+	inFlight := build(append([]chat.LedgerEvent(nil), base...), &chat.ForegroundTurn{OperationID: "op5", LaneID: lane.ID})
+	if link, err := subsessionForkLink(inFlight, "src-tab", inFlight.Ledger, true); err != nil || link.ForkBeforeOperationID != "op5" {
+		t.Fatalf("an unconsumed in-flight prompt must be the boundary: %#v err=%v", link, err)
+	}
+}
