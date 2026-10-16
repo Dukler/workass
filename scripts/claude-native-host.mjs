@@ -244,7 +244,11 @@ function promptContent(blocks) {
 // prompt into Workflow orchestration among them — so without it a Workass chat
 // could never use ultracode (user request 2026-10-13). Wake-ups and messages
 // from other agents are never marked.
-function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority, humanAuthored = false) {
+// taskNotification marks a Workass wake-up notice (a tracked subagent
+// finished). Claude Code frames origin {kind:"task-notification"} as a
+// background notification, never as the user speaking — exactly how its own
+// background agents report back (user 2026-10-16).
+function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority, humanAuthored = false, taskNotification = false) {
   return {
     type: 'user',
     message: { role: 'user', content: promptContent(blocks) },
@@ -252,7 +256,7 @@ function sdkUserMessage(sessionId, blocks, uuid = randomUUID(), priority, humanA
     session_id: sessionId,
     uuid,
     ...(priority ? { priority } : {}),
-    ...(humanAuthored ? { origin: { kind: 'human' } } : {}),
+    ...(humanAuthored ? { origin: { kind: 'human' } } : taskNotification ? { origin: { kind: 'task-notification' } } : {}),
   };
 }
 
@@ -838,10 +842,10 @@ class ClaudeSession {
     return { behavior: 'deny', message: 'Permission was denied', toolUseID: options.toolUseID };
   }
 
-  async enqueuePrompt(blocks, clientUserMessageId = '', humanAuthored = false) {
+  async enqueuePrompt(blocks, clientUserMessageId = '', humanAuthored = false, taskNotification = false) {
 	if (this.activePrompt) throw new Error('A Claude turn is already running');
 	const uuid = stableMessageUUID(this.sessionId, clientUserMessageId);
-    const message = sdkUserMessage(this.sessionId, blocks, uuid, undefined, humanAuthored);
+    const message = sdkUserMessage(this.sessionId, blocks, uuid, undefined, humanAuthored, taskNotification);
     this.startedTurns = true;
     this.turnStatus = 'active';
     this.partialTextSeen = false;
@@ -861,6 +865,9 @@ class ClaudeSession {
         establishedBeforePrompt: this.conversation.snapshotEstablished(),
       inputSubmitted: false,
 	  clientUserMessageId: String(clientUserMessageId || '').trim(),
+        // Our own notice also carries origin task-notification; its result
+        // settles this prompt, never a turn Claude Code started itself.
+        taskNotification: taskNotification === true,
         earlySteers: [],
       };
     });
@@ -1325,7 +1332,8 @@ class ClaudeSession {
       // Otherwise it is that other turn's result and the prompt runs next.
       if (lifecycle
         ? !this.activePromptInTurn()
-        : ((originKind && originKind !== 'human') || (!this.activePrompt && this.harnessTurnActive))) {
+        : ((originKind && originKind !== 'human' && !(originKind === 'task-notification' && this.activePrompt?.taskNotification))
+          || (!this.activePrompt && this.harnessTurnActive))) {
         this.emitTurnEnded(message);
         return;
       }
@@ -1840,7 +1848,8 @@ async function handleRequest(message) {
   if (!session) throw Object.assign(new Error('Claude session not found'), { rpcCode: -32000 });
   if (method === 'session/prompt') {
 	respond(id, await session.enqueuePrompt(params.prompt, String(params.clientUserMessageId || '').trim(),
-	  params._meta?.workassCommandInput?.humanAuthored === true));
+	  params._meta?.workassCommandInput?.humanAuthored === true,
+	  params._meta?.workassCommandInput?.taskNotification === true));
     return;
   }
   if (method === 'session/set_config_option') {

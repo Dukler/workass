@@ -112,6 +112,29 @@ func TestTrackedSubagentCompletionRunsOnOwningMockCoordinator(t *testing.T) {
 	if markerCount != 1 {
 		t.Fatalf("mock coordinator did not execute exactly one final handoff: marker count=%d ledger=%#v", markerCount, state.Ledger)
 	}
+	// The wake-up input is a notice, never the user speaking: its row says so,
+	// and the transcript projects one quiet line with the result folded.
+	notices := 0
+	for _, event := range state.Ledger {
+		if event.Role != "user" || event.NoticeKind == "" {
+			continue
+		}
+		notices++
+		if event.NoticeKind != "subagent" || event.NoticeTitle != "child" || event.NoticeStatus != "done" {
+			t.Fatalf("notice row = %#v", event)
+		}
+		projected, err := projectLedgerMessage(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		notice, _ := projected["notice"].(map[string]any)
+		if notice["kind"] != "subagent" || notice["title"] != "child" || notice["status"] != "done" || notice["body"] != "FINAL_HANDOFF_MARKER" {
+			t.Fatalf("projected notice = %#v", projected["notice"])
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("want exactly one notice row, got %d", notices)
+	}
 }
 
 func TestTrackedSubagentCompletionDoesNotResurrectDeletedChat(t *testing.T) {

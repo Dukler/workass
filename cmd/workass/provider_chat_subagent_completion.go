@@ -66,6 +66,7 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 		AssistantMessageID: stableAgentMessageIdentity("a", operationID),
 		QueueID:            string(operationID), PromptText: message, Title: state.Presentation.Title,
 		Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		NoticeKind: "subagent", NoticeTitle: receipt.Label, NoticeStatus: receipt.Status,
 	}
 	if err := actor.engine.Apply(chat.Submit{
 		OperationID: operationID, LaneID: laneID, Text: message, ModelID: lane.ModelID, ModeID: lane.ModeID,

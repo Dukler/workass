@@ -93,9 +93,14 @@ export interface QueuedMsg {
   attachmentError?: string;
 }
 
+// A Workass wake-up notice on a user row (a tracked subagent finished).
+export interface MsgNotice { kind: string; title?: string; status?: string; body?: string }
+
 export interface Msg {
   id: string;
   role: 'user' | 'assistant';
+  // Set when this user row is a Workass notice, not the user speaking.
+  notice?: MsgNotice;
   // History a forked subsession inherited from its parent (folded by default).
   inherited?: boolean;
   content: string;

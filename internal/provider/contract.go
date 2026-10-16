@@ -110,6 +110,13 @@ type TurnPresentation struct {
 	// presentation metadata, not provider input, and survives restart so the
 	// actor can rebuild the frozen transcript without inventing a new time.
 	StartedAt string
+	// NoticeKind/Title/Status mark a wake-up input Workass sends on the
+	// user's behalf (today: a tracked subagent finished). The model receives
+	// it as a background task notification, never as the user speaking, and
+	// the transcript draws it as one quiet line (user 2026-10-16).
+	NoticeKind   string `json:",omitempty"`
+	NoticeTitle  string `json:",omitempty"`
+	NoticeStatus string `json:",omitempty"`
 }
 
 type TurnInput struct {

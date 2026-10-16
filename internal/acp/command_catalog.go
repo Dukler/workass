@@ -30,6 +30,9 @@ const (
 type providerCommandInput struct {
 	Text          string
 	HumanAuthored bool
+	// TaskNotification: a Workass wake-up notice, delivered like Claude
+	// Code's own background task notifications.
+	TaskNotification bool
 }
 
 // commandCatalogEntry is one chat's cached catalog. Keyed by tab/chat, NOT by
