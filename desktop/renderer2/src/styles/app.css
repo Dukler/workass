@@ -1155,7 +1155,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .qrow .qcontent { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 6px; }
 .qrow .qimages { display: flex; flex-wrap: wrap; gap: 5px; }
 .qrow .qimages img { display: block; width: 38px; height: 38px; object-fit: cover; border-radius: 7px; border: 1px solid var(--line2); background: var(--field); }
-.qrow .qtext { flex: 1; min-width: 0; color: var(--ink2); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+/* A queued report can be kilobytes; unclamped it pushed the question dock off
+   screen (2026-10-19). Editing the row still shows the whole text. */
+.qrow .qtext { flex: 1; min-width: 0; color: var(--ink2); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .qrow .qattachstate { color: var(--faint); font-size: 10.5px; }
 .qrow .qattachretry { align-self: flex-start; border: 0; background: transparent; color: var(--acc); padding: 0; font: inherit; font-size: 10.5px; cursor: pointer; }
 .qrow .qattachretry:hover { text-decoration: underline; }

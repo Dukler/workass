@@ -230,7 +230,7 @@ func TestSpawnedSubagentQuestionIsHandedBackWhileItsPermissionsStillAsk(t *testi
 
 func TestPermissionQuestionIsBoundedAndRedacted(t *testing.T) {
 	t.Parallel()
-	long := strings.Repeat("x", 900)
+	long := strings.Repeat("x", 4000)
 	question := permissionQuestion(map[string]any{
 		"question": long,
 		"header":   strings.Repeat("h", 120),
@@ -243,11 +243,16 @@ func TestPermissionQuestionIsBoundedAndRedacted(t *testing.T) {
 	if question == nil {
 		t.Fatal("question dropped")
 	}
-	if runes := []rune(asString(question["question"])); len(runes) > 401 {
+	if runes := []rune(asString(question["question"])); len(runes) > permissionQuestionMaxRunes+1 {
 		t.Fatalf("question not clipped: %d runes", len(runes))
 	}
 	if runes := []rune(asString(question["header"])); len(runes) > 41 {
 		t.Fatalf("header not clipped: %d runes", len(runes))
+	}
+	// A long question still reaches its ask: 400 runes used to cut it off.
+	paragraph := strings.Repeat("y", 1200) + " Which model should be the pick?"
+	if kept := permissionQuestion(map[string]any{"question": paragraph, "options": []any{map[string]any{"label": "a"}}}); asString(kept["question"]) != paragraph {
+		t.Fatalf("a 1.2k-rune question was clipped: %d runes", len([]rune(asString(kept["question"]))))
 	}
 	options := anySlice(question["options"])
 	if len(options) != 4 {

@@ -2475,7 +2475,7 @@ func workassQuestionPayload(question providercontract.PermissionQuestion) map[st
 	}
 	return map[string]any{
 		"workassTool": true, "questionId": question.ID, "operationId": question.OperationID,
-		"question": clipPermissionText(question.Question, 400), "header": clipPermissionText(question.Header, 40),
+		"question": clipPermissionText(question.Question, permissionQuestionMaxRunes), "header": clipPermissionText(question.Header, 40),
 		"options": options, "multiSelect": question.MultiSelect, "allowFreeText": question.AllowFreeText,
 	}
 }
@@ -2513,12 +2513,16 @@ func permissionQuestion(raw any) map[string]any {
 	}
 	multiSelect, _ := fields["multiSelect"].(bool)
 	return map[string]any{
-		"question":    clipPermissionText(question, 400),
+		"question":    clipPermissionText(question, permissionQuestionMaxRunes),
 		"header":      clipPermissionText(strings.TrimSpace(asString(fields["header"])), 40),
 		"options":     options,
 		"multiSelect": multiSelect,
 	}
 }
+
+// A model-authored question usually ends in the ask itself: 400 runes cut
+// "Which model should be the…" off a two-option decision (2026-10-19).
+const permissionQuestionMaxRunes = 2000
 
 func clipPermissionText(s string, max int) string {
 	s = redactSensitiveText(s)
