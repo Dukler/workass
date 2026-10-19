@@ -726,6 +726,27 @@ test('official Claude SDK host clamps, exposes, and replaces the Claude command 
   assert.equal((await peer.waitFor((message) => message.id === 4)).result.stopReason, 'end_turn');
 });
 
+// The result's usage sums every API call of the turn; the window's fill is the
+// last main-thread call's prompt (2026-10-19: 1.2M of a 1.0M window).
+test('official Claude SDK host reports the last main call as context usage, not the turn sum', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: '[fixture:multi-call-usage] go' }],
+  } });
+  const usage = await peer.waitFor((message) => message.method === 'session/update'
+    && message.params.update.sessionUpdate === 'usage_update');
+  assert.equal(usage.params.update.used, 20 + 610000 + 70);
+  assert.equal(usage.params.update.size, 1000000);
+  assert.equal((await peer.waitFor((message) => message.id === 3)).result.stopReason, 'end_turn');
+});
+
 // A mid-session engine restart never produces an open reply, and the restarted
 // CLI may have been upgraded on disk — so every successful reopen outside a
 // session/new|resume|load request re-announces the catalog (spec H3).

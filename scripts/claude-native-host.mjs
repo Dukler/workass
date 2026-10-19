@@ -460,6 +460,9 @@ class ClaudeSession {
     this.turnStartedAt = 0;
     this.turnTokensSettled = 0;
     this.turnTokensCurrent = 0;
+    // What the last main-thread API call carried into the model: the context
+    // window's fill. The result's usage is the whole turn summed across calls.
+    this.contextTokens = 0;
     this.turnPhase = '';
     this.turnToolName = '';
     this.retryState = null;
@@ -1313,6 +1316,7 @@ class ClaudeSession {
       return;
     }
     if (message.type === 'assistant') {
+      if (!parentToolUseId && message.message?.usage) this.contextTokens = contextTokens(message.message.usage);
       this.handleAssistantContent(message.message?.content, parentToolUseId);
       return;
     }
@@ -1372,11 +1376,12 @@ class ClaudeSession {
       // the client and keep streaming the answer to the direction into it.
       if (lifecycle ? this.activePromptHasQueuedSteer() : this.consumeSteerBoundary()) return;
       this.emitTurnEnded(message);
-      if (message.usage) {
-        const used = numeric(message.usage.input_tokens) + numeric(message.usage.cache_creation_input_tokens)
-          + numeric(message.usage.cache_read_input_tokens) + numeric(message.usage.output_tokens);
+      // The result's usage sums every API call of the turn: cache reads are
+      // counted once per tool round, so a long agentic turn reported 1.2M of a
+      // 1.0M window (2026-10-19). The context is the last call's prompt.
+      if (message.usage && this.contextTokens > 0) {
         notify(this.sessionId, {
-          sessionUpdate: 'usage_update', used, size: maxContextWindow(message.modelUsage),
+          sessionUpdate: 'usage_update', used: this.contextTokens, size: maxContextWindow(message.modelUsage),
           _meta: { 'workass.claude/turnUsage': message.usage },
         });
       }
@@ -1678,6 +1683,11 @@ class ClaudeSession {
 
 function numeric(value) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function contextTokens(usage) {
+  return numeric(usage.input_tokens) + numeric(usage.cache_creation_input_tokens)
+    + numeric(usage.cache_read_input_tokens) + numeric(usage.output_tokens);
 }
 
 function maxContextWindow(modelUsage) {
