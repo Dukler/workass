@@ -1143,7 +1143,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    box sized to its text (never full-width). Double-click a box to edit in place
    (saves as you type), drag a box to reorder (the box IS the grip — no handle),
    ✕ appears only on hover and is the only button. */
-.qlist { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: 100%; max-width: var(--read); margin: 0 auto 9px; }
+.qlist { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: 100%; max-width: var(--read); margin: 0 auto 9px; max-height: 40vh; overflow-y: auto; }
 .qlabel { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--faint); margin: 0 2px 1px; letter-spacing: .02em; }
 .qrow { display: inline-flex; align-items: flex-start; gap: 8px; width: fit-content; max-width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px 6px 11px; cursor: grab; }
 .qrow:hover { border-color: var(--line2); }
@@ -1167,7 +1167,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .qrow .qx svg { width: 12px; height: 12px; }
 /* Editing: seamless in-place field, no buttons. Grows to full width for comfort. */
 .qrow.editing { cursor: default; width: 100%; background: color-mix(in srgb, var(--acc) 5%, var(--card)); border-color: color-mix(in srgb, var(--acc) 40%, var(--line)); }
-.qrow .qedit { flex: 1; background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 12.5px; line-height: 1.5; resize: none; outline: none; padding: 0; overflow: hidden; }
+/* Double-click is how a clamped row is read in full: like t3code's queue, it
+   scrolls inside a bounded box instead of growing past the screen. */
+.qrow .qedit { flex: 1; background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 12.5px; line-height: 1.5; resize: none; outline: none; padding: 0; overflow-y: auto; max-height: 32vh; }
 
 /* selector popover */
 .pop { position: absolute; z-index: 20; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; padding: 5px; min-width: 180px; box-shadow: 0 8px 30px rgba(0,0,0,.35); max-height: 320px; overflow-y: auto; }
