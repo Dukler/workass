@@ -759,6 +759,20 @@ class FixtureQuery {
         this.emit(this.result('error_during_execution', { terminal_reason: 'api_error' }));
         continue;
       }
+      // A turn of three API calls (two main, one subagent): the result sums
+      // them, as the real CLI does, so it overstates the window's fill.
+      if (text.includes('[fixture:multi-call-usage]')) {
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        const call = (input, cacheRead, output) => ({ input_tokens: input, cache_creation_input_tokens: 0, cache_read_input_tokens: cacheRead, output_tokens: output });
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'first call' }], usage: call(10, 600000, 50) } });
+        this.emit({ ...base, parent_tool_use_id: 'toolu_usage_agent', type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'subagent call' }], usage: call(5, 900000, 5) } });
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'second call' }], usage: call(20, 610000, 70) } });
+        await this.endTurn(text, {
+          usage: call(35, 2110000, 125),
+          modelUsage: { 'claude-fixture[1m]': { contextWindow: 1000000 } },
+        });
+        continue;
+      }
       const holdMs = fixtureMarker(text, 'hold-ms');
       if (holdMs !== null) await new Promise((resolve) => setTimeout(resolve, Number(holdMs) || 0));
       await this.endTurn(text);
