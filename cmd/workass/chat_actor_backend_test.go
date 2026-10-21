@@ -39,11 +39,14 @@ func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T)
 		flagSet   bool
 		env       func(string) (string, bool)
 		profile   string
+		goos      string
 		wantChats bool
 		source    string
 	}{
 		{name: "dev default", env: unset, profile: "dev", wantChats: true, source: "dev profile default"},
-		{name: "prod default", env: unset, profile: "prod", source: "prod profile default"},
+		{name: "prod default on macOS", env: unset, profile: "prod", goos: "darwin", wantChats: true, source: "prod profile default"},
+		{name: "prod default on Windows", env: unset, profile: "prod", goos: "windows", source: "prod profile default"},
+		{name: "explicit empty env in macOS prod", env: sqliteStoresTestEnv("", true), profile: "prod", goos: "darwin", source: sqliteStoresEnv},
 		{name: "test default", env: unset, profile: "test", source: "test profile default"},
 		{name: "env on in prod", env: sqliteStoresTestEnv(" Chats ", true), profile: "prod", wantChats: true, source: sqliteStoresEnv},
 		{name: "explicit empty env in dev", env: sqliteStoresTestEnv("", true), profile: "dev", source: sqliteStoresEnv},
@@ -52,6 +55,11 @@ func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T)
 		{name: "flag on in prod", flag: "chats", flagSet: true, env: sqliteStoresTestEnv("", true), profile: "prod", wantChats: true, source: "--sqlite-stores"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			goos := tc.goos
+			if goos == "" {
+				goos = "windows"
+			}
+			setSQLiteStoresGOOS(t, goos)
 			stores, source, err := parseSQLiteStores(tc.flag, tc.flagSet, tc.env, tc.profile)
 			if err != nil {
 				t.Fatal(err)
@@ -72,10 +80,11 @@ func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T)
 	}
 }
 
-// main passes workassRuntimeProfile(): only WORKASS_PROFILE=dev turns the
-// default on; an unset or unknown profile is prod and keeps JSON.
+// main passes workassRuntimeProfile(): WORKASS_PROFILE=dev turns the default
+// on, and an unset or unknown profile is prod, which is on only on macOS.
 func TestSQLiteStoresFollowTheRuntimeProfile(t *testing.T) {
-	for profile, want := range map[string]bool{" Dev ": true, "test": false, "prod": false, "": false, "unexpected": false} {
+	setSQLiteStoresGOOS(t, "darwin")
+	for profile, want := range map[string]bool{" Dev ": true, "test": false, "prod": true, "": true, "unexpected": true} {
 		t.Setenv("WORKASS_PROFILE", profile)
 		stores, _, err := parseSQLiteStores("", false, sqliteStoresTestEnv("", false), workassRuntimeProfile())
 		if err != nil || stores[sqliteStoreChats] != want {
@@ -203,4 +212,11 @@ func TestProviderChatRuntimeRunsOnTheSQLiteBackend(t *testing.T) {
 	if err != nil || !found || reloaded.Presentation.Draft != "saved through SQLite" {
 		t.Fatalf("SQLite readback: found=%v err=%v draft=%q", found, err, reloaded.Presentation.Draft)
 	}
+}
+
+func setSQLiteStoresGOOS(t *testing.T, goos string) {
+	t.Helper()
+	previous := sqliteStoresGOOS
+	sqliteStoresGOOS = goos
+	t.Cleanup(func() { sqliteStoresGOOS = previous })
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -64,18 +65,26 @@ const sqliteStoresEnv = "WORKASS_SQLITE_STORES"
 
 // sqliteStoresProfileDefault is what a profile runs with when neither the flag
 // nor the environment names the SQLite stores: the dev profile keeps chats in
-// SQLite, and every other profile (prod, test) keeps every store on JSON.
+// SQLite everywhere, prod keeps them in SQLite on macOS only (Windows prod
+// stays on JSON until it is measured there), and the test profile keeps every
+// store on JSON.
 //
 // profile is workassRuntimeProfile(): WORKASS_PROFILE, set by
 // config/environments/*.env, where anything but "dev" or "test" is "prod".
 // --prod and WORKASS_PROD do not select it; they only change the Windows
 // port and bind defaults.
 func sqliteStoresProfileDefault(profile string) string {
-	if profile == "dev" {
+	switch {
+	case profile == "dev":
+		return sqliteStoreChats
+	case profile == "prod" && sqliteStoresGOOS == "darwin":
 		return sqliteStoreChats
 	}
 	return ""
 }
+
+// sqliteStoresGOOS is runtime.GOOS; tests replace it to pin the platform rule.
+var sqliteStoresGOOS = runtime.GOOS
 
 // parseSQLiteStores resolves which stores live in state/state.db. The first
 // source that is present wins, and an explicitly empty value is present (it
