@@ -6,6 +6,7 @@
 // JSON only; diagnostics go to stderr.
 
 import { createHash, randomUUID } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
@@ -543,10 +544,11 @@ class ClaudeSession {
   // no SDKUserMessage is emitted for it, so without this hook that turn is
   // invisible and its output is discarded downstream.
   //
-  // These callbacks are observers only. UserPromptSubmit blocks the prompt it
-  // fires for and times out at 30s, so every callback does one synchronous
-  // stdout write, swallows its own errors and returns {} immediately. They
-  // compose with the user's own settings-file hooks, which keep working.
+  // These callbacks are observers only — all but PreToolUse, the home-scan
+  // guard. UserPromptSubmit blocks the prompt it fires for and times out at
+  // 30s, so every callback does one synchronous stdout write, swallows its own
+  // errors and returns {} immediately. They compose with the user's own
+  // settings-file hooks, which keep working.
   lifecycleHooks() {
     const observe = (handler) => async (input) => {
       try {
@@ -561,6 +563,12 @@ class ClaudeSession {
       return {};
     };
     return {
+      // A hook, not canUseTool: bypassPermissions never asks canUseTool, but
+      // runs every PreToolUse hook. No agent_id filter either — a subagent's
+      // scan pops the same prompt.
+      ...(process.platform === 'darwin'
+        ? { PreToolUse: [{ matcher: 'Bash|Glob|Grep', hooks: [(input) => this.guardHomeScan(input)] }] }
+        : {}),
       UserPromptSubmit: [{ hooks: [observe((input) => this.emitTurnStarted(input))] }],
       Stop: [{ hooks: [observe((input) => this.captureStopEvidence(input))] }],
       StopFailure: [{ hooks: [observe((input) => this.emitTurnPhase('failed', {
@@ -570,6 +578,21 @@ class ClaudeSession {
         notificationType: clipTurnField(input.notification_type),
       }, input))] }],
     };
+  }
+
+  // A deny comes back as the call's is_error tool_result, so the row fails
+  // with this reason like any other refused call, and the model reads it and
+  // retargets. A guard that throws allows: it must never wedge a tool call.
+  async guardHomeScan(input) {
+    try {
+      const reason = homeScanDenial(input?.tool_name, input?.tool_input, { cwd: input?.cwd || this.cwd, home: os.homedir() });
+      if (reason) {
+        return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+      }
+    } catch (error) {
+      diagnostic('Claude home-scan guard failed', error);
+    }
+    return {};
   }
 
   emitTurnPhase(phase, fields, input) {
@@ -1759,6 +1782,558 @@ function toolTitle(name, input) {
   return String(candidate || name || 'Claude Code tool').slice(0, 240);
 }
 
+// Home-scan guard (macOS). A process attributed to Workass that reads inside
+// another app's container makes macOS ask "Workass would like to access data
+// from other apps" (TCC kTCCServiceSystemPolicyAppData), and Allow never
+// persists for that service: the next scan asks again seconds later
+// (2026-10-21). An agent's `find ~`, rg or Glob over the home folder walks
+// straight into ~/Library/Containers and ~/Library/Group Containers.
+//
+// Refused: a recursive walk rooted at a path that CONTAINS those two folders —
+// /, /Users, ~, ~/Library, or either container folder itself. Specific
+// subfolders and non-recursive commands pass, and so does anything this cannot
+// read with confidence: it catches the common broad scans, it is not a shell
+// parser. Returns the reason to hand the agent, or '' to allow.
+export function homeScanDenial(toolName, toolInput, { cwd = '', home = '' } = {}) {
+  if (typeof home !== 'string' || !path.isAbsolute(home)) return '';
+  const resolvedHome = path.resolve(home);
+  const input = toolInput && typeof toolInput === 'object' ? toolInput : {};
+  const start = typeof cwd === 'string' && path.isAbsolute(cwd) ? path.resolve(cwd) : null;
+  let root = '';
+  if (toolName === 'Bash') root = bashScanRoot(input.command, start, resolvedHome, 0);
+  else if (toolName === 'Glob') root = globToolScanRoot(input, start, resolvedHome);
+  else if (toolName === 'Grep') root = scanRootHit({ path: toolPath(input.path, start, resolvedHome) ?? start }, null, resolvedHome);
+  if (!root) return '';
+  return `Search a specific folder instead — scanning ${displayScanRoot(root, resolvedHome)} recursively walks into other apps' data under ~/Library, which makes macOS show the user a privacy prompt. Target the project or an exact subfolder (e.g. ~/Workspace/<repo>, ~/Library/Logs/<app>).`;
+}
+
+function displayScanRoot(root, home) {
+  const lower = root.toLowerCase();
+  if (lower === home.toLowerCase()) return '~';
+  if (lower.startsWith(`${home.toLowerCase()}/`)) return `~${root.slice(home.length)}`;
+  return root;
+}
+
+// The root a walk starts from, against each protected folder: a hit when every
+// segment of the root names (or, unquoted, globs) the protected path's segment
+// at that depth. A depth limit that stops short of reading the container
+// folder lets a shallow look (`find ~ -maxdepth 2`) through. APFS is
+// case-insensitive by default, so ~/library is ~/Library.
+function scanRootHit(target, maxDepth, home) {
+  if (!target?.path) return '';
+  const segments = target.path.split('/').filter(Boolean);
+  const homeSegments = home.split('/').filter(Boolean);
+  for (const tail of [['Library', 'Containers'], ['Library', 'Group Containers']]) {
+    const protectedSegments = [...homeSegments, ...tail];
+    if (segments.length > protectedSegments.length) continue;
+    if (!segments.every((segment, index) => scanSegmentMatches(segment, protectedSegments[index], target.glob))) continue;
+    if (maxDepth !== null && maxDepth <= protectedSegments.length - segments.length) continue;
+    return target.path;
+  }
+  return '';
+}
+
+function scanSegmentMatches(pattern, literal, glob) {
+  if (!glob || !/[*?[]/.test(pattern)) return pattern.toLowerCase() === literal.toLowerCase();
+  let source = '';
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === '*') source += '.*';
+    else if (char === '?') source += '.';
+    else if (char === '[' && pattern.indexOf(']', index + 2) > 0) {
+      const close = pattern.indexOf(']', index + 2);
+      const body = pattern.slice(index + 1, close).replace(/^!/, '^').replace(/\\/g, '\\\\');
+      source += `[${body}]`;
+      index = close;
+    } else source += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  try {
+    return new RegExp(`^${source}$`, 'i').test(literal);
+  } catch {
+    return false;
+  }
+}
+
+function expandToolTilde(text, home) {
+  return text === '~' || text.startsWith('~/') ? home + text.slice(1) : text;
+}
+
+// Claude Code's file tools take ~ but no shell variables.
+function toolPath(value, cwd, home) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const expanded = expandToolTilde(value.trim(), home);
+  if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  return cwd ? path.resolve(cwd, expanded) : null;
+}
+
+// Glob lists every file under its base before it filters, so the base is what
+// counts. A pattern's literal leading folders narrow that base (`~/Library/**`
+// is rooted at ~/Library; `Workspace/**` from ~ at ~/Workspace).
+function globToolScanRoot(input, cwd, home) {
+  const pattern = typeof input.pattern === 'string' ? expandToolTilde(input.pattern.trim(), home) : '';
+  let base = path.isAbsolute(pattern) ? '/' : (toolPath(input.path, cwd, home) ?? cwd);
+  if (!base) return '';
+  for (const segment of pattern.split('/').filter(Boolean)) {
+    if (/[*?[{]/.test(segment)) break;
+    base = path.join(base, segment);
+  }
+  return scanRootHit({ path: path.resolve(base) }, null, home);
+}
+
+// Words of one shell command line, split into simple commands. Quotes,
+// escapes, $HOME/${HOME}, comments, redirections and heredoc bodies are
+// honoured; $(…) and `…` bodies are returned for a separate pass and make the
+// word that holds them unresolvable. null means the line could not be read
+// (an unterminated quote, say) — and an unread line is allowed.
+function shellCommands(source, home) {
+  const commands = [];
+  const substitutions = [];
+  const heredocs = [];
+  const length = source.length;
+  let words = [];
+  let piped = false;
+  let word = null;
+  let redirectTarget = false;
+  let index = 0;
+  const variable = (name) => (name === 'HOME' ? home : name === 'USER' || name === 'LOGNAME' ? path.basename(home) : null);
+  const endWord = () => {
+    if (!word) return;
+    if (redirectTarget) redirectTarget = false;
+    else words.push(word);
+    word = null;
+  };
+  const endCommand = (nextPiped) => {
+    endWord();
+    if (words.length) commands.push({ words, piped });
+    words = [];
+    piped = nextPiped;
+    redirectTarget = false;
+  };
+  const closingParen = (open) => {
+    let depth = 0;
+    for (let at = open; at < length; at++) {
+      const char = source[at];
+      if (char === '\\') at++;
+      else if (char === "'") {
+        at = source.indexOf("'", at + 1);
+        if (at < 0) return -1;
+      } else if (char === '"') {
+        at++;
+        while (at < length && source[at] !== '"') at += source[at] === '\\' ? 2 : 1;
+        if (at >= length) return -1;
+      } else if (char === '(') depth++;
+      else if (char === ')' && --depth === 0) return at;
+    }
+    return -1;
+  };
+  // Returns the index after the expansion, or -1 when it cannot be read.
+  const expand = (at) => {
+    if (source[at] === '`') {
+      const close = source.indexOf('`', at + 1);
+      if (close < 0) return -1;
+      substitutions.push(source.slice(at + 1, close));
+      word.unresolvable = true;
+      return close + 1;
+    }
+    const next = source[at + 1];
+    if (next === '(') {
+      const close = closingParen(at + 1);
+      if (close < 0) return -1;
+      if (source[at + 2] !== '(') substitutions.push(source.slice(at + 2, close));
+      word.unresolvable = true;
+      return close + 1;
+    }
+    if (next === '{') {
+      const close = source.indexOf('}', at + 2);
+      if (close < 0) return -1;
+      const value = variable(source.slice(at + 2, close));
+      if (value === null) word.unresolvable = true;
+      else word.text += value;
+      return close + 1;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(at + 1))?.[0];
+    if (name) {
+      const value = variable(name);
+      if (value === null) word.unresolvable = true;
+      else word.text += value;
+      return at + 1 + name.length;
+    }
+    if (next && /[0-9?$!#@*-]/.test(next)) {
+      word.unresolvable = true;
+      return at + 2;
+    }
+    word.text += '$';
+    return at + 1;
+  };
+  while (index < length) {
+    const char = source[index];
+    if (char === '\n') {
+      endCommand(false);
+      index++;
+      while (heredocs.length) {
+        const { delimiter, stripTabs } = heredocs.shift();
+        let found = false;
+        while (index < length && !found) {
+          const end = source.indexOf('\n', index) < 0 ? length : source.indexOf('\n', index);
+          const line = source.slice(index, end);
+          found = (stripTabs ? line.replace(/^\t+/, '') : line) === delimiter;
+          index = end + 1;
+        }
+      }
+      continue;
+    }
+    if (char === ' ' || char === '\t' || char === '\r') { endWord(); index++; continue; }
+    if (char === '#' && !word) {
+      const end = source.indexOf('\n', index);
+      index = end < 0 ? length : end;
+      continue;
+    }
+    if (char === ';' || char === '(' || char === ')') { endCommand(false); index++; continue; }
+    if (char === '|') {
+      if (source[index + 1] === '|') { endCommand(false); index += 2; continue; }
+      endCommand(true);
+      index += source[index + 1] === '&' ? 2 : 1;
+      continue;
+    }
+    if (char === '&') {
+      if (source[index + 1] === '&') { endCommand(false); index += 2; continue; }
+      if (source[index + 1] === '>') {
+        endWord();
+        redirectTarget = true;
+        index += source[index + 2] === '>' ? 3 : 2;
+        continue;
+      }
+      endCommand(false);
+      index++;
+      continue;
+    }
+    if (char === '>' || char === '<') {
+      // A bare fd number before the operator (2>) belongs to the redirection.
+      if (word && !word.quoted && !word.unresolvable && /^\d+$/.test(word.text)) word = null;
+      else endWord();
+      if (char === '<' && source[index + 1] === '<' && source[index + 2] !== '<') {
+        index += 2;
+        const stripTabs = source[index] === '-';
+        if (stripTabs) index++;
+        while (source[index] === ' ' || source[index] === '\t') index++;
+        let delimiter = '';
+        while (index < length && !/[\s;&|<>()]/.test(source[index])) {
+          const quote = source[index];
+          if (quote === "'" || quote === '"') {
+            const close = source.indexOf(quote, index + 1);
+            if (close < 0) return null;
+            delimiter += source.slice(index + 1, close);
+            index = close + 1;
+          } else if (quote === '\\') {
+            delimiter += source[index + 1] || '';
+            index += 2;
+          } else {
+            delimiter += quote;
+            index++;
+          }
+        }
+        if (!delimiter) return null;
+        heredocs.push({ delimiter, stripTabs });
+        continue;
+      }
+      index++;
+      while (source[index] === '>' || source[index] === '<' || source[index] === '|' || source[index] === '&') index++;
+      redirectTarget = true;
+      continue;
+    }
+    if (!word) word = { text: '', tilde: false, glob: false, quoted: false, unresolvable: false };
+    if (char === "'") {
+      const close = source.indexOf("'", index + 1);
+      if (close < 0) return null;
+      word.text += source.slice(index + 1, close);
+      word.quoted = true;
+      index = close + 1;
+      continue;
+    }
+    if (char === '"') {
+      word.quoted = true;
+      index++;
+      while (index < length && source[index] !== '"') {
+        const inner = source[index];
+        if (inner === '\\' && '"\\$`\n'.includes(source[index + 1] ?? '')) {
+          word.text += source[index + 1];
+          index += 2;
+        } else if (inner === '$' || inner === '`') {
+          index = expand(index);
+          if (index < 0) return null;
+        } else {
+          word.text += inner;
+          index++;
+        }
+      }
+      if (index >= length) return null;
+      index++;
+      continue;
+    }
+    if (char === '\\') {
+      word.text += source[index + 1] ?? '';
+      word.quoted = true;
+      index += 2;
+      continue;
+    }
+    if (char === '$' || char === '`') {
+      index = expand(index);
+      if (index < 0) return null;
+      continue;
+    }
+    if (char === '~' && !word.text && !word.quoted) word.tilde = true;
+    if (char === '*' || char === '?' || char === '[') word.glob = true;
+    word.text += char;
+    index++;
+  }
+  endCommand(false);
+  return { commands, substitutions };
+}
+
+function resolveShellPath(word, cwd, home) {
+  if (!word || word.unresolvable || !word.text) return null;
+  let text = word.text;
+  if (word.tilde) {
+    const tilde = /^~([^/]*)(.*)$/.exec(text);
+    if (tilde && !tilde[1]) text = home + tilde[2];
+    else if (tilde && /^[A-Za-z0-9._-]+$/.test(tilde[1])) text = path.join(path.dirname(home), tilde[1]) + tilde[2];
+  }
+  if (path.isAbsolute(text)) return { path: path.resolve(text), glob: word.glob };
+  return cwd ? { path: path.resolve(cwd, text), glob: word.glob } : null;
+}
+
+// Prefixes that run the next word as the command, with their value-taking
+// short options. `command -v find` only looks a name up.
+const SCAN_COMMAND_WRAPPERS = { sudo: 'ugCDhprtU', env: 'uCS', nice: 'n', timeout: 'sk', command: '', builtin: '', exec: 'a', nohup: '', time: 'fo', caffeinate: 'tw' };
+const SCAN_SHELL_KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'elif', 'else', 'do', 'while', 'until']);
+
+function unwrapScanCommand(words) {
+  let rest = words;
+  for (let guard = 0; guard < 8 && rest.length; guard++) {
+    while (rest.length && ((!rest[0].quoted && SCAN_SHELL_KEYWORDS.has(rest[0].text))
+      || /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0].text))) rest = rest.slice(1);
+    const name = rest.length ? path.basename(rest[0].text) : '';
+    const valueFlags = SCAN_COMMAND_WRAPPERS[name];
+    if (valueFlags === undefined) return rest;
+    rest = rest.slice(1);
+    while (rest.length && rest[0].text.startsWith('-') && rest[0].text !== '-') {
+      const flag = rest[0].text;
+      rest = rest.slice(1);
+      if (flag === '--') break;
+      if (name === 'command' && /[vV]/.test(flag)) return [];
+      if (flag.length === 2 && valueFlags.includes(flag[1])) rest = rest.slice(1);
+    }
+    if (name === 'timeout') rest = rest.slice(1);
+  }
+  return rest;
+}
+
+// Short and long option parsing shared by the walkers below. Values are kept
+// as words so a value that is a path (fd --search-path ~) still resolves.
+function parseScanOptions(args, { valueShort = '', valueLong = [], stopShort = '', stopLong = [] } = {}) {
+  const shorts = new Map();
+  const longs = new Map();
+  const positionals = [];
+  let options = true;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index];
+    const text = word.text;
+    if (!options || text === '-' || !text.startsWith('-')) {
+      positionals.push(word);
+      continue;
+    }
+    if (text === '--') {
+      options = false;
+      continue;
+    }
+    if (text.startsWith('--')) {
+      const equals = text.indexOf('=');
+      const name = equals < 0 ? text.slice(2) : text.slice(2, equals);
+      if (stopLong.includes(name)) break;
+      if (equals >= 0) longs.set(name, { ...word, text: text.slice(equals + 1), tilde: false });
+      else longs.set(name, valueLong.includes(name) ? args[++index] : true);
+      continue;
+    }
+    let stopped = false;
+    for (let at = 1; at < text.length; at++) {
+      const flag = text[at];
+      if (stopShort.includes(flag)) {
+        stopped = true;
+        break;
+      }
+      if (valueShort.includes(flag)) {
+        shorts.set(flag, at + 1 < text.length ? { ...word, text: text.slice(at + 1), tilde: false } : args[++index]);
+        break;
+      }
+      shorts.set(flag, true);
+    }
+    if (stopped) break;
+  }
+  return { shorts, longs, positionals };
+}
+
+function scanDepth(value) {
+  const depth = Number.parseInt(String(typeof value === 'object' && value ? value.text : ''), 10);
+  return Number.isFinite(depth) && depth >= 0 ? depth : null;
+}
+
+// Each walker maps its arguments to { paths, useCwd, maxDepth, base? }, or null
+// when the invocation does not walk. useCwd: with no path it walks the cwd —
+// except a searcher fed by a pipe, which reads that instead.
+const SCAN_WALKERS = {
+  find(args) {
+    let index = 0;
+    const paths = [];
+    while (index < args.length && /^-[HLPEXdsx]+$/.test(args[index].text)) index++;
+    for (; index < args.length; index++) {
+      const text = args[index].text;
+      if (text === '-f' && args[index + 1]) paths.push(args[++index]);
+      else if (text.startsWith('-') || text === '(' || text === '!') break;
+      else paths.push(args[index]);
+    }
+    const expression = args.slice(index);
+    // A walk that prunes the very folders in question stays out of them.
+    if (expression.some((word) => word.text === '-prune')
+      && expression.some((word) => /library|containers|users/i.test(word.text))) return null;
+    const limit = expression.findIndex((word) => word.text === '-maxdepth');
+    return { paths, useCwd: true, maxDepth: limit >= 0 ? scanDepth(expression[limit + 1]) : null };
+  },
+  rg(args, { piped }) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueShort: 'ABCEMTdefgjmrt',
+      valueLong: ['after-context', 'before-context', 'context', 'encoding', 'max-columns', 'type-not', 'max-depth', 'maxdepth',
+        'regexp', 'file', 'glob', 'iglob', 'threads', 'max-count', 'replace', 'type', 'type-add', 'type-clear', 'colors', 'color',
+        'sort', 'sortr', 'max-filesize', 'path-separator', 'pre', 'pre-glob', 'context-separator', 'field-match-separator',
+        'field-context-separator', 'engine', 'dfa-size-limit', 'regex-size-limit', 'ignore-file', 'hostname-bin', 'hyperlink-format'],
+    });
+    if (['help', 'version', 'type-list', 'generate'].some((name) => longs.has(name)) || shorts.has('h') || shorts.has('V')) return null;
+    const patternGiven = longs.has('files') || shorts.has('e') || shorts.has('f') || longs.has('regexp') || longs.has('file');
+    return {
+      paths: patternGiven ? positionals : positionals.slice(1),
+      useCwd: !piped,
+      maxDepth: scanDepth(shorts.get('d') ?? longs.get('max-depth') ?? longs.get('maxdepth')),
+    };
+  },
+  grep(args, { piped }) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueShort: 'ABCDdefm',
+      valueLong: ['after-context', 'before-context', 'context', 'devices', 'directories', 'regexp', 'file', 'max-count', 'label',
+        'include', 'exclude', 'exclude-dir', 'exclude-from', 'binary-files', 'group-separator'],
+    });
+    const directories = shorts.get('d') ?? longs.get('directories');
+    const recursive = shorts.has('r') || shorts.has('R') || longs.has('recursive') || longs.has('dereference-recursive')
+      || directories?.text === 'recurse';
+    if (!recursive) return null;
+    const patternGiven = shorts.has('e') || shorts.has('f') || longs.has('regexp') || longs.has('file');
+    return { paths: patternGiven ? positionals : positionals.slice(1), useCwd: !piped, maxDepth: null };
+  },
+  ag(args, { piped }) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueShort: 'ABCGgmp',
+      valueLong: ['after', 'before', 'context', 'file-search-regex', 'ignore', 'ignore-dir', 'max-count', 'path-to-ignore', 'depth', 'pager', 'workers'],
+    });
+    return { paths: shorts.has('g') ? positionals : positionals.slice(1), useCwd: !piped, maxDepth: scanDepth(longs.get('depth')) };
+  },
+  fd(args) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueShort: 'dtejEcSo',
+      stopShort: 'xX',
+      valueLong: ['max-depth', 'maxdepth', 'min-depth', 'exact-depth', 'type', 'extension', 'exclude', 'color', 'threads', 'size',
+        'changed-within', 'changed-before', 'change-newer-than', 'change-older-than', 'newer', 'older', 'owner', 'base-directory',
+        'path-separator', 'search-path', 'max-results', 'ignore-file', 'format', 'batch-size', 'max-buffer-time'],
+      stopLong: ['exec', 'exec-batch'],
+    });
+    if (shorts.has('h') || shorts.has('V') || longs.has('help') || longs.has('version')) return null;
+    const paths = positionals.slice(1);
+    if (typeof longs.get('search-path') === 'object') paths.push(longs.get('search-path'));
+    const base = longs.get('base-directory');
+    return {
+      paths,
+      useCwd: true,
+      base: typeof base === 'object' ? base : null,
+      maxDepth: scanDepth(shorts.get('d') ?? longs.get('max-depth') ?? longs.get('maxdepth') ?? longs.get('exact-depth')),
+    };
+  },
+  // du always walks the whole tree to total it; -d/-s only shorten the report.
+  du(args) {
+    const { positionals } = parseScanOptions(args, {
+      valueShort: 'BIdtX',
+      valueLong: ['max-depth', 'block-size', 'exclude', 'exclude-from', 'threshold', 'time-style', 'files0-from'],
+    });
+    return { paths: positionals, useCwd: true, maxDepth: null };
+  },
+  ls(args) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueLong: ['ignore', 'hide', 'width', 'tabsize', 'format', 'sort', 'time-style', 'indicator-style', 'quoting-style', 'block-size'],
+    });
+    if (!shorts.has('R') && !longs.has('recursive')) return null;
+    return { paths: positionals, useCwd: true, maxDepth: null };
+  },
+  tree(args) {
+    const { shorts, longs, positionals } = parseScanOptions(args, {
+      valueShort: 'LPIoHT',
+      valueLong: ['filelimit', 'charset', 'timefmt', 'sort', 'hintro', 'houtro', 'infofile', 'gitfile'],
+    });
+    if (longs.has('help') || longs.has('version')) return null;
+    return { paths: positionals, useCwd: true, maxDepth: scanDepth(shorts.get('L')) };
+  },
+};
+for (const [alias, walker] of [['gfind', 'find'], ['egrep', 'grep'], ['fgrep', 'grep'], ['ggrep', 'grep'], ['fdfind', 'fd'], ['gdu', 'du'], ['gls', 'ls']]) {
+  SCAN_WALKERS[alias] = SCAN_WALKERS[walker];
+}
+
+const SCAN_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+
+function bashScanRoot(command, cwd, home, depth) {
+  if (depth > 3 || typeof command !== 'string' || !command.trim()) return '';
+  const parsed = shellCommands(command, home);
+  if (!parsed) return '';
+  for (const body of parsed.substitutions) {
+    const hit = bashScanRoot(body, cwd, home, depth + 1);
+    if (hit) return hit;
+  }
+  let current = cwd;
+  for (const { words: all, piped } of parsed.commands) {
+    // zsh expands ** by walking every folder below it, whatever the command.
+    for (const word of all) {
+      if (!word.glob || !word.text.includes('**')) continue;
+      const target = resolveShellPath(word, current, home);
+      if (!target) continue;
+      const segments = target.path.split('/');
+      const globstar = segments.findIndex((segment) => segment.includes('**'));
+      if (globstar < 0) continue;
+      const hit = scanRootHit({ path: segments.slice(0, globstar).join('/') || '/', glob: true }, null, home);
+      if (hit) return hit;
+    }
+    const words = unwrapScanCommand(all);
+    if (!words.length) continue;
+    const name = path.basename(words[0].text);
+    if (name === 'cd' || name === 'pushd') {
+      const target = words.slice(1).find((word) => word.text === '-' || !word.text.startsWith('-'));
+      if (!target) current = home;
+      else current = target.text === '-' ? null : resolveShellPath(target, current, home)?.path ?? null;
+      continue;
+    }
+    if (SCAN_SHELLS.has(name)) {
+      const flag = words.findIndex((word) => /^-[a-z]*c$/.test(word.text));
+      const hit = flag > 0 && words[flag + 1] ? bashScanRoot(words[flag + 1].text, current, home, depth + 1) : '';
+      if (hit) return hit;
+      continue;
+    }
+    const plan = SCAN_WALKERS[name]?.(words.slice(1), { piped });
+    if (!plan) continue;
+    const base = plan.base ? resolveShellPath(plan.base, current, home)?.path ?? null : current;
+    const targets = plan.paths.length
+      ? plan.paths.map((word) => resolveShellPath(word, base, home))
+      : plan.useCwd && base ? [{ path: base }] : [];
+    for (const target of targets) {
+      const hit = scanRootHit(target, plan.maxDepth, home);
+      if (hit) return hit;
+    }
+  }
+  return '';
+}
+
 const TASK_EVENT_KINDS = new Set(['task_started', 'task_progress', 'task_updated', 'task_notification']);
 
 function taskEventKind(message) {
@@ -1952,14 +2527,18 @@ function serveACP() {
 
 }
 
-if (process.argv.includes('--workass-fork-session')) {
-  forkSessionCommand().then(
-    () => process.exit(0),
-    (error) => {
-      process.stderr.write(`Claude fork failed: ${String(error?.message || error)}\n`);
-      process.exit(1);
-    },
-  );
-} else {
-  serveACP();
+// Imported (tests read homeScanDenial) it serves nothing. Only a definite
+// false skips serving: a Node without import.meta.main must still start the host.
+if (import.meta.main !== false) {
+  if (process.argv.includes('--workass-fork-session')) {
+    forkSessionCommand().then(
+      () => process.exit(0),
+      (error) => {
+        process.stderr.write(`Claude fork failed: ${String(error?.message || error)}\n`);
+        process.exit(1);
+      },
+    );
+  } else {
+    serveACP();
+  }
 }
