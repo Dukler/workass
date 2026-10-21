@@ -1,7 +1,7 @@
 import { FloatingBrowser } from './FloatingBrowser';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject, type WheelEvent } from 'react';
 import type { Chat } from '../store/types';
-import { store, useApp, useProc } from '../store/store';
+import { store, useApp, useProc, type OlderHistoryOutcome } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
@@ -23,6 +23,8 @@ import {
 } from '../transcript-window';
 
 const HISTORY_PAGE = 40;
+const OLDER_RETRY_MIN_MS = 1000;
+const OLDER_RETRY_MAX_MS = 15000;
 // A window that keeps re-cutting itself inside one commit is an estimate that
 // has not converged; stop there and let the next scroll continue.
 const MAX_SYNC_REWINDOWS = 4;
@@ -617,12 +619,27 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // Older history arrives before the reader reaches the oldest loaded row;
   // the anchor keeps the prepend from moving anything on screen.
   const olderStalledAt = useRef(-1);
+  // After a failed older read, the next automatic one waits 1 s, then 2, 4, 8,
+  // at most 15; a read that lands resets it.
+  const olderRetry = useRef<{ at: number; delay: number; timer: number | null }>({ at: 0, delay: 0, timer: null });
+  const olderRetryPending = () => performance.now() < olderRetry.current.at;
+  const noteOlderOutcome = (outcome: OlderHistoryOutcome) => {
+    const retry = olderRetry.current;
+    if (outcome !== 'failed') { retry.delay = 0; retry.at = 0; return; }
+    retry.delay = Math.min(OLDER_RETRY_MAX_MS, Math.max(OLDER_RETRY_MIN_MS, retry.delay * 2));
+    retry.at = performance.now() + retry.delay;
+    if (retry.timer !== null) window.clearTimeout(retry.timer);
+    // Nothing else may re-render a reader who holds still at the top.
+    retry.timer = window.setTimeout(() => { retry.timer = null; setWindowTick((tick) => tick + 1); }, retry.delay);
+  };
+  useEffect(() => () => { if (olderRetry.current.timer !== null) window.clearTimeout(olderRetry.current.timer); }, []);
   const loadOlderAhead = () => {
     const el = scrollRef.current;
     if (!el || !virtual || stick.current || restoring.current || hidden <= 0 || historyLoadingNow.current || olderStalledAt.current === total) return;
-    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX) return;
+    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX || olderRetryPending()) return;
     const before = total;
-    void revealOlder().then((loaded) => { if (!loaded) olderStalledAt.current = before; });
+    // Only "nothing older" stops it; a read that failed is tried again.
+    void revealOlder().then((outcome) => { if (outcome === 'empty') olderStalledAt.current = before; });
   };
 
   // Clamp writes to the real maximum. Programmatic scroll events are ignored by
@@ -818,16 +835,21 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   };
 
   // One older page from the actor. The reading anchor keeps the prepend from
-  // moving what is on screen.
-  const revealOlder = async (page = HISTORY_PAGE): Promise<boolean> => {
-    if (!chat || chat.historyComplete || historyLoadingNow.current) return false;
+  // moving what is on screen. A read that failed (a timeout behind a busy
+  // history lane, a race) is retried after a growing pause instead of being
+  // taken for the start of the chat.
+  const revealOlder = async (page = HISTORY_PAGE): Promise<OlderHistoryOutcome> => {
+    if (!chat || chat.historyComplete) return 'empty';
+    if (historyLoadingNow.current) return 'failed';
     historyLoadingNow.current = true;
     setHistoryLoading(true);
     const chatID = chat.id;
     try {
-      return total === 0
-        ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
-        : await store.loadOlderHistory(chat.id, page);
+      const outcome: OlderHistoryOutcome = total === 0
+        ? (await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL) ? 'loaded' : 'failed')
+        : await store.loadOlderHistoryPage(chat.id, page);
+      if (viewChat.current === chatID) noteOlderOutcome(outcome);
+      return outcome;
     } finally {
       if (viewChat.current === chatID) {
         historyLoadingNow.current = false;
@@ -896,11 +918,11 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const doc = docRef.current;
     const el = scrollRef.current;
     if (!doc || !el || !chat || selectedFindMatch || doc.offsetHeight >= el.clientHeight) return;
-    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current) return;
+    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current || olderRetryPending()) return;
     const chatID = chat.id;
     const before = chat.messages.length;
-    void revealOlder().then(() => {
-      if ((store.chat(chatID)?.messages.length ?? 0) <= before) autoFillStalled.current = true;
+    void revealOlder().then((outcome) => {
+      if (outcome !== 'failed' && (store.chat(chatID)?.messages.length ?? 0) <= before) autoFillStalled.current = true;
     });
   });
 
@@ -915,10 +937,11 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       messages: visibleMessages, restore: pending, historyComplete: !!chat.historyComplete,
       loading: historyLoadingNow.current, stalled: restoreStalled.current,
     });
-    if (step !== 'load') return;
-    void revealOlder(CHAT_MESSAGE_TAIL).then((loaded) => {
+    if (step !== 'load' || olderRetryPending()) return;
+    void revealOlder(CHAT_MESSAGE_TAIL).then((outcome) => {
       if (restoring.current !== pending) return;
-      if (!loaded) restoreStalled.current = true;
+      // Only "nothing older" proves the row gone; a failed read is retried.
+      if (outcome === 'empty') restoreStalled.current = true;
       // Re-run the restore even when the store had nothing to publish.
       setWindowTick((tick) => tick + 1);
     });

@@ -188,6 +188,47 @@ test('older history pages prepend by stable boundary until the canonical transcr
   }
 });
 
+// A failed read is not the start of the chat. Taking it for one stopped the
+// automatic upward load of a 225 MB chat for good after one timeout.
+test('an older page read says whether it loaded, found nothing, or failed', async () => {
+  const complete = messages(100);
+  const previousWindow = (globalThis as any).window;
+  let mode: 'fail' | 'page' | 'nothing' = 'fail';
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { beforeMessageId: string; limit: number }) => {
+        if (mode === 'fail') throw new Error('socket closed');
+        if (mode === 'nothing') return [];
+        const boundary = complete.findIndex((message) => message.id === options.beforeMessageId);
+        return complete.slice(Math.max(0, boundary - options.limit), boundary);
+      },
+    },
+  };
+  try {
+    const subject = ownStore(new StoreCtor());
+    const target = chat('tab-outcome', complete.slice(-60));
+    target.messageCount = complete.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    assert.equal(await subject.loadOlderHistoryPage(target.id, 20), 'failed');
+    assert.equal(target.messages.length, 60, 'a failed read changes nothing');
+    assert.equal(await subject.loadOlderHistory(target.id, 20), false, 'the boolean form stays as it was');
+    mode = 'page';
+    assert.equal(await subject.loadOlderHistoryPage(target.id, 20), 'loaded');
+    assert.equal(target.messages.length, 80);
+    mode = 'nothing';
+    assert.equal(await subject.loadOlderHistoryPage(target.id, 20), 'empty');
+    target.historyComplete = true;
+    assert.equal(await subject.loadOlderHistoryPage(target.id, 20), 'empty', 'a complete history has nothing older');
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
 test('short image-rich pages keep advancing without marking history complete early', async () => {
   const complete = messages(9);
   const previousWindow = (globalThis as any).window;
