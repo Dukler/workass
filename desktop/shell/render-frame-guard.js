@@ -22,11 +22,18 @@ function isSrcdoc(url) {
 }
 
 /**
- * @param {{ isMainFrame: boolean, url: string, frameUrls: string[] }} details
+ * @param {{ isMainFrame: boolean, url: string, frameUrls: string[], initiatorUrls?: string[] }} details
  *   frameUrls[0] is the navigating frame's current URL, then its ancestors up
- *   to (and including) the main frame.
+ *   to (and including) the main frame. initiatorUrls is the same chain for the
+ *   frame that started the navigation.
+ *
+ * Measured in Electron 38: when a render frame navigates itself to another
+ * site, the event's `frame` is the new cross-process frame, whose URL is still
+ * empty; the `initiator` is the render frame. So anything a render frame (or a
+ * frame inside one) initiates is refused, whatever frame it targets.
  */
-function shouldBlockFrameNavigation({ isMainFrame, url, frameUrls } = {}) {
+function shouldBlockFrameNavigation({ isMainFrame, url, frameUrls, initiatorUrls } = {}) {
+  if (Array.isArray(initiatorUrls) && initiatorUrls.some(isSrcdoc)) return true;
   if (isMainFrame) return false;
   const chain = Array.isArray(frameUrls) ? frameUrls : [];
   if (chain.slice(1).some(isSrcdoc)) return true;
@@ -64,7 +71,8 @@ function installRenderFrameGuard(webContents, log = (line) => console.error(line
   webContents.on('will-frame-navigate', (event) => {
     const details = event && typeof event === 'object' ? event : {};
     const frameUrls = frameUrlChain(details.frame);
-    if (!shouldBlockFrameNavigation({ isMainFrame: !!details.isMainFrame, url: details.url, frameUrls })) return;
+    const initiatorUrls = frameUrlChain(details.initiator);
+    if (!shouldBlockFrameNavigation({ isMainFrame: !!details.isMainFrame, url: details.url, frameUrls, initiatorUrls })) return;
     event.preventDefault();
     log(`[shell] render frame navigation blocked ${navigationOrigin(details.url)}`);
   });

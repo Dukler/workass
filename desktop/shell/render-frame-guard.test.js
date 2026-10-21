@@ -13,6 +13,15 @@ test('a render frame cannot navigate away from its page', () => {
   assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: `${APP}index.html`, frameUrls: ['about:srcdoc', APP] }), true);
 });
 
+test('a navigation a render frame initiates is refused even when the target frame has no URL yet', () => {
+  // Electron 38: a render frame navigating itself cross-site reports the new,
+  // still-empty frame; only its initiator is the about:srcdoc page.
+  assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: 'https://evil.invalid/?chat=1', frameUrls: ['', APP], initiatorUrls: ['about:srcdoc', APP] }), true);
+  assert.equal(shouldBlockFrameNavigation({ isMainFrame: true, url: 'https://evil.invalid/', frameUrls: [APP], initiatorUrls: ['about:srcdoc', APP] }), true);
+  assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: 'https://evil.invalid/', frameUrls: ['', APP], initiatorUrls: ['about:blank', 'about:srcdoc', APP] }), true);
+  assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: `${APP}workass/artifacts/chart-1a2b/`, frameUrls: ['', APP], initiatorUrls: [APP] }), false);
+});
+
 test('the renderer may load or replace the page itself', () => {
   assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: 'about:srcdoc', frameUrls: ['about:blank', APP] }), false);
   assert.equal(shouldBlockFrameNavigation({ isMainFrame: false, url: 'about:srcdoc', frameUrls: ['', APP] }), false);
@@ -63,7 +72,13 @@ test('the installed guard cancels a render-frame navigation and locks WebRTC to 
   assert.equal(prevented, 1);
   assert.deepEqual(lines, ['[shell] render frame navigation blocked https://evil.example']);
 
-  const allowed = { url: 'about:srcdoc', isMainFrame: false, frame: { url: 'about:blank', parent: main }, preventDefault: () => { prevented++; } };
+  const speculative = { url: 'https://evil.invalid/?chat=1', isMainFrame: false, frame: { url: '', parent: main }, initiator: { url: 'about:srcdoc', parent: main }, preventDefault: () => { prevented++; } };
+  contents.emit('will-frame-navigate', speculative);
+  assert.equal(prevented, 2);
+  assert.equal(lines[1], '[shell] render frame navigation blocked https://evil.invalid');
+  prevented = 1;
+
+  const allowed = { url: 'about:srcdoc', isMainFrame: false, frame: { url: 'about:blank', parent: main }, initiator: main, preventDefault: () => { prevented++; } };
   contents.emit('will-frame-navigate', allowed);
   const top = { url: 'https://example.com/', isMainFrame: true, frame: main, preventDefault: () => { prevented++; } };
   contents.emit('will-frame-navigate', top);
