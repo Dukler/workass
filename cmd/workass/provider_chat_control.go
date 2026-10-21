@@ -1368,8 +1368,12 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 	receipt := queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID)
 	actor.mu.Unlock()
 	// Agent control is headless. The durable queue receipt returns immediately;
-	// provider cold-start and turn execution continue from the actor outbox.
-	go func() { _ = actor.coordinator.Drain(context.Background()) }()
+	// provider cold-start and turn execution continue from the actor outbox on
+	// the coordinator's own effect worker. Its context is cancelled and awaited
+	// by Coordinator.Close, so no turn can start a lane or write chat state
+	// after the runtime has closed (an untracked Drain on a background context
+	// kept writing into the state dir after shutdown).
+	actor.coordinator.Wake()
 	return receipt, nil
 }
 
