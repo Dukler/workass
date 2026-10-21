@@ -66,7 +66,9 @@ A copy or restore of a SQLite-live state directory that keeps the bytes but move
 its import receipt, identical bytes refresh the receipt, and only different bytes refuse the start.
 The import refuses a chat file that JSON discovery would refuse, so the daemon does not start in
 either mode: the JSON stays in place and authoritative, and `state/chat-import-refused.json` names
-the file and the reason until the file is fixed or removed and the import completes.
+the file and the reason until the file is fixed or removed and the import completes. A failure that
+is not the file's (the database busy, the disk full, a read error) stops the start the same way but
+writes no refusal: the error names the cause, and the next start retries the import.
 
 Daemon logs are written to stderr. Stdout is unused.
 
