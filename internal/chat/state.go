@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -975,6 +976,17 @@ func (s State) Clone() State {
 	return out
 }
 
+// cloneValueMap copies a map whose values hold no references. maps.Clone
+// copies the table wholesale, several times faster than re-inserting each
+// entry (the tool-owner map of a long chat has 60k); like the loops it
+// replaced, a nil map becomes an empty one.
+func cloneValueMap[M ~map[K]V, K comparable, V any](m M) M {
+	if m == nil {
+		return make(M)
+	}
+	return maps.Clone(m)
+}
+
 // cloneSharingLedger is Clone except that the result shares the ledger's
 // rows with s. It is for a transition that never writes a ledger row: the
 // ledger is the bulk of a long chat, so deep-copying it on every command
@@ -992,35 +1004,17 @@ func (s State) cloneSharingLedger() State {
 	out.Parent = s.Parent.Clone()
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
-	out.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt, len(s.QueueMutationReceipts))
-	for operationID, receipt := range s.QueueMutationReceipts {
-		out.QueueMutationReceipts[operationID] = receipt
-	}
-	out.PresentationMutationReceipts = make(map[provider.OperationID]PresentationMutationReceipt, len(s.PresentationMutationReceipts))
-	for operationID, receipt := range s.PresentationMutationReceipts {
-		out.PresentationMutationReceipts[operationID] = receipt
-	}
-	out.RuntimeControlMutationReceipts = make(map[provider.OperationID]RuntimeControlMutationReceipt, len(s.RuntimeControlMutationReceipts))
-	for operationID, receipt := range s.RuntimeControlMutationReceipts {
-		out.RuntimeControlMutationReceipts[operationID] = receipt
-	}
+	out.QueueMutationReceipts = cloneValueMap(s.QueueMutationReceipts)
+	out.PresentationMutationReceipts = cloneValueMap(s.PresentationMutationReceipts)
+	out.RuntimeControlMutationReceipts = cloneValueMap(s.RuntimeControlMutationReceipts)
 	out.WorkspaceMutationReceipts = make(map[provider.OperationID]WorkspaceMutationReceipt, len(s.WorkspaceMutationReceipts))
 	for operationID, receipt := range s.WorkspaceMutationReceipts {
 		receipt.DetachOperationIDs = append([]provider.OperationID(nil), receipt.DetachOperationIDs...)
 		out.WorkspaceMutationReceipts[operationID] = receipt
 	}
-	out.LaneSelectionMutationReceipts = make(map[provider.OperationID]LaneSelectionMutationReceipt, len(s.LaneSelectionMutationReceipts))
-	for operationID, receipt := range s.LaneSelectionMutationReceipts {
-		out.LaneSelectionMutationReceipts[operationID] = receipt
-	}
-	out.CancelMutationReceipts = make(map[provider.OperationID]CancelMutationReceipt, len(s.CancelMutationReceipts))
-	for operationID, receipt := range s.CancelMutationReceipts {
-		out.CancelMutationReceipts[operationID] = receipt
-	}
-	out.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt, len(s.AgentWaitObservationReceipts))
-	for operationID, receipt := range s.AgentWaitObservationReceipts {
-		out.AgentWaitObservationReceipts[operationID] = receipt
-	}
+	out.LaneSelectionMutationReceipts = cloneValueMap(s.LaneSelectionMutationReceipts)
+	out.CancelMutationReceipts = cloneValueMap(s.CancelMutationReceipts)
+	out.AgentWaitObservationReceipts = cloneValueMap(s.AgentWaitObservationReceipts)
 	out.Outbox = make([]OutboxEntry, len(s.Outbox))
 	for i, entry := range s.Outbox {
 		out.Outbox[i] = entry.Clone()
@@ -1036,24 +1030,15 @@ func (s State) cloneSharingLedger() State {
 			pending.Batch = cloneContextBatch(lane.PendingImport.Batch)
 			lane.PendingImport = &pending
 		}
-		lane.Coverage = make(map[uint64]CoverageRecord, len(lane.Coverage))
-		for sequence, record := range s.Lanes[id].Coverage {
-			lane.Coverage[sequence] = record
-		}
+		lane.Coverage = cloneValueMap(lane.Coverage)
 		if lane.Attachment != nil {
 			attachment := lane.Attachment.Clone()
 			lane.Attachment = &attachment
 		}
 		out.Lanes[id] = lane
 	}
-	out.Operations = make(map[provider.OperationID]struct{}, len(s.Operations))
-	for operationID := range s.Operations {
-		out.Operations[operationID] = struct{}{}
-	}
-	out.Tools = make(map[string]ToolState, len(s.Tools))
-	for id, value := range s.Tools {
-		out.Tools[id] = value
-	}
+	out.Operations = cloneValueMap(s.Operations)
+	out.Tools = cloneValueMap(s.Tools)
 	out.Plans = make(map[provider.OperationID]PlanState, len(s.Plans))
 	for id, value := range s.Plans {
 		value.Event.Entries = append([]provider.PlanEntry(nil), value.Event.Entries...)
@@ -1073,18 +1058,9 @@ func (s State) cloneSharingLedger() State {
 		}
 		out.Background[id] = value
 	}
-	out.Usage = make(map[provider.LaneID]provider.UsageEvent, len(s.Usage))
-	for id, value := range s.Usage {
-		out.Usage[id] = value
-	}
-	out.Compactions = make(map[provider.LaneID]CompactionState, len(s.Compactions))
-	for id, value := range s.Compactions {
-		out.Compactions[id] = value
-	}
-	out.Transport = make(map[provider.LaneID]provider.TransportHealthEvent, len(s.Transport))
-	for id, value := range s.Transport {
-		out.Transport[id] = value
-	}
+	out.Usage = cloneValueMap(s.Usage)
+	out.Compactions = cloneValueMap(s.Compactions)
+	out.Transport = cloneValueMap(s.Transport)
 	if s.Foreground != nil {
 		foreground := *s.Foreground
 		foreground.Input.Attachments = append([]provider.Attachment(nil), s.Foreground.Input.Attachments...)

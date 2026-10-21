@@ -845,10 +845,7 @@ func validateJournaledProviderEventMutation(state State, event provider.Event) e
 
 func cloneJournaledProviderEventState(current State, kind provider.EventKind, shareTools bool) State {
 	next := current
-	next.Lanes = make(map[provider.LaneID]LaneState, len(current.Lanes))
-	for laneID, lane := range current.Lanes {
-		next.Lanes[laneID] = lane
-	}
+	next.Lanes = cloneValueMap(current.Lanes)
 
 	cloneForeground := func(cloneEvents bool) {
 		if current.Foreground == nil {
@@ -860,18 +857,8 @@ func cloneJournaledProviderEventState(current State, kind provider.EventKind, sh
 		}
 		next.Foreground = &foreground
 	}
-	copyTools := func() {
-		next.Tools = make(map[string]ToolState, len(current.Tools))
-		for id, value := range current.Tools {
-			next.Tools[id] = value
-		}
-	}
-	copyPlans := func() {
-		next.Plans = make(map[provider.OperationID]PlanState, len(current.Plans))
-		for operationID, value := range current.Plans {
-			next.Plans[operationID] = value
-		}
-	}
+	copyTools := func() { next.Tools = cloneValueMap(current.Tools) }
+	copyPlans := func() { next.Plans = cloneValueMap(current.Plans) }
 
 	switch kind {
 	case provider.EventAssistantChunk, provider.EventAssistantMedia:
@@ -887,21 +874,12 @@ func cloneJournaledProviderEventState(current State, kind provider.EventKind, sh
 		cloneForeground(true)
 		copyPlans()
 	case provider.EventUsageUpdated:
-		next.Usage = make(map[provider.LaneID]provider.UsageEvent, len(current.Usage))
-		for laneID, value := range current.Usage {
-			next.Usage[laneID] = value
-		}
+		next.Usage = cloneValueMap(current.Usage)
 	case provider.EventCompactionStarted, provider.EventCompactionCheckpoint:
 		cloneForeground(true)
-		next.Compactions = make(map[provider.LaneID]CompactionState, len(current.Compactions))
-		for laneID, value := range current.Compactions {
-			next.Compactions[laneID] = value
-		}
+		next.Compactions = cloneValueMap(current.Compactions)
 	case provider.EventBackgroundWork:
-		next.Background = make(map[string]BackgroundState, len(current.Background))
-		for id, value := range current.Background {
-			next.Background[id] = value
-		}
+		next.Background = cloneValueMap(current.Background)
 	}
 	return next
 }
