@@ -8,10 +8,23 @@
 # that reached out to proxy.golang.org would be one more thing that works in one
 # place and not the other. `vendor/` present means `go build` uses it
 # automatically and offline.
+#
+# `go mod vendor` copies every platform's files. The SQLite driver
+# (modernc.org/sqlite + modernc.org/libc) is machine-generated Go per
+# GOOS/GOARCH, so the copy is ~140 MB, almost all of it for platforms Workass
+# never builds. After vendoring, every vendored source file that no target
+# below compiles is removed. `go build -mod=vendor` checks vendor/modules.txt,
+# not file presence, so the pruned tree builds offline for these targets; a
+# new target must be added here (and this script re-run) before it can build.
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
+
+# Every GOOS/GOARCH a Workass binary is built for: scripts/build-daemon.sh,
+# the macOS packaging scripts, stage-windows-portable.sh and
+# deploy-remote-daemon.sh (--arch amd64|arm64).
+targets="darwin/arm64 windows/amd64 linux/amd64 linux/arm64"
 
 echo "[vendor-go] tidying"
 go mod tidy
@@ -19,8 +32,37 @@ go mod tidy
 echo "[vendor-go] vendoring"
 go mod vendor
 
+echo "[vendor-go] pruning sources no target compiles ($targets)"
+keep=$(mktemp)
+all=$(mktemp)
+trap 'rm -f "$keep" "$all"' EXIT
+vendor_dir="$repo_root/vendor"
+for target in $targets; do
+  goos=${target%/*}
+  goarch=${target#*/}
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go list -mod=vendor -deps -test \
+    -f '{{$d := .Dir}}{{range .GoFiles}}{{$d}}/{{.}}
+{{end}}{{range .SFiles}}{{$d}}/{{.}}
+{{end}}{{range .HFiles}}{{$d}}/{{.}}
+{{end}}{{range .SysoFiles}}{{$d}}/{{.}}
+{{end}}{{range .EmbedFiles}}{{$d}}/{{.}}
+{{end}}' ./... | grep "^$vendor_dir/" >>"$keep" || true
+done
+sort -u -o "$keep" "$keep"
+find "$vendor_dir" -type f \( -name '*.go' -o -name '*.s' -o -name '*.h' -o -name '*.c' -o -name '*.syso' \) | sort >"$all"
+pruned=$(comm -23 "$all" "$keep" | wc -l | tr -d ' ')
+comm -23 "$all" "$keep" | while IFS= read -r file; do rm -f "$file"; done
+# Upstream agent-instruction files would be loaded by coding agents working
+# in this repo as if they were Workass instructions. They are not ours.
+find "$vendor_dir" -type f \( -name 'CLAUDE.md' -o -name 'AGENTS.md' -o -name 'GEMINI.md' -o -name '.cursorrules' \) -exec rm -f {} +
+find "$vendor_dir" -type d -empty -delete
+echo "[vendor-go] pruned $pruned files"
+
 echo "[vendor-go] verifying the tree builds from vendor alone"
 go build -mod=vendor ./... >/dev/null
+for target in $targets; do
+  CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go build -mod=vendor ./cmd/... >/dev/null
+done
 
 echo "[vendor-go] dependencies:"
 if [ -f vendor/modules.txt ]; then
