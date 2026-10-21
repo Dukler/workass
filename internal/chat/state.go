@@ -491,6 +491,9 @@ type providerActivityOwnerIndex struct {
 	state  State
 	built  bool
 	ledger map[providerActivityLedgerKey]*providerActivityLedgerTurns
+	// checked holds each distinct owner's answer: a long chat's tool calls
+	// share a few hundred owners (one per turn) among tens of thousands.
+	checked map[ProviderActivityOwner]error
 }
 
 type providerActivityLedgerKey struct {
@@ -567,7 +570,15 @@ func (index *providerActivityOwnerIndex) matches(owner ProviderActivityOwner) bo
 
 // validate is validateProviderActivityOwner(index.state, owner).
 func (index *providerActivityOwnerIndex) validate(owner ProviderActivityOwner) error {
-	return validateProviderActivityOwnerWith(index.state.Lanes, owner, index.matches)
+	if err, ok := index.checked[owner]; ok {
+		return err
+	}
+	err := validateProviderActivityOwnerWith(index.state.Lanes, owner, index.matches)
+	if index.checked == nil {
+		index.checked = make(map[ProviderActivityOwner]error)
+	}
+	index.checked[owner] = err
+	return err
 }
 
 // validateProviderActivityOwnerWith is validateProviderActivityOwner for the
