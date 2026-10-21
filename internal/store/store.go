@@ -223,12 +223,14 @@ func Open(opts Options) (*DB, error) {
 
 func connectionPragmas(busy time.Duration, syncMode Synchronous) []string {
 	// Order matters and is why these are not DSN _pragma values (the driver
-	// sorts those): locking_mode must precede journal_mode=WAL so the
-	// wal-index is created in heap memory and no -shm file ever exists.
+	// sorts those): locking_mode must precede every read of the file, so that
+	// the wal-index is created in heap memory and no -shm file ever exists.
+	// On a reopened WAL database even the page_count check of the auto_vacuum
+	// step is such a read: before EXCLUSIVE it created a -shm file.
 	return []string{
 		fmt.Sprintf("PRAGMA busy_timeout = %d", busy.Milliseconds()),
-		newFileAutoVacuum,
 		"PRAGMA locking_mode = EXCLUSIVE",
+		newFileAutoVacuum,
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = " + string(syncMode),
 		"PRAGMA foreign_keys = ON",

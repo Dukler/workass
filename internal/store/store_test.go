@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,6 +66,33 @@ func TestOpenAppliesPragmasAndEmbeddedSchema(t *testing.T) {
 	// EXCLUSIVE locking before WAL keeps the wal-index in heap memory.
 	if _, err := os.Stat(path + "-shm"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a -shm file exists beside the database: %v", err)
+	}
+}
+
+// A reopened WAL database must not grow a -shm file either: every read of the
+// file, the auto_vacuum step's page count included, comes after EXCLUSIVE.
+func TestReopenCreatesNoSharedMemoryFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	for round := 0; round < 3; round++ {
+		db, err := Open(Options{Path: path, BinaryVersion: "test", BusyTimeout: 100 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("open %d: %v", round, err)
+		}
+		if err := db.Write(context.Background(), func(tx *Tx) error {
+			_, err := tx.Exec(`INSERT OR REPLACE INTO migrated_stores(store, status, source, started_at, binary_version) VALUES (?, 'importing', 'src', 'now', 'test')`, fmt.Sprintf("store-%d", round))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path + "-shm"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("open %d: a -shm file exists beside the database: %v", round, err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path + "-shm"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("close %d: a -shm file exists beside the database: %v", round, err)
+		}
 	}
 }
 
