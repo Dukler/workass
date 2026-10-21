@@ -735,13 +735,50 @@ func commandLeavesLedger(command Command) bool {
 // publishing partial state without cloning or revalidating the entire ledger
 // for every streamed token.
 func reduceJournaledProviderEvent(current State, command ProviderEventReceived) (State, error) {
+	return reduceJournaledProviderEventWith(current, command, false)
+}
+
+// reduceJournaledProviderEventSharingTools is reduceJournaledProviderEvent for
+// the engine, which holds its lock across the whole commit. A tool update
+// writes exactly one tool-owner entry, so it writes that entry into the
+// committed map in place instead of copying a map that holds every tool call
+// the chat ever made (60k on a long chat, several milliseconds per update).
+// undo puts the entry back exactly; the engine calls it when the commit fails.
+// When the reduction itself fails the entry is already back.
+func reduceJournaledProviderEventSharingTools(current State, command ProviderEventReceived) (State, func(), error) {
+	event := command.Event
+	if event.Kind != provider.EventToolUpdate || event.Tool == nil || current.Tools == nil {
+		next, err := reduceJournaledProviderEvent(current, command)
+		return next, func() {}, err
+	}
+	id := strings.TrimSpace(event.Tool.ToolCallID)
+	previous, existed := current.Tools[id]
+	undo := func() {
+		if existed {
+			current.Tools[id] = previous
+		} else {
+			delete(current.Tools, id)
+		}
+	}
+	next, err := reduceJournaledProviderEventWith(current, command, true)
+	if err != nil {
+		undo()
+		return current, nil, err
+	}
+	return next, undo, nil
+}
+
+// reduceJournaledProviderEventWith is reduceJournaledProviderEvent; with
+// shareTools a tool update writes the committed Tools map in place (see
+// reduceJournaledProviderEventSharingTools).
+func reduceJournaledProviderEventWith(current State, command ProviderEventReceived, shareTools bool) (State, error) {
 	if !journalableProviderEvent(command.Event.Kind) {
 		return current, errors.New("provider event is not eligible for the durable stream journal")
 	}
 	if current.Deleted {
 		return current, errors.New("chat was durably deleted")
 	}
-	next := cloneJournaledProviderEventState(current, command.Event.Kind)
+	next := cloneJournaledProviderEventState(current, command.Event.Kind, shareTools)
 	effects, err := reduceProviderEvent(&next, command)
 	if err != nil {
 		return current, err
@@ -806,7 +843,7 @@ func validateJournaledProviderEventMutation(state State, event provider.Event) e
 	return nil
 }
 
-func cloneJournaledProviderEventState(current State, kind provider.EventKind) State {
+func cloneJournaledProviderEventState(current State, kind provider.EventKind, shareTools bool) State {
 	next := current
 	next.Lanes = make(map[provider.LaneID]LaneState, len(current.Lanes))
 	for laneID, lane := range current.Lanes {
@@ -843,7 +880,9 @@ func cloneJournaledProviderEventState(current State, kind provider.EventKind) St
 		cloneForeground(true)
 	case provider.EventToolUpdate:
 		cloneForeground(true)
-		copyTools()
+		if !shareTools {
+			copyTools()
+		}
 	case provider.EventPlanUpdate:
 		cloneForeground(true)
 		copyPlans()
