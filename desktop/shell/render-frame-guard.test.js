@@ -85,6 +85,25 @@ test('the installed guard cancels a render-frame navigation and locks WebRTC to 
   assert.equal(prevented, 1);
 });
 
+test('a disposed frame never throws out of the guard (that would stop the shell behind a modal error)', () => {
+  const contents = new EventEmitter();
+  contents.setWebRTCIPHandlingPolicy = () => {};
+  const lines = [];
+  installRenderFrameGuard(contents, (line) => lines.push(line));
+  const disposed = {
+    url: 'https://evil.invalid/', isMainFrame: false,
+    get frame() { throw new Error('Render frame was disposed before WebFrameMain could be accessed'); },
+    get initiator() { return { url: 'about:srcdoc', parent: { url: APP, parent: null } }; },
+    preventDefault() { this.prevented = true; },
+  };
+  assert.doesNotThrow(() => contents.emit('will-frame-navigate', disposed));
+  assert.equal(disposed.prevented, true, 'the initiator alone still refuses it');
+  const broken = { url: 'https://evil.invalid/', isMainFrame: false, frame: null, initiator: null, preventDefault() { throw new Error('gone'); } };
+  broken.initiator = { url: 'about:srcdoc', parent: null };
+  assert.doesNotThrow(() => contents.emit('will-frame-navigate', broken));
+  assert.match(lines.at(-1), /render frame guard error: gone/);
+});
+
 test('a shell without the WebRTC policy API still installs the navigation guard', () => {
   const contents = new EventEmitter();
   contents.setWebRTCIPHandlingPolicy = () => { throw new Error('unsupported'); };

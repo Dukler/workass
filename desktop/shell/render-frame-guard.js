@@ -67,14 +67,29 @@ function navigationOrigin(url) {
   }
 }
 
+// Reading event.frame / event.initiator can itself throw once a frame is
+// disposed, and an exception escaping a main-process listener stops the shell
+// behind Electron's modal error dialog. Every read is guarded.
+function readFrame(event, key) {
+  try {
+    return event[key];
+  } catch {
+    return null;
+  }
+}
+
 function installRenderFrameGuard(webContents, log = (line) => console.error(line)) {
   webContents.on('will-frame-navigate', (event) => {
-    const details = event && typeof event === 'object' ? event : {};
-    const frameUrls = frameUrlChain(details.frame);
-    const initiatorUrls = frameUrlChain(details.initiator);
-    if (!shouldBlockFrameNavigation({ isMainFrame: !!details.isMainFrame, url: details.url, frameUrls, initiatorUrls })) return;
-    event.preventDefault();
-    log(`[shell] render frame navigation blocked ${navigationOrigin(details.url)}`);
+    try {
+      const details = event && typeof event === 'object' ? event : {};
+      const frameUrls = frameUrlChain(readFrame(details, 'frame'));
+      const initiatorUrls = frameUrlChain(readFrame(details, 'initiator'));
+      if (!shouldBlockFrameNavigation({ isMainFrame: !!details.isMainFrame, url: details.url, frameUrls, initiatorUrls })) return;
+      event.preventDefault();
+      log(`[shell] render frame navigation blocked ${navigationOrigin(details.url)}`);
+    } catch (err) {
+      log(`[shell] render frame guard error: ${err && err.message ? err.message : err}`);
+    }
   });
   // WebRTC is the one way out that no CSP covers. The frame bootstrap removes
   // RTCPeerConnection; this keeps any connection that survives off direct UDP.
