@@ -54,7 +54,8 @@ test('the transcript shortcut searches semantic history in a bounded render wind
   assert.match(transcript, /event\.stopImmediatePropagation\(\)/);
   assert.match(transcript, /findChatMessageMatches\(visibleMessages, findQuery\)/);
   assert.match(transcript, /searchStart \+ SEARCH_WINDOW/);
-  assert.match(transcript, /useState\(CHAT_INITIAL_HISTORY\)/);
+  // Outside a selected result the transcript is windowed around the reader.
+  assert.match(transcript, /const virtual = !selectedFindMatch;/);
   assert.match(transcript, /store\.loadFullHistory\(chat\.id\)/);
   assert.match(transcript, /store\.loadRecentHistory\(chat\.id, CHAT_MESSAGE_TAIL\)/);
   assert.match(transcript, /store\.loadOlderHistory\(chat\.id, HISTORY_PAGE\)/);

@@ -1,18 +1,15 @@
-import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { memo, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
-import { messageImageSrc } from '../image-drafts';
 import { useMessageImageSrc } from './MessageImage';
-import { call } from '../wire/api';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
-import { observeTranscriptImageOnce } from '../transcript-images';
 import { cachedToolOutput, loadToolOutput } from '../chat/tool-detail';
 
 export { extractSubagents } from '../subagent-layout';
@@ -334,33 +331,11 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
 }
 
 function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; alt: string }) {
-  const button = useRef<HTMLButtonElement>(null);
-  const [visible, setVisible] = useState(false);
-  const [src, setSrc] = useState(() => image.deferredImageRef ? '' : messageImageSrc(image));
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    if (!image.deferredImageRef) setSrc(messageImageSrc(image));
-  }, [image]);
-  useEffect(() => {
-    if (!image.deferredImageRef || !button.current) return;
-    return observeTranscriptImageOnce(button.current, () => setVisible(true));
-  }, [image.deferredImageRef]);
-  useEffect(() => {
-    if (!image.deferredImageRef) return;
-    if (!visible) return;
-    let current = true;
-    setFailed(false);
-    void call('archiveLoad', tabId, { imageRef: image.deferredImageRef }).then((reply) => {
-      if (!current) return;
-      const data = Array.isArray(reply) && reply[0] && typeof reply[0] === 'object'
-        ? (reply[0] as { data?: unknown }).data : null;
-      if (typeof data === 'string' && data.length > 0) setSrc(data.startsWith('data:') ? data : `data:${image.mimeType};base64,${data}`);
-      else setFailed(true);
-    }).catch(() => { if (current) setFailed(true); });
-    return () => { current = false; };
-  }, [image.deferredImageRef, image.mimeType, tabId, visible]);
+  // The same once-per-image cache as message images: a windowed transcript
+  // remounts rows as the reader scrolls, and a remount must not fetch again.
+  const { target, src, failed } = useMessageImageSrc(tabId, image);
   return (
-    <button ref={button} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
+    <button ref={(element) => { target.current = element; }} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
       {src ? <img src={src} alt={alt} /> : <span className="tool-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>}
     </button>
   );
