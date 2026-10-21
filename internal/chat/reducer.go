@@ -1237,6 +1237,22 @@ func sameOperationIDSequence(left, right []provider.OperationID) bool {
 	return true
 }
 
+// environmentUpdateUnchanged reports whether the reducer accepts command and
+// leaves the Entorno projection exactly as it is apart from its revision,
+// which nothing reads. It runs the reducer on a copy of the projection.
+func environmentUpdateUnchanged(state State, command UpdateEnvironment) bool {
+	probe := State{
+		Initialized: state.Initialized, Deleted: state.Deleted,
+		Presentation: PresentationState{TabID: state.Presentation.TabID},
+		Environment:  state.Environment.Clone(),
+	}
+	if err := reduceUpdateEnvironment(&probe, command); err != nil {
+		return false
+	}
+	probe.Environment.Revision = state.Environment.Revision
+	return reflect.DeepEqual(probe.Environment, state.Environment)
+}
+
 func reduceUpdateEnvironment(state *State, command UpdateEnvironment) error {
 	if !state.Initialized || state.Deleted {
 		return errors.New("environment update requires an active chat actor")
