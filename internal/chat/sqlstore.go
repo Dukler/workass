@@ -576,6 +576,11 @@ func (s *SQLStore) Save(state State) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}
+	return s.saveValidated(state)
+}
+
+// saveValidated is Save for a state the caller has just validated.
+func (s *SQLStore) saveValidated(state State) error {
 	if strings.TrimSpace(state.ChatID) != s.chatID || s.chatID == "" {
 		return errors.New("chat state store belongs to another chat")
 	}
