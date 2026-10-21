@@ -237,11 +237,18 @@ type SQLStore struct {
 
 // sqlLedgerCache is this handle's private, exact copy of the ledger rows it
 // last read or wrote (exactLedgerCopy: nil and empty stay distinct, as they
-// are in the stored JSON). gen is the chats.ledger_gen those rows carry; another writer
-// bumps it, which invalidates the cache (the next checkpoint rewrites all
-// rows). head/length identify the committed Ledger slice: the engine shares
-// that backing array with the next state when a streamed event leaves the
-// ledger alone, so an identical slice header proves "unchanged" in O(1).
+// are in the stored JSON): its view of what is persisted. gen is the
+// chats.ledger_gen those rows carry; another writer bumps it, which
+// invalidates the cache (the next checkpoint rewrites all rows).
+//
+// A checkpoint compares every row against it. The engine shares the committed
+// ledger's backing array with the next state when a streamed event leaves the
+// ledger alone, so an identical slice proves nothing about the rows in it: an
+// old row edited in place through the shared array must still be written
+// (review 2026-10-21: comparing only the newest row lost such an edit).
+//
+// head/length identify the slice the last streamed event committed, for
+// ledgerChanged alone (see there).
 type sqlLedgerCache struct {
 	gen    int64
 	rows   []LedgerEvent
@@ -266,16 +273,16 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 		s.cache = nil
 		return State{}, false, err
 	}
-	s.cache = &sqlLedgerCache{
-		gen: loaded.ledgerGen, rows: exactLedgerCopy(loaded.rows),
-		head: unsafe.Pointer(unsafe.SliceData(loaded.state.Ledger)), length: len(loaded.state.Ledger),
-	}
+	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows}
 	return loaded.state, true, nil
 }
 
 type sqlLoadedActor struct {
-	state     State
-	rows      []LedgerEvent // the stored rows, before any journal replay
+	state State
+	// rows is an exact copy of the stored rows, taken before journal replay
+	// (which reduces in place and so may write to the decoded rows); nil
+	// when the caller did not ask for it.
+	rows      []LedgerEvent
 	ledgerGen int64
 }
 
@@ -401,7 +408,7 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			sqlLoadBetweenChunks(chatID, len(ledger))
 		}
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen)
+	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
 }
 
 // readSQLActorHead reads one chats row as stored.
@@ -499,19 +506,22 @@ func appendSQLLedgerRows(ledger []LedgerEvent, rows []sqlRawRow) ([]LedgerEvent,
 
 // finishSQLActor turns a decoded checkpoint into the State FileStore.Load
 // returns for the equivalent files: ledger rows in place, maps normalized,
-// validated, journal replayed.
-func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal [][]byte, ledgerGen int64) (sqlLoadedActor, bool, error) {
-	var rows []LedgerEvent
+// validated, journal replayed. keepRows also returns an exact copy of the
+// stored rows, taken before the replay.
+func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal [][]byte, ledgerGen int64, keepRows bool) (sqlLoadedActor, bool, error) {
 	if ledgerLen > 0 {
 		if len(ledger) != ledgerLen {
 			return sqlLoadedActor{}, false, fmt.Errorf("chat ledger has %d rows, its checkpoint expects %d", len(ledger), ledgerLen)
 		}
-		rows = ledger
-		state.Ledger = rows
+		state.Ledger = ledger
 	}
 	normalizeStateMaps(&state)
 	if err := state.Validate(); err != nil {
 		return sqlLoadedActor{}, false, fmt.Errorf("validate chat state: %w", err)
+	}
+	var rows []LedgerEvent
+	if keepRows && ledgerLen > 0 {
+		rows = exactLedgerCopy(ledger)
 	}
 	next := 0
 	state, err := replayProviderEventRecords(state, func() ([]byte, error) {
@@ -537,8 +547,8 @@ func loadSQLActor(tx *store.Tx, chatID string) (State, bool, error) {
 }
 
 // loadSQLActorRows is the whole load inside the caller's transaction: the
-// import, which runs at boot before any chat can commit. Runtime opens use
-// loadSQLActorInChunks.
+// import, which runs at boot before any chat can commit and needs no copy of
+// the rows. Runtime opens use loadSQLActorInChunks.
 func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error) {
 	head, found, err := readSQLActorHead(tx, chatID)
 	if err != nil || !found {
@@ -567,7 +577,7 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 	if err != nil {
 		return sqlLoadedActor{}, false, err
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen)
+	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, false)
 }
 
 // Save is a checkpoint: the head, the ledger rows that differ from the ones
@@ -597,9 +607,10 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	// the cache describes) and writes. A full plan (no usable cache: a new
 	// chat, a failed commit, another writer) still writes every row in one
 	// transaction, which a checkpoint must; an open actor's ordinary
-	// checkpoints are incremental.
+	// checkpoints are incremental. The diff compares every row, whatever slice
+	// the ledger arrives in.
 	plan := sqlLedgerPlan{full: cache == nil || cache.gen == 0}
-	if !plan.full && !cache.sameLedger(state.Ledger) {
+	if !plan.full {
 		plan.diff(cache.rows, state.Ledger)
 	}
 	if err := plan.encode(state.Ledger); err != nil {
@@ -650,20 +661,20 @@ func (s *SQLStore) checkpointLocked(state State) error {
 // has since replaced.
 var errSQLPlanStale = errors.New("chat ledger rows changed since this handle read them")
 
-// sameLedger reports whether ledger is the committed ledger this cache
-// describes. The O(1) proof is the identical slice header (the engine shares
-// the array whenever an event leaves the ledger alone); the newest row is
-// still compared, cheaply, as a guard against an in-place edit of a shared
-// array. Anything else falls back to comparing every row.
+// sameLedger reports whether every row of ledger equals the row this cache
+// says is stored. Newest first: an edit is most likely near the end.
 func (c *sqlLedgerCache) sameLedger(ledger []LedgerEvent) bool {
 	if len(ledger) != len(c.rows) {
 		return false
 	}
-	if unsafe.Pointer(unsafe.SliceData(ledger)) == c.head && len(ledger) == c.length {
-		return len(ledger) == 0 || reflect.DeepEqual(ledger[len(ledger)-1], c.rows[len(c.rows)-1])
-	}
-	for index := range ledger {
-		if !reflect.DeepEqual(ledger[index], c.rows[index]) {
+	return c.sameRows(ledger, 0)
+}
+
+// sameRows compares ledger[from:] with the stored rows at the same positions;
+// len(ledger) == len(c.rows).
+func (c *sqlLedgerCache) sameRows(ledger []LedgerEvent, from int) bool {
+	for index := len(ledger) - 1; index >= from; index-- {
+		if !ledgerRowEqual(&ledger[index], &c.rows[index]) {
 			return false
 		}
 	}
@@ -684,7 +695,7 @@ func (p *sqlLedgerPlan) diff(stored, next []LedgerEvent) {
 		shared = len(next)
 	}
 	for index := 0; index < shared; index++ {
-		if !reflect.DeepEqual(stored[index], next[index]) {
+		if !ledgerRowEqual(&next[index], &stored[index]) {
 			p.changed = append(p.changed, index)
 		}
 	}
@@ -910,22 +921,41 @@ func (s *SQLStore) journalCheckpoint(next State) error {
 	return s.checkpointLocked(next)
 }
 
-// ledgerChanged reports whether next's ledger differs from the stored rows.
-// An unknown cache counts as changed (the checkpoint then rewrites).
+// ledgerChanged decides whether a streamed record may be journaled: it
+// reports whether next's ledger differs from the stored rows. An unknown
+// cache counts as changed (the checkpoint then rewrites).
+//
+// It runs on every streamed event, so the slice the previous checkpoint or
+// event committed (the engine shares it whenever an event leaves the ledger
+// alone) is taken as unchanged after comparing only its newest rows.
+// Comparing every row here would cost ~1 ms per event on a 4,000-row, 443 MiB
+// actor, against a ~40 µs commit (BenchmarkSQLLedgerChangeDetection). What
+// the short path can miss is an old row edited in place through the shared
+// array. Such an edit is not lost: made by a reducer, it replays from the
+// journal record on load, and the next checkpoint, which compares every row,
+// writes it (until then the rows lag the actor).
 func (s *SQLStore) ledgerChanged(next State) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cache == nil {
+	cache := s.cache
+	if cache == nil || len(next.Ledger) != len(cache.rows) {
 		return true
 	}
-	if !s.cache.sameLedger(next.Ledger) {
+	if unsafe.Pointer(unsafe.SliceData(next.Ledger)) == cache.head && len(next.Ledger) == cache.length {
+		return !cache.sameRows(next.Ledger, max(0, len(next.Ledger)-sqlStreamedTailRows))
+	}
+	if !cache.sameLedger(next.Ledger) {
 		return true
 	}
 	// Equal content in a new slice (a reducer clone): remember its header so
-	// the streamed events that follow take the O(1) path.
-	s.cache.head, s.cache.length = unsafe.Pointer(unsafe.SliceData(next.Ledger)), len(next.Ledger)
+	// the streamed events that follow take the short path.
+	cache.head, cache.length = unsafe.Pointer(unsafe.SliceData(next.Ledger)), len(next.Ledger)
 	return false
 }
+
+// sqlStreamedTailRows is how many of the newest rows ledgerChanged compares
+// on the shared slice: where a settled turn's late updates land.
+const sqlStreamedTailRows = 8
 
 // appendJournalRecord commits one record after the checkpoint, charging the
 // journal the same framed size the file journal would so both stores
