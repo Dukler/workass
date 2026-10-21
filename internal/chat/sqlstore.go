@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -256,10 +257,35 @@ type sqlJournalAccount struct {
 // that backing array with the next state when a streamed event leaves the
 // ledger alone, so an identical slice header proves "unchanged" in O(1).
 type sqlLedgerCache struct {
-	gen    int64
-	rows   []LedgerEvent
+	gen  int64
+	rows []LedgerEvent
+	// shadow is a shallow copy of the committed rows: each row's own fields,
+	// sharing its slices and pointers. Committed row data is never edited in
+	// place (a transition copies the rows into a new array and replaces any
+	// slice it changes), so a row whose memory still equals its shadow is the
+	// stored row and needs no deep comparison. Anything else is compared with
+	// rows.
+	shadow []LedgerEvent
 	head   unsafe.Pointer
 	length int
+}
+
+// unchangedRow reports whether ledger[index] is, field for field and
+// pointer for pointer, the row this cache last stored at that position.
+func (c *sqlLedgerCache) unchangedRow(ledger []LedgerEvent, index int) bool {
+	if index >= len(c.shadow) {
+		return false
+	}
+	size := unsafe.Sizeof(ledger[index])
+	return bytes.Equal(
+		unsafe.Slice((*byte)(unsafe.Pointer(&ledger[index])), size),
+		unsafe.Slice((*byte)(unsafe.Pointer(&c.shadow[index])), size),
+	)
+}
+
+// shadowLedger is the shallow copy a cache keeps of the rows it stored.
+func shadowLedger(ledger []LedgerEvent) []LedgerEvent {
+	return append(make([]LedgerEvent, 0, len(ledger)), ledger...)
 }
 
 var (
@@ -281,7 +307,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 		return State{}, false, err
 	}
 	s.cache = &sqlLedgerCache{
-		gen: loaded.ledgerGen, rows: exactLedgerCopy(loaded.rows),
+		gen: loaded.ledgerGen, rows: exactLedgerCopy(loaded.rows), shadow: shadowLedger(loaded.rows),
 		head: unsafe.Pointer(unsafe.SliceData(loaded.state.Ledger)), length: len(loaded.state.Ledger),
 	}
 	return loaded.state, true, nil
@@ -619,7 +645,7 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	// checkpoints are incremental.
 	plan := sqlLedgerPlan{full: cache == nil || cache.gen == 0}
 	if !plan.full && !cache.sameLedger(state.Ledger) {
-		plan.diff(cache.rows, state.Ledger)
+		plan.diff(cache, state.Ledger)
 	}
 	if err := plan.encode(state.Ledger); err != nil {
 		return err
@@ -684,7 +710,7 @@ func (c *sqlLedgerCache) sameLedger(ledger []LedgerEvent) bool {
 		return len(ledger) == 0 || reflect.DeepEqual(ledger[len(ledger)-1], c.rows[len(c.rows)-1])
 	}
 	for index := range ledger {
-		if !reflect.DeepEqual(ledger[index], c.rows[index]) {
+		if !c.unchangedRow(ledger, index) && !reflect.DeepEqual(ledger[index], c.rows[index]) {
 			return false
 		}
 	}
@@ -699,13 +725,14 @@ type sqlLedgerPlan struct {
 	gen     int64
 }
 
-func (p *sqlLedgerPlan) diff(stored, next []LedgerEvent) {
+func (p *sqlLedgerPlan) diff(cache *sqlLedgerCache, next []LedgerEvent) {
+	stored := cache.rows
 	shared := len(stored)
 	if len(next) < shared {
 		shared = len(next)
 	}
 	for index := 0; index < shared; index++ {
-		if !reflect.DeepEqual(stored[index], next[index]) {
+		if !cache.unchangedRow(next, index) && !reflect.DeepEqual(stored[index], next[index]) {
 			p.changed = append(p.changed, index)
 		}
 	}
@@ -766,7 +793,7 @@ func (p *sqlLedgerPlan) apply(tx *store.Tx, chatID string, ledger []LedgerEvent)
 // nextCache is the cache after a committed plan: a private copy of exactly
 // the rows now in the table, re-cloning only the rows the plan wrote.
 func (p *sqlLedgerPlan) nextCache(previous *sqlLedgerCache, ledger []LedgerEvent) *sqlLedgerCache {
-	next := &sqlLedgerCache{gen: p.gen, head: unsafe.Pointer(unsafe.SliceData(ledger)), length: len(ledger)}
+	next := &sqlLedgerCache{gen: p.gen, shadow: shadowLedger(ledger), head: unsafe.Pointer(unsafe.SliceData(ledger)), length: len(ledger)}
 	if p.full || previous == nil {
 		next.rows = exactLedgerCopy(ledger)
 		return next
@@ -939,11 +966,16 @@ func (s *SQLStore) ledgerChanged(next State) bool {
 	if s.cache == nil {
 		return true
 	}
+	newSlice := unsafe.Pointer(unsafe.SliceData(next.Ledger)) != s.cache.head || len(next.Ledger) != s.cache.length
 	if !s.cache.sameLedger(next.Ledger) {
 		return true
 	}
 	// Equal content in a new slice (a reducer clone): remember its header so
-	// the streamed events that follow take the O(1) path.
+	// the streamed events that follow take the O(1) path, and its rows so the
+	// next comparison recognises them without a deep one.
+	if newSlice {
+		s.cache.shadow = shadowLedger(next.Ledger)
+	}
 	s.cache.head, s.cache.length = unsafe.Pointer(unsafe.SliceData(next.Ledger)), len(next.Ledger)
 	return false
 }
