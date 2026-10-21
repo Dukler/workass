@@ -17,7 +17,7 @@ type nativeInstructionDelivery struct {
 	ConfigEnvironment string
 }
 
-var workassNativeInstructions = agenttext.Get("native.bootstrap") + agenttext.Get("rules.home-scan")
+var workassNativeInstructions = agenttext.Get("native.bootstrap")
 
 // prepareNativeInstructions creates only process-owned files. User instruction,
 // authentication, permission and project files are never written.

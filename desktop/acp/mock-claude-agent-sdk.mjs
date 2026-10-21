@@ -444,32 +444,6 @@ class FixtureQuery {
         this.emit(this.result('success'));
         continue;
       }
-      // Tool calls run the way the real CLI runs them in bypassPermissions:
-      // PreToolUse hooks first and no canUseTool, and a denying hook's reason
-      // comes back as the call's is_error tool_result. A broad home-folder
-      // scan, a plain listing, and a subagent's (agent_id) Grep over ~.
-      if (text.includes('[fixture:home-scan]')) {
-        const calls = [
-          { id: 'toolu_home_scan', name: 'Bash', input: { command: 'find ~ -maxdepth 5 -name "*.sqlite" 2>/dev/null', description: 'Find SQLite files' } },
-          { id: 'toolu_home_list', name: 'Bash', input: { command: 'ls ~', description: 'List the home folder' } },
-          { id: 'toolu_agent_grep', name: 'Grep', input: { pattern: 'token', path: '~' }, parent: 'toolu_home_agent', agent: 'fixture-subagent-home' },
-        ];
-        for (const call of calls) {
-          const base = { parent_tool_use_id: call.parent || null, session_id: this.sessionId };
-          this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'tool_use', id: call.id, name: call.name, input: call.input }] } });
-          const outputs = await this.fireHook('PreToolUse', {
-            tool_name: call.name, tool_input: call.input, tool_use_id: call.id,
-            ...(call.agent ? { agent_id: call.agent, agent_type: 'Explore' } : {}),
-          }, call.name);
-          const denial = outputs.map((output) => output?.hookSpecificOutput).find((output) => output?.permissionDecision === 'deny');
-          this.emit({ ...base, type: 'user', uuid: randomUUID(), message: { content: [{
-            type: 'tool_result', tool_use_id: call.id, is_error: Boolean(denial),
-            content: denial ? String(denial.permissionDecisionReason || '') : 'fixture ok',
-          }] } });
-        }
-        await this.endTurn(text);
-        continue;
-      }
       // A tool call streamed the way the real CLI streams it: the block opens
       // with an empty input, and the full input only arrives with the
       // assistant message that closes it.
@@ -822,13 +796,11 @@ class FixtureQuery {
   }
 
   // Faithful to the SDK's hook dispatch: every matcher group whose matcher is
-  // absent, '*', the event's filter value or an A|B alternation naming it runs
-  // its callbacks. Their outputs are returned for the one caller that decides
-  // on them (PreToolUse); observers ignore them.
+  // absent, '*' or exactly the event's filter value runs its callbacks. Hook
+  // return values are ignored here — this lane's hooks are observers.
   async fireHook(event, input, filterValue = '') {
-    const outputs = [];
     const groups = this.options?.hooks?.[event];
-    if (!Array.isArray(groups)) return outputs;
+    if (!Array.isArray(groups)) return;
     const base = {
       session_id: this.sessionId,
       transcript_path: `/tmp/fixture-transcript-${this.sessionId}.jsonl`,
@@ -840,17 +812,16 @@ class FixtureQuery {
     };
     for (const group of groups) {
       const matcher = String(group?.matcher ?? '').trim();
-      if (matcher && matcher !== '*' && !matcher.split('|').includes(filterValue)) continue;
+      if (matcher && matcher !== '*' && matcher !== filterValue) continue;
       for (const hook of Array.isArray(group?.hooks) ? group.hooks : []) {
         try {
-          outputs.push(await hook(base, base.tool_use_id, { signal: new AbortController().signal }));
+          await hook(base, undefined, { signal: new AbortController().signal });
         } catch (error) {
           // A throwing hook must not take the turn down with it.
           process.stderr.write(`fixture hook ${event} threw: ${error?.message}\n`);
         }
       }
     }
-    return outputs;
   }
 
   // The Stop hook always precedes the terminal result — the ordering the daemon

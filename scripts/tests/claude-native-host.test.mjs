@@ -156,40 +156,6 @@ test('official Claude SDK host forwards the input of a streamed tool call once i
   assert.equal(updates.at(-1).status, 'completed');
 });
 
-// macOS asks "Workass would like to access data from other apps" whenever an
-// agent walks into ~/Library/Containers, and Allow never sticks (2026-10-21).
-// The host's PreToolUse hook refuses the broad scan even in bypassPermissions,
-// inside subagents too, and the row fails with the reason like any refused call.
-test('official Claude SDK host refuses a recursive home-folder scan on macOS', {
-  skip: process.platform !== 'darwin' && 'the home-scan guard is macOS-only',
-}, async (t) => {
-  const peer = startHost();
-  t.after(() => peer.child.kill('SIGKILL'));
-  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
-  await peer.waitFor((message) => message.id === 1);
-  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
-  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
-  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/set_config_option', params: { sessionId, configId: 'mode', value: 'bypassPermissions' } });
-  assert.equal((await peer.waitFor((message) => message.id === 3)).error, undefined);
-  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
-    sessionId, prompt: [{ type: 'text', text: '[fixture:home-scan] find my databases' }],
-  } });
-  assert.equal((await peer.waitFor((message) => message.id === 4)).result.stopReason, 'end_turn');
-  const settled = (id) => peer.messages.find((message) => message.method === 'session/update'
-    && message.params.update.sessionUpdate === 'tool_call_update' && message.params.update.toolCallId === id)?.params.update;
-
-  const scan = settled('toolu_home_scan');
-  assert.equal(scan?.status, 'failed', `the home scan was not refused: ${JSON.stringify(scan)}`);
-  assert.match(scan.content.text, /^Search a specific folder instead — scanning ~ recursively/);
-  assert.equal(scan.title, 'Find SQLite files');
-  assert.equal(settled('toolu_home_list')?.status, 'completed', 'a plain ls ~ must run');
-  const agentGrep = settled('toolu_agent_grep');
-  assert.equal(agentGrep?.status, 'failed', 'a subagent scan pops the same prompt');
-  assert.equal(agentGrep._meta.claudeCode.parentToolUseId, 'toolu_home_agent');
-  assert.equal(peer.messages.some((message) => message.method === 'session/request_permission'), false,
-    'the guard decides on its own; it never asks the user');
-});
-
 // Claude Code reports subagents and background shells as system messages with
 // a task_* subtype. Each must reach Workass as a spawned-work event, or the
 // work is invisible (user report 2026-10-13).
