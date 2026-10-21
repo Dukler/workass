@@ -339,6 +339,7 @@ func main() {
 	handler := httpserve.New(staticDir, hub, nil)
 	handler.MocksDir = mocksDir
 	handler.ArtifactHosts = artifactHosting
+	handler.ChatImages = newChatImageHTTPHandler(providerChats)
 	if staticDir == "" {
 		handler.RendererFS = embeddedRendererFS()
 	}

@@ -195,6 +195,14 @@ export class MachineRegistry {
     return this.ready.get(machineId);
   }
 
+  /** Where and with what key this machine's chat images load by URL; null reads them over the socket. */
+  imageAccess(machineId: string): { origin: string; key: string } | null {
+    const socket = this.ready.get(machineId);
+    const key = socket?.imageKey ?? '';
+    const origin = socket?.httpOrigin ?? '';
+    return key && origin ? { origin, key } : null;
+  }
+
   /** Event-free authenticated mutation lane for exact-machine control. */
   controlLinkFor(machineId: string): MachineSocket | undefined {
     return this.controlSockets.get(machineId);

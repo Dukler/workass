@@ -34,6 +34,11 @@ var mimeByExt = map[string]string{
 
 const mocksPathPrefix = "/workass/mocks"
 
+// ChatImagePathPrefix serves a chat's stored images by content reference:
+// GET /workass/chat-image/<tabId>/<sha256 digest>?k=<image key>. Additive; the
+// socket's archive image read stays for older renderers.
+const ChatImagePathPrefix = "/workass/chat-image/"
+
 // AllowFunc decides whether a non-local client IP may access HTTP/WS.
 type AllowFunc func(ip string) bool
 
@@ -48,12 +53,15 @@ type Server struct {
 	RendererFS    fs.FS
 	MocksDir      string
 	ArtifactHosts http.Handler
-	Metrics       MetricsFunc
-	Allow         AllowFunc
-	Hub           *wire.Hub
-	Version       string
-	Name          string
-	Identity      IdentityFunc
+	// ChatImages answers an authorized chat-image request: the image key has
+	// already been checked here; it checks that the chat owns the image.
+	ChatImages http.Handler
+	Metrics    MetricsFunc
+	Allow      AllowFunc
+	Hub        *wire.Hub
+	Version    string
+	Name       string
+	Identity   IdentityFunc
 }
 
 // New creates an HTTP renderer server. With a nil Allow hook, clients may load
@@ -95,6 +103,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><body style="font:15px system-ui;background:#06110d;color:#cfe;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2>Acceso pendiente o denegado</h2><p style="color:#8fb3a6">Pedile al anfitrión que permita este dispositivo, y recargá.</p></div></body>`))
+		return
+	}
+
+	if r.URL != nil && strings.HasPrefix(r.URL.Path, ChatImagePathPrefix) {
+		s.serveChatImage(w, r)
 		return
 	}
 
@@ -163,6 +176,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	_, _ = w.Write(data)
+}
+
+// serveChatImage authenticates a chat-image request the way the socket
+// authenticates a device: the image key must belong to a device that is still
+// approved, from loopback as from the LAN, because any local page can point an
+// <img> at localhost. Ownership of the image is the handler's check.
+func (s *Server) serveChatImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.ChatImages == nil || s.Hub == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.Hub.AuthorizeChatImageKey(r.URL.Query().Get("k")) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "chat image access requires an approved device", http.StatusForbidden)
+		return
+	}
+	s.ChatImages.ServeHTTP(w, r)
 }
 
 func (s *Server) serveMocks(w http.ResponseWriter, r *http.Request, requestPath string) {

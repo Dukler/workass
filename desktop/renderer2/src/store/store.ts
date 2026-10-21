@@ -60,6 +60,7 @@ import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
 import { installWorkassArtifactsBridge, connectedArtifactURL, parseArtifactLink, isArtifactLink } from '../connected-artifacts';
 import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
+import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 
 const APP = 'app';
@@ -2512,6 +2513,9 @@ export class Store {
         },
         onUnmount: (machineId) => this.evictMachineChats(machineId),
       });
+      // A remote chat's images load by URL from its own daemon, with that
+      // machine's image key; without one they are read over its socket.
+      setRemoteChatImageAccess((machineId) => this.machines?.imageAccess(machineId) ?? null);
       // Another renderer can mutate the actor without this window issuing a
       // command. Job events do not contain user attachments or every steer
       // boundary, so reconcile the owning actor's revision on its refresh
