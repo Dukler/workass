@@ -244,6 +244,35 @@ place for a long-lived secret in general — it is the existing debt that
 tokens follow the same path, they inherit the same debt. Fine for now, worth a
 line in your SPEC.
 
+## 7 · Chat images by URL (additive, 2026-10-21)
+
+A chat image the archive read sends by reference (`deferredImageRef:
+"images/<sha256>"`) can be fetched over HTTP instead of
+`chat:archive-load {imageRef}`, so an image view decodes it natively and caches
+it by URL:
+
+```
+GET /workass/chat-image/<tabId, URL-escaped>/<sha256>?k=<imageKey>
+```
+
+- `imageKey` arrives on `lan:access-state` when `state` is `approved`. It is a
+  read-only capability derived from the device record, not the device token,
+  so a URL that leaks (a log, "copy image address") opens images only, and only
+  until the device is revoked. A daemon that predates the endpoint sends no
+  key: read the image over the socket as before.
+- The request passes the same ownership check as the socket read: the tab's
+  chat exists, is not deleted and owns the reference. Otherwise `404`; a
+  missing or stale key is `403`; anything but a raster image (an SVG) is `415`
+  and stays on the socket read.
+- `200` carries the image bytes with their sniffed `Content-Type`, `ETag:
+  "<sha256>"` and `Cache-Control: private, max-age=31536000, immutable`;
+  `If-None-Match` answers `304`.
+- `&w=<px>` asks for a display rendition at most that wide, rounded up to one
+  of 160, 240, 320, 480, 640, 960, 1280, 1920 (wider: the full image). PNG
+  stays PNG and JPEG stays JPEG; an image already that narrow, or any other
+  format, comes back as it is. Its ETag is `"<sha256>-w<px>"`. Size it to what
+  you draw (CSS width x device pixel ratio) and open the full image without it.
+
 ---
 
 ## What is owed, and by whom

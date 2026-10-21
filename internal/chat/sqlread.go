@@ -541,60 +541,6 @@ func (a *SQLActors) ReadLedgerStamps(chatID string, ledgerLength, window int) ([
 	return stamps, nil
 }
 
-// LedgerOwnsAttachment is the ledger half of Engine.AttachmentRefOwnership
-// for a chat that is not resident (a closed actor has no foreground turn or
-// pending steer): whether a row's own attachment or a tool attachment in its
-// timeline is ref. Only rows whose JSON contains ref are decoded.
-func (a *SQLActors) LedgerOwnsAttachment(chatID, ref string) (bool, uint64, error) {
-	chatID = strings.TrimSpace(chatID)
-	if ref == "" {
-		return false, 0, nil
-	}
-	encoded, err := json.Marshal(ref)
-	if err != nil {
-		return false, 0, err
-	}
-	needle := string(encoded)
-	var (
-		raws     [][]byte
-		revision uint64
-	)
-	err = a.db.Read(context.Background(), func(tx *store.Tx) error {
-		raws = raws[:0]
-		head, err := readSQLLedgerHead(tx, chatID)
-		if err != nil {
-			return err
-		}
-		revision = head.revision
-		rows, err := tx.Query(`SELECT event_json FROM messages WHERE chat_id = ? AND instr(event_json, ?) > 0 ORDER BY seq`, chatID, needle)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
-				return err
-			}
-			raws = append(raws, raw)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return false, 0, err
-	}
-	for _, raw := range raws {
-		var row LedgerEvent
-		if err := json.Unmarshal(raw, &row); err != nil {
-			return false, 0, fmt.Errorf("decode chat ledger row: %w", err)
-		}
-		if timelineOwnsAttachment(row.Timeline, ref) || attachmentsOwn(row.Attachments, ref) {
-			return true, revision, nil
-		}
-	}
-	return false, revision, nil
-}
-
 // needsCheckpointAfterLoad: the loaded state is not the stored checkpoint.
 // Journal records were replayed onto the head (and may have edited an old row
 // the rows still lag), or the rows predate incremental checkpoints.
@@ -751,4 +697,66 @@ func (d *sqlRowDecoder) stop() {
 	d.stopped = true
 	close(d.work)
 	d.wg.Wait()
+}
+
+// LedgerAttachmentRefs returns every attachment reference the ledger owns in
+// the sense of Engine.AttachmentRefOwnership: a row's own attachments and the
+// tool attachments in its timeline. It reads the rows once, in chunks checked
+// against revision, decoding only those fields; a caller keeps the set to
+// answer image reads of a closed chat without scanning its rows per image.
+func (a *SQLActors) LedgerAttachmentRefs(chatID string, revision uint64) (map[string]struct{}, error) {
+	chatID = strings.TrimSpace(chatID)
+	type refs struct {
+		Attachments []struct{ Ref string }
+		Timeline    []struct {
+			Tool *struct{ Attachments []struct{ Ref string } }
+		}
+	}
+	owned := make(map[string]struct{})
+	after := int64(0)
+	for done := false; !done; {
+		var chunk []sqlRawRow
+		err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+			head, err := readSQLLedgerHead(tx, chatID)
+			if err != nil {
+				return err
+			}
+			if head.revision != revision {
+				return errLedgerChangedDuringRead
+			}
+			chunk, done, err = readSQLLedgerChunk(tx, chatID, after, sqlLoadChunkBytes, nil)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		for index := range chunk {
+			if chunk[index].seq != after+1 {
+				return nil, fmt.Errorf("chat ledger row %d is missing", after+1)
+			}
+			after = chunk[index].seq
+			raw := chunk[index].eventJSON
+			chunk[index].eventJSON = nil
+			if !bytes.Contains(raw, []byte(`"Ref":"`)) {
+				continue
+			}
+			var row refs
+			if err := json.Unmarshal(raw, &row); err != nil {
+				return nil, fmt.Errorf("decode chat ledger row %d: %w", after, err)
+			}
+			for _, attachment := range row.Attachments {
+				owned[attachment.Ref] = struct{}{}
+			}
+			for _, entry := range row.Timeline {
+				if entry.Tool == nil {
+					continue
+				}
+				for _, attachment := range entry.Tool.Attachments {
+					owned[attachment.Ref] = struct{}{}
+				}
+			}
+		}
+	}
+	delete(owned, "")
+	return owned, nil
 }

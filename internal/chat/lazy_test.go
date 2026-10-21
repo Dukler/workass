@@ -310,12 +310,18 @@ func TestClosedLedgerReadsMatchTheEngine(t *testing.T) {
 		t.Fatalf("live rows = %v %v", live, err)
 	}
 
-	// Attachment ownership: a row's own image and a missing one.
+	// Attachment ownership: a row's own image, a tool's, and a missing one.
+	refs, err := actors.LedgerAttachmentRefs(chatID, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, ref := range []string{"workass-session-image:images/abc", "workass-session-image:images/def", "workass-session-image:images/none"} {
-		owned, _, err := actors.LedgerOwnsAttachment(chatID, ref)
-		if err != nil || owned != engine.AttachmentRefOwnership(ref).Owned {
-			t.Fatalf("ownership of %s = %v %v", ref, owned, err)
+		if _, owned := refs[ref]; owned != engine.AttachmentRefOwnership(ref).Owned {
+			t.Fatalf("ownership of %s = %v", ref, owned)
 		}
+	}
+	if _, err := actors.LedgerAttachmentRefs(chatID, revision+1); !errors.Is(err, errLedgerChangedDuringRead) {
+		t.Fatalf("refs at a stale revision: %v", err)
 	}
 	if found, err := actors.LedgerHasNativeTurn(chatID, "native-2"); err != nil || !found {
 		t.Fatalf("native turn lookup = %v %v", found, err)
