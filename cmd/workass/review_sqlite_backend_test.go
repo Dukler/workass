@@ -6,27 +6,29 @@
 package main
 
 // Independent-review reproduction (fe7003e5): a byte-identical provider-chats
-// JSON whose mtime moved after the cutover makes the daemon refuse to start.
+// JSON whose mtime moved after the cutover made the daemon refuse to start.
+// Fixed; both tests are inverted to assert the daemon now boots. The normal
+// suite covers it in TestOpenChatActorBackendBootsFromARestoredCopy.
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"workass/internal/chat"
 )
 
 // The macOS updater snapshots the state dir with fs.cpSync(preserveTimestamps)
 // and, on rollback, renames that copy into place. The copy's mtimes differ in
 // the sub-microsecond digits, so the restored (SQLite-live) state is refused.
-// Set WORKASS_REVIEW_NODE to the updater's node binary.
+// WORKASS_REVIEW_NODE selects the updater's node binary (default: node on PATH).
 func TestReviewUpdaterSnapshotCopyIsRefusedOnRollback(t *testing.T) {
 	node := os.Getenv("WORKASS_REVIEW_NODE")
 	if node == "" {
-		t.Skip("set WORKASS_REVIEW_NODE")
+		node, _ = exec.LookPath("node")
+	}
+	if node == "" {
+		t.Skip("set WORKASS_REVIEW_NODE or put node on PATH")
 	}
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -58,11 +60,14 @@ func TestReviewUpdaterSnapshotCopyIsRefusedOnRollback(t *testing.T) {
 	if err := os.Rename(snapshot, stateDir); err != nil {
 		t.Fatal(err)
 	}
-	_, err = openChatActorBackend(stateDir, true, "test", t.Logf)
-	if !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
-		t.Fatalf("expected the restored snapshot to be refused, got %v", err)
+	backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatalf("restored snapshot is still refused: %v", err)
 	}
-	t.Logf("REPRODUCED: updater snapshot restored by rollback is refused: %v", err)
+	if err := backend.close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("FIXED: updater snapshot restored by rollback boots")
 }
 
 func TestReviewDaemonRefusesStartAfterJSONTouch(t *testing.T) {
@@ -85,9 +90,12 @@ func TestReviewDaemonRefusesStartAfterJSONTouch(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("bytes changed")
 	}
-	_, err = openChatActorBackend(stateDir, true, "test", t.Logf)
-	if !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
-		t.Fatalf("expected refusal, got %v", err)
+	backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatalf("touched JSON still refuses the start: %v", err)
 	}
-	t.Logf("REPRODUCED: main.go os.Exit(1) path, openChatActorBackend: %v", err)
+	if err := backend.close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("FIXED: a touched, byte-identical JSON boots")
 }

@@ -61,6 +61,9 @@ Defaults:
   in Windows prod or the test profile; an explicit value, even an empty one, wins.
 
 Rollback: once a state dir is on SQLite, a build with the SQLite store refuses to start without it, and a build from before it ignores `state.db` and starts from the stale pre-switch JSON; moving `state.db` aside rolls back to that JSON and loses every later write.
+A copy or restore of a SQLite-live state directory that keeps the bytes but moves file times
+(`cp -R`, the macOS updater's state snapshot) boots: a JSON actor whose time moved is hashed against
+its import receipt, identical bytes refresh the receipt, and only different bytes refuse the start.
 
 Daemon logs are written to stderr. Stdout is unused.
 
