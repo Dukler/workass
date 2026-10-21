@@ -229,7 +229,7 @@ func workassToolMutates(kind toolKind, name string) bool {
 	}
 	switch name {
 	case "workass_create_chat", "workass_create_subsession", "workass_rename_chat", "workass_settle_chat", "workass_configure_chat", "workass_focus_chat",
-		"workass_delete_chat", "workass_send_chat_message", "workass_cancel_chat_turn", "workass_host_artifact",
+		"workass_delete_chat", "workass_send_chat_message", "workass_cancel_chat_turn", "workass_host_artifact", "workass_render_html",
 		"workass_schedule_message", "workass_cancel_scheduled_message",
 		"workass_apply_update",
 		"workass_spawn_subagent", "workass_wait_subagent", "workass_wait_subagents",
@@ -245,14 +245,15 @@ func workassToolMutates(kind toolKind, name string) bool {
 
 // agentToolsForChild is the delegated agent's catalog: every chat-control
 // tool, acting for its parent chat. Like Claude Code subagents it cannot
-// delegate further (no subagent orchestration), and questions go to the
-// parent that owns the conversation with the user.
+// delegate further (no subagent orchestration), and questions and pages go to
+// the parent that owns the conversation with the user: a page renders only
+// from the chat's own reply, so a delegated agent reports instead.
 func agentToolsForChild() []map[string]any {
 	tools := agentMCPTools()
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == "workass_ask_user_question" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
+		if name == "workass_ask_user_question" || name == "workass_render_html" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
 			continue
 		}
 		filtered = append(filtered, tool)

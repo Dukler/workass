@@ -168,6 +168,11 @@ func agentMCPTools() []map[string]any {
 			"entry":       str(agenttext.Get("schema.agentMCPTools.guidance.43")),
 			"name":        str(agenttext.Get("schema.agentMCPTools.guidance.44")),
 		}, "source_path"), false, false, true, true),
+		tool("workass_render_html", agenttext.Get("tools.workass_render_html"), mutationObject(map[string]any{
+			"title": map[string]any{"type": "string", "minLength": 1, "maxLength": maxHTMLRenderTitleBytes, "description": agenttext.Get("schema.renderHTML.title")},
+			"html":  map[string]any{"type": "string", "minLength": 1, "maxLength": maxHTMLRenderSourceBytes, "description": agenttext.Get("schema.renderHTML.html")},
+			"path":  map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": agenttext.Get("schema.renderHTML.path")},
+		}, "title"), false, false, true, false),
 		tool("workass_spawn_subagent", agenttext.Get("tools.workass_spawn_subagent"), map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
@@ -364,6 +369,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "agent.catalog"
 	case "workass_host_artifact":
 		method = "artifact.host"
+	case "workass_render_html":
+		method = "html.render"
 	case "workass_spawn_subagent":
 		method = "agent.spawn"
 		params["prompt"] = params["task"]
