@@ -561,7 +561,16 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 			return current, nil, errors.New("chat was durably deleted")
 		}
 	}
-	next := current.Clone()
+	var next State
+	sharesLedger := commandLeavesLedger(command)
+	if sharesLedger {
+		if checkLedgerSharing != nil {
+			defer checkLedgerSharing(command, exactLedgerCopy(current.Ledger), current.Ledger, &next)
+		}
+		next = current.cloneSharingLedger()
+	} else {
+		next = current.Clone()
+	}
 	var (
 		effects []Effect
 		err     error
@@ -693,6 +702,29 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 		return current, nil, fmt.Errorf("chat transition produced invalid state: %w", err)
 	}
 	return next, effects, nil
+}
+
+// checkLedgerSharing is a test hook: when set, every transition that shares
+// the ledger reports the rows before it, the committed rows, and the result.
+var checkLedgerSharing func(command Command, before, current []LedgerEvent, next *State)
+
+// commandLeavesLedger reports whether command's reducer, and everything it
+// calls, only ever reads the ledger: it neither writes a row in place nor
+// appends one. Such a transition may share the committed ledger rows instead
+// of deep-copying them (see State.cloneSharingLedger). A command belongs here
+// only after its whole call tree has been checked; the set covers the
+// commands a chat runs on open, switch, queueing, steering, settings and
+// external mutations. TestLedgerLeavingCommandsLeaveTheLedger enforces it.
+func commandLeavesLedger(command Command) bool {
+	switch command.(type) {
+	case UpdatePresentation, SavePresentation, UpdateEnvironment, ChangeWorkspace,
+		ReplaceStagedQueue, PromoteStagedQueue, UpdateRuntimeControls, SaveRuntimeControls,
+		AttachTab, Submit, Steer, ResolvePermission, PermissionDecided,
+		RecordCancelReceipt, RecordAgentWaitObservation,
+		RecordExternalMutation, ExternalMutationReceipt, ClaimEffect:
+		return true
+	}
+	return false
 }
 
 // reduceJournaledProviderEvent is the bounded in-memory companion to the

@@ -834,6 +834,26 @@ type OutboxEntry struct {
 	LastError                   provider.ErrorKind
 }
 
+// Clone copies the entry so it shares nothing with the actor.
+func (entry OutboxEntry) Clone() OutboxEntry {
+	if entry.Input != nil {
+		input := *entry.Input
+		input.Attachments = append([]provider.Attachment(nil), entry.Input.Attachments...)
+		entry.Input = &input
+	}
+	if entry.Batch != nil {
+		batch := cloneContextBatch(*entry.Batch)
+		entry.Batch = &batch
+	}
+	if entry.Background != nil {
+		action := entry.Background.Clone()
+		entry.Background = &action
+	}
+	entry.Checkpoint = append(json.RawMessage(nil), entry.Checkpoint...)
+	entry.Result = append(json.RawMessage(nil), entry.Result...)
+	return entry
+}
+
 // PresentationState keeps a direct idle send in the transcript during native
 // attachment. The internal dispatch queue is not the user's follow-up queue.
 // This shallow view never changes the actor or schedules provider work.
@@ -950,12 +970,26 @@ func NewState(chatID string) (State, error) {
 }
 
 func (s State) Clone() State {
+	out := s.cloneSharingLedger()
+	out.Ledger = cloneLedgerEvents(s.Ledger)
+	return out
+}
+
+// cloneSharingLedger is Clone except that the result shares the ledger's
+// rows with s. It is for a transition that never writes a ledger row: the
+// ledger is the bulk of a long chat, so deep-copying it on every command
+// dominated the command, and a shared array also lets the SQLite store prove
+// the ledger unchanged without comparing every row. Like Clone's copy, a nil
+// ledger becomes an empty one.
+func (s State) cloneSharingLedger() State {
 	out := s
+	if out.Ledger == nil {
+		out.Ledger = make([]LedgerEvent, 0)
+	}
 	out.Presentation = s.Presentation.Clone()
 	out.Environment = s.Environment.Clone()
 	out.Obligation = s.Obligation.Clone()
 	out.Parent = s.Parent.Clone()
-	out.Ledger = cloneLedgerEvents(s.Ledger)
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
 	out.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt, len(s.QueueMutationReceipts))
@@ -989,22 +1023,7 @@ func (s State) Clone() State {
 	}
 	out.Outbox = make([]OutboxEntry, len(s.Outbox))
 	for i, entry := range s.Outbox {
-		if entry.Input != nil {
-			input := *entry.Input
-			input.Attachments = append([]provider.Attachment(nil), entry.Input.Attachments...)
-			entry.Input = &input
-		}
-		if entry.Batch != nil {
-			batch := cloneContextBatch(*entry.Batch)
-			entry.Batch = &batch
-		}
-		if entry.Background != nil {
-			action := entry.Background.Clone()
-			entry.Background = &action
-		}
-		entry.Checkpoint = append(json.RawMessage(nil), entry.Checkpoint...)
-		entry.Result = append(json.RawMessage(nil), entry.Result...)
-		out.Outbox[i] = entry
+		out.Outbox[i] = entry.Clone()
 	}
 	out.Lanes = make(map[provider.LaneID]LaneState, len(s.Lanes))
 	for id, lane := range s.Lanes {
