@@ -16,7 +16,7 @@ import { localBrowserOwnsChat } from '../browser';
 import { CHAT_MESSAGE_TAIL } from '../chat/residency';
 import { forkStore } from '../store/forks';
 import {
-  recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
+  newMessagesSince, recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
   TRANSCRIPT_LOAD_AHEAD_PX, type MeasuredUnit, type TranscriptAnchor, type TranscriptWindow,
 } from '../transcript-window';
 
@@ -454,10 +454,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // assistant turn, so a receipt never inserts a bubble into rendered prose.
   const latestUserMessageId = latestOrdinaryUserMessageId(chat?.messages ?? []);
 
-  // SCROLL CONTRACT — "↓ N mensajes nuevos" pill state. `seen` is the message
-  // count last observed while pinned to bottom; when the user scrolls up, new
-  // messages accrue against it without shifting the viewport.
-  const seen = useRef(total);
+  // SCROLL CONTRACT — "↓ N mensajes nuevos" pill state. `seen` is the newest
+  // message observed while pinned to bottom; when the user scrolls up, new
+  // messages accrue after it without shifting the viewport. It is an identity,
+  // not a count: older history loading above the reader is not new (a count
+  // read a 3,000-row history load as "2990 mensajes nuevos").
+  const newestId = visibleMessages[visibleMessages.length - 1]?.id ?? null;
+  const seen = useRef<string | null>(newestId);
   const [newCount, setNewCount] = useState(0);
   // The screen-filling load found nothing more for this chat; do not retry it.
   const autoFillStalled = useRef(false);
@@ -470,7 +473,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     historyLoadingNow.current = false;
     setHistoryLoading(false);
     userScrollUntil.current = 0;
-    seen.current = total;
+    seen.current = newestId;
     setNewCount(0);
   }, [chat?.id]);
 
@@ -673,12 +676,15 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setFindIndex(next);
   };
 
-  // Reconcile the new-message counter whenever the total changes.
+  // Reconcile the new-message counter whenever the newest message changes.
   useEffect(() => {
-    if (stick.current) { seen.current = total; if (newCount !== 0) setNewCount(0); }
-    else { const n = Math.max(0, total - seen.current); if (n !== newCount) setNewCount(n); }
+    if (stick.current) { seen.current = newestId; if (newCount !== 0) setNewCount(0); }
+    else {
+      const n = newMessagesSince(visibleMessages, seen.current);
+      if (n !== newCount) setNewCount(n);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [total]);
+  }, [total, newestId]);
 
   const markUserScroll = (durationMs = 240, delta = 0) => {
     userScrollUntil.current = performance.now() + durationMs;
@@ -696,7 +702,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el, delta);
     const wasPinned = stick.current;
     stick.current = atBottom;
-    if (atBottom) { dropAnchor(); seen.current = total; if (newCount !== 0) setNewCount(0); }
+    if (atBottom) { dropAnchor(); seen.current = newestId; if (newCount !== 0) setNewCount(0); }
     else {
       if (!wasPinned) holdAnchor();
       recordAnchor();
@@ -731,7 +737,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     userScrollUntil.current = 0;
     stick.current = true;
     dropAnchor();
-    seen.current = total;
+    seen.current = newestId;
     setNewCount(0);
     setWindowTick((tick) => tick + 1);
     setScrollTop(el, el.scrollHeight);
@@ -770,7 +776,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     userScrollUntil.current = 0;
     stick.current = true;
     dropAnchor();
-    seen.current = total;
+    seen.current = newestId;
     setNewCount(0);
     setWindowTick((tick) => tick + 1);
     setScrollTop(el, el.scrollHeight);

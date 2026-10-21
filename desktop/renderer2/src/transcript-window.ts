@@ -121,6 +121,18 @@ export function transcriptAnchorAt(units: readonly MeasuredUnit[], viewportTop: 
   return last ? { key: last.key, offset: last.top - viewportTop } : null;
 }
 
+/**
+ * Messages appended after the newest one the reader saw pinned. An identity,
+ * not a count: older history loading above the reader is never "new".
+ */
+export function newMessagesSince(messages: readonly { id: string }[], seenId: string | null): number {
+  if (!seenId) return 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].id === seenId) return messages.length - 1 - index;
+  }
+  return 0;
+}
+
 // ---- per-chat view memory --------------------------------------------------
 // Switching back to a chat restores how it was left: pinned chats stay pinned
 // to the newest row, a reader in the middle returns to the same row and

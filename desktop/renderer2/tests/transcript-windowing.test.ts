@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
 import {
   recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
-  forgetTranscriptViews, TRANSCRIPT_ESTIMATED_UNIT_PX, TRANSCRIPT_VIEW_MEMORY,
+  forgetTranscriptViews, newMessagesSince, TRANSCRIPT_ESTIMATED_UNIT_PX, TRANSCRIPT_VIEW_MEMORY,
 } from '../src/transcript-window.ts';
 import { CHAT_MESSAGE_TAIL, releaseInactiveHistories } from '../src/chat/residency.ts';
 import type { Chat, Msg } from '../src/store/types.ts';
@@ -72,6 +72,14 @@ test('the window is cut again only near an edge or when it grew far past the vie
   assert.equal(transcriptWindowStale(cut, { ...input, anchor: { key: 'm1505', offset: 0 } }), false, 'a short scroll keeps the mounted rows');
   assert.equal(transcriptWindowStale(cut, { ...input, anchor: { key: 'm1530', offset: 0 } }), true, 'nearing the bottom edge re-cuts');
   assert.equal(transcriptWindowStale({ from: 0, to: 3000 }, input), true, 'everything mounted is cut back down');
+});
+
+test('older history loading above the reader is not counted as new messages', () => {
+  const rows = (ids: string[]) => ids.map((id) => ({ id }));
+  assert.equal(newMessagesSince(rows(['m5', 'm6', 'm7']), 'm7'), 0);
+  assert.equal(newMessagesSince(rows(['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']), 'm7'), 0, 'a prepended page');
+  assert.equal(newMessagesSince(rows(['m1', 'm2', 'm7', 'm8', 'm9']), 'm7'), 2, 'rows appended after the seen one');
+  assert.equal(newMessagesSince(rows(['m8', 'm9']), 'gone'), 0);
 });
 
 test('a chat remembers how it was left, within a bounded memory', () => {
