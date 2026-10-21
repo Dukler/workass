@@ -6,7 +6,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
 import {
   recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
-  forgetTranscriptViews, newMessagesSince, TRANSCRIPT_ESTIMATED_UNIT_PX, TRANSCRIPT_VIEW_MEMORY,
+  forgetTranscriptViews, newMessagesSince, transcriptAnchorDepth, transcriptRestoredScrollTop, transcriptRestoreStep,
+  TRANSCRIPT_ESTIMATED_UNIT_PX, TRANSCRIPT_RESTORE_SLACK, TRANSCRIPT_VIEW_MEMORY,
 } from '../src/transcript-window.ts';
 import { CHAT_MESSAGE_TAIL, releaseInactiveHistories } from '../src/chat/residency.ts';
 import type { Chat, Msg } from '../src/store/types.ts';
@@ -93,6 +94,49 @@ test('a chat remembers how it was left, within a bounded memory', () => {
   assert.equal(recallTranscriptView('reading').pinned, true, 'the oldest view is forgotten');
 });
 
+// Review 2026-10-21: a reader at a-00005 (scrollTop 5990) came back at the
+// first message (scrollTop 0), and a-00094 came back at a-00073 while older
+// pages started loading. A fresh mount had nothing to hold the anchor with, and
+// the next layout pass recorded the first mounted row over it.
+const ids = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => ({ id: `m${from + index}` }));
+
+test('a remembered row that is loaded is restored where it was read', () => {
+  const restore = { anchor: { key: 'm94', offset: -37 }, depth: 106, newestId: 'm199' };
+  assert.equal(transcriptRestoreStep({ messages: ids(0, 200), restore, historyComplete: true, loading: false, stalled: false }), 'restore');
+  // The row's top is 412 px below the viewport top at scrollTop 9000: moving it
+  // to 37 px above the top edge takes scrollTop to 9000 + 412 + 37.
+  assert.equal(transcriptRestoredScrollTop(9000, 512, 100, -37), 9449);
+  assert.equal(transcriptRestoredScrollTop(0, 6090, 100, 0), 5990, 'a-00005 back at scrollTop 5990, not 0');
+});
+
+test('a remembered row older than the loaded history loads pages until it is present', () => {
+  const restore = { anchor: { key: 'm20', offset: 0 }, depth: 180, newestId: 'm199' };
+  const tail = ids(140, 200);
+  assert.equal(transcriptRestoreStep({ messages: tail, restore, historyComplete: false, loading: false, stalled: false }), 'load');
+  assert.equal(transcriptRestoreStep({ messages: tail, restore, historyComplete: false, loading: true, stalled: false }), 'wait');
+  assert.equal(transcriptRestoreStep({ messages: ids(80, 200), restore, historyComplete: false, loading: false, stalled: false }), 'load');
+  assert.equal(transcriptRestoreStep({ messages: ids(20, 200), restore, historyComplete: false, loading: false, stalled: false }), 'restore');
+});
+
+test('a remembered row that is gone reopens at the newest row instead of loading forever', () => {
+  const restore = { anchor: { key: 'rewound', offset: 0 }, depth: 30, newestId: 'm199' };
+  assert.equal(transcriptRestoreStep({ messages: ids(0, 200), restore, historyComplete: true, loading: false, stalled: false }), 'abandon');
+  assert.equal(transcriptRestoreStep({ messages: ids(140, 200), restore, historyComplete: false, loading: false, stalled: true }), 'abandon', 'a load that found nothing');
+  // History already reaches a page past where the row was: it is not older.
+  assert.equal(transcriptRestoreStep({ messages: ids(200 - 30 - TRANSCRIPT_RESTORE_SLACK, 200), restore, historyComplete: false, loading: false, stalled: false }), 'abandon');
+  assert.equal(transcriptRestoreStep({ messages: ids(200 - 30 - TRANSCRIPT_RESTORE_SLACK + 1, 200), restore, historyComplete: false, loading: false, stalled: false }), 'load');
+  // Rows appended since leaving push the row further from the end.
+  const appended = [...ids(200 - 30 - TRANSCRIPT_RESTORE_SLACK + 1, 200), ...ids(200, 250)];
+  assert.equal(transcriptRestoreStep({ messages: appended, restore, historyComplete: false, loading: false, stalled: false }), 'load');
+  assert.equal(transcriptRestoreStep({ messages: [ids(109, 110)[0], ...appended], restore, historyComplete: false, loading: false, stalled: false }), 'abandon');
+});
+
+test('a reader\'s depth is counted from the anchor row to the newest', () => {
+  assert.equal(transcriptAnchorDepth(ids(0, 200), 'm94'), 106);
+  assert.equal(transcriptAnchorDepth(ids(0, 200), 'm199'), 1);
+  assert.equal(transcriptAnchorDepth(ids(0, 200), 'gone'), undefined);
+});
+
 test('recently read chats keep their loaded history; others return to the bounded tail', () => {
   const chat = (id: string, count: number) => ({
     id, messages: Array.from({ length: count }, (_, index) => ({ id: `${id}-${index}`, role: 'user', content: '', status: 'done', at: null, events: [] })),
@@ -134,4 +178,61 @@ test('a 3,000-message transcript mounts a bounded window ending at the newest ro
   assert.match(html, /data-chat-find-message="a1499"/, 'the newest row is mounted');
   assert.doesNotMatch(html, /data-chat-find-message="u0"/, 'the oldest row is a spacer');
   assert.match(html, /class="vpad" style="height:\d+px"/);
+});
+
+function seededChat(id: string, count: number, complete: boolean, total = count): Chat {
+  const messages: Msg[] = [];
+  for (let index = total - count; index < total; index++) {
+    const role = index % 2 === 0 ? 'user' : 'assistant';
+    messages.push({ id: `${id}-${index}`, role, content: `${role} ${index}`, status: 'done', at: null, events: [] } as unknown as Msg);
+  }
+  return {
+    id, chatId: `chat-${id}`, sessionId: null, title: id, titleLocked: true, group: null, cwd: '/repo',
+    providerId: 'mock', currentModelId: null, currentModeId: null, pending: false, draft: '', messages,
+    messageCount: total, historyComplete: complete,
+  } as unknown as Chat;
+}
+
+// The same module instance Transcript.tsx reads its remembered views from.
+async function rendererViews() {
+  return await vite.ssrLoadModule('/src/transcript-window.ts') as {
+    rememberTranscriptView(chatKey: string, view: unknown): void;
+    forgetTranscriptViews(): void;
+  };
+}
+
+test('a chat left mid-read reopens with its window cut around the remembered row, visible', async () => {
+  const views = await rendererViews();
+  views.forgetTranscriptViews();
+  const chat = seededChat('tab-read', 200, true);
+  views.rememberTranscriptView(chat.id, { pinned: false, anchor: { key: 'tab-read-94', offset: -37 }, heights: new Map(), depth: 106, newestId: 'tab-read-199' });
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+  const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  assert.match(html, /data-chat-find-message="tab-read-94"/, 'the remembered row is mounted');
+  assert.doesNotMatch(html, /data-chat-find-message="tab-read-199"/, 'the newest row is not what opens');
+  assert.doesNotMatch(html, /visibility:hidden/);
+});
+
+test('a chat whose remembered row is older than what is loaded stays hidden until that row arrives', async () => {
+  const views = await rendererViews();
+  views.forgetTranscriptViews();
+  const chat = seededChat('tab-old', 60, false, 200);
+  views.rememberTranscriptView(chat.id, { pinned: false, anchor: { key: 'tab-old-20', offset: 0 }, heights: new Map(), depth: 180, newestId: 'tab-old-199' });
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+  const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  assert.match(html, /class="doc" style="visibility:hidden" aria-busy="true"/, 'the newest rows are never shown first');
+});
+
+test('a chat left at the bottom keeps opening at the bottom', async () => {
+  const views = await rendererViews();
+  views.forgetTranscriptViews();
+  const chat = seededChat('tab-pinned', 200, true);
+  views.rememberTranscriptView(chat.id, { pinned: true, anchor: null, heights: new Map() });
+  appStore.state.chats = [chat];
+  appStore.state.activeId = chat.id;
+  const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
+  assert.match(html, /data-chat-find-message="tab-pinned-199"/);
+  assert.doesNotMatch(html, /visibility:hidden/);
 });
