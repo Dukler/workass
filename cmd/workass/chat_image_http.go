@@ -29,14 +29,15 @@ import (
 // the decoded bytes. Sidecars are content-addressed, so the response is
 // immutable and its ETag is the digest.
 type chatImageHTTP struct {
-	chats *providerChatRuntime
+	chats  *providerChatRuntime
+	thumbs *chatImageThumbs
 }
 
 func newChatImageHTTPHandler(chats *providerChatRuntime) http.Handler {
 	if chats == nil {
 		return nil
 	}
-	return chatImageHTTP{chats: chats}
+	return chatImageHTTP{chats: chats, thumbs: newChatImageThumbs(filepath.Dir(chats.sessions.path))}
 }
 
 func (h chatImageHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +54,13 @@ func (h chatImageHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// ?w= asks for a display rendition (chat_image_thumbs.go); its own URL,
+	// so its own immutable ETag.
+	width := chatImageThumbWidth(r.URL.Query().Get("w"))
 	etag := `"` + digest + `"`
+	if width > 0 {
+		etag = `"` + digest + "-w" + strconv.Itoa(width) + `"`
+	}
 	header := w.Header()
 	header.Set("ETag", etag)
 	// private: the bytes are a device's, never a shared cache's. immutable: a
@@ -66,7 +73,15 @@ func (h chatImageHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	data, err := readChatImageBytes(ref, filepath.Dir(h.chats.sessions.path))
+	stateDir := filepath.Dir(h.chats.sessions.path)
+	var data []byte
+	contentType := ""
+	if width > 0 {
+		data, contentType, err = h.thumbs.rendition(digest, width, func() ([]byte, error) { return readChatImageBytes(ref, stateDir) })
+	} else {
+		data, err = readChatImageBytes(ref, stateDir)
+		contentType = http.DetectContentType(data)
+	}
 	if err != nil {
 		header.Del("ETag")
 		header.Set("Cache-Control", "no-store")
@@ -77,7 +92,6 @@ func (h chatImageHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	contentType := http.DetectContentType(data)
 	if !strings.HasPrefix(contentType, "image/") {
 		// Raster images only. Anything else (an SVG sniffs as text/xml) stays
 		// on the socket read, where the renderer builds a data URL as before.
