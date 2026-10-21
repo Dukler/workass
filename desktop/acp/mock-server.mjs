@@ -3,6 +3,8 @@
 import process from 'node:process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { PAGE_CHIPS, PAGE_COV, PAGE_DASH, PAGE_EVIL, PAGE_SIM } from './html-pages.mjs';
 
 const sessions = new Map();
 let sessionSeq = 0;
@@ -314,6 +316,71 @@ async function runPrompt(id, params) {
       at += size;
       await sleep(text.includes('[mock:slow]') ? 12 : 3);
     }
+    session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+    respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
+    return;
+  }
+
+  if (text.includes('[mock:stream-html]')) {
+    // The approved html-render mock's replies, streamed the way models write:
+    // a dashboard (a full document), chips (a fragment), a simulator (a script)
+    // and the hostile page. With [mock:slow] the last page takes about 6s, so
+    // the one-line "Escribiendo página" state can be seen and captured.
+    const fence = (source) => '```html\n' + source + '\n```\n\n';
+    const parts = [
+      'El pico de las 14 h es la reconexión de los tres bridges; el resto del día el p95 quedó debajo de 190 ms.\n\n',
+      fence(PAGE_DASH),
+      'Así quedan los chips de estado, con el color solo en el punto:\n\n',
+      fence(PAGE_CHIPS),
+      'Mové los controles; la página recalcula sola.\n\n',
+      fence(PAGE_SIM),
+      'Lo abrí dentro del sandbox. Pide tu contraseña e intenta leer tus datos y mandarlos afuera; el registro de abajo es lo que consiguió.\n\n',
+      fence(PAGE_EVIL),
+      'Nada: no tiene red ni acceso a Workass. Igual no escribas nada ahí, es phishing.',
+    ];
+    const slow = text.includes('[mock:slow]');
+    for (let index = 0; index < parts.length && !session.cancelled; index++) {
+      const part = parts[index];
+      const last = index === parts.length - 2;
+      const size = slow && last ? Math.max(8, Math.ceil(part.length / 600)) : 48;
+      for (let at = 0; at < part.length && !session.cancelled; at += size) {
+        notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: part.slice(at, at + size) } });
+        await sleep(slow && last ? 10 : 3);
+      }
+    }
+    session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+    respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
+    return;
+  }
+
+  if (text.includes('[mock:render-html]')) {
+    // A real workass_render_html call through the Workass tools CLI the daemon
+    // hands every provider (WORKASS_TOOLS_COMMAND / WORKASS_TOOL_CONTEXT), shown
+    // as the shell row a real agent produces. [mock:hostile] publishes the
+    // hostile page instead of the coverage report.
+    const hostile = text.includes('[mock:hostile]');
+    const say = (chunk) => notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } });
+    say(hostile ? 'Lo publico como página para verlo dentro del sandbox:\n\n' : 'Con los números de la corrida de hoy:\n\n');
+    await pause();
+    const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'mock-render-html-'));
+    const pagePath = path.join(dir, hostile ? 'verificacion.html' : 'cobertura.html');
+    const argsPath = path.join(dir, 'args.json');
+    fs.writeFileSync(pagePath, hostile ? PAGE_EVIL : PAGE_COV);
+    const operation = `mock-render-${String(session.id).replace(/[^A-Za-z0-9_-]/g, '')}-${session.turn}`;
+    fs.writeFileSync(argsPath, JSON.stringify({ title: hostile ? 'Verificación de cuenta' : 'Cobertura por paquete', path: pagePath, operation_id: operation }));
+    const command = `"$WORKASS_TOOLS_COMMAND" tools call workass_render_html --input ${argsPath}`;
+    const callId = `${toolCallId}-render`;
+    notify(session.id, { sessionUpdate: 'tool_call', toolCallId: callId, title: 'Bash', kind: 'execute', status: 'in_progress', rawInput: { command } });
+    const tools = process.env.WORKASS_TOOLS_COMMAND || '';
+    const outcome = await new Promise((resolve) => {
+      if (!tools) { resolve({ ok: false, text: 'WORKASS_TOOLS_COMMAND is not set' }); return; }
+      execFile(tools, ['tools', 'call', 'workass_render_html', '--input', argsPath], { env: process.env, timeout: 30_000 }, (error, stdout, stderr) => {
+        resolve({ ok: !error, text: String(error ? (stderr || error.message) : stdout).trim() });
+      });
+    });
+    notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: callId, title: 'Bash', kind: 'execute', status: outcome.ok ? 'completed' : 'failed', content: { type: 'text', text: outcome.text } });
+    await pause();
+    say(hostile ? 'Nada de lo que intenta sale del marco.' : 'Los tres últimos paquetes son los que más bajaron esta semana.');
     session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
     respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
     return;
