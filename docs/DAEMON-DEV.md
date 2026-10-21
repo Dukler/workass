@@ -64,6 +64,9 @@ Rollback: once a state dir is on SQLite, a build with the SQLite store refuses t
 A copy or restore of a SQLite-live state directory that keeps the bytes but moves file times
 (`cp -R`, the macOS updater's state snapshot) boots: a JSON actor whose time moved is hashed against
 its import receipt, identical bytes refresh the receipt, and only different bytes refuse the start.
+The import refuses a chat file that JSON discovery would refuse, so the daemon does not start in
+either mode: the JSON stays in place and authoritative, and `state/chat-import-refused.json` names
+the file and the reason until the file is fixed or removed and the import completes.
 
 Daemon logs are written to stderr. Stdout is unused.
 

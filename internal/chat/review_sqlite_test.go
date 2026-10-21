@@ -98,10 +98,11 @@ func TestReviewLiveVerifyRefusesTouchedButIdenticalJSON(t *testing.T) {
 	t.Logf("FIXED: byte-identical JSON with a new mtime is accepted")
 }
 
-// R2: import does not run State.Validate on an actor without a journal, so a
-// file that FileStore discovery refuses at boot (fails closed) is imported,
-// the store flips live, and the bad actor only fails when opened. The JSON is
-// then a frozen backup and the fix-the-file recovery path is gone.
+// R2 (fixed, inverted): import did not run State.Validate on an actor without
+// a journal, so a file that FileStore discovery refuses at boot (fails closed)
+// was imported, the store flipped live, and the bad actor only failed when
+// opened. The import now opens every imported actor and refuses, as discovery
+// does; TestImportRefusesAnInvalidActorAndRecordsWhy is the normal-suite test.
 func TestReviewImportAcceptsAnActorFileDiscoveryRefuses(t *testing.T) {
 	stateDir := t.TempDir()
 	dir := filepath.Join(stateDir, "provider-chats")
@@ -128,18 +129,14 @@ func TestReviewImportAcceptsAnActorFileDiscoveryRefuses(t *testing.T) {
 	}
 	actors := openTestActors(t)
 	result, err := ImportFileActors(context.Background(), actors.db, corpusImportOptions(stateDir))
-	if err != nil {
-		t.Fatalf("import refused too (no finding): %v", err)
+	if err == nil || result.Live {
+		t.Fatalf("import still accepts what discovery refuses: %+v %v", result, err)
 	}
 	heads, err := actors.Discover()
-	if err != nil {
-		t.Fatalf("sql discover: %v", err)
+	if err != nil || len(heads) != 0 {
+		t.Fatalf("sql discover after the refusal: %d heads, %v", len(heads), err)
 	}
-	_, _, loadErr := actors.Store("bad-sequence").Load("bad-sequence")
-	t.Logf("REPRODUCED: import result %+v, SQL discover lists %d heads, open fails later: %v", result, len(heads), loadErr)
-	if !result.Live || len(heads) != 1 || loadErr == nil {
-		t.Fatalf("unexpected: live=%v heads=%d loadErr=%v", result.Live, len(heads), loadErr)
-	}
+	t.Logf("FIXED: import refuses like discovery")
 }
 
 // R3 (measurement): every chat shares one connection, and Load decodes,

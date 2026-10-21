@@ -551,12 +551,16 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 	head.stateJSON = nil
 	var ledger []LedgerEvent
 	if head.ledgerLen > 0 {
-		raws, _, err := readSQLLedgerChunk(tx, chatID, 0, 0, nil)
-		if err != nil {
-			return sqlLoadedActor{}, false, err
-		}
-		if ledger, err = appendSQLLedgerRows(make([]LedgerEvent, 0, head.ledgerLen), raws); err != nil {
-			return sqlLoadedActor{}, false, err
+		// Chunks here only bound the raw bytes held next to the decoded rows.
+		ledger = make([]LedgerEvent, 0, head.ledgerLen)
+		var chunk []sqlRawRow
+		for done := false; !done; {
+			if chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(len(ledger)), sqlLoadChunkBytes, chunk[:0]); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+			if ledger, err = appendSQLLedgerRows(ledger, chunk); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
 		}
 	}
 	journal, err := readSQLJournal(tx, chatID)
