@@ -181,6 +181,7 @@ type invokeScheduling uint8
 const (
 	invokeOrdered invokeScheduling = iota
 	invokeOutOfBandRead
+	invokeHistoryRead
 )
 
 type registeredHandler struct {
@@ -405,6 +406,20 @@ func (h *Hub) RegisterOutOfBandRead(channel string, fn Handler) {
 		panic("wire: mutating channel cannot run out of band: " + channel)
 	}
 	h.register(channel, fn, invokeOutOfBandRead)
+}
+
+// RegisterHistoryRead installs a read-only transcript handler on a second
+// per-connection lane. History reads keep their arrival order among
+// themselves, but never wait behind the ordered lane: on a seeded large chat
+// a providers:detect pass (2-4.5 s of provider probes) or a whole-actor
+// presentation rewrite held every history page queued behind it. Replies are
+// matched by id, so their order relative to ordered replies is not part of
+// the frozen protocol.
+func (h *Hub) RegisterHistoryRead(channel string, fn Handler) {
+	if _, mutating := mutatingChannels[channel]; mutating {
+		panic("wire: mutating channel cannot run on the history read lane: " + channel)
+	}
+	h.register(channel, fn, invokeHistoryRead)
 }
 
 func (h *Hub) register(channel string, fn Handler, scheduling invokeScheduling) {
@@ -1168,31 +1183,37 @@ func (h *Hub) readLoop(c *client) {
 	// reads keep transport liveness observable during that work; reply ids make
 	// out-of-order replies part of the frozen protocol.
 	ordered := make(chan invokeMessage, outboundQueueFrameLimit)
+	history := make(chan invokeMessage, outboundQueueFrameLimit)
 	readerDone := make(chan struct{})
 	orderedDone := make(chan struct{})
-	go func() {
-		defer close(orderedDone)
+	historyDone := make(chan struct{})
+	lane := func(queue <-chan invokeMessage, done chan<- struct{}) {
+		defer close(done)
 		for {
 			select {
 			case <-readerDone:
 				return
 			case <-c.done:
 				return
-			case msg, ok := <-ordered:
+			case msg, ok := <-queue:
 				if !ok {
 					return
 				}
 				h.handleInvoke(c, msg)
 			}
 		}
-	}()
+	}
+	go lane(ordered, orderedDone)
+	go lane(history, historyDone)
 	defer func() {
 		close(readerDone)
 		close(ordered)
+		close(history)
 		// A handler that already began may have taken the controller lease. Let
 		// it leave the ordered boundary before drop releases that lease; otherwise
 		// it can finish after removal and resurrect a disconnected controller.
 		<-orderedDone
+		<-historyDone
 	}()
 
 	var buf []byte
@@ -1209,12 +1230,16 @@ func (h *Hub) readLoop(c *client) {
 				if !ok {
 					continue
 				}
-				if h.schedulingFor(msg.Channel) == invokeOutOfBandRead {
+				queue := ordered
+				switch h.schedulingFor(msg.Channel) {
+				case invokeOutOfBandRead:
 					h.handleInvoke(c, msg)
 					continue
+				case invokeHistoryRead:
+					queue = history
 				}
 				select {
-				case ordered <- msg:
+				case queue <- msg:
 				case <-c.done:
 					return
 				}

@@ -225,6 +225,71 @@ func TestOutOfBandLivenessReadBypassesSlowOrderedInvoke(t *testing.T) {
 	}
 }
 
+// A providers:detect pass held a seeded large chat's history pages for 3-6 s
+// on the ordered lane. History reads take their own lane: they answer while
+// an ordered invoke is still running, and keep their own arrival order.
+func TestHistoryReadsBypassSlowOrderedInvokeAndStayOrdered(t *testing.T) {
+	hub := NewHub()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	hub.Register("providers:detect", func(args []any) (any, error) {
+		close(started)
+		<-release
+		return map[string]any{"ok": true}, nil
+	})
+	firstRead := make(chan struct{})
+	releaseRead := make(chan struct{})
+	hub.RegisterHistoryRead("chat:archive-load", func(args []any) (any, error) {
+		label := fmt.Sprint(args[0])
+		if label == "first" {
+			close(firstRead)
+			<-releaseRead
+		}
+		return label, nil
+	})
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	client := dialWS(t, server.URL, "aGlzdG9yeS1yZWFkLWxhbmU=")
+	defer client.conn.Close()
+
+	client.sendText(t, `{"t":"invoke","id":1,"channel":"providers:detect","args":[]}`)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow ordered invoke never started")
+	}
+	client.sendText(t, `{"t":"invoke","id":2,"channel":"chat:archive-load","args":["first"]}`)
+	client.sendText(t, `{"t":"invoke","id":3,"channel":"chat:archive-load","args":["second"]}`)
+	select {
+	case <-firstRead:
+	case <-time.After(time.Second):
+		t.Fatal("history read waited behind the ordered lane")
+	}
+	close(releaseRead)
+	if reply := readReply(t, client); reply.ID != json.Number("2") || reply.Error != nil {
+		t.Fatalf("first history reply = %+v", reply)
+	}
+	if reply := readReply(t, client); reply.ID != json.Number("3") || reply.Error != nil {
+		t.Fatalf("history reads lost their arrival order: %+v", reply)
+	}
+	close(release)
+	if reply := readReply(t, client); reply.ID != json.Number("1") || reply.Error != nil {
+		t.Fatalf("ordered reply after release = %+v", reply)
+	}
+}
+
+func TestMutatingHandlerCannotUseHistoryReadLane(t *testing.T) {
+	hub := NewHub()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("mutating history-lane registration did not fail")
+		}
+	}()
+	hub.RegisterHistoryRead("chat:archive-append", func(args []any) (any, error) {
+		return nil, nil
+	})
+}
+
 func TestMutatingHandlerCannotRunOutOfBand(t *testing.T) {
 	hub := NewHub()
 	defer func() {

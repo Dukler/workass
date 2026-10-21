@@ -31,7 +31,10 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		}
 		return false, os.ErrNotExist
 	})
-	hub.Register("chat:archive-load", func(args []any) (any, error) {
+	// History pages, one-row tool detail and image reads never wait behind
+	// the ordered lane (a provider probe, a first provider attachment, a
+	// whole-actor rewrite).
+	hub.RegisterHistoryRead("chat:archive-load", func(args []any) (any, error) {
 		if providerChats == nil {
 			return nil, os.ErrInvalid
 		}
@@ -41,7 +44,24 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		// byte-identical full response.
 		if len(args) > 1 {
 			options := mapFromAnyMain(args[1])
-			read := archiveReadOptions{deferMessageImages: options["deferImages"] == true}
+			read := archiveReadOptions{deferMessageImages: options["deferImages"] == true, leanTools: options["leanTools"] == true}
+			// toolDetail is checked first. A renderer pairs it with tail:1, so
+			// a daemon that predates it answers one bounded row instead of
+			// the complete archive.
+			if rawDetail, requested := options["toolDetail"]; requested {
+				request, err := parseToolDetailRequest(rawDetail)
+				if err != nil {
+					return nil, err
+				}
+				detail, found, err := providerChats.ProjectToolDetailByTab(stringArg(args, 0), request)
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return nil, os.ErrNotExist
+				}
+				return detail, nil
+			}
 			if _, requested := options["imageRef"]; requested {
 				image, found, err := providerChats.ProjectToolImageByTab(stringArg(args, 0), fieldString(options, "imageRef"))
 				if err != nil {

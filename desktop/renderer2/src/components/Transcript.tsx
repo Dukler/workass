@@ -13,10 +13,17 @@ import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { localBrowserOwnsChat } from '../browser';
-import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, transcriptWindowStart } from '../chat/residency';
+import { CHAT_MESSAGE_TAIL } from '../chat/residency';
 import { forkStore } from '../store/forks';
+import {
+  newMessagesSince, recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
+  TRANSCRIPT_LOAD_AHEAD_PX, type MeasuredUnit, type TranscriptAnchor, type TranscriptWindow,
+} from '../transcript-window';
 
 const HISTORY_PAGE = 40;
+// A window that keeps re-cutting itself inside one commit is an estimate that
+// has not converged; stop there and let the next scroll continue.
+const MAX_SYNC_REWINDOWS = 4;
 // How long the streaming height hold outlives the last growth (see onResize).
 export const HELD_HEIGHT_RELEASE_MS = 700;
 const SEARCH_WINDOW = 40;
@@ -258,6 +265,56 @@ function EmptyChat({ chat }: { chat: Chat | null }) {
   );
 }
 
+// The first and last elements of a transcript unit that generate a box. Units
+// and their message wrappers are display:contents, so the spacing between
+// messages (collapsed margins) is exactly what it was before windowing.
+function firstBox(parent: Element): Element | null {
+  for (const child of parent.children) {
+    if (child.getClientRects().length > 0) return child;
+    const inner = firstBox(child);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+function lastBox(parent: Element): Element | null {
+  for (let index = parent.children.length - 1; index >= 0; index--) {
+    const child = parent.children[index];
+    if (child.getClientRects().length > 0) return child;
+    const inner = lastBox(child);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+function measureUnits(doc: Element): MeasuredUnit[] {
+  const units: MeasuredUnit[] = [];
+  for (const node of doc.children) {
+    const key = (node as HTMLElement).dataset?.vunit;
+    if (!key) continue;
+    const first = firstBox(node);
+    const last = lastBox(node);
+    if (!first || !last) continue;
+    units.push({ key, top: first.getBoundingClientRect().top, bottom: last.getBoundingClientRect().bottom });
+  }
+  return units;
+}
+
+// Reading position is anchored on a message, not a unit: a turn block can grow
+// at its top when an older page completes it, and its key changes with it.
+function measureMessages(doc: Element): MeasuredUnit[] {
+  const messages: MeasuredUnit[] = [];
+  for (const node of doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')) {
+    const key = node.dataset.chatFindMessage;
+    const boxed = node.getClientRects().length > 0;
+    const first = boxed ? node : firstBox(node);
+    const last = boxed ? node : lastBox(node);
+    if (!key || !first || !last) continue;
+    messages.push({ key, top: first.getBoundingClientRect().top, bottom: last.getBoundingClientRect().bottom });
+  }
+  return messages;
+}
+
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 }
@@ -276,8 +333,28 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const userScrollUntil = useRef(0);
   const userScrollDelta = useRef(0);
   const lastScrollTop = useRef(0);
-  const [reveal, setReveal] = useState(CHAT_INITIAL_HISTORY);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const historyLoadingNow = useRef(false);
+  // Windowing (transcript-window.ts): which units are mounted is cut around the
+  // reading anchor; a tick re-cuts it when the reader nears an edge.
+  const [, setWindowTick] = useState(0);
+  const heights = useRef<Map<string, number>>(new Map());
+  const anchor = useRef<TranscriptAnchor | null>(null);
+  const mountedWindow = useRef<TranscriptWindow>({ from: 0, to: 0, topPad: 0, bottomPad: 0 });
+  const syncRewindows = useRef(0);
+  const viewChat = useRef<string | null>(null);
+  const chatKey = chat?.id ?? '';
+  if (viewChat.current !== chatKey) {
+    // Leaving a chat remembers how it was read; arriving restores it (pinned
+    // chats stay pinned to the newest row). Swapped during render so the first
+    // frame of the arriving chat is already cut around its own position.
+    if (viewChat.current) rememberTranscriptView(viewChat.current, { pinned: stick.current, anchor: anchor.current, heights: heights.current });
+    const view = recallTranscriptView(chatKey);
+    stick.current = view.pinned;
+    anchor.current = view.pinned ? null : view.anchor;
+    heights.current = view.heights;
+    viewChat.current = chatKey;
+  }
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findIndex, setFindIndex] = useState(0);
@@ -309,11 +386,14 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const selectedFindMatch = findMatches.length ? findMatches[Math.min(findIndex, findMatches.length - 1)] : undefined;
   const searchStart = selectedFindMatch ? Math.max(0, selectedFindMatch.messageIndex - Math.floor(SEARCH_WINDOW / 2)) : 0;
   const searchEnd = selectedFindMatch ? Math.min(total, searchStart + SEARCH_WINDOW) : 0;
+  // Every resident message is part of the transcript; windowing below decides
+  // which of them are mounted. A selected search result keeps its own
+  // 40-message window, as before.
+  const virtual = !selectedFindMatch;
   const shown = selectedFindMatch
     ? visibleMessages.slice(Math.max(0, searchEnd - SEARCH_WINDOW), searchEnd)
-    : visibleMessages.slice(transcriptWindowStart(visibleMessages, reveal));
-  const residentHidden = selectedFindMatch ? 0 : total - shown.length;
-  const hidden = selectedFindMatch || (inheritedFold && !inheritedOpen && ownHistoryLoaded && residentHidden === 0)
+    : visibleMessages;
+  const hidden = selectedFindMatch || (inheritedFold && !inheritedOpen && ownHistoryLoaded)
     ? 0
     : Math.max(0, knownTotal - shown.length);
   const runningMessage = [...shown].reverse().find((message) => (
@@ -329,13 +409,34 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   useEffect(() => {
     if (chat?.id && chat.chatId) forkStore.ensure({ tabId: chat.id, chatId: chat.chatId });
   }, [chat?.id, chat?.chatId]);
-  const turnBlocks = assistantTurnBlockRanges(shown);
-  const turnBlockStarts = new Map<number, number>();
-  const turnBlockMembers = new Set<number>();
-  for (const { start, end } of turnBlocks) {
-    turnBlockStarts.set(start, end);
-    for (let index = start + 1; index < end; index++) turnBlockMembers.add(index);
+  // Units: one message, or one assistant turn block, each with a stable key.
+  const turnBlockEnds = new Map<number, number>();
+  for (const { start, end } of assistantTurnBlockRanges(shown)) turnBlockEnds.set(start, end);
+  const units: Array<{ key: string; start: number; end: number }> = [];
+  for (let index = 0; index < shown.length;) {
+    const end = turnBlockEnds.get(index);
+    if (end != null) {
+      units.push({ key: `turn-block:${shown[index].id}`, start: index, end });
+      index = end;
+    } else {
+      units.push({ key: shown[index].id, start: index, end: index + 1 });
+      index++;
+    }
   }
+  const unitKeys = units.map((unit) => unit.key);
+  // The anchor names a message; the window is cut around the unit holding it.
+  const unitOfMessage = new Map<string, string>();
+  for (const unit of units) for (let index = unit.start; index < unit.end; index++) unitOfMessage.set(shown[index].id, unit.key);
+  const unitAnchor = (): TranscriptAnchor | null => {
+    const held = anchor.current;
+    const key = held && !stick.current ? unitOfMessage.get(held.key) : undefined;
+    return key ? { key, offset: held!.offset } : null;
+  };
+  const viewportHeight = scrollRef.current?.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
+  const windowInput = { keys: unitKeys, heights: heights.current, viewport: viewportHeight, anchor: unitAnchor() };
+  const win: TranscriptWindow = virtual
+    ? transcriptWindow(windowInput)
+    : { from: 0, to: units.length, topPad: 0, bottomPad: 0 };
   // While a reply streams here, the transcript follows its end with a damped
   // spring (createScrollSpring) instead of snapping a whole line up per delta
   // or bobbing through one smooth scroll per finished sentence; reduced motion
@@ -353,27 +454,107 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // assistant turn, so a receipt never inserts a bubble into rendered prose.
   const latestUserMessageId = latestOrdinaryUserMessageId(chat?.messages ?? []);
 
-  // SCROLL CONTRACT — "↓ N mensajes nuevos" pill state. `seen` is the message
-  // count last observed while pinned to bottom; when the user scrolls up, new
-  // messages accrue against it without shifting the viewport.
-  const seen = useRef(total);
+  // SCROLL CONTRACT — "↓ N mensajes nuevos" pill state. `seen` is the newest
+  // message observed while pinned to bottom; when the user scrolls up, new
+  // messages accrue after it without shifting the viewport. It is an identity,
+  // not a count: older history loading above the reader is not new (a count
+  // read a 3,000-row history load as "2990 mensajes nuevos").
+  const newestId = visibleMessages[visibleMessages.length - 1]?.id ?? null;
+  const seen = useRef<string | null>(newestId);
   const [newCount, setNewCount] = useState(0);
-  // Windowing: remember distance-from-bottom across a "ver anteriores" reveal so
-  // prepending older messages keeps the read position fixed.
-  const keepFromBottom = useRef<number | null>(null);
   // The screen-filling load found nothing more for this chat; do not retry it.
   const autoFillStalled = useRef(false);
 
-  // Reset the window when switching chats.
+  // Per-chat transient state resets on a switch. Pinned/anchor position is not
+  // reset here: the arriving chat's remembered view was restored during render.
   useEffect(() => {
     autoFillStalled.current = false;
-    setReveal(CHAT_INITIAL_HISTORY);
+    olderStalledAt.current = -1;
+    historyLoadingNow.current = false;
     setHistoryLoading(false);
-    stick.current = true;
     userScrollUntil.current = 0;
-    seen.current = total;
+    seen.current = newestId;
     setNewCount(0);
   }, [chat?.id]);
+
+  // Save the view when the transcript goes away entirely (another pane).
+  useEffect(() => () => {
+    if (viewChat.current) rememberTranscriptView(viewChat.current, { pinned: stick.current, anchor: anchor.current, heights: heights.current });
+  }, []);
+
+  // Where the reader is, as the first unit at the viewport's top edge.
+  // Two granularities: the message (survives remounts, cuts the window, is
+  // remembered per chat) and the exact element under the top edge, which is
+  // what the reader is looking at. Both are kept as offsets in content
+  // coordinates (viewport offset + scrollTop): scrolling never changes them,
+  // so any change is a layout shift above the reader and is undone before
+  // paint. This replaces the browser's own scroll anchoring for the
+  // transcript (overflow-anchor: none), which a wheel scroll in progress
+  // could override while an image above the reader arrived (+491 px).
+  const anchorNode = useRef<{ node: Element; contentTop: number } | null>(null);
+  const anchorContentTop = useRef<number | null>(null);
+  const recordAnchor = () => {
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    if (!el || !doc) return;
+    const viewport = el.getBoundingClientRect();
+    const next = transcriptAnchorAt(measureMessages(doc), viewport.top);
+    if (next) {
+      anchor.current = next;
+      anchorContentTop.current = next.offset + el.scrollTop;
+    }
+    const hit = typeof document.elementFromPoint === 'function'
+      ? document.elementFromPoint(viewport.left + viewport.width / 2, viewport.top + 1)
+      : null;
+    anchorNode.current = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
+      ? { node: hit, contentTop: hit.getBoundingClientRect().top - viewport.top + el.scrollTop }
+      : null;
+  };
+  const dropAnchor = () => {
+    anchorNode.current = null;
+    anchorContentTop.current = null;
+  };
+
+  // Undo any layout shift above the reader since the anchor was recorded:
+  // prepends, estimates replaced by measurements, window slides, images. A
+  // pinned reader follows the bottom instead.
+  const holdAnchor = () => {
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    const held = anchor.current;
+    if (!el || !doc || stick.current || !held) return;
+    const viewportTop = el.getBoundingClientRect().top;
+    let delta: number | null = null;
+    const exact = anchorNode.current;
+    if (exact && exact.node.isConnected && doc.contains(exact.node)) {
+      delta = exact.node.getBoundingClientRect().top - viewportTop + el.scrollTop - exact.contentTop;
+    } else if (anchorContentTop.current !== null) {
+      const node = [...doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')]
+        .find((candidate) => candidate.dataset.chatFindMessage === held.key);
+      const box = node && (node.getClientRects().length > 0 ? node : firstBox(node));
+      if (box) delta = box.getBoundingClientRect().top - viewportTop + el.scrollTop - anchorContentTop.current;
+    }
+    if (delta !== null && Math.abs(delta) >= 0.5) setScrollTop(el, el.scrollTop + delta);
+  };
+
+  // Cut the window again when the reader has moved near an edge of it.
+  const rewindowIfStale = () => {
+    const el = scrollRef.current;
+    if (!el || !virtual) return;
+    const input = { keys: unitKeys, heights: heights.current, viewport: el.clientHeight, anchor: unitAnchor() };
+    if (transcriptWindowStale(mountedWindow.current, input)) setWindowTick((tick) => tick + 1);
+  };
+
+  // Older history arrives before the reader reaches the oldest loaded row;
+  // the anchor keeps the prepend from moving anything on screen.
+  const olderStalledAt = useRef(-1);
+  const loadOlderAhead = () => {
+    const el = scrollRef.current;
+    if (!el || !virtual || stick.current || hidden <= 0 || historyLoadingNow.current || olderStalledAt.current === total) return;
+    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX) return;
+    const before = total;
+    void revealOlder().then((loaded) => { if (!loaded) olderStalledAt.current = before; });
+  };
 
   // Clamp writes to the real maximum. Programmatic scroll events are ignored by
   // onScroll unless a wheel/touch/scrollbar intent preceded them.
@@ -495,12 +676,15 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setFindIndex(next);
   };
 
-  // Reconcile the new-message counter whenever the total changes.
+  // Reconcile the new-message counter whenever the newest message changes.
   useEffect(() => {
-    if (stick.current) { seen.current = total; if (newCount !== 0) setNewCount(0); }
-    else { const n = Math.max(0, total - seen.current); if (n !== newCount) setNewCount(n); }
+    if (stick.current) { seen.current = newestId; if (newCount !== 0) setNewCount(0); }
+    else {
+      const n = newMessagesSince(visibleMessages, seen.current);
+      if (n !== newCount) setNewCount(n);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [total]);
+  }, [total, newestId]);
 
   const markUserScroll = (durationMs = 240, delta = 0) => {
     userScrollUntil.current = performance.now() + durationMs;
@@ -516,8 +700,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const delta = userScrollDelta.current || el.scrollTop - lastScrollTop.current;
     lastScrollTop.current = el.scrollTop;
     const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el, delta);
+    const wasPinned = stick.current;
     stick.current = atBottom;
-    if (atBottom) { seen.current = total; if (newCount !== 0) setNewCount(0); }
+    if (atBottom) { dropAnchor(); seen.current = newestId; if (newCount !== 0) setNewCount(0); }
+    else {
+      if (!wasPinned) holdAnchor();
+      recordAnchor();
+    }
+    if (wasPinned !== atBottom) setWindowTick((tick) => tick + 1);
+    else rewindowIfStale();
+    loadOlderAhead();
   };
 
   const onWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -544,60 +736,76 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     if (!el) return;
     userScrollUntil.current = 0;
     stick.current = true;
-    seen.current = total;
+    dropAnchor();
+    seen.current = newestId;
     setNewCount(0);
+    setWindowTick((tick) => tick + 1);
     setScrollTop(el, el.scrollHeight);
   };
 
-  const revealOlder = async () => {
-    const el = scrollRef.current;
-    if (el) keepFromBottom.current = el.scrollHeight - el.scrollTop;
-    if (reveal < total) {
-      setReveal((current) => Math.min(total, current + HISTORY_PAGE));
-      return;
-    }
-    if (!chat || chat.historyComplete || historyLoading) {
-      keepFromBottom.current = null;
-      return;
-    }
+  // One older page from the actor. The reading anchor keeps the prepend from
+  // moving what is on screen.
+  const revealOlder = async (): Promise<boolean> => {
+    if (!chat || chat.historyComplete || historyLoadingNow.current) return false;
+    historyLoadingNow.current = true;
     setHistoryLoading(true);
-    const residentBefore = total;
+    const chatID = chat.id;
     try {
-      const loaded = residentBefore === 0
+      return total === 0
         ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
         : await store.loadOlderHistory(chat.id, HISTORY_PAGE);
-      const live = store.chat(chat.id);
-      if (loaded && live && live.messages.length > residentBefore) {
-        setReveal((current) => Math.min(residentBefore, current) + HISTORY_PAGE);
-      } else {
-        keepFromBottom.current = null;
-      }
     } finally {
-      setHistoryLoading(false);
+      if (viewChat.current === chatID) {
+        historyLoadingNow.current = false;
+        setHistoryLoading(false);
+      }
     }
   };
-
-  // Restore read position after older messages prepend (windowing).
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el && keepFromBottom.current != null) {
-      setScrollTop(el, el.scrollHeight - keepFromBottom.current);
-      keepFromBottom.current = null;
-    }
-  }, [reveal]);
 
   // Sending is an explicit request to follow the new turn. Re-pin on the newest
   // user-message id even when the assistant placeholder is appended in the same
   // store update (so the user message is not necessarily the final array item).
+  // Arriving at another chat is not a send: that chat's own view is restored.
+  const followed = useRef<{ chat: string; id: string | null }>({ chat: '', id: null });
   useLayoutEffect(() => {
+    const previous = followed.current;
+    followed.current = { chat: chatKey, id: latestUserMessageId };
     const el = scrollRef.current;
     if (!el || !latestUserMessageId) return;
+    if (previous.chat !== chatKey && !stick.current) return;
     userScrollUntil.current = 0;
     stick.current = true;
-    seen.current = total;
+    dropAnchor();
+    seen.current = newestId;
     setNewCount(0);
+    setWindowTick((tick) => tick + 1);
     setScrollTop(el, el.scrollHeight);
   }, [chat?.id, latestUserMessageId]);
+
+  // After every commit: measure the mounted units and hold the reading anchor
+  // before the browser paints. A pinned reader is followed by the observers
+  // below (instantly, or by the streaming spring), exactly as before.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    if (!el || !doc) return;
+    mountedWindow.current = win;
+    recordUnitHeights(heights.current, measureUnits(doc));
+    if (!virtual) { recordAnchor(); return; }
+    // A remembered reading position whose row is no longer loaded reopens at
+    // the newest row, never at some other row near the top.
+    if (!stick.current && anchor.current && !unitOfMessage.has(anchor.current.key)) {
+      stick.current = true;
+      anchor.current = null;
+      dropAnchor();
+      setWindowTick((tick) => tick + 1);
+    }
+    if (!stick.current) { holdAnchor(); recordAnchor(); }
+    // Re-cuts inside one frame are estimates converging; cap them per frame.
+    if (syncRewindows.current++ === 0) requestAnimationFrame(() => { syncRewindows.current = 0; });
+    if (syncRewindows.current <= MAX_SYNC_REWINDOWS) rewindowIfStale();
+    loadOlderAhead();
+  });
 
   // A window shorter than the screen left a band of nothing under the newest
   // row while older messages sat behind "Ver anteriores" (user 2026-10-15).
@@ -610,11 +818,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const doc = docRef.current;
     const el = scrollRef.current;
     if (!doc || !el || !chat || selectedFindMatch || doc.offsetHeight >= el.clientHeight) return;
-    if (residentHidden > 0) {
-      setReveal((current) => Math.min(total, Math.max(current, shown.length) + CHAT_INITIAL_HISTORY));
-      return;
-    }
-    if (hidden <= 0 || historyLoading || chat.historyComplete || autoFillStalled.current) return;
+    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current) return;
     const chatID = chat.id;
     const before = chat.messages.length;
     void revealOlder().then(() => {
@@ -689,7 +893,12 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           releaseHoldSoon();
         }
       }
-      if (!stick.current) return;
+      // Growth that is not a commit (an image arriving) is held here too.
+      if (!stick.current) {
+        holdAnchor();
+        recordAnchor();
+        return;
+      }
       scheduler.dispose();
       follow();
     };
@@ -767,17 +976,19 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                   <button className="btn" style={{ margin: '4px auto 16px', display: 'block' }} disabled={historyLoading} onClick={() => { void revealOlder(); }}>
                     {historyLoading
                       ? 'Cargando historial…'
-                      : `Ver ${Math.min(HISTORY_PAGE, residentHidden > 0 ? residentHidden : hidden)} mensajes anteriores`}
+                      : `Ver ${Math.min(HISTORY_PAGE, hidden)} mensajes anteriores`}
                   </button>
                 )}
-                {shown.flatMap((m, index) => {
+                {win.topPad > 0 && <div className="vpad" style={{ height: win.topPad }} aria-hidden="true" />}
+                {units.slice(win.from, win.to).map((unit) => {
+                  const index = unit.start;
+                  const m = shown[index];
                   const midRun = (at: number) => shown[at]?.role === 'assistant' && shown[at + 1]?.role === 'assistant';
-                  const blockEnd = turnBlockStarts.get(index);
-                  if (blockEnd != null) {
-                    const messages = shown.slice(index, blockEnd);
+                  let body: ReactNode;
+                  if (unit.end - unit.start > 1) {
+                    const messages = shown.slice(unit.start, unit.end);
                     const block = (
                       <AssistantTurnBlock
-                        key={`turn-block:${messages[0].id}`}
                         tabId={chat.id}
                         messages={messages}
                         turnSeqs={messages.map((message) => store.checkpointForJob(chat, message.jobId)?.turnSeq)}
@@ -785,29 +996,29 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                         midRun={messages.map((_, offset) => midRun(index + offset))}
                       />
                     );
-                    return [inheritedFold && messages[0].inherited
-                      ? <div className="inh-msg" key={`inh-block:${messages[0].id}`}>{block}</div>
-                      : block];
+                    body = inheritedFold && messages[0].inherited ? <div className="inh-msg">{block}</div> : block;
+                  } else {
+                    body = (
+                      <div className={`chatfind-message${inheritedFold && m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id}>
+                        {m.role === 'user' ? (
+                          m.notice
+                            ? <NoticeLine notice={m.notice} />
+                            : <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
+                        ) : (
+                          <AssistantMessage
+                            tabId={chat.id}
+                            msg={m}
+                            turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
+                            artifactOrigin={artifactOrigin}
+                            midRun={midRun(index)}
+                          />
+                        )}
+                      </div>
+                    );
                   }
-                  if (turnBlockMembers.has(index)) return [];
-                  return [(
-                    <div className={`chatfind-message${inheritedFold && m.inherited ? ' inh-msg' : ''}`} data-chat-find-message={m.id} key={m.id}>
-                      {m.role === 'user' ? (
-                        m.notice
-                          ? <NoticeLine notice={m.notice} />
-                          : <UserPill tabId={chat.id} text={m.content} images={m.images} steerState={m.steerState} />
-                      ) : (
-                        <AssistantMessage
-                          tabId={chat.id}
-                          msg={m}
-                          turnSeq={store.checkpointForJob(chat, m.jobId)?.turnSeq}
-                          artifactOrigin={artifactOrigin}
-                          midRun={midRun(index)}
-                        />
-                      )}
-                    </div>
-                  )];
+                  return <div className="vunit" data-vunit={unit.key} key={unit.key}>{body}</div>;
                 })}
+                {win.bottomPad > 0 && <div className="vpad" style={{ height: win.bottomPad }} aria-hidden="true" />}
               </>
             )}
           </div>

@@ -1,18 +1,16 @@
-import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { memo, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
-import { messageImageSrc } from '../image-drafts';
 import { useMessageImageSrc } from './MessageImage';
-import { call } from '../wire/api';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
-import { observeTranscriptImageOnce } from '../transcript-images';
+import { cachedToolOutput, loadToolOutput } from '../chat/tool-detail';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -251,6 +249,16 @@ export function toolLiveLine(t: ToolEvent): string {
 // group summary used to carry, now folded into this one line.
 export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?: boolean; trail?: ReactNode }) {
   const [showOut, setShowOut] = useState(false);
+  // Lean history carried only the head of a large output: the whole of it is
+  // read when the row opens. The head stays on screen until it arrives.
+  const [fullOutput, setFullOutput] = useState<string | null>(() => cachedToolOutput(t));
+  useEffect(() => {
+    if (!showOut || !t.outputDeferred || fullOutput !== null) return;
+    let current = true;
+    void loadToolOutput(t).then((text) => { if (current && text !== null) setFullOutput(text); });
+    return () => { current = false; };
+  }, [showOut, t, fullOutput]);
+  const output = t.outputDeferred ? fullOutput ?? t.output : t.output;
   const st = toolState(t.status);
   // A subagent header rendered inline as a task row: model brand instead of the
   // status glyph, a "Subagente ·" prefix, and a link to its detail in the rail
@@ -315,7 +323,7 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
           {/* the provider's own id, so a renamed row never hides WHICH tool ran */}
           {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{act.raw}</div>}
           {raw && raw !== detail && <div className="evt-full">{raw}</div>}
-          {t.output}
+          {output}
         </div>
       )}
     </div>
@@ -323,33 +331,11 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
 }
 
 function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; alt: string }) {
-  const button = useRef<HTMLButtonElement>(null);
-  const [visible, setVisible] = useState(false);
-  const [src, setSrc] = useState(() => image.deferredImageRef ? '' : messageImageSrc(image));
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    if (!image.deferredImageRef) setSrc(messageImageSrc(image));
-  }, [image]);
-  useEffect(() => {
-    if (!image.deferredImageRef || !button.current) return;
-    return observeTranscriptImageOnce(button.current, () => setVisible(true));
-  }, [image.deferredImageRef]);
-  useEffect(() => {
-    if (!image.deferredImageRef) return;
-    if (!visible) return;
-    let current = true;
-    setFailed(false);
-    void call('archiveLoad', tabId, { imageRef: image.deferredImageRef }).then((reply) => {
-      if (!current) return;
-      const data = Array.isArray(reply) && reply[0] && typeof reply[0] === 'object'
-        ? (reply[0] as { data?: unknown }).data : null;
-      if (typeof data === 'string' && data.length > 0) setSrc(data.startsWith('data:') ? data : `data:${image.mimeType};base64,${data}`);
-      else setFailed(true);
-    }).catch(() => { if (current) setFailed(true); });
-    return () => { current = false; };
-  }, [image.deferredImageRef, image.mimeType, tabId, visible]);
+  // The same once-per-image cache as message images: a windowed transcript
+  // remounts rows as the reader scrolls, and a remount must not fetch again.
+  const { target, src, failed } = useMessageImageSrc(tabId, image);
   return (
-    <button ref={button} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
+    <button ref={(element) => { target.current = element; }} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
       {src ? <img src={src} alt={alt} /> : <span className="tool-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>}
     </button>
   );

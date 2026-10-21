@@ -1012,7 +1012,15 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if providerChats == nil {
 			return nil, errors.New("session:get requires the authoritative chat actor runtime")
 		}
-		raw, err := providerChats.ProjectSessionRaw()
+		// Optional {leanTools, deferImages} are additive, as on archive-load:
+		// older renderers send no argument and keep the byte-identical full
+		// projection.
+		var options map[string]any
+		if len(args) > 0 {
+			options = mapFromAnyMain(args[0])
+		}
+		read := archiveReadOptions{leanTools: options["leanTools"] == true, deferMessageImages: options["deferImages"] == true}
+		raw, err := providerChats.ProjectSessionRaw(read)
 		if err != nil {
 			return nil, err
 		}

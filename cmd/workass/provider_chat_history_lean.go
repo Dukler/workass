@@ -1,0 +1,129 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+// Tool payloads dominate transcript bytes: in a 3,000-message chat they were
+// 95% of every history page (a ten-row read was 330 KB, the whole history
+// 148 MiB), while the renderer shows a tool's output only after its row is
+// opened. A renderer that asks for leanTools receives each large payload as a
+// bounded head plus its full size, and reads the rest through the same
+// authenticated archive channel when a row opens (after t3code's wire
+// projection, which omits command output and serves detail on demand). A
+// renderer that does not ask keeps the byte-identical full rows.
+const (
+	leanToolPayloadThreshold = 4 << 10
+	leanToolPayloadHead      = 1 << 10
+	toolDetailChunkBytes     = 1 << 20
+)
+
+// leanArchiveToolPayloads trims committed rows only. A running or pending row
+// is the live foreground owner: its tools are still changing on the event
+// stream and are never addressable by a committed message id. A subagent
+// header keeps its summary, which the rail prints without an open gesture.
+func leanArchiveToolPayloads(messages []any) {
+	for _, raw := range messages {
+		message := mapFromAnyMain(raw)
+		switch fieldString(message, "status") {
+		case "running", "pending":
+			continue
+		}
+		for _, rawEvent := range anySlice(message["events"]) {
+			event := mapFromAnyMain(rawEvent)
+			if fieldString(event, "kind") != "tool" || event["subagentHeader"] == true {
+				continue
+			}
+			for _, field := range [...]string{"output", "input"} {
+				value, ok := event[field].(string)
+				if !ok || len(value) <= leanToolPayloadThreshold {
+					continue
+				}
+				event[field] = leanToolHead(value)
+				event[field+"Deferred"] = true
+				event[field+"Bytes"] = len(value)
+			}
+		}
+	}
+}
+
+// leanToolHead keeps whole lines when it can, and never splits a rune.
+func leanToolHead(value string) string {
+	head := value[:leanToolPayloadHead]
+	for !utf8.ValidString(head) && len(head) > 0 {
+		head = head[:len(head)-1]
+	}
+	if cut := strings.LastIndexByte(head, '\n'); cut > leanToolPayloadHead/2 {
+		head = head[:cut+1]
+	}
+	return head
+}
+
+type toolDetailRequest struct {
+	messageID string
+	key       string
+	field     string
+	offset    int
+}
+
+func parseToolDetailRequest(raw any) (toolDetailRequest, error) {
+	options := mapFromAnyMain(raw)
+	request := toolDetailRequest{
+		messageID: strings.TrimSpace(fieldString(options, "messageId")),
+		key:       strings.TrimSpace(fieldString(options, "key")),
+		field:     strings.TrimSpace(fieldString(options, "field")),
+		offset:    intValue(options["offset"]),
+	}
+	if request.field == "" {
+		request.field = "output"
+	}
+	if request.messageID == "" || request.key == "" {
+		return toolDetailRequest{}, errors.New("tool detail requires a message id and tool key")
+	}
+	if request.field != "output" && request.field != "input" {
+		return toolDetailRequest{}, fmt.Errorf("unknown tool detail field %q", request.field)
+	}
+	if request.offset < 0 {
+		return toolDetailRequest{}, errors.New("tool detail offset must not be negative")
+	}
+	return request, nil
+}
+
+// ProjectToolDetailByTab returns one bounded chunk of a committed tool
+// payload: {text, offset, next, total}. Chunks end on rune boundaries, so a
+// reader that concatenates them from offset 0 until next == total holds the
+// exact stored payload. No reply approaches the frame limit, whatever the
+// payload's size.
+func (r *providerChatRuntime) ProjectToolDetailByTab(tabID string, request toolDetailRequest) (map[string]any, bool, error) {
+	actor, found, err := r.actorByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	event, found := actor.engine.ReadMessage(request.messageID)
+	if !found {
+		return nil, false, nil
+	}
+	for _, entry := range event.Timeline {
+		if entry.Tool == nil || entry.Key != request.key {
+			continue
+		}
+		value := entry.Tool.Output
+		if request.field == "input" {
+			value = entry.Tool.Input
+		}
+		if request.offset > len(value) {
+			return nil, false, errors.New("tool detail offset is past the payload")
+		}
+		end := min(len(value), request.offset+toolDetailChunkBytes)
+		for end < len(value) && end > request.offset && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		return map[string]any{
+			"text": value[request.offset:end], "offset": request.offset, "next": end, "total": len(value),
+		}, true, nil
+	}
+	return nil, false, nil
+}

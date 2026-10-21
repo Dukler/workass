@@ -455,21 +455,12 @@ func (e *Engine) ReadLedgerPageBefore(beforeMessageID string, limit int) (Ledger
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	end := -1
 	for index := len(e.state.Ledger) - 1; index >= 0; index-- {
 		if e.state.Ledger[index].MessageID == beforeMessageID {
-			end = index
-			break
+			return e.readMessagesLocked(uint64(index+1), limit)
 		}
 	}
-	if end < 0 {
-		return LedgerPageSnapshot{}, errors.New("ledger page boundary does not exist")
-	}
-	start := max(0, end-limit)
-	return LedgerPageSnapshot{
-		Events: cloneLedgerEvents(e.state.Ledger[start:end]), Start: start, End: end,
-		LedgerCount: len(e.state.Ledger), Deleted: e.state.Deleted,
-	}, nil
+	return LedgerPageSnapshot{}, errors.New("ledger page boundary does not exist")
 }
 
 // DigestSnapshot is the bounded, body-free view used by the five-second health
