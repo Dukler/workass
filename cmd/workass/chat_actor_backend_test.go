@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -77,6 +85,27 @@ func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T)
 	}
 	if _, _, err := parseSQLiteStores("", false, sqliteStoresTestEnv("lanes", true), "dev"); err == nil || !strings.Contains(err.Error(), "lanes") {
 		t.Fatalf("unknown store from the env accepted: %v", err)
+	}
+}
+
+// The --sqlite-stores help states each profile default the parser applies.
+func TestSQLiteStoresHelpStatesTheProfileDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		profile, goos, phrase string
+		on                    bool
+	}{
+		{"dev", "windows", "chats in the dev profile", true},
+		{"prod", "darwin", "in prod on macOS", true},
+		{"prod", "windows", "none in Windows prod", false},
+		{"test", "darwin", "or the test profile", false},
+	} {
+		setSQLiteStoresGOOS(t, tc.goos)
+		if on := sqliteStoresProfileDefault(tc.profile) == sqliteStoreChats; on != tc.on {
+			t.Fatalf("%s on %s: default on=%v, want %v", tc.profile, tc.goos, on, tc.on)
+		}
+		if !strings.Contains(sqliteStoresUsage, tc.phrase) {
+			t.Fatalf("help %q does not say %q", sqliteStoresUsage, tc.phrase)
+		}
 	}
 }
 
@@ -219,4 +248,372 @@ func setSQLiteStoresGOOS(t *testing.T, goos string) {
 	previous := sqliteStoresGOOS
 	sqliteStoresGOOS = goos
 	t.Cleanup(func() { sqliteStoresGOOS = previous })
+}
+
+// A rollback or backup restore puts back a copy of a SQLite-live state
+// directory. The copy has the same bytes and new file times: the macOS
+// updater's snapshot (fs.cpSync with preserveTimestamps keeps microseconds),
+// a plain `cp -R`, or any tool that rounds times. Each must boot, and a real
+// JSON write after the cutover must still be refused.
+func TestOpenChatActorBackendBootsFromARestoredCopy(t *testing.T) {
+	copies := map[string]func(t *testing.T, from, to string){
+		"updater snapshot": func(t *testing.T, from, to string) {
+			node, err := exec.LookPath("node")
+			if err != nil {
+				t.Skip("node is not on PATH")
+			}
+			// desktop/shell/update-worker.js, the mutable-state snapshot.
+			script := `const fs=require("fs");fs.cpSync(process.argv[1],process.argv[2],{recursive:true,errorOnExist:true,force:false,dereference:false,preserveTimestamps:true,verbatimSymlinks:true,mode:fs.constants.COPYFILE_FICLONE});`
+			if out, err := exec.Command(node, "-e", script, from, to).CombinedOutput(); err != nil {
+				t.Fatalf("cpSync: %v %s", err, out)
+			}
+		},
+		"cp -R": func(t *testing.T, from, to string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("no cp on Windows")
+			}
+			if out, err := exec.Command("cp", "-R", from, to).CombinedOutput(); err != nil {
+				t.Fatalf("cp -R: %v %s", err, out)
+			}
+		},
+		"microsecond times": func(t *testing.T, from, to string) {
+			copyTreeWithTimes(t, from, to, func(at time.Time) time.Time { return at.Truncate(time.Microsecond) })
+		},
+	}
+	for name, copyTree := range copies {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			stateDir := filepath.Join(root, "state")
+			engine := writeBackendTestActor(t, stateDir, "restored-chat")
+			// The JSON times must carry nanoseconds for a microsecond copy to move them.
+			jsonPath := providerChatStatePath(stateDir, "restored-chat")
+			withNanos := time.Unix(1_700_000_000, 123_456_789)
+			if err := os.Chtimes(jsonPath, withNanos, withNanos); err != nil {
+				t.Fatal(err)
+			}
+			backend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.close(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := filepath.Join(root, "snapshot")
+			copyTree(t, stateDir, snapshot)
+			before, _ := os.Stat(jsonPath)
+			// The restore: the live directory moves aside, the copy takes its place.
+			if err := os.Rename(stateDir, filepath.Join(root, "failed")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(snapshot, stateDir); err != nil {
+				t.Fatal(err)
+			}
+			if after, _ := os.Stat(jsonPath); after.ModTime().Equal(before.ModTime()) {
+				t.Logf("this copy kept the exact file time")
+			}
+			backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+			if err != nil {
+				t.Fatalf("restored copy refused: %v", err)
+			}
+			heads, err := backend.discover()
+			if err != nil || len(heads) != 1 || heads[0].State.ChatID != "restored-chat" {
+				t.Fatalf("restored discovery = %#v %v", heads, err)
+			}
+			if err := backend.close(); err != nil {
+				t.Fatal(err)
+			}
+
+			// A JSON-only build writes the restored JSON: refused.
+			restored, err := chat.NewDurableEngine("restored-chat", chat.FileStore{Path: jsonPath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := engine.Snapshot().Presentation.Clone()
+			next.Draft = "written after the restore"
+			if err := restored.Apply(chat.SavePresentation{OperationID: "late-save", Digest: "late", Presentation: next}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := openChatActorBackend(stateDir, true, "test", t.Logf); !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
+				t.Fatalf("JSON written after the restore: %v", err)
+			}
+		})
+	}
+}
+
+// A rollback cycle: the SQLite build switches, an older build runs and
+// rewrites the JSON, then state.db is put back. The refusal names the file
+// and says what to do, and doing it starts from the current JSON.
+func TestCutoverRefusalSaysHowToReimportAndThatWorks(t *testing.T) {
+	stateDir := t.TempDir()
+	engine := writeBackendTestActor(t, stateDir, "cycled-chat")
+	backend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.close(); err != nil {
+		t.Fatal(err)
+	}
+	// The older build writes the JSON.
+	next := engine.Snapshot().Presentation.Clone()
+	next.Draft = "written by the older build"
+	if err := engine.Apply(chat.SavePresentation{OperationID: "older-build-save", Digest: "older", Presentation: next}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("diverged JSON: %v", err)
+	}
+	jsonPath := providerChatStatePath(stateDir, "cycled-chat")
+	for _, want := range []string{jsonPath, "move state.db, state.db-wal and state.db-shm", "out of " + stateDir, "imports the current JSON"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal does not say %q:\n%v", want, err)
+		}
+	}
+	// Do what it says.
+	aside := filepath.Join(t.TempDir(), "aside")
+	if err := os.MkdirAll(aside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{store.FileName, store.FileName + "-wal", store.FileName + "-shm"} {
+		if err := os.Rename(filepath.Join(stateDir, name), filepath.Join(aside, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatalf("start after moving state.db aside: %v", err)
+	}
+	defer backend.close()
+	loaded, found, err := backend.store("cycled-chat").Load("cycled-chat")
+	if err != nil || !found || loaded.Presentation.Draft != "written by the older build" {
+		t.Fatalf("re-imported actor: found=%v draft=%q err=%v", found, loaded.Presentation.Draft, err)
+	}
+}
+
+// copyTreeWithTimes copies a directory tree, giving every file the time
+// adjust returns for its own.
+func copyTreeWithTimes(t *testing.T, from, to string, adjust func(time.Time) time.Time) {
+	t.Helper()
+	err := filepath.WalkDir(from, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(from, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(to, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, raw, info.Mode().Perm()); err != nil {
+			return err
+		}
+		at := adjust(info.ModTime())
+		return os.Chtimes(target, at, at)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+const snapshotWriterStateEnv = "WORKASS_TEST_SNAPSHOT_WRITER_STATE"
+
+// TestStateSnapshotWriterHelper is the child process of
+// TestUpdaterStateSnapshotUnderWriteLoadAlwaysBoots: a stand-in daemon that
+// commits chat checkpoints to state.db as fast as it can until it is killed,
+// or closes the database cleanly on SIGTERM.
+func TestStateSnapshotWriterHelper(t *testing.T) {
+	stateDir := os.Getenv(snapshotWriterStateEnv)
+	if stateDir == "" {
+		t.Skip("child process of the state snapshot test")
+	}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM)
+	backend, err := openChatActorBackend(stateDir, true, "snapshot-writer", nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	// Rows large enough that the WAL checkpoints into state.db every few
+	// commits: a raw copy under this load is torn about a third of the time.
+	text := strings.Repeat("w", 200_000)
+	type writer struct {
+		store chat.StateStore
+		state chat.State
+	}
+	writers := make([]*writer, 4)
+	for index := range writers {
+		chatID := fmt.Sprintf("load-chat-%d", index)
+		handle := backend.store(chatID)
+		state, found, err := handle.Load(chatID)
+		if err == nil && !found {
+			state, err = chat.NewState(chatID)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		writers[index] = &writer{store: handle, state: state}
+	}
+	for round := 0; ; round++ {
+		select {
+		case <-stop:
+			if err := backend.close(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		default:
+		}
+		for _, w := range writers {
+			next := w.state.Clone()
+			next.Revision++
+			if len(next.Ledger) >= 30 {
+				next.Ledger = next.Ledger[:10]
+			}
+			sequence := len(next.Ledger) + 1
+			next.Ledger = append(next.Ledger, chat.LedgerEvent{
+				EventID: fmt.Sprintf("load-event-%d-%d", sequence, next.Revision), MessageID: fmt.Sprintf("load-message-%d-%d", sequence, next.Revision),
+				Sequence: uint64(sequence), Role: "assistant", Status: "done", Text: text,
+				OperationID: providercontract.OperationID(fmt.Sprintf("load-operation-%d", next.Revision)), ContextExcluded: true,
+			})
+			if err := w.store.Save(next); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			w.state = next
+		}
+		if round == 0 {
+			fmt.Println("writing")
+		}
+	}
+}
+
+// The macOS updater snapshots state/ before it activates a release, and a
+// rollback renames that copy into place. A copy taken while the daemon
+// writes can pair a state.db with a -wal from a moment later and fail
+// integrity_check. The updater (update-worker.js snapshotMutableState, run
+// here for real) must refuse while a writer is alive, and its copy once the
+// writer is gone, killed mid-commit or closed cleanly, must pass
+// integrity_check and boot.
+func TestUpdaterStateSnapshotUnderWriteLoadAlwaysBoots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the macOS updater snapshot; Windows prod keeps chats in JSON")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH")
+	}
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	writeBackendTestActor(t, stateDir, "seed-chat")
+	script := filepath.Join(root, "snapshot.js")
+	if err := os.WriteFile(script, []byte(`'use strict';
+const [workerPath, stateDir, backupDir, writerPid] = process.argv.slice(2);
+const { defaultOperations } = require(workerPath);
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err.code !== 'ESRCH'; } };
+const tx = { platform: 'darwin', mutableStateTarget: stateDir, mutableStateBackupTarget: backupDir, failedMutableStateTarget: backupDir + '-failed' };
+defaultOperations(tx, { daemonServiceIsDown: () => !alive(Number(writerPid)) }).snapshotMutableState()
+  .then(() => process.stdout.write('snapshotted\n'))
+  .catch((err) => { process.stderr.write(String(err && err.message || err) + '\n'); process.exitCode = 3; });
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerPath := filepath.Join(repoRoot(t), "desktop", "shell", "update-worker.js")
+	snapshot := func(backupDir string, writerPID int) (string, error) {
+		out, err := exec.Command(node, script, workerPath, stateDir, backupDir, strconv.Itoa(writerPID)).CombinedOutput()
+		return string(out), err
+	}
+
+	const cycles = 12
+	for cycle := 0; cycle < cycles; cycle++ {
+		writer := exec.Command(os.Args[0], "-test.run=^TestStateSnapshotWriterHelper$")
+		writer.Env = append(os.Environ(), snapshotWriterStateEnv+"="+stateDir)
+		stdout, err := writer.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr strings.Builder
+		writer.Stderr = &stderr
+		if err := writer.Start(); err != nil {
+			t.Fatal(err)
+		}
+		line, err := bufio.NewReader(stdout).ReadString('\n')
+		if err != nil || strings.TrimSpace(line) != "writing" {
+			_ = writer.Process.Kill()
+			_ = writer.Wait()
+			t.Fatalf("cycle %d: writer did not start: %q %v %s", cycle, line, err, stderr.String())
+		}
+		go func() { _, _ = io.Copy(io.Discard, stdout) }()
+
+		// While it writes, the updater refuses to copy.
+		refusedDir := filepath.Join(root, fmt.Sprintf("refused-%d", cycle))
+		if out, err := snapshot(refusedDir, writer.Process.Pid); err == nil || !strings.Contains(out, "daemon is running") {
+			_ = writer.Process.Kill()
+			_ = writer.Wait()
+			t.Fatalf("cycle %d: snapshot under write load = %v %s", cycle, err, out)
+		}
+		if _, err := os.Stat(filepath.Join(refusedDir, "state")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("cycle %d: a refused snapshot left a copy: %v", cycle, err)
+		}
+
+		// Stop it mid-load: killed outright, or a clean close.
+		time.Sleep(time.Duration(40+cycle*17%120) * time.Millisecond)
+		if cycle%2 == 0 {
+			_ = writer.Process.Kill()
+		} else {
+			_ = writer.Process.Signal(syscall.SIGTERM)
+		}
+		waitErr := writer.Wait()
+		if cycle%2 == 1 && waitErr != nil {
+			t.Fatalf("cycle %d: writer did not close cleanly: %v %s", cycle, waitErr, stderr.String())
+		}
+
+		backupDir := filepath.Join(root, fmt.Sprintf("snapshot-%d", cycle))
+		if out, err := snapshot(backupDir, writer.Process.Pid); err != nil {
+			t.Fatalf("cycle %d: snapshot after the writer stopped: %v %s", cycle, err, out)
+		}
+		copied := filepath.Join(backupDir, "state")
+		if wal, err := os.Stat(filepath.Join(copied, store.FileName+"-wal")); err == nil {
+			t.Logf("cycle %d: snapshot holds a %d-byte WAL", cycle, wal.Size())
+		}
+		db, err := store.Open(store.Options{Path: filepath.Join(copied, store.FileName), BinaryVersion: "test"})
+		if err != nil {
+			t.Fatalf("cycle %d: open the snapshot: %v", cycle, err)
+		}
+		var integrity string
+		if err := db.Read(context.Background(), func(tx *store.Tx) error {
+			return tx.QueryRow(`PRAGMA integrity_check`).Scan(&integrity)
+		}); err != nil || integrity != "ok" {
+			t.Fatalf("cycle %d: snapshot integrity_check = %q %v", cycle, integrity, err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		backend, err := openChatActorBackend(copied, true, "test", nil)
+		if err != nil {
+			t.Fatalf("cycle %d: the snapshot does not boot: %v", cycle, err)
+		}
+		heads, err := backend.discover()
+		if err != nil || len(heads) != 5 {
+			t.Fatalf("cycle %d: snapshot discovery = %d heads, %v", cycle, len(heads), err)
+		}
+		for _, head := range heads {
+			if _, found, err := backend.store(head.State.ChatID).Load(head.State.ChatID); err != nil || !found {
+				t.Fatalf("cycle %d: snapshot actor %s: found=%v %v", cycle, head.State.ChatID, found, err)
+			}
+		}
+		if err := backend.close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

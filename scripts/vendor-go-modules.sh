@@ -37,16 +37,28 @@ keep=$(mktemp)
 all=$(mktemp)
 trap 'rm -f "$keep" "$all"' EXIT
 vendor_dir="$repo_root/vendor"
+# Each target is listed in every build configuration a Workass build or test
+# uses there, not only the release one: cgo off (releases, cross-compiles)
+# and on (a plain `go build` or `go test` on a Mac with Xcode), each with and
+# without the race detector's `race` tag (`go build -race`, `go test -race`).
+# A file only one of them compiles, such as golang.org/x/sys/unix/race.go,
+# would otherwise be pruned and break that configuration.
 for target in $targets; do
   goos=${target%/*}
   goarch=${target#*/}
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go list -mod=vendor -deps -test \
-    -f '{{$d := .Dir}}{{range .GoFiles}}{{$d}}/{{.}}
+  for cgo in 0 1; do
+    for tags in "" race; do
+      CGO_ENABLED=$cgo GOOS="$goos" GOARCH="$goarch" go list -mod=vendor -deps -test -tags "$tags" \
+        -f '{{$d := .Dir}}{{range .GoFiles}}{{$d}}/{{.}}
+{{end}}{{range .CgoFiles}}{{$d}}/{{.}}
+{{end}}{{range .CFiles}}{{$d}}/{{.}}
 {{end}}{{range .SFiles}}{{$d}}/{{.}}
 {{end}}{{range .HFiles}}{{$d}}/{{.}}
 {{end}}{{range .SysoFiles}}{{$d}}/{{.}}
 {{end}}{{range .EmbedFiles}}{{$d}}/{{.}}
 {{end}}' ./... | grep "^$vendor_dir/" >>"$keep" || true
+    done
+  done
 done
 sort -u -o "$keep" "$keep"
 find "$vendor_dir" -type f \( -name '*.go' -o -name '*.s' -o -name '*.h' -o -name '*.c' -o -name '*.syso' \) | sort >"$all"
@@ -60,6 +72,10 @@ echo "[vendor-go] pruned $pruned files"
 
 echo "[vendor-go] verifying the tree builds from vendor alone"
 go build -mod=vendor ./... >/dev/null
+# The race detector needs this host's cgo toolchain; skip it where there is none.
+if CGO_ENABLED=1 go env CC >/dev/null 2>&1 && command -v "$(go env CC)" >/dev/null 2>&1; then
+  go build -mod=vendor -race ./... >/dev/null
+fi
 for target in $targets; do
   CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go build -mod=vendor ./cmd/... >/dev/null
 done

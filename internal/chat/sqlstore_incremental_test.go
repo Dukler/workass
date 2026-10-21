@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"workass/internal/provider"
 	"workass/internal/store"
@@ -340,5 +343,134 @@ func TestPhase1aDatabaseUpgradesAndHealsOnFirstOpen(t *testing.T) {
 	page, _, err := actors.ReadMessages(chatID, 0, 100)
 	if err != nil || !reflect.DeepEqual(cloneLedgerEvents(page.Events), sqlEngine.Snapshot().Ledger) {
 		t.Fatalf("rows after the healing open: %d events, %v", len(page.Events), err)
+	}
+}
+
+// bigRowsState is a valid state whose rows are about rowBytes each.
+func bigRowsState(t testing.TB, chatID string, rows, rowBytes int) State {
+	t.Helper()
+	state := largeLedgerState(t, chatID, rows)
+	text := strings.Repeat("x", rowBytes)
+	for index := range state.Ledger {
+		state.Ledger[index].Text = text + state.Ledger[index].Text
+	}
+	return state
+}
+
+// Every chat shares one SQLite connection. Opening a large chat must not hold
+// it for the whole read and decode: another chat's commits keep landing in
+// about the time of one chunk read, not of the open.
+func TestSQLLargeLoadDoesNotStallOtherChatsCommits(t *testing.T) {
+	actors := openTestActors(t)
+	big := bigRowsState(t, "big-chat", 400, 100_000)
+	if err := actors.Store("big-chat").Save(big); err != nil {
+		t.Fatal(err)
+	}
+	small := largeLedgerState(t, "small-chat", 4)
+	smallStore := actors.Store("small-chat")
+	if err := smallStore.Save(small); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan time.Duration)
+	go func() {
+		started := time.Now()
+		loaded, found, err := actors.Store("big-chat").Load("big-chat")
+		if err != nil || !found || len(loaded.Ledger) != len(big.Ledger) {
+			t.Errorf("big load: found=%v rows=%d err=%v", found, len(loaded.Ledger), err)
+		}
+		done <- time.Since(started)
+	}()
+	var loadTook time.Duration
+	var commits []time.Duration
+	for loadTook == 0 {
+		select {
+		case loadTook = <-done:
+			continue
+		default:
+		}
+		small.Revision++
+		started := time.Now()
+		if err := smallStore.Save(small); err != nil {
+			t.Fatal(err)
+		}
+		commits = append(commits, time.Since(started))
+	}
+	if len(commits) == 0 {
+		t.Fatal("no small commit ran during the load")
+	}
+	sort.Slice(commits, func(i, j int) bool { return commits[i] < commits[j] })
+	worst := commits[len(commits)-1]
+	// The slowest commit includes SQLite's periodic WAL checkpoint, which an
+	// idle loop of the same commits shows too (~9 ms with fullfsync here).
+	t.Logf("%d MB chat load %v; %d small commits during it: median %v, p99 %v, slowest %v",
+		len(big.Ledger)*100_000>>20, loadTook, len(commits), commits[len(commits)/2], commits[len(commits)*99/100], worst)
+	if loadTook < 40*time.Millisecond {
+		t.Skipf("the load took %v: too fast on this machine to show a stall", loadTook)
+	}
+	if worst > loadTook/3 {
+		t.Fatalf("a small chat's commit waited %v during a %v load of another chat", worst, loadTook)
+	}
+}
+
+// A chunked load spans several read transactions. A checkpoint by another
+// handle in between must not mix two checkpoints: the load restarts and
+// returns the newer one exactly.
+func TestSQLChunkedLoadRestartsWhenTheActorIsCheckpointedMidLoad(t *testing.T) {
+	const chatID = "chunked-chat"
+	actors := openTestActors(t)
+	writer := actors.Store(chatID)
+	state := bigRowsState(t, chatID, 12, sqlLoadChunkBytes/2)
+	if err := writer.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	newer := state.Clone()
+	newer.Revision++
+	newer.Ledger[0].Text = "rewritten while another handle was loading"
+	newer.Ledger = append(newer.Ledger, historyRow(len(newer.Ledger)+1))
+
+	var pauses []int
+	sqlLoadBetweenChunks = func(id string, decoded int) {
+		pauses = append(pauses, decoded)
+		if len(pauses) == 1 {
+			if err := writer.Save(newer); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { sqlLoadBetweenChunks = nil })
+	reader := actors.Store(chatID)
+	loaded, found, err := reader.Load(chatID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	if len(pauses) < 4 {
+		t.Fatalf("the load paused %d times; want several chunks", len(pauses))
+	}
+	got, _ := json.Marshal(loaded.Ledger)
+	want, _ := json.Marshal(newer.Ledger)
+	if loaded.Revision != newer.Revision || string(got) != string(want) {
+		t.Fatalf("load mixed checkpoints: revision %d, %s", loaded.Revision, firstJSONDifference(got, want))
+	}
+	// The reader's cache describes the newer rows: its next checkpoint is
+	// incremental and leaves the table equal to its state.
+	next := loaded
+	next.Revision++
+	next.Ledger = append(exactLedgerCopy(loaded.Ledger), historyRow(len(loaded.Ledger)+1))
+	if err := reader.Save(next); err != nil {
+		t.Fatal(err)
+	}
+	assertRowsMatch(t, actors, chatID, next.Ledger)
+
+	// A writer that never lets the load finish exhausts the restarts and
+	// fails closed instead of returning a mixed state.
+	sqlLoadBetweenChunks = func(string, int) {
+		next.Revision++
+		if err := writer.Save(next); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, _, err := actors.Store(chatID).Load(chatID); !errors.Is(err, errSQLActorCheckpointedDuringLoad) {
+		t.Fatalf("endless checkpoints during a load: %v", err)
 	}
 }

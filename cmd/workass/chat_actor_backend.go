@@ -63,6 +63,11 @@ const sqliteStoreChats = "chats"
 
 const sqliteStoresEnv = "WORKASS_SQLITE_STORES"
 
+// sqliteStoresUsage is the --sqlite-stores help text; it states
+// sqliteStoresProfileDefault.
+const sqliteStoresUsage = "comma-separated stores kept in state/state.db instead of JSON files (known: " + sqliteStoreChats + "); also " + sqliteStoresEnv +
+	"; when neither is given: " + sqliteStoreChats + " in the dev profile and in prod on macOS, none in Windows prod or the test profile; an explicit value, even an empty one, wins"
+
 // sqliteStoresProfileDefault is what a profile runs with when neither the flag
 // nor the environment names the SQLite stores: the dev profile keeps chats in
 // SQLite everywhere, prod keeps them in SQLite on macOS only (Windows prod
