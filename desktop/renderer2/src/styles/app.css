@@ -722,7 +722,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .tool-image { min-width: 0; padding: 0; overflow: hidden; border: 1px solid var(--line2); border-radius: 8px; background: var(--field); cursor: zoom-in; }
 .tool-image:hover { border-color: color-mix(in srgb, var(--acc) 45%, var(--line2)); }
 .tool-image img { display: block; width: 100%; max-height: 340px; object-fit: contain; background: var(--bg); }
-.tool-image-pending { display: grid; min-height: 170px; place-items: center; color: var(--muted); font-size: 12px; }
+/* The 170px min-height is gone: a pending tool image's frame (.ri) reserves
+   its real size. The class stays as an alias on the placeholder. */
+.tool-image-pending { display: grid; place-items: center; color: var(--muted); font-size: 12px; }
 .assistant-image-pending { color: var(--muted); }
 .assistant-inline-image { display: block; width: fit-content; max-width: 100%; margin: 8px 0 2px; padding: 0; overflow: hidden; border: 1px solid var(--line2); border-radius: 8px; background: var(--field); cursor: zoom-in; }
 .assistant-inline-image:hover { border-color: color-mix(in srgb, var(--acc) 45%, var(--line2)); }
@@ -730,6 +732,45 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .assistant-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
 .assistant-images .assistant-inline-image { width: 100%; margin: 0; }
 .assistant-images .assistant-inline-image img { width: 100%; }
+
+/* A reserved image (.ri), ported from the approved mock image-placeholder
+   (variant C · Línea de acento). The frame owns the size from the first paint:
+   --iw/--ih are the image's pixel size from the wire, and each surface keeps
+   today's caps. The media box below the frame's 1px border carries the exact
+   aspect ratio, so swapping the placeholder for the image never changes a
+   single pixel of layout. The older classes stay on the same elements. */
+.ri { position: relative; display: block; padding: 0; overflow: hidden; border: 1px solid var(--line2); text-align: left; }
+.ri-media { position: relative; display: block; width: 100%; aspect-ratio: var(--iw) / var(--ih); container-type: size; background: var(--field); }
+.ri-media > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-width: none; max-height: none; border: 0; border-radius: 0; background: none; object-fit: contain; opacity: 0; transition: opacity .16s ease; }
+.ri-media > img.zoomable { transition: opacity .16s ease, filter .12s ease; }
+.ri-media > img:focus-visible { outline-offset: -2px; }
+.ri[data-state="loaded"] .ri-media > img { opacity: 1; }
+.ri[data-state="loaded"] .ri-media { background: var(--bg); }
+.ri-ph { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 7px; color: var(--muted); font-size: 12px; pointer-events: none; -webkit-user-select: none; user-select: none; transition: opacity .16s ease; }
+.ri-ph svg { display: block; flex: none; width: 18px; height: 18px; color: var(--faint); fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.ri[data-state="loaded"] .ri-ph { opacity: 0; }
+@container (max-height: 76px) { .ri-ph .cap { display: none; } }
+/* Surfaces: the same caps the <img> had. Attachments share a flex row that
+   stretches every item to the tallest, as it stretched the <img>; the media
+   sits centred, like object-fit there. */
+.ri-user { display: flex; flex-direction: column; justify-content: center; width: min(calc(var(--iw) * 1px + 2px), min(420px, 68vw), calc(318px * var(--iw) / var(--ih) + 2px)); border-radius: 9px; background: var(--panel); }
+.ri-user .ri-media { flex: none; }
+.ri-user[data-state="loaded"] .ri-media { background: var(--panel); }
+.ri-inline { width: min(calc(var(--iw) * 1px + 2px), 100%, calc(620px * var(--iw) / var(--ih) + 2px)); margin: 8px 0 2px; border-radius: 8px; background: var(--field); cursor: zoom-in; }
+.ri-gallery .ri-media { max-height: 620px; }
+.ri-tool { min-width: 0; border-radius: 8px; background: var(--field); cursor: zoom-in; }
+.ri-tool .ri-media { max-height: 340px; }
+/* A failed read keeps its box; nothing below moves. */
+.ri[data-state="failed"] .ri-ph .cap { display: block; }
+.ri[data-state="failed"] .ri-media::after { display: none; }
+/* Variant C: a 2px accent bar runs along the bottom edge while the bytes are
+   on the way. Deliberately not gated on prefers-reduced-motion (this Mac runs
+   Reduce Motion ON; the approved mock runs it unconditionally). */
+.ri[data-state="pending"] .ri-media::after {
+  content: ""; position: absolute; bottom: 0; left: 0; width: 30%; height: 2px; border-radius: 2px;
+  background: var(--acc); animation: ri-bar 1.3s ease-in-out infinite;
+}
+@keyframes ri-bar { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 .tg-ic { flex: none; width: 15px; text-align: center; font-size: 12px; }
 .tg-ic.done, .tg-ic.running { color: var(--acc); }
 .tg-ic.failed { color: var(--del); }
