@@ -53,62 +53,24 @@ func (a *SQLActors) Store(chatID string) *SQLStore {
 
 // ActorHead is what boot discovery needs from one actor without decoding its
 // history: the State with no Ledger, and how many ledger rows it has.
+// JournalBytes and LedgerGen are the store's checkpoint facts (SQLite only):
+// a head with journal records, or rows from before incremental checkpoints,
+// is not yet the committed actor.
 type ActorHead struct {
 	State        State
 	LedgerLength int
+	JournalBytes int64
+	LedgerGen    int64
 }
 
-// Discover lists every actor's head, ordered by ChatID. It decodes only
-// state_json (never messages), so boot no longer reads every transcript; full
-// validation and journal replay happen when the actor is opened. The heads
-// are copied out in one read and decoded after it.
+// Discover lists every actor's head, ordered by ChatID (DiscoverEach).
 func (a *SQLActors) Discover() ([]ActorHead, error) {
-	type rawHead struct {
-		chatID    string
-		version   int
-		stateJSON []byte
-		ledgerLen int
-	}
-	var raws []rawHead
-	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
-		raws = raws[:0]
-		rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len FROM chats ORDER BY chat_id`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw rawHead
-			if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen); err != nil {
-				return err
-			}
-			raws = append(raws, raw)
-		}
-		return rows.Err()
+	var heads []ActorHead
+	err := a.DiscoverEach(func(head ActorHead) error {
+		heads = append(heads, head)
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	heads := make([]ActorHead, 0, len(raws))
-	for index := range raws {
-		raw := &raws[index]
-		if raw.version != currentStateEnvelopeVersion {
-			return nil, fmt.Errorf("chat actor %q: unsupported chat state version %d", raw.chatID, raw.version)
-		}
-		var state State
-		if err := json.Unmarshal(raw.stateJSON, &state); err != nil {
-			return nil, fmt.Errorf("decode chat actor %q: %w", raw.chatID, err)
-		}
-		raw.stateJSON = nil
-		if strings.TrimSpace(state.ChatID) != raw.chatID {
-			return nil, fmt.Errorf("chat actor %q holds state for another chat", raw.chatID)
-		}
-		if raw.ledgerLen > 0 {
-			state.Ledger = nil
-		}
-		heads = append(heads, ActorHead{State: state, LedgerLength: raw.ledgerLen})
-	}
-	return heads, nil
+	return heads, err
 }
 
 // ErrLedgerNotCheckpointed: the chat's rows were written by a build that
@@ -233,6 +195,10 @@ type SQLStore struct {
 
 	mu    sync.Mutex
 	cache *sqlLedgerCache
+	// journalRecords counts the chat_events rows after the checkpoint this
+	// handle last read or wrote (sqlread.go: they keep the head and, for an
+	// old row edited in place, the rows behind the actor).
+	journalRecords int
 }
 
 // sqlLedgerCache is this handle's private, exact copy of the ledger rows it
@@ -274,6 +240,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 		return State{}, false, err
 	}
 	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows}
+	s.journalRecords = loaded.journalRecords
 	return loaded.state, true, nil
 }
 
@@ -284,6 +251,8 @@ type sqlLoadedActor struct {
 	// when the caller did not ask for it.
 	rows      []LedgerEvent
 	ledgerGen int64
+	// journalRecords is how many journal records were replayed onto the head.
+	journalRecords int
 }
 
 // sqlActorHeadRow is a chats row as stored. Its checkpoint fields identify
@@ -536,7 +505,7 @@ func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal []
 	if err != nil {
 		return sqlLoadedActor{}, false, fmt.Errorf("replay provider event journal: %w", err)
 	}
-	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen}, true, nil
+	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen, journalRecords: len(journal)}, true, nil
 }
 
 // loadSQLActor reads the checkpoint, its ledger rows and journal, and returns
@@ -654,6 +623,7 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		return err
 	}
 	s.cache = plan.nextCache(cache, state.Ledger)
+	s.journalRecords = 0
 	return nil
 }
 
@@ -987,6 +957,11 @@ func (s *SQLStore) appendJournalRecord(record providerEventJournalRecord, payloa
 		appended = true
 		return nil
 	})
+	if appended && err == nil {
+		s.mu.Lock()
+		s.journalRecords++
+		s.mu.Unlock()
+	}
 	return appended, err
 }
 
