@@ -152,7 +152,7 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 		for _, opt := range opts {
 			opt.beforeBudget(anySlice(projected["messages"]))
 		}
-		messages, err := boundedActorHistory(anySlice(projected["messages"]), filepath.Dir(r.sessions.path))
+		messages, err := boundedArchiveHistory(anySlice(projected["messages"]), filepath.Dir(r.sessions.path), deferringMessageImages(opts))
 		if err != nil {
 			return nil, err
 		}
@@ -265,6 +265,17 @@ func (o archiveReadOptions) apply(messages []any) {
 	}
 }
 
+// deferringMessageImages: whether apply will send message images by
+// reference, so the byte budget must not count their bytes.
+func deferringMessageImages(opts []archiveReadOptions) bool {
+	for _, opt := range opts {
+		if opt.deferMessageImages {
+			return true
+		}
+	}
+	return false
+}
+
 // ProjectArchivePageBeforeByTab returns one bounded canonical ledger page
 // immediately before a stable resident message. It is the ordinary upward
 // history path; explicit full-history reads remain available for search and
@@ -295,7 +306,7 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 	for _, opt := range opts {
 		opt.beforeBudget(messages)
 	}
-	messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
+	messages, err = boundedArchiveHistory(messages, filepath.Dir(r.sessions.path), deferringMessageImages(opts))
 	if err != nil {
 		return nil, false, err
 	}
@@ -340,7 +351,7 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 		opt.beforeBudget(messages)
 	}
 	if history != actorHistoryFull {
-		messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
+		messages, err = boundedArchiveHistory(messages, filepath.Dir(r.sessions.path), deferringMessageImages(opts))
 		if err != nil {
 			return nil, false, err
 		}
@@ -405,44 +416,14 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 	if err != nil || !found {
 		return nil, found, err
 	}
-	state := actor.engine.Snapshot()
-	if state.Deleted {
+	// Tool media and, once deferred, a message's own images. The ownership
+	// check reads the actor in place: cloning it per image (Snapshot) made each
+	// read of a 225 MB chat cost ~15 ms before any image byte was read.
+	ownership := actor.engine.AttachmentRefOwnership(providerSessionImageRefPrefix + ref)
+	if ownership.Deleted {
 		return nil, false, errors.New("chat is deleted")
 	}
-	owned := func(timeline []chat.TimelineEntry) bool {
-		for _, event := range timeline {
-			if event.Tool == nil {
-				continue
-			}
-			for _, image := range event.Tool.Attachments {
-				if image.Ref == providerSessionImageRefPrefix+ref {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	// A message's own images are read the same way once they are deferred.
-	ownedAttachment := func(attachments []providercontract.Attachment) bool {
-		for _, image := range attachments {
-			if image.Ref == providerSessionImageRefPrefix+ref {
-				return true
-			}
-		}
-		return false
-	}
-	allowed := false
-	for _, row := range state.Ledger {
-		if owned(row.Timeline) || ownedAttachment(row.Attachments) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed && state.Foreground != nil {
-		allowed = owned(state.Foreground.Timeline) || ownedAttachment(state.Foreground.Input.Attachments) ||
-			ownedAttachment(state.Foreground.AssistantAttachments)
-	}
-	if !allowed {
+	if !ownership.Owned {
 		return nil, false, errors.New("archive image does not belong to this chat")
 	}
 	data, err := readExternalSessionImage(ref, filepath.Dir(r.sessions.path))
