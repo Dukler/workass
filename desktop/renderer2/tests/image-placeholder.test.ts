@@ -74,6 +74,12 @@ test('frame state: pending until the current source loads, failed on a failed re
   assert.equal(reservedImageState(true, '', '', ''), 'failed', 'the read by reference failed');
   assert.equal(reservedImageState(false, 'data:a', '', 'data:a'), 'failed', 'the browser could not decode the bytes');
   assert.equal(reservedImageState(false, 'data:b', '', 'data:a'), 'pending');
+  // A loaded display rendition switching to a larger one (or the full image)
+  // keeps drawing its pixels: the frame never falls back to the placeholder.
+  const full = `/workass/chat-image/tab/${'ab'.repeat(32)}?k=d.k`;
+  assert.equal(reservedImageState(false, full, `${full}&w=320`, ''), 'loaded');
+  assert.equal(reservedImageState(false, `${full}&w=640`, `${full}&w=320`, ''), 'loaded');
+  assert.equal(reservedImageState(false, full.replace('tab/', 'other/'), `${full}&w=320`, ''), 'pending', 'another image waits for its own load');
 });
 
 function frame(html: string, className: string): { state: string; style: string } {
