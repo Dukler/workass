@@ -95,6 +95,13 @@ func (r *providerChatRuntime) discoverActors(backend chatActorBackend) error {
 	}
 	r.ledgers = ledgers
 	closed, reasons := 0, map[string]int{}
+	var newestStamps map[string]chat.LedgerStamp
+	if ledgers != nil {
+		var err error
+		if newestStamps, err = ledgers.ReadNewestStamps(); err != nil {
+			return fmt.Errorf("read chat ledger stamps: %w", err)
+		}
+	}
 	visit := func(head chat.ActorHead) error {
 		// The store may contain an empty envelope from a chat:create attempt
 		// that never committed InitializeChat. It has no accepted chat
@@ -114,9 +121,15 @@ func (r *providerChatRuntime) discoverActors(backend chatActorBackend) error {
 			reasons[reason]++
 			return nil
 		}
-		stamps, err := ledgers.ReadLedgerStamps(chatID, head.LedgerLength, chat.SessionActivityWindow)
-		if err != nil {
-			return fmt.Errorf("read chat %q tail: %w", chatID, err)
+		var stamps []chat.LedgerStamp
+		if newest, ok := newestStamps[chatID]; ok && newest.HasLedgerTimestamp() {
+			stamps = []chat.LedgerStamp{newest}
+		} else if head.LedgerLength > 0 {
+			// The newest row has no timestamp: read back for one.
+			var err error
+			if stamps, err = ledgers.ReadLedgerStamps(chatID, head.LedgerLength, chat.SessionActivityWindow); err != nil {
+				return fmt.Errorf("read chat %q tail: %w", chatID, err)
+			}
 		}
 		r.summaries[chatID] = chat.SummarizeHead(head.State, head.LedgerLength, stamps)
 		closed++
@@ -136,6 +149,9 @@ func (r *providerChatRuntime) discoverActors(backend chatActorBackend) error {
 	if err == nil && ledgers != nil {
 		log.Printf("[workass] chat actors: %d known, %d left closed until used, %d opened for restart recovery %v",
 			len(r.known), closed, len(r.known)-closed, reasons)
+		// Decoding every head left garbage several times the size of what
+		// discovery keeps; hand it back before the daemon starts serving.
+		debug.FreeOSMemory()
 	}
 	return err
 }

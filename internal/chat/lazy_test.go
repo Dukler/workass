@@ -203,6 +203,14 @@ func TestActorSummaryAnswersLikeTheEngine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	newest, err := actors.ReadNewestStamps()
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := state.Ledger[len(state.Ledger)-1]
+	if stamp := newest[chatID]; stamp.MessageID != last.MessageID || stamp.At != last.At || stamp.HasLedgerTimestamp() {
+		t.Fatalf("newest stamp = %+v, want the undated %s", stamp, last.MessageID)
+	}
 	for name, summary := range map[string]ActorSummary{"discovered": discoveredSummary(t, actors, chatID), "resident": engine.Summary()} {
 		if got, want := summary.DigestSnapshot(), engine.DigestSnapshot(); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s digest = %#v, engine %#v", name, got, want)
