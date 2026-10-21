@@ -50,6 +50,14 @@ contextBridge.exposeInMainWorld('workassClipboard', {
   openImageExternal: (payload) => ipcRenderer.invoke('workass-image:open-external', payload),
 });
 
+// main.js installs render-frame-guard.js on this window: every navigation of a
+// chat HTML page frame is cancelled. Pages run their scripts only when this
+// says so; without it (older shells, plain browsers) they render static.
+contextBridge.exposeInMainWorld('workassRenderFrames', {
+  supported: true,
+  navigationGuard: true,
+});
+
 contextBridge.exposeInMainWorld('workassWindow', {
   platform: process.platform,
 });
