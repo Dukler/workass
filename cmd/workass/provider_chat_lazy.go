@@ -508,6 +508,8 @@ func (r *providerChatRuntime) retireIdleActors(ctx context.Context, ttl time.Dur
 		// The ledgers just released are most of the heap; hand them back now
 		// rather than when the scavenger gets to them.
 		debug.FreeOSMemory()
+		open, closed := r.lazyActorCounts()
+		log.Printf("[workass] closed %d idle chat actors (%d open, %d closed)", retired, open, closed)
 	}
 	return retired
 }
