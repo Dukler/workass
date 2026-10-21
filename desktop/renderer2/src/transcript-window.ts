@@ -142,7 +142,66 @@ export type TranscriptView = {
   pinned: boolean;
   anchor: TranscriptAnchor | null;
   heights: Map<string, number>;
+  /** Messages from the anchor to the newest one, inclusive, when it was left. */
+  depth?: number;
+  /** The newest message when it was left. */
+  newestId?: string | null;
 };
+
+/**
+ * A remembered reading position on its way back. Until it is restored nothing
+ * may overwrite it: every scroll and layout pass would otherwise record the
+ * row a fresh mount happens to show at the top (the first loaded row, at
+ * scrollTop 0) in its place.
+ */
+export type TranscriptRestore = {
+  anchor: TranscriptAnchor;
+  depth?: number;
+  newestId?: string | null;
+};
+
+/** Older history loaded past the remembered depth before a missing row counts as gone. */
+export const TRANSCRIPT_RESTORE_SLACK = 60;
+
+/**
+ * restore: the row is loaded, put it back where it was read.
+ * load: it is older than what is loaded; bring in the next older page.
+ * wait: a page is already on its way.
+ * abandon: it is gone (history complete, a load found nothing, or history
+ *   reaches past where it was without it); reopen at the newest row.
+ */
+export type TranscriptRestoreStep = 'restore' | 'load' | 'wait' | 'abandon';
+
+export function transcriptRestoreStep(input: {
+  messages: readonly { id: string }[];
+  restore: TranscriptRestore;
+  historyComplete: boolean;
+  loading: boolean;
+  stalled: boolean;
+}): TranscriptRestoreStep {
+  const { messages, restore } = input;
+  if (messages.some((message) => message.id === restore.anchor.key)) return 'restore';
+  if (input.historyComplete || input.stalled) return 'abandon';
+  if (restore.depth !== undefined) {
+    // Rows appended since leaving push the anchor further from the end.
+    const appended = newMessagesSince(messages, restore.newestId ?? null);
+    if (messages.length >= restore.depth + appended + TRANSCRIPT_RESTORE_SLACK) return 'abandon';
+  }
+  return input.loading ? 'wait' : 'load';
+}
+
+/** The scrollTop that puts a row whose top is at `rowTop` back at `offset` from the viewport top. */
+export function transcriptRestoredScrollTop(scrollTop: number, rowTop: number, viewportTop: number, offset: number): number {
+  return scrollTop + (rowTop - viewportTop) - offset;
+}
+
+/** How deep a reader is: messages from the anchor row to the newest, inclusive. */
+export function transcriptAnchorDepth(messages: readonly { id: string }[], key: string): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].id === key) return messages.length - index;
+  }
+  return undefined;
+}
 
 export const TRANSCRIPT_VIEW_MEMORY = 24;
 

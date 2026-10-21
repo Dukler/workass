@@ -1,7 +1,7 @@
 import { FloatingBrowser } from './FloatingBrowser';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject, type WheelEvent } from 'react';
 import type { Chat } from '../store/types';
-import { store, useApp, useProc } from '../store/store';
+import { store, useApp, useProc, type OlderHistoryOutcome } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
@@ -17,11 +17,14 @@ import { localBrowserOwnsChat } from '../browser';
 import { CHAT_MESSAGE_TAIL } from '../chat/residency';
 import { forkStore } from '../store/forks';
 import {
-  newMessagesSince, recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptWindow, transcriptWindowStale,
-  TRANSCRIPT_LOAD_AHEAD_PX, type MeasuredUnit, type TranscriptAnchor, type TranscriptWindow,
+  newMessagesSince, recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptAnchorDepth,
+  transcriptRestoredScrollTop, transcriptRestoreStep, transcriptWindow, transcriptWindowStale,
+  TRANSCRIPT_LOAD_AHEAD_PX, type MeasuredUnit, type TranscriptAnchor, type TranscriptRestore, type TranscriptView, type TranscriptWindow,
 } from '../transcript-window';
 
 const HISTORY_PAGE = 40;
+const OLDER_RETRY_MIN_MS = 1000;
+const OLDER_RETRY_MAX_MS = 15000;
 // A window that keeps re-cutting itself inside one commit is an estimate that
 // has not converged; stop there and let the next scroll continue.
 const MAX_SYNC_REWINDOWS = 4;
@@ -344,16 +347,38 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const mountedWindow = useRef<TranscriptWindow>({ from: 0, to: 0, topPad: 0, bottomPad: 0 });
   const syncRewindows = useRef(0);
   const viewChat = useRef<string | null>(null);
+  // A remembered reading position on its way back (transcript-window.ts). Until
+  // its row is loaded and put back at its offset, nothing records over it.
+  const restoring = useRef<TranscriptRestore | null>(null);
+  const restoreStalled = useRef(false);
+  // The rows of the latest render, so leaving can say how deep the reader was.
+  const latestMessages = useRef<readonly { id: string }[]>([]);
+  const currentView = (): TranscriptView => {
+    const pending = restoring.current;
+    const held = pending ? pending.anchor : anchor.current;
+    const pinned = stick.current || !held;
+    const messages = latestMessages.current;
+    return {
+      pinned,
+      anchor: pinned ? null : held,
+      heights: heights.current,
+      // A position still on its way back keeps what it was remembered with.
+      depth: pending ? pending.depth : held ? transcriptAnchorDepth(messages, held.key) : undefined,
+      newestId: pending ? pending.newestId : messages[messages.length - 1]?.id ?? null,
+    };
+  };
   const chatKey = chat?.id ?? '';
   if (viewChat.current !== chatKey) {
     // Leaving a chat remembers how it was read; arriving restores it (pinned
     // chats stay pinned to the newest row). Swapped during render so the first
     // frame of the arriving chat is already cut around its own position.
-    if (viewChat.current) rememberTranscriptView(viewChat.current, { pinned: stick.current, anchor: anchor.current, heights: heights.current });
+    if (viewChat.current) rememberTranscriptView(viewChat.current, currentView());
     const view = recallTranscriptView(chatKey);
-    stick.current = view.pinned;
-    anchor.current = view.pinned ? null : view.anchor;
+    stick.current = view.pinned || !view.anchor;
+    anchor.current = stick.current ? null : view.anchor;
     heights.current = view.heights;
+    restoring.current = anchor.current ? { anchor: anchor.current, depth: view.depth, newestId: view.newestId } : null;
+    restoreStalled.current = false;
     viewChat.current = chatKey;
   }
   const [findOpen, setFindOpen] = useState(false);
@@ -378,6 +403,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const visibleMessages = inheritedFold && !inheritedOpen
     ? allMessages.filter((message) => !message.inherited)
     : allMessages;
+  latestMessages.current = visibleMessages;
   const artifactOrigin = store.browserArtifactMachineId(chat?.machineId);
   const total = visibleMessages.length;
   const knownTotal = chat?.historyComplete === false
@@ -438,6 +464,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const win: TranscriptWindow = virtual
     ? transcriptWindow(windowInput)
     : { from: 0, to: units.length, topPad: 0, bottomPad: 0 };
+  // While the remembered row is still older than what is loaded, the newest
+  // rows are laid out but not shown: revealing them first and then jumping to
+  // the remembered row once its page arrives is exactly the jump to avoid.
+  const restorePending = virtual && !!restoring.current && !unitOfMessage.has(restoring.current.anchor.key);
   // While a reply streams here, the transcript follows its end with a damped
   // spring (createScrollSpring) instead of snapping a whole line up per delta
   // or bobbing through one smooth scroll per finished sentence; reduced motion
@@ -478,9 +508,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     setNewCount(0);
   }, [chat?.id]);
 
-  // Save the view when the transcript goes away entirely (another pane).
+  // Save the view when the transcript goes away: another chat (each chat mounts
+  // its own transcript) or another pane. currentView reads refs only.
   useEffect(() => () => {
-    if (viewChat.current) rememberTranscriptView(viewChat.current, { pinned: stick.current, anchor: anchor.current, heights: heights.current });
+    if (viewChat.current) rememberTranscriptView(viewChat.current, currentView());
   }, []);
 
   // Where the reader is, as the first unit at the viewport's top edge.
@@ -497,7 +528,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const recordAnchor = () => {
     const el = scrollRef.current;
     const doc = docRef.current;
-    if (!el || !doc) return;
+    // A position on its way back is not where the reader is yet: recording
+    // here is what replaced a-00094 with the first mounted row (a-00073).
+    if (!el || !doc || restoring.current) return;
     const viewport = el.getBoundingClientRect();
     const next = transcriptAnchorAt(measureMessages(doc), viewport.top);
     if (next) {
@@ -514,6 +547,43 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const dropAnchor = () => {
     anchorNode.current = null;
     anchorContentTop.current = null;
+    // Following the bottom (a send, the new-messages pill) supersedes it.
+    restoring.current = null;
+  };
+
+  // Put a remembered reading position back: its row at the offset it was read
+  // at. Runs before paint, so the arriving chat's first visible frame is
+  // already there. Returns false while the row still has to arrive.
+  const restoreReadingPosition = (): boolean => {
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    const pending = restoring.current;
+    if (!el || !doc || !pending) return false;
+    const step = transcriptRestoreStep({
+      messages: visibleMessages, restore: pending, historyComplete: !!chat?.historyComplete,
+      loading: historyLoadingNow.current, stalled: restoreStalled.current,
+    });
+    if (step === 'load' || step === 'wait') return false;
+    restoring.current = null;
+    if (step === 'abandon') {
+      // The row is gone: reopen at the newest row, never at some other row.
+      stick.current = true;
+      anchor.current = null;
+      dropAnchor();
+      setWindowTick((tick) => tick + 1);
+      setScrollTop(el, el.scrollHeight);
+      return true;
+    }
+    const node = [...doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')]
+      .find((candidate) => candidate.dataset.chatFindMessage === pending.anchor.key);
+    const box = node && (node.getClientRects().length > 0 ? node : firstBox(node));
+    if (!box) return true; // loaded but not mounted: the ordinary hold takes over
+    const viewportTop = el.getBoundingClientRect().top;
+    setScrollTop(el, transcriptRestoredScrollTop(el.scrollTop, box.getBoundingClientRect().top, viewportTop, pending.anchor.offset));
+    anchor.current = pending.anchor;
+    anchorNode.current = null;
+    anchorContentTop.current = box.getBoundingClientRect().top - viewportTop + el.scrollTop;
+    return true;
   };
 
   // Undo any layout shift above the reader since the anchor was recorded:
@@ -523,7 +593,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     const doc = docRef.current;
     const held = anchor.current;
-    if (!el || !doc || stick.current || !held) return;
+    if (!el || !doc || stick.current || !held || restoring.current) return;
     const viewportTop = el.getBoundingClientRect().top;
     let delta: number | null = null;
     const exact = anchorNode.current;
@@ -549,12 +619,27 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // Older history arrives before the reader reaches the oldest loaded row;
   // the anchor keeps the prepend from moving anything on screen.
   const olderStalledAt = useRef(-1);
+  // After a failed older read, the next automatic one waits 1 s, then 2, 4, 8,
+  // at most 15; a read that lands resets it.
+  const olderRetry = useRef<{ at: number; delay: number; timer: number | null }>({ at: 0, delay: 0, timer: null });
+  const olderRetryPending = () => performance.now() < olderRetry.current.at;
+  const noteOlderOutcome = (outcome: OlderHistoryOutcome) => {
+    const retry = olderRetry.current;
+    if (outcome !== 'failed') { retry.delay = 0; retry.at = 0; return; }
+    retry.delay = Math.min(OLDER_RETRY_MAX_MS, Math.max(OLDER_RETRY_MIN_MS, retry.delay * 2));
+    retry.at = performance.now() + retry.delay;
+    if (retry.timer !== null) window.clearTimeout(retry.timer);
+    // Nothing else may re-render a reader who holds still at the top.
+    retry.timer = window.setTimeout(() => { retry.timer = null; setWindowTick((tick) => tick + 1); }, retry.delay);
+  };
+  useEffect(() => () => { if (olderRetry.current.timer !== null) window.clearTimeout(olderRetry.current.timer); }, []);
   const loadOlderAhead = () => {
     const el = scrollRef.current;
-    if (!el || !virtual || stick.current || hidden <= 0 || historyLoadingNow.current || olderStalledAt.current === total) return;
-    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX) return;
+    if (!el || !virtual || stick.current || restoring.current || hidden <= 0 || historyLoadingNow.current || olderStalledAt.current === total) return;
+    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX || olderRetryPending()) return;
     const before = total;
-    void revealOlder().then((loaded) => { if (!loaded) olderStalledAt.current = before; });
+    // Only "nothing older" stops it; a read that failed is tried again.
+    void revealOlder().then((outcome) => { if (outcome === 'empty') olderStalledAt.current = before; });
   };
 
   // Clamp writes to the real maximum. Programmatic scroll events are ignored by
@@ -577,6 +662,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
 
   const openFind = useCallback(() => {
     if (!findOpen) findReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Searching is a new place to read; a position still on its way back yields.
+    restoring.current = null;
     setFindOpen(true);
     void loadCompleteHistory();
     requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); });
@@ -697,6 +784,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    // Layout passes while a remembered position is on its way back move
+    // nothing the reader sees (the rows are hidden); they record nothing.
+    if (restoring.current) { lastScrollTop.current = el.scrollTop; return; }
     const userInitiated = performance.now() <= userScrollUntil.current;
     const delta = userScrollDelta.current || el.scrollTop - lastScrollTop.current;
     lastScrollTop.current = el.scrollTop;
@@ -745,16 +835,21 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   };
 
   // One older page from the actor. The reading anchor keeps the prepend from
-  // moving what is on screen.
-  const revealOlder = async (): Promise<boolean> => {
-    if (!chat || chat.historyComplete || historyLoadingNow.current) return false;
+  // moving what is on screen. A read that failed (a timeout behind a busy
+  // history lane, a race) is retried after a growing pause instead of being
+  // taken for the start of the chat.
+  const revealOlder = async (page = HISTORY_PAGE): Promise<OlderHistoryOutcome> => {
+    if (!chat || chat.historyComplete) return 'empty';
+    if (historyLoadingNow.current) return 'failed';
     historyLoadingNow.current = true;
     setHistoryLoading(true);
     const chatID = chat.id;
     try {
-      return total === 0
-        ? await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL)
-        : await store.loadOlderHistory(chat.id, HISTORY_PAGE);
+      const outcome: OlderHistoryOutcome = total === 0
+        ? (await store.loadRecentHistory(chat.id, CHAT_MESSAGE_TAIL) ? 'loaded' : 'failed')
+        : await store.loadOlderHistoryPage(chat.id, page);
+      if (viewChat.current === chatID) noteOlderOutcome(outcome);
+      return outcome;
     } finally {
       if (viewChat.current === chatID) {
         historyLoadingNow.current = false;
@@ -793,15 +888,19 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     mountedWindow.current = win;
     recordUnitHeights(heights.current, measureUnits(doc));
     if (!virtual) { recordAnchor(); return; }
-    // A remembered reading position whose row is no longer loaded reopens at
-    // the newest row, never at some other row near the top.
-    if (!stick.current && anchor.current && !unitOfMessage.has(anchor.current.key)) {
+    if (restoring.current) {
+      // Arriving at a chat that was left mid-read: its row goes back exactly
+      // where it was. A row older than what is loaded keeps the restore
+      // pending (and the rows hidden) while the effect below loads pages.
+      restoreReadingPosition();
+    } else if (!stick.current && anchor.current && !unitOfMessage.has(anchor.current.key)) {
+      // A reading position whose row is no longer loaded reopens at the
+      // newest row, never at some other row near the top.
       stick.current = true;
       anchor.current = null;
       dropAnchor();
       setWindowTick((tick) => tick + 1);
-    }
-    if (!stick.current) { holdAnchor(); recordAnchor(); }
+    } else if (!stick.current) { holdAnchor(); recordAnchor(); }
     // Re-cuts inside one frame are estimates converging; cap them per frame.
     if (syncRewindows.current++ === 0) requestAnimationFrame(() => { syncRewindows.current = 0; });
     if (syncRewindows.current <= MAX_SYNC_REWINDOWS) rewindowIfStale();
@@ -819,11 +918,32 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const doc = docRef.current;
     const el = scrollRef.current;
     if (!doc || !el || !chat || selectedFindMatch || doc.offsetHeight >= el.clientHeight) return;
-    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current) return;
+    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current || olderRetryPending()) return;
     const chatID = chat.id;
     const before = chat.messages.length;
-    void revealOlder().then(() => {
-      if ((store.chat(chatID)?.messages.length ?? 0) <= before) autoFillStalled.current = true;
+    void revealOlder().then((outcome) => {
+      if (outcome !== 'failed' && (store.chat(chatID)?.messages.length ?? 0) <= before) autoFillStalled.current = true;
+    });
+  });
+
+  // A remembered row older than the loaded history: load older pages, the
+  // largest the actor serves, until it is present (the layout effect then puts
+  // it back) or it proves gone. A passive effect, so it runs after the
+  // per-chat reset above has settled the loading flags of this mount.
+  useEffect(() => {
+    const pending = restoring.current;
+    if (!pending || !virtual || !chat) return;
+    const step = transcriptRestoreStep({
+      messages: visibleMessages, restore: pending, historyComplete: !!chat.historyComplete,
+      loading: historyLoadingNow.current, stalled: restoreStalled.current,
+    });
+    if (step !== 'load' || olderRetryPending()) return;
+    void revealOlder(CHAT_MESSAGE_TAIL).then((outcome) => {
+      if (restoring.current !== pending) return;
+      // Only "nothing older" proves the row gone; a failed read is retried.
+      if (outcome === 'empty') restoreStalled.current = true;
+      // Re-run the restore even when the store had nothing to publish.
+      setWindowTick((tick) => tick + 1);
     });
   });
 
@@ -954,7 +1074,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           onTouchCancel={onTouchEnd}
         >
           <ChatFindQueryContext.Provider value={findOpen ? findQuery : ''}>
-          <div className="doc" ref={docRef}>
+          <div className="doc" ref={docRef} style={restorePending ? { visibility: 'hidden' } : undefined} aria-busy={restorePending || undefined}>
             {inheritedFold && chat && (
               <button
                 type="button" className="inh" aria-expanded={inheritedOpen}
