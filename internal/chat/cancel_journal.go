@@ -82,6 +82,10 @@ func (c cancelJournalCommand) command() (Command, error) {
 }
 
 func (s FileStore) commitCancelCommand(baseRevision uint64, next State, command Command) error {
+	return commitCancelCommandViaJournal(s, baseRevision, next, command)
+}
+
+func commitCancelCommandViaJournal(s journalStateStore, baseRevision uint64, next State, command Command) error {
 	if !cancellationCommand(next, command) {
 		return errors.New("non-cancel command cannot enter the cancellation journal")
 	}
@@ -98,15 +102,16 @@ func (s FileStore) commitCancelCommand(baseRevision uint64, next State, command 
 	case CancelPendingTurn:
 		cancel.Pending = &value
 	}
-	frame, err := encodeProviderEventJournalFrame(providerEventJournalRecord{
+	record := providerEventJournalRecord{
 		Version: cancelJournalVersion, BaseRevision: baseRevision, Revision: next.Revision, Cancel: cancel,
-	})
+	}
+	payload, err := encodeProviderEventJournalPayload(record)
 	if err != nil {
 		return err
 	}
 	// Like the native terminal receipt, Stop must not trigger a whole-history
 	// checkpoint merely because the stream journal reached its normal threshold.
-	appended, err := appendProviderEventJournalFrame(s.Path, frame, true)
+	appended, err := s.appendJournalRecord(record, payload, true)
 	if err != nil || appended {
 		return err
 	}
