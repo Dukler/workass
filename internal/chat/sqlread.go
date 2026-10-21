@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"workass/internal/store"
 )
@@ -24,9 +27,11 @@ import (
 // a caller can tell that the actor was opened and changed underneath it.
 
 // DiscoverEach visits every actor's head, ordered by ChatID. It decodes only
-// state_json (never messages), one head at a time after a single read of the
-// rows, so boot reads no transcript and never holds every decoded head at
-// once. Full validation and journal replay happen when the actor is opened.
+// state_json (never messages), so boot reads no transcript. Heads are copied
+// out in read transactions of about sqlDiscoverChunkBytes and decoded one at
+// a time between them, so boot never holds every head's JSON, or every
+// decoded head, at once, and visit may read the store itself. Full
+// validation and journal replay happen when the actor is opened.
 func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 	type rawHead struct {
 		chatID       string
@@ -36,17 +41,100 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 		journalBytes int64
 		ledgerGen    int64
 	}
-	var raws []rawHead
+	after, more := "", true
+	for more {
+		var raws []rawHead
+		err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+			raws, more = raws[:0], false
+			rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len, journal_bytes, ledger_gen FROM chats WHERE chat_id > ? ORDER BY chat_id`, after)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			copied := 0
+			for rows.Next() {
+				if copied >= sqlDiscoverChunkBytes {
+					more = true
+					break
+				}
+				var raw rawHead
+				if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen, &raw.journalBytes, &raw.ledgerGen); err != nil {
+					return err
+				}
+				copied += len(raw.stateJSON)
+				raws = append(raws, raw)
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			return err
+		}
+		// Decoding is most of discovery; the heads of a chunk decode in
+		// parallel and are visited in order.
+		states := make([]State, len(raws))
+		errs := make([]error, len(raws))
+		var next atomic.Int64
+		var workers sync.WaitGroup
+		for worker := 0; worker < min(len(raws), runtime.GOMAXPROCS(0), 8); worker++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for index := int(next.Add(1)) - 1; index < len(raws); index = int(next.Add(1)) - 1 {
+					if raws[index].version == currentStateEnvelopeVersion {
+						errs[index] = json.Unmarshal(raws[index].stateJSON, &states[index])
+					}
+					raws[index].stateJSON = nil
+				}
+			}()
+		}
+		workers.Wait()
+		for index := range raws {
+			raw := &raws[index]
+			after = raw.chatID
+			if raw.version != currentStateEnvelopeVersion {
+				return fmt.Errorf("chat actor %q: unsupported chat state version %d", raw.chatID, raw.version)
+			}
+			if errs[index] != nil {
+				return fmt.Errorf("decode chat actor %q: %w", raw.chatID, errs[index])
+			}
+			state := states[index]
+			states[index] = State{}
+			if strings.TrimSpace(state.ChatID) != raw.chatID {
+				return fmt.Errorf("chat actor %q holds state for another chat", raw.chatID)
+			}
+			if raw.ledgerLen > 0 {
+				state.Ledger = nil
+			}
+			if err := visit(ActorHead{State: state, LedgerLength: raw.ledgerLen, JournalBytes: raw.journalBytes, LedgerGen: raw.ledgerGen}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// sqlDiscoverChunkBytes bounds the head JSON one discovery read copies.
+const sqlDiscoverChunkBytes = 16 << 20
+
+// ReadNewestStamps returns the stamp of every chat's newest ledger row, in
+// one read: what SummarizeHead needs for almost every chat (the rest, whose
+// newest row has no timestamp, read further back with ReadLedgerStamps).
+func (a *SQLActors) ReadNewestStamps() (map[string]LedgerStamp, error) {
+	type rawStamp struct {
+		chatID    string
+		eventJSON []byte
+	}
+	var raws []rawStamp
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
 		raws = raws[:0]
-		rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len, journal_bytes, ledger_gen FROM chats ORDER BY chat_id`)
+		rows, err := tx.Query(`SELECT messages.chat_id, messages.event_json FROM chats JOIN messages ON messages.chat_id = chats.chat_id AND messages.seq = chats.ledger_len`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var raw rawHead
-			if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen, &raw.journalBytes, &raw.ledgerGen); err != nil {
+			var raw rawStamp
+			if err := rows.Scan(&raw.chatID, &raw.eventJSON); err != nil {
 				return err
 			}
 			raws = append(raws, raw)
@@ -54,29 +142,25 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 		return rows.Err()
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
+	stamps := make(map[string]LedgerStamp, len(raws))
 	for index := range raws {
-		raw := &raws[index]
-		if raw.version != currentStateEnvelopeVersion {
-			return fmt.Errorf("chat actor %q: unsupported chat state version %d", raw.chatID, raw.version)
+		var stamp LedgerStamp
+		if err := json.Unmarshal(raws[index].eventJSON, &stamp); err != nil {
+			return nil, fmt.Errorf("decode chat %q newest ledger row: %w", raws[index].chatID, err)
 		}
-		var state State
-		if err := json.Unmarshal(raw.stateJSON, &state); err != nil {
-			return fmt.Errorf("decode chat actor %q: %w", raw.chatID, err)
-		}
-		raw.stateJSON = nil
-		if strings.TrimSpace(state.ChatID) != raw.chatID {
-			return fmt.Errorf("chat actor %q holds state for another chat", raw.chatID)
-		}
-		if raw.ledgerLen > 0 {
-			state.Ledger = nil
-		}
-		if err := visit(ActorHead{State: state, LedgerLength: raw.ledgerLen, JournalBytes: raw.journalBytes, LedgerGen: raw.ledgerGen}); err != nil {
-			return err
-		}
+		raws[index].eventJSON = nil
+		stamps[raws[index].chatID] = stamp
 	}
-	return nil
+	return stamps, nil
+}
+
+// HasLedgerTimestamp reports whether a stamp's timestamp parses (the session
+// timestamp rule).
+func (s LedgerStamp) HasLedgerTimestamp() bool {
+	_, ok := ledgerStampTime(s.At)
+	return ok
 }
 
 // errSQLChatUnknown: the chat has no checkpoint row.

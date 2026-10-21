@@ -53,7 +53,7 @@ func lazyTestChat(t *testing.T, stateDir string, backend chatActorBackend, chatI
 				Attachments: []providercontract.Attachment{{ID: "tool-image", MIMEType: "image/png", Ref: providerSessionImageRefPrefix + lazyImageRef(t, stateDir, fmt.Sprintf("%s-tool-%d", chatID, sequence))}},
 			}}}
 		}
-		if sequence < rows-2 {
+		if sequence < rows-2 || rows%2 == 1 { // even-sized chats end with undated rows
 			row.At = at.Add(time.Duration(sequence) * time.Minute).Format(time.RFC3339Nano)
 		}
 		state.Ledger = append(state.Ledger, row)
