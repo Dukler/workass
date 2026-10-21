@@ -2364,7 +2364,11 @@ func (m *Manager) refreshProviderCatalogNow(ctx context.Context, providerID stri
 				runtime.CatalogRefreshError = ""
 			}
 			after := runtime.catalogGroupLocked()
-			changed = !sameUsableCatalog(before, after)
+			// state:digest hashes this group whole, latency included, and a
+			// renderer heals a diverged hash only from a published catalog.
+			// Publishing just "usable" changes let every refresh (latency is
+			// re-measured each time) diverge the digest with nothing to heal it.
+			changed = !sameDigestCatalog(before, after)
 		}
 		if runtime.CatalogRefreshDone == done {
 			runtime.CatalogRefreshing = false
@@ -2373,6 +2377,9 @@ func (m *Manager) refreshProviderCatalogNow(ctx context.Context, providerID stri
 		}
 	}
 	m.mu.Unlock()
+	// A first probe (no usable catalog yet) is a catalog read: its caller
+	// publishes, or the needs-login transition below does. Refreshing a catalog
+	// that was already published is the daemon's own news.
 	if changed && !initialNoUsableCache {
 		m.emitCatalogSnapshot()
 	}
@@ -2416,6 +2423,14 @@ func sameModelCatalog(a, b []Model) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// sameDigestCatalog reports whether two groups hash alike in state:digest,
+// which marshals each group whole.
+func sameDigestCatalog(a, b CatalogGroup) bool {
+	left, errA := json.Marshal(a)
+	right, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(left, right)
+}
+
 func sameUsableCatalog(a, b CatalogGroup) bool {
 	return a.ProviderName == b.ProviderName && a.Status == b.Status &&
 		reflect.DeepEqual(a.Models, b.Models) && reflect.DeepEqual(a.Modes, b.Modes)
@@ -2435,11 +2450,19 @@ func invalidateProviderCatalogLocked(runtime *providerRuntime) {
 }
 
 func (m *Manager) emitCatalogSnapshot() {
+	m.emit("chat:catalog", m.CatalogSnapshot())
+}
+
+// CatalogSnapshot is the chat:catalog payload for the current visible catalog,
+// read without probing or starting a provider: exactly the groups state:digest
+// hashes. providers:catalog returns it, so a renderer whose catalog hash
+// diverged (a missed chat:catalog) heals with one read instead of a detection
+// pass.
+func (m *Manager) CatalogSnapshot() map[string]any {
 	m.mu.Lock()
 	defaultID := m.defaultProviderID
 	m.mu.Unlock()
-	groups := m.CatalogSnapshotGroups()
-	m.emit("chat:catalog", catalogPayload(groups, defaultID))
+	return catalogPayload(m.CatalogSnapshotGroups(), defaultID)
 }
 
 func (r *providerRuntime) catalogGroupLocked() CatalogGroup {

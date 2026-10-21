@@ -22,6 +22,7 @@ import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceip
 import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
+import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
@@ -83,6 +84,9 @@ const isToolFailed = (s: string) => s === 'failed' || s === 'error';
 const HYDRATION_STEP_TIMEOUT = 15000;
 const AGENT_REFRESH_TIMEOUT = 20000;
 const DIGEST_SYNC_DEBOUNCE = 250;
+// A daemon without providers:catalog re-publishes a drifted catalog only from a
+// detection pass; its background refresh re-measures latency every 5 minutes.
+const CATALOG_DETECT_FALLBACK_MS = 10 * 60 * 1000;
 const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
 type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
@@ -578,6 +582,11 @@ export class Store {
   private syncQueued = false;
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private localCatalogHashes: Record<string, string> | null = null;
+  // The diverged (daemon, local) catalog state the latest digest reported, and
+  // the one a catalog sync last ran for (see refreshCatalogSnapshot).
+  private catalogDigestKey: string | null = null;
+  private catalogSyncedKey: string | null = null;
+  private catalogDetectFallbackAt = Number.NEGATIVE_INFINITY;
   private localSettingsRevision: string | null = null;
   private localProcHash: string | null = null;
   private catalogHashEpoch = 0;
@@ -2265,7 +2274,14 @@ export class Store {
     // so counting them here made the two sides permanently unequal: every heartbeat
     // declared the session diverged and re-restored it, wholesale, forever.
     if (digest.chats.length !== this.state.chats.filter((chat) => !ownerMachineId(chat)).length) scopes.add('session');
-    if (hashMapDiverged(this.localCatalogHashes, digest.catalogHash)) scopes.add('catalog');
+    if (hashMapDiverged(this.localCatalogHashes, digest.catalogHash)) {
+      // One catalog sync per distinct (daemon, local) catalog state: re-reading
+      // the same state cannot converge, it only repeats work every heartbeat.
+      // An older daemon may still get its bounded detection fallback.
+      const key = `${catalogHashKey(digest.catalogHash)}\u0000${catalogHashKey(this.localCatalogHashes)}`;
+      this.catalogDigestKey = key;
+      if (key !== this.catalogSyncedKey || this.catalogDetectFallbackDue()) scopes.add('catalog');
+    }
     if (digest.settingsRevision && this.localSettingsRevision !== digest.settingsRevision) scopes.add('settings');
     if (digest.procHash && this.localProcHash !== digest.procHash) scopes.add('processes');
     return scopes;
@@ -2314,17 +2330,39 @@ export class Store {
     }
   }
 
-  // A catalog digest only re-reads the daemon's provider snapshot. It never
-  // asks for providers:detect: that probes every CLI and local server (2-4.5 s)
-  // and holds up every other request on this connection, while the daemon
-  // already detects on its own and pushes chat:catalog when the catalog
+  // A catalog digest re-reads the daemon's provider and catalog snapshots. It
+  // does not ask for providers:detect: that probes every CLI and local server
+  // (2-4.5 s) and holds up every other request on this connection, while the
+  // daemon already detects on its own and pushes chat:catalog when the catalog
   // changes. Explicit refreshes (Settings, re-enabling an agent) still detect.
+  //
+  // providers:list carries no catalog groups, so on its own it never healed a
+  // diverged catalog hash (a missed chat:catalog, or a daemon refresh that
+  // re-measured latency without publishing). providers:catalog returns exactly
+  // the groups the digest hashes. A daemon without it can only re-publish its
+  // catalog through a detection pass, so that daemon gets one, at most once per
+  // CATALOG_DETECT_FALLBACK_MS while its catalog stays diverged.
   private async refreshCatalogSnapshot() {
+    const key = this.catalogDigestKey;
     if (has('providersList')) {
       const providers = await call('providersList');
       if (Array.isArray(providers)) this.onProvidersList(providers);
     }
+    if (has('providersCatalog')) {
+      const catalog = await call('providersCatalog');
+      if (catalog && typeof catalog === 'object' && Array.isArray(catalog.groups)) this.onCatalog(catalog);
+    } else if (has('providersDetect') && this.catalogDetectFallbackDue()) {
+      this.catalogDetectFallbackAt = Date.now();
+      const detected = await call('providersDetect', {});
+      if (Array.isArray(detected?.providers)) this.onProvidersList(detected.providers);
+    }
+    this.catalogSyncedKey = key;
     this.bumpApp(false);
+  }
+
+  private catalogDetectFallbackDue(): boolean {
+    return !has('providersCatalog') && has('providersDetect')
+      && Date.now() - this.catalogDetectFallbackAt >= CATALOG_DETECT_FALLBACK_MS;
   }
 
   private async refreshProcesses() {
@@ -6958,17 +6996,6 @@ function hashMapDiverged(local: Record<string, string> | null, remote: Record<st
   if (!local) return remoteKeys.length > 0;
   const localKeys = Object.keys(local).sort();
   return !sameStrings(localKeys, remoteKeys) || remoteKeys.some((key) => local[key] !== remote[key]);
-}
-async function stateDigestHash(value: unknown): Promise<string | null> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) return null;
-  try {
-    const encoded = new TextEncoder().encode(JSON.stringify(value));
-    const digest = await subtle.digest('SHA-256', encoded);
-    return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, '0')).join('');
-  } catch {
-    return null;
-  }
 }
 function isStateDigest(value: unknown): value is StateDigest {
   if (!value || typeof value !== 'object') return false;
