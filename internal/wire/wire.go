@@ -1840,6 +1840,11 @@ func (h *Hub) accessApprovedPayload(c *client, device lease.Device) map[string]a
 	if token := c.consumeIssuedToken(); token != "" {
 		payload["deviceToken"] = token
 	}
+	// Additive: the read-only capability for GET /workass/chat-image/ (see
+	// chat_image_key.go). An older client ignores it.
+	if key := chatImageKey(device); key != "" {
+		payload["imageKey"] = key
+	}
 	return h.stampIdentity(payload)
 }
 

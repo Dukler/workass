@@ -39,7 +39,7 @@ export function ImageClipboardController() {
       event.preventDefault();
       event.stopPropagation();
       void openImageElementExternally(image).then((opened) => {
-        if (!opened) store.openImageLightbox(image.currentSrc || image.src, image.alt || 'Imagen');
+        if (!opened) store.openImageLightbox(image.dataset?.fullSrc || image.currentSrc || image.src, image.alt || 'Imagen');
       });
     };
     document.addEventListener('keydown', onKeyDown);
