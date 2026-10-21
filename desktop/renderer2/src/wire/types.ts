@@ -702,7 +702,9 @@ export interface WorkassApi {
   // a compare-and-swap: the daemon refuses it if the blob changed since.
   setSettings?: (settings: unknown, options?: { expectedRevision: string }) => Promise<unknown>;
   getConfig?: () => Promise<DaemonConfig>;
-  getSession?: () => Promise<unknown>;
+  // leanTools: large committed tool payloads arrive as a bounded head plus
+  // outputDeferred/outputBytes; an older daemon or bridge ignores it.
+  getSession?: (options?: { leanTools?: boolean }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
@@ -739,7 +741,13 @@ export interface WorkassApi {
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   // deferImages: a message's own images arrive by reference (deferredImageRef)
   // and load per image through { imageRef }; an older daemon ignores it.
-  archiveLoad?: (tabId: string, options?: { tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean }) => Promise<unknown[]>;
+  // leanTools: large tool payloads arrive as a head (outputDeferred) and load
+  // per row through { toolDetail } in bounded chunks ({ text, offset, next,
+  // total }); tail:1 rides along so an older daemon answers one bounded row.
+  archiveLoad?: (tabId: string, options?: {
+    tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean; leanTools?: boolean;
+    toolDetail?: { messageId: string; key: string; field?: 'output' | 'input'; offset: number };
+  }) => Promise<unknown>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
   // D5 explicit chat fork: a new chat copies the source's visible ledger prefix

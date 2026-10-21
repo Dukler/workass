@@ -133,8 +133,8 @@ test('switching chats keeps a bounded recent tail and loads the full ledger only
     assert.equal(first.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(first.id), true);
     assert.deepEqual(archiveCalls, [
-      { tabId: first.id, options: { tail: 60, deferImages: true } },
-      { tabId: first.id, options: { beforeMessageId: 'message-0', limit: 60, deferImages: true } },
+      { tabId: first.id, options: { tail: 60, deferImages: true, leanTools: true } },
+      { tabId: first.id, options: { beforeMessageId: 'message-0', limit: 60, deferImages: true, leanTools: true } },
     ]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -178,9 +178,9 @@ test('older history pages prepend by stable boundary until the canonical transcr
     assert.equal(target.messageCount, 145);
     assert.equal(target.historyComplete, true);
     assert.deepEqual(archiveCalls, [
-      { tabId: target.id, options: { beforeMessageId: 'message-85', limit: 40, deferImages: true } },
-      { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40, deferImages: true } },
-      { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40, deferImages: true } },
+      { tabId: target.id, options: { beforeMessageId: 'message-85', limit: 40, deferImages: true, leanTools: true } },
+      { tabId: target.id, options: { beforeMessageId: 'message-45', limit: 40, deferImages: true, leanTools: true } },
+      { tabId: target.id, options: { beforeMessageId: 'message-5', limit: 40, deferImages: true, leanTools: true } },
     ]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
@@ -276,7 +276,7 @@ test('older history paging remains compatible with a daemon that returns the ful
     assert.equal(await subject.loadOlderHistory(target.id, 40), true);
     assert.deepEqual(target.messages.map((message) => message.id), complete.map((message) => message.id));
     assert.equal(target.historyComplete, true);
-    assert.deepEqual(archiveCalls, [{ beforeMessageId: 'message-40', limit: 40, deferImages: true }]);
+    assert.deepEqual(archiveCalls, [{ beforeMessageId: 'message-40', limit: 40, deferImages: true, leanTools: true }]);
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
@@ -346,7 +346,7 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     subject.switchChat(target.id);
     assert.equal(subject.state.activeId, first.id);
     assert.equal(first.messages.length, firstRows.length);
-    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, deferImages: true } }]);
+    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, deferImages: true, leanTools: true } }]);
 
     historyReleased = true;
     releaseHistory(targetRows.slice(-10));
@@ -539,7 +539,7 @@ test('a newer metadata-only refresh reconciles a bounded recent suffix without c
     await load;
 
     assert.equal(archiveReads, 1);
-    assert.deepEqual(archiveOptions, { tail: 10, deferImages: true });
+    assert.deepEqual(archiveOptions, { tail: 10, deferImages: true, leanTools: true });
     assert.equal(subject.chat(active.id)?.messages.length, complete.length);
     assert.equal(subject.chat(active.id)?.historyComplete, true);
     assert.equal(subject.fullHistoriesLoaded.has(active.id), true);

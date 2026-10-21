@@ -36,6 +36,12 @@ export interface ToolEvent {
   // Friendly model+effort combo for the Turnos chip, e.g. "Opus4.8-xhigh".
   // Additive: absent against an older daemon → the chip is simply hidden.
   subagentModel?: string | null;
+  // Lean history (additive): the daemon sent only a head of a large payload.
+  // The full output loads when the row opens (chat/tool-detail.ts), through
+  // `detail`, which the renderer stamps on hydration with the owning row.
+  outputDeferred?: boolean; outputBytes?: number;
+  inputDeferred?: boolean; inputBytes?: number;
+  detail?: { tabId: string; messageId: string };
 }
 // Quiet in-transcript marker that the daemon auto-compacted the context (D1).
 export interface CompactionEvent { key: string; at: number; kind: 'compaction'; }
