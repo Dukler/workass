@@ -22,8 +22,8 @@ import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceip
 import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
-import { actorMessages } from '../chat/history';
-import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
+import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
+import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
@@ -404,6 +404,10 @@ export function titleFromPrompt(text: string, max = 34): string {
 // it, the newest few kept on window for the shell's perf endpoint. "cold" means
 // it had to read its recent history first (2026-10-13: a slow switch could not
 // be measured after the fact).
+// session:get asks for the same references as history pages: a message's own
+// images and large tool payloads load when seen or opened.
+const LEAN_SESSION_READ = { leanTools: true, deferImages: true } as const;
+
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
   requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -712,8 +716,12 @@ export class Store {
   private markAllChatsDirty() {
     for (const chat of this.state.chats) this.touchChat(chat.id);
   }
+  // Most recently read first; these keep their loaded history while inactive.
+  private recentlyRead: string[] = [];
   private releaseInactiveHistories(activeId: string | null) {
-    for (const chatId of releaseInactiveHistories(this.state.chats, activeId)) this.fullHistoriesLoaded.delete(chatId);
+    if (activeId) this.recentlyRead = [activeId, ...this.recentlyRead.filter((id) => id !== activeId)].slice(0, CHAT_RETAINED_HISTORIES);
+    const retained = new Set(this.recentlyRead);
+    for (const chatId of releaseInactiveHistories(this.state.chats, activeId, retained)) this.fullHistoriesLoaded.delete(chatId);
   }
   private preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]) {
     for (const chatId of preserveUnchangedFullHistories(previous, restored)) this.fullHistoriesLoaded.add(chatId);
@@ -1137,7 +1145,7 @@ export class Store {
         });
       }
       const contextUsageByProvider = normalizeContextUsageByProvider(c.contextUsageByProvider);
-      const messages = actorMessages(Array.isArray(c.messages) ? c.messages : []);
+      const messages = actorMessages(Array.isArray(c.messages) ? c.messages : [], c.id);
       const messageCount = Number.isInteger(c.messageCount) && (c.messageCount ?? 0) >= messages.length
         ? c.messageCount!
         : messages.length;
@@ -1244,7 +1252,7 @@ export class Store {
       try {
         const step = await this.guardedStep(
           `recent actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { tail: limit, deferImages: true }),
+          () => call('archiveLoad', chatId, { tail: limit, ...HISTORY_READ_OPTIONS }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return;
@@ -1253,7 +1261,7 @@ export class Store {
       if (!chat || chat.chatId !== durableChatId || !Array.isArray(projected)) return;
       let messages: Msg[];
       try {
-        messages = actorMessages(projected as MirrorMsg[]);
+        messages = actorMessages(projected as MirrorMsg[], chatId);
       } catch (error) {
         console.warn(`[store] recent actor history rejected (${chatId})`, error);
         return;
@@ -1271,11 +1279,11 @@ export class Store {
         const boundary = messages[0].id;
         const step = await this.guardedStep(
           `recent actor history prefix (${chatId})`,
-          () => call('archiveLoad', chatId, { beforeMessageId: boundary, limit: Math.min(limit, messageCount) - messages.length, deferImages: true }),
+          () => call('archiveLoad', chatId, { beforeMessageId: boundary, limit: Math.min(limit, messageCount) - messages.length, ...HISTORY_READ_OPTIONS }),
         );
         if (!step.ok || !Array.isArray(step.value)) break;
         let page: Msg[];
-        try { page = actorMessages(step.value as MirrorMsg[]); } catch { break; }
+        try { page = actorMessages(step.value as MirrorMsg[], chatId); } catch { break; }
         const boundaryIndex = page.findIndex((message) => message.id === boundary);
         const prefix = boundaryIndex >= 0 ? page.slice(0, boundaryIndex) : page;
         const seen = new Set(messages.map((message) => message.id));
@@ -1362,7 +1370,7 @@ export class Store {
       try {
         const step = await this.guardedStep(
           `older actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { beforeMessageId, limit, deferImages: true }),
+          () => call('archiveLoad', chatId, { beforeMessageId, limit, ...HISTORY_READ_OPTIONS }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return false;
@@ -1371,7 +1379,7 @@ export class Store {
       if (!chat || chat.chatId !== durableChatId || chat.messages[0]?.id !== beforeMessageId || !Array.isArray(projected)) return false;
       let page: Msg[];
       try {
-        page = actorMessages(projected as MirrorMsg[]);
+        page = actorMessages(projected as MirrorMsg[], chatId);
       } catch (error) {
         console.warn(`[store] older actor history rejected (${chatId})`, error);
         return false;
@@ -1426,13 +1434,13 @@ export class Store {
     let beforeMessageId: string | undefined;
     for (;;) {
       const options = beforeMessageId
-        ? { beforeMessageId, limit: CHAT_MESSAGE_TAIL, deferImages: true }
-        : { tail: CHAT_MESSAGE_TAIL, deferImages: true };
+        ? { beforeMessageId, limit: CHAT_MESSAGE_TAIL, ...HISTORY_READ_OPTIONS }
+        : { tail: CHAT_MESSAGE_TAIL, ...HISTORY_READ_OPTIONS };
       const step = await this.guardedStep(
         `actor history (${chatId})`, () => call('archiveLoad', chatId, options),
       );
       if (!step.ok || !Array.isArray(step.value)) return null;
-      const page = actorMessages(step.value as MirrorMsg[]);
+      const page = actorMessages(step.value as MirrorMsg[], chatId);
       if (page.length === 0) break;
       // Older daemons return the complete archive even when options are
       // supplied. Its exact boundary gives the remaining canonical prefix.
@@ -2283,7 +2291,7 @@ export class Store {
   private async runScopedSync(scopes: ReadonlySet<SyncScope>) {
     if (scopes.has('session')) {
       const liveEventFence = this.liveTurnEventVersion;
-      const result = await this.guardedStep('digest session:get', () => callThrow('getSession'));
+      const result = await this.guardedStep('digest session:get', () => callThrow('getSession', LEAN_SESSION_READ));
       if (result.ok && this.restoreSessionSnapshot(result.value, liveEventFence)) {
         this.recoverIdleQueues();
         this.bumpApp(false);
@@ -3407,7 +3415,7 @@ export class Store {
     // from the server-side session store).
     const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
-      ? await this.guardedStep('boot session:get', () => callThrow('getSession'))
+      ? await this.guardedStep('boot session:get', () => callThrow('getSession', LEAN_SESSION_READ))
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
     if (!sessionStep.ok) {
@@ -3562,7 +3570,7 @@ export class Store {
     await this.guardedStep('reconnect app metadata', () => this.refreshAppMeta());
     const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
-      ? await this.guardedStep('reconnect session:get', () => callThrow('getSession'))
+      ? await this.guardedStep('reconnect session:get', () => callThrow('getSession', LEAN_SESSION_READ))
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
     if (sessionStep.ok && this.restoreSessionSnapshot(server, liveEventFence)) {
@@ -6105,7 +6113,12 @@ export class Store {
       );
       if (match) {
         match.status = ev.status || match.status;
-        if (ev.output != null) match.output = ev.output;
+        if (ev.output != null) {
+          // A live payload is whole: it replaces any lean history head.
+          match.output = ev.output;
+          delete match.outputDeferred;
+          delete match.outputBytes;
+        }
         if (ev.images != null) match.images = ev.images;
         if (ev.command != null) match.command = ev.command;
         if (ev.terminalId != null) match.terminalId = ev.terminalId;

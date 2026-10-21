@@ -81,7 +81,7 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 // chat:archive-load method. Both the wire result and the actor snapshot are
 // bounded here: limiting only the serialized rows still paid to deep-copy every
 // historical body before a large chat could paint.
-func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
+func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[string]any, error) {
 	if r == nil || r.sessions == nil {
 		return nil, errors.New("provider chat projection is unavailable")
 	}
@@ -149,6 +149,9 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		if err := projectActorChatWithHistoryWindow(projected, state, history, sessionProjectionMessageTail, window); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
 		}
+		for _, opt := range opts {
+			opt.beforeBudget(anySlice(projected["messages"]))
+		}
 		messages, err := boundedActorHistory(anySlice(projected["messages"]), filepath.Dir(r.sessions.path))
 		if err != nil {
 			return nil, err
@@ -156,6 +159,9 @@ func (r *providerChatRuntime) ProjectSession() (map[string]any, error) {
 		projected["messages"] = messages
 		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
 		deferArchiveToolImages(messages)
+		for _, opt := range opts {
+			opt.apply(messages)
+		}
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
@@ -205,8 +211,8 @@ func sessionHistoryProjection(state chat.State, activeTabID string) actorHistory
 	return actorHistoryMetadataOnly
 }
 
-func (r *providerChatRuntime) ProjectSessionRaw() ([]byte, error) {
-	root, err := r.ProjectSession()
+func (r *providerChatRuntime) ProjectSessionRaw(opts ...archiveReadOptions) ([]byte, error) {
+	root, err := r.ProjectSession(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +245,17 @@ type archiveReadOptions struct {
 	// is not a multi-megabyte read before its text can paint (2026-10-13: four
 	// screenshots made a ten-message read 4.8 MB).
 	deferMessageImages bool
+	// leanTools sends large committed tool payloads as a bounded head; the
+	// rest is read per row with the toolDetail archive option.
+	leanTools bool
+}
+
+// beforeBudget runs before the byte budget measures a page, so a lean page
+// carries as many rows as its lean size allows.
+func (o archiveReadOptions) beforeBudget(messages []any) {
+	if o.leanTools {
+		leanArchiveToolPayloads(messages)
+	}
 }
 
 func (o archiveReadOptions) apply(messages []any) {
@@ -273,6 +290,9 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 			return nil, false, err
 		}
 		messages = append(messages, message)
+	}
+	for _, opt := range opts {
+		opt.beforeBudget(messages)
 	}
 	messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
 	if err != nil {
@@ -314,6 +334,9 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 		return nil, false, err
 	}
 	messages := anySlice(projected["messages"])
+	for _, opt := range opts {
+		opt.beforeBudget(messages)
+	}
 	if history != actorHistoryFull {
 		messages, err = boundedActorHistory(messages, filepath.Dir(r.sessions.path))
 		if err != nil {

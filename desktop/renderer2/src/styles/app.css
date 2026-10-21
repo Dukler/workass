@@ -403,6 +403,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .chatfind-box button:disabled { opacity: .35; cursor: default; }
 .chatfind-box button svg { width: 12px; height: 12px; stroke-width: 1.4; }
 .chatfind-message { display: contents; }
+/* Transcript windowing: a unit wrapper adds no box, so message spacing is unchanged. */
+.vunit { display: contents; }
+.vpad { flex: none; }
 .chatfind-text { display: contents; }
 ::highlight(workass-chat-find) { background-color: color-mix(in srgb, var(--amber) 35%, transparent); color: inherit; }
 ::highlight(workass-chat-find-current) { background-color: color-mix(in srgb, var(--amber) 78%, transparent); color: var(--bg); }
@@ -411,7 +414,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
    the centered .doc stays on the same centerline as the (scrollbar-free)
    composer below it — and doesn't shift 4.5px when the scrollbar appears. */
 .transcriptviewport { position: relative; flex: 1; min-height: 0; --thinklive-h: 32px; --live-gap: 14px; }
-.transcriptviewport > .scroll { height: 100%; }
+.transcriptviewport > .scroll { height: 100%; overflow-anchor: none; } /* the transcript holds its own reading anchor */
 .scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable both-edges; }
 .doc { max-width: var(--read); margin: 0 auto; padding: 26px 36px var(--doc-pad-b); }
 /* The Working line's row is reserved whether or not a turn runs, so the text
