@@ -539,8 +539,19 @@ type RecoverOutbox struct{}
 func (RecoverOutbox) chatCommand() {}
 
 func Reduce(current State, command Command) (State, []Effect, error) {
-	if err := current.Validate(); err != nil {
-		return current, nil, fmt.Errorf("invalid current chat state: %w", err)
+	return reduce(current, command, false)
+}
+
+// reduce is Reduce. currentValidated says current is exactly a state that
+// State.Validate has already accepted (the engine's committed state, which it
+// installs only from a validated transition); validating it again cannot
+// change the outcome and on a long chat costs tens of milliseconds per
+// command, so it is skipped.
+func reduce(current State, command Command, currentValidated bool) (State, []Effect, error) {
+	if !currentValidated {
+		if err := current.Validate(); err != nil {
+			return current, nil, fmt.Errorf("invalid current chat state: %w", err)
+		}
 	}
 	if current.Deleted {
 		switch command.(type) {

@@ -201,7 +201,15 @@ func normalizeCancelMutationReceipts(state *State) {
 }
 
 func (s FileStore) Save(state State) error {
-	if err := saveStateEnvelope(s.Path, state, currentStateEnvelopeVersion); err != nil {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	return s.saveValidated(state)
+}
+
+// saveValidated is Save for a state the caller has just validated.
+func (s FileStore) saveValidated(state State) error {
+	if err := writeStateEnvelope(s.Path, state, currentStateEnvelopeVersion); err != nil {
 		return err
 	}
 	return resetProviderEventJournal(s.Path)
@@ -648,6 +656,10 @@ func saveStateEnvelope(path string, state State, version int) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}
+	return writeStateEnvelope(path, state, version)
+}
+
+func writeStateEnvelope(path string, state State, version int) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return errors.New("chat state store path is empty")

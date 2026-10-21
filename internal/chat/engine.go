@@ -15,8 +15,14 @@ import (
 // commands. External effects become executable exclusively through ClaimNext,
 // after their Pending -> Dispatched transition is durably stored.
 type Engine struct {
-	mu                  sync.Mutex
-	state               State
+	mu    sync.Mutex
+	state State
+	// validated: state is exactly a state State.Validate accepted, because it
+	// was installed from a validated transition and committed state is never
+	// changed in place. The next transition then skips revalidating it. A
+	// journaled provider event validates only what it changed, so it clears
+	// this.
+	validated           bool
 	store               StateStore
 	cancelRouting       atomic.Pointer[cancelRoutingSnapshot]
 	pendingSteerSettled chan struct{}
@@ -62,11 +68,12 @@ func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := store.Save(next); err != nil {
+	engine := &Engine{store: store}
+	if err := engine.saveReduced(next); err != nil {
 		return nil, err
 	}
-	engine := &Engine{store: store}
 	engine.installCommittedState(next)
+	engine.validated = true
 	return engine, nil
 }
 
@@ -126,9 +133,12 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		err  error
 	)
 	if useProviderEventJournal {
+		// The journaled reducer shares unchanged structure with the committed
+		// state; stop vouching for it before running.
+		e.validated = false
 		next, err = reduceJournaledProviderEvent(e.state, providerEvent)
 	} else {
-		next, _, err = Reduce(e.state, command)
+		next, _, err = reduce(e.state, command, e.validated)
 	}
 	if err != nil {
 		return err
@@ -145,14 +155,29 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		} else if prepare == nil {
 			persistErr = e.persistCommand(next, command)
 		} else {
-			persistErr = e.store.Save(next)
+			persistErr = e.saveReduced(next)
 		}
 		if persistErr != nil {
 			return persistErr
 		}
 	}
 	e.installCommittedState(next)
+	e.validated = !useProviderEventJournal
 	return nil
+}
+
+// saveReduced checkpoints a state reduce has just validated. Both stores
+// validate on Save to refuse any caller's invalid state; for the engine's own
+// transition that is the same pure check run an instant earlier on the same
+// value. Other stores (wrappers in tests) keep their Save.
+func (e *Engine) saveReduced(next State) error {
+	switch store := e.store.(type) {
+	case *SQLStore:
+		return store.saveValidated(next)
+	case FileStore:
+		return store.saveValidated(next)
+	}
+	return e.store.Save(next)
 }
 
 // ClaimNext persists the Pending -> Dispatched transition before returning an
@@ -165,7 +190,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 		if entry.Status != OutboxPending || !outboxEntryExecutable(e.state, entry) {
 			continue
 		}
-		next, effects, err := Reduce(e.state, ClaimEffect{EffectID: entry.ID})
+		next, effects, err := reduce(e.state, ClaimEffect{EffectID: entry.ID}, e.validated)
 		if err != nil {
 			return nil, false, err
 		}
@@ -178,6 +203,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 			}
 		}
 		e.installCommittedState(next)
+		e.validated = true
 		return effects[0], true, nil
 	}
 	return nil, false, nil
@@ -197,7 +223,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 		if entry.ID != effectID || entry.Status != OutboxPending || !outboxEntryDirectClaimable(e.state, entry) {
 			continue
 		}
-		next, effects, err := Reduce(e.state, ClaimEffect{EffectID: effectID})
+		next, effects, err := reduce(e.state, ClaimEffect{EffectID: effectID}, e.validated)
 		if err != nil {
 			return nil, false, err
 		}
@@ -210,6 +236,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 			}
 		}
 		e.installCommittedState(next)
+		e.validated = true
 		return effects[0], true, nil
 	}
 	return nil, false, nil
