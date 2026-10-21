@@ -3,6 +3,8 @@ import type { ListItem, SignedBlock } from './blocks';
 import { renderInline, type InlineMediaResolver } from './inline';
 import { CodeBlock } from './CodeBlock';
 import { VisualizeBlock } from './VisualizeBlock';
+import { HtmlBlock } from './HtmlBlock';
+import { isHtmlFence } from './html-render';
 
 // One block. Memoized on its signature so a sealed block above the streaming
 // tail never re-renders while tokens flow into the last block.
@@ -53,6 +55,8 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin,
     case 'heading':
       return <div className={`mdh mdh${Math.min(b.level, 3)}`}>{renderInline(b.raw, 'h', true, media)}</div>;
     case 'code':
+      // A finished ```html block renders as its page (approved mock html-render).
+      if (isHtmlFence(b.lang)) return <HtmlBlock raw={b.raw} closed={b.closed} streaming={streaming} />;
       return <CodeBlock raw={b.raw} language={b.lang} closed={b.closed} />;
     case 'quote':
       return <div className="mdquote">{renderInline(b.raw, 'q', true, media)}</div>;

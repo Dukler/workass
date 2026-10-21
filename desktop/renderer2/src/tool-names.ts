@@ -150,6 +150,7 @@ const WORKASS_MCP_LABEL: Record<string, [string, string]> = {
   workass_cancel_chat_turn: ['Cancelar un turno', 'chat'],
   workass_agent_catalog: ['Ver el catálogo de modelos', 'plan'],
   workass_host_artifact: ['Publicar un artefacto', 'web'],
+  workass_render_html: ['Mostrar una página', 'web'],
   workass_browser_open: ['Abrir el navegador', 'web'],
   workass_browser_navigate: ['Navegar en el navegador', 'web'],
   workass_browser_screenshot: ['Capturar el navegador', 'web'],
