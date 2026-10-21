@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,14 +49,16 @@ func TestHTMLRenderRejectsViewportHeightUnitsOnlyInCSS(t *testing.T) {
 
 func TestHTMLRenderSourceTakesExactlyOneBoundedUTF8Page(t *testing.T) {
 	dir := t.TempDir()
+	workingDir := func() (string, error) { return dir, nil }
 	page := filepath.Join(dir, "page.html")
 	if err := os.WriteFile(page, []byte("<h1>hola</h1>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if source, err := htmlRenderSource(map[string]any{"path": page}); err != nil || source != "<h1>hola</h1>" {
+	if source, err := htmlRenderSource(map[string]any{"path": page}, workingDir); err != nil || source != "<h1>hola</h1>" {
 		t.Fatalf("path source = %q, %v", source, err)
 	}
-	if source, err := htmlRenderSource(map[string]any{"html": "<p>x</p>"}); err != nil || source != "<p>x</p>" {
+	inlineOnly := func() (string, error) { t.Fatal("an inline page asked for the working directory"); return "", nil }
+	if source, err := htmlRenderSource(map[string]any{"html": "<p>x</p>"}, inlineOnly); err != nil || source != "<p>x</p>" {
 		t.Fatalf("inline source = %q, %v", source, err)
 	}
 	big := filepath.Join(dir, "big.html")
@@ -83,9 +86,72 @@ func TestHTMLRenderSourceTakesExactlyOneBoundedUTF8Page(t *testing.T) {
 		"not utf-8":     {"path": binary},
 		"blank":         {"html": "   \n"},
 	} {
-		if _, err := htmlRenderSource(params); err == nil {
+		if _, err := htmlRenderSource(params, workingDir); err == nil {
 			t.Errorf("%s: htmlRenderSource accepted %#v", name, params)
 		}
+	}
+}
+
+// workass_render_html reads a path only as the real file it names, and only
+// inside the chat's working directory.
+func TestHTMLRenderSourceReadsOnlyRealPagesInsideTheWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{workspace, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, body string) string {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	link := func(target, path string) string {
+		t.Helper()
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return path
+	}
+	page := write(filepath.Join(workspace, "page.html"), "<h1>dentro</h1>")
+	secret := write(filepath.Join(workspace, "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----")
+	outsidePage := write(filepath.Join(outside, "page.html"), "<h1>fuera</h1>")
+	workingDir := func() (string, error) { return workspace, nil }
+
+	accepted := map[string]string{
+		"page in the working directory":      page,
+		"page-named link to a page inside":   link(page, filepath.Join(workspace, "alias.html")),
+		"other-named link to a page inside":  link(page, filepath.Join(workspace, "alias.txt")),
+		"page reached through the workspace": filepath.Join(workspace, ".", "page.html"),
+	}
+	for name, path := range accepted {
+		if source, err := htmlRenderSource(map[string]any{"path": path}, workingDir); err != nil || source != "<h1>dentro</h1>" {
+			t.Errorf("%s: %q, %v", name, source, err)
+		}
+	}
+	refused := map[string]string{
+		"page-named link to a key":             link(secret, filepath.Join(workspace, "key.html")),
+		"page outside the working directory":   outsidePage,
+		"page-named link to a page outside":    link(outsidePage, filepath.Join(workspace, "escape.html")),
+		"dot-dot out of the working directory": filepath.Join(workspace, "..", "outside", "page.html"),
+		"page through a linked directory":      filepath.Join(link(outside, filepath.Join(workspace, "linked")), "page.html"),
+	}
+	for name, path := range refused {
+		if source, err := htmlRenderSource(map[string]any{"path": path}, workingDir); err == nil {
+			t.Errorf("%s: read %q", name, source)
+		}
+	}
+	if _, err := htmlRenderSource(map[string]any{"path": page}, func() (string, error) { return "", errors.New("no working directory") }); err == nil {
+		t.Error("a chat without a working directory read a path")
+	}
+	// A working directory reached through a link confines to its real place.
+	linkedWorkspace := link(workspace, filepath.Join(root, "workspace-link"))
+	if _, err := htmlRenderSource(map[string]any{"path": page}, func() (string, error) { return linkedWorkspace, nil }); err != nil {
+		t.Errorf("page under a linked working directory: %v", err)
 	}
 }
 
@@ -234,13 +300,27 @@ func TestAgentControlRendersHTMLPagesThroughTheArtifactRegistry(t *testing.T) {
 		t.Fatalf("reused operation with another page = %v", err)
 	}
 
-	file := filepath.Join(t.TempDir(), "dashboard.html")
+	file := filepath.Join(workspace, "dashboard.html")
 	if err := os.WriteFile(file, []byte("<h1>Latencia</h1>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fromFile, err := call(map[string]any{"operation_id": "page-file", "title": "Latencia", "path": file})
 	if err != nil || toString(mapFromAnyMain(mapFromAnyMain(fromFile)["htmlRender"])["id"]) == id {
 		t.Fatalf("page from path = %#v, %v", fromFile, err)
+	}
+	// A page outside the chat's working directory is refused before anything
+	// is journaled.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.html")
+	if err := os.WriteFile(elsewhere, []byte("<h1>Fuera</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call(map[string]any{"operation_id": "page-elsewhere", "title": "Fuera", "path": elsewhere}); err == nil || !strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("page outside the working directory = %v", err)
+	}
+	if state, ok := runtime.Snapshot(chatID); !ok {
+		t.Fatal("actor disappeared")
+	} else if _, journaled := externalBrowserMutationEntry(state, "page-elsewhere"); journaled {
+		t.Fatal("a refused page was journaled")
 	}
 
 	if _, err := call(map[string]any{"operation_id": "page-vh", "title": "Hero", "html": "<style>main{height:100vh}</style><main></main>"}); err == nil || !strings.Contains(err.Error(), "viewport height unit (100vh)") {

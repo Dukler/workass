@@ -60,40 +60,55 @@ type ActorHead struct {
 
 // Discover lists every actor's head, ordered by ChatID. It decodes only
 // state_json (never messages), so boot no longer reads every transcript; full
-// validation and journal replay happen when the actor is opened.
+// validation and journal replay happen when the actor is opened. The heads
+// are copied out in one read and decoded after it.
 func (a *SQLActors) Discover() ([]ActorHead, error) {
-	var heads []ActorHead
+	type rawHead struct {
+		chatID    string
+		version   int
+		stateJSON []byte
+		ledgerLen int
+	}
+	var raws []rawHead
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		raws = raws[:0]
 		rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len FROM chats ORDER BY chat_id`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var chatID string
-			var stateJSON []byte
-			var version, ledgerLen int
-			if err := rows.Scan(&chatID, &version, &stateJSON, &ledgerLen); err != nil {
+			var raw rawHead
+			if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen); err != nil {
 				return err
 			}
-			if version != currentStateEnvelopeVersion {
-				return fmt.Errorf("chat actor %q: unsupported chat state version %d", chatID, version)
-			}
-			var state State
-			if err := json.Unmarshal(stateJSON, &state); err != nil {
-				return fmt.Errorf("decode chat actor %q: %w", chatID, err)
-			}
-			if strings.TrimSpace(state.ChatID) != chatID {
-				return fmt.Errorf("chat actor %q holds state for another chat", chatID)
-			}
-			if ledgerLen > 0 {
-				state.Ledger = nil
-			}
-			heads = append(heads, ActorHead{State: state, LedgerLength: ledgerLen})
+			raws = append(raws, raw)
 		}
 		return rows.Err()
 	})
-	return heads, err
+	if err != nil {
+		return nil, err
+	}
+	heads := make([]ActorHead, 0, len(raws))
+	for index := range raws {
+		raw := &raws[index]
+		if raw.version != currentStateEnvelopeVersion {
+			return nil, fmt.Errorf("chat actor %q: unsupported chat state version %d", raw.chatID, raw.version)
+		}
+		var state State
+		if err := json.Unmarshal(raw.stateJSON, &state); err != nil {
+			return nil, fmt.Errorf("decode chat actor %q: %w", raw.chatID, err)
+		}
+		raw.stateJSON = nil
+		if strings.TrimSpace(state.ChatID) != raw.chatID {
+			return nil, fmt.Errorf("chat actor %q holds state for another chat", raw.chatID)
+		}
+		if raw.ledgerLen > 0 {
+			state.Ledger = nil
+		}
+		heads = append(heads, ActorHead{State: state, LedgerLength: raw.ledgerLen})
+	}
+	return heads, nil
 }
 
 // ErrLedgerNotCheckpointed: the chat's rows were written by a build that
@@ -133,7 +148,10 @@ func (a *SQLActors) ReadMessages(chatID string, beforeSeq uint64, limit int) (pa
 	if limit <= 0 {
 		return MessagePage{}, false, errors.New("read messages requires a positive limit")
 	}
+	var raws []sqlRawRow
+	expected := int64(0)
 	err = a.db.Read(context.Background(), func(tx *store.Tx) error {
+		page, found, raws = MessagePage{}, false, raws[:0]
 		var ledgerLen, ledgerGen int64
 		var revision uint64
 		err := tx.QueryRow(`SELECT ledger_len, ledger_gen, revision FROM chats WHERE chat_id = ?`, chatID).Scan(&ledgerLen, &ledgerGen, &revision)
@@ -160,43 +178,46 @@ func (a *SQLActors) ReadMessages(chatID string, beforeSeq uint64, limit int) (pa
 		if upper == 0 || upper > page.Total+1 {
 			upper = page.Total + 1
 		}
+		expected = int64(upper) - 1
 		rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`, chatID, int64(upper), limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		var events []LedgerEvent
-		expected := int64(upper) - 1
 		for rows.Next() {
-			var seq int64
-			var raw []byte
-			if err := rows.Scan(&seq, &raw); err != nil {
+			var raw sqlRawRow
+			if err := rows.Scan(&raw.seq, &raw.eventJSON); err != nil {
 				return err
 			}
-			if seq != expected {
-				return fmt.Errorf("chat ledger row %d is missing", expected)
-			}
-			var event LedgerEvent
-			if err := json.Unmarshal(raw, &event); err != nil {
-				return fmt.Errorf("decode chat ledger row %d: %w", seq, err)
-			}
-			events = append(events, event)
-			expected--
+			raws = append(raws, raw)
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
-			events[left], events[right] = events[right], events[left]
-		}
-		page.Events = events
-		if len(events) > 0 {
-			page.First = uint64(expected + 1)
-		}
-		return nil
+		return rows.Err()
 	})
 	if err != nil {
 		return MessagePage{}, found, err
+	}
+	// Decoding a page of large rows happens after the read, so it never holds
+	// the connection every chat shares.
+	events := make([]LedgerEvent, 0, len(raws))
+	for index := range raws {
+		raw := &raws[index]
+		if raw.seq != expected {
+			return MessagePage{}, found, fmt.Errorf("chat ledger row %d is missing", expected)
+		}
+		var event LedgerEvent
+		if err := json.Unmarshal(raw.eventJSON, &event); err != nil {
+			return MessagePage{}, found, fmt.Errorf("decode chat ledger row %d: %w", raw.seq, err)
+		}
+		raw.eventJSON = nil
+		events = append(events, event)
+		expected--
+	}
+	for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
+		events[left], events[right] = events[right], events[left]
+	}
+	if len(events) > 0 {
+		page.Events = events
+		page.First = uint64(expected + 1)
 	}
 	return page, found, nil
 }
@@ -240,15 +261,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var (
-		loaded sqlLoadedActor
-		found  bool
-	)
-	err := s.actors.db.Read(context.Background(), func(tx *store.Tx) error {
-		var err error
-		loaded, found, err = loadSQLActorRows(tx, s.chatID)
-		return err
-	})
+	loaded, found, err := loadSQLActorInChunks(s.actors.db, s.chatID)
 	if err != nil || !found {
 		s.cache = nil
 		return State{}, false, err
@@ -266,103 +279,177 @@ type sqlLoadedActor struct {
 	ledgerGen int64
 }
 
-// loadSQLActor reads the checkpoint, its ledger rows and journal, and returns
-// the same State FileStore.Load would for the equivalent files.
-func loadSQLActor(tx *store.Tx, chatID string) (State, bool, error) {
-	loaded, found, err := loadSQLActorRows(tx, chatID)
-	return loaded.state, found, err
+// sqlActorHeadRow is a chats row as stored. Its checkpoint fields identify
+// one committed checkpoint: every checkpoint bumps ledger_gen, so a reader
+// that sees the same values again knows no checkpoint happened in between.
+type sqlActorHeadRow struct {
+	version   int
+	revision  uint64
+	stateJSON []byte
+	ledgerLen int
+	ledgerGen int64
+	updatedAt string
 }
 
-func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error) {
+func (h sqlActorHeadRow) sameCheckpoint(other sqlActorHeadRow) bool {
+	return h.version == other.version && h.revision == other.revision && h.ledgerLen == other.ledgerLen &&
+		h.ledgerGen == other.ledgerGen && h.updatedAt == other.updatedAt
+}
+
+// sqlRawRow is one messages row as stored.
+type sqlRawRow struct {
+	seq       int64
+	eventJSON []byte
+}
+
+const (
+	// sqlLoadChunkBytes bounds the ledger bytes one read transaction copies
+	// out while an actor loads. Every chat shares one connection: a 150 MB
+	// chat read and decoded in one transaction stalled every other chat's
+	// commits for the whole open (review 2026-10-21: a 0.2 ms commit waited
+	// 440 ms).
+	sqlLoadChunkBytes = 1 << 20
+	// sqlLoadAttempts bounds the restarts when another handle checkpoints the
+	// actor between two chunks. Each actor has one writer, so a restart is
+	// rare and a second one rarer still.
+	sqlLoadAttempts = 8
+)
+
+// errSQLActorCheckpointedDuringLoad restarts a chunked load.
+var errSQLActorCheckpointedDuringLoad = errors.New("chat actor was checkpointed during its load")
+
+// sqlLoadBetweenChunks, tests only, runs between two read transactions of a
+// chunked load, with the number of rows decoded so far.
+var sqlLoadBetweenChunks func(chatID string, decoded int)
+
+// loadSQLActorInChunks returns what loadSQLActorRows returns in one
+// transaction, without holding the connection for the whole read or for any
+// decoding. The head and the first rows are copied out in one short read
+// transaction; each later one re-reads the head's checkpoint fields and
+// copies the next sqlLoadChunkBytes of rows, and the one that reaches the
+// last row also copies the journal. Decoding, validation and journal replay
+// run between and after those transactions.
+//
+// The result is one committed checkpoint: rows change only through a
+// checkpoint, which bumps ledger_gen, so an unchanged head proves the rows
+// already copied still belong to it, and the journal copied with the last
+// rows is that checkpoint's journal at that moment. A checkpoint in between
+// restarts the load.
+func loadSQLActorInChunks(db *store.DB, chatID string) (sqlLoadedActor, bool, error) {
+	for attempt := 1; ; attempt++ {
+		loaded, found, err := loadSQLActorChunkedOnce(db, chatID)
+		if errors.Is(err, errSQLActorCheckpointedDuringLoad) && attempt < sqlLoadAttempts {
+			continue
+		}
+		return loaded, found, err
+	}
+}
+
+func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool, error) {
 	var (
-		version   int
-		revision  uint64
-		stateJSON []byte
-		ledgerLen int
-		ledgerGen int64
+		head    sqlActorHeadRow
+		state   State
+		ledger  []LedgerEvent
+		chunk   []sqlRawRow
+		journal [][]byte
 	)
-	err := tx.QueryRow(`SELECT envelope_version, revision, state_json, ledger_len, ledger_gen FROM chats WHERE chat_id = ?`, chatID).
-		Scan(&version, &revision, &stateJSON, &ledgerLen, &ledgerGen)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sqlLoadedActor{}, false, nil
-	}
-	if err != nil {
-		return sqlLoadedActor{}, false, err
-	}
-	if version != currentStateEnvelopeVersion {
-		return sqlLoadedActor{}, false, fmt.Errorf("unsupported chat state version %d", version)
-	}
-	var state State
-	if err := json.Unmarshal(stateJSON, &state); err != nil {
-		return sqlLoadedActor{}, false, fmt.Errorf("decode chat state: %w", err)
-	}
-	stateJSON = nil
-	if strings.TrimSpace(state.ChatID) != chatID {
-		return sqlLoadedActor{}, false, errors.New("chat state row belongs to another chat")
-	}
-	if state.Revision != revision {
-		return sqlLoadedActor{}, false, fmt.Errorf("chat state revision %d disagrees with its checkpoint row %d", state.Revision, revision)
-	}
-	var rows []LedgerEvent
-	if ledgerLen > 0 {
-		rows, err = loadSQLLedger(tx, chatID, ledgerLen)
-		if err != nil {
+	for first, done := true, false; !done; first = false {
+		found := false
+		err := db.Read(context.Background(), func(tx *store.Tx) error {
+			chunk, journal, done = chunk[:0], nil, false
+			current, ok, err := readSQLActorHead(tx, chatID)
+			if err != nil {
+				return err
+			}
+			found = ok
+			if first {
+				head = current
+				if !ok {
+					return nil
+				}
+			} else if !ok || !current.sameCheckpoint(head) {
+				return errSQLActorCheckpointedDuringLoad
+			}
+			done = true
+			if head.ledgerLen > 0 {
+				chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(len(ledger)), sqlLoadChunkBytes, chunk)
+				if err != nil {
+					return err
+				}
+			}
+			if done {
+				journal, err = readSQLJournal(tx, chatID)
+			}
+			return err
+		})
+		if err != nil || !found {
 			return sqlLoadedActor{}, false, err
 		}
-		state.Ledger = rows
+		if first {
+			if state, err = decodeSQLHead(head, chatID); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+			head.stateJSON = nil
+			if head.ledgerLen > 0 {
+				ledger = make([]LedgerEvent, 0, head.ledgerLen)
+			}
+		}
+		if ledger, err = appendSQLLedgerRows(ledger, chunk); err != nil {
+			return sqlLoadedActor{}, false, err
+		}
+		if !done && sqlLoadBetweenChunks != nil {
+			sqlLoadBetweenChunks(chatID, len(ledger))
+		}
 	}
-	normalizeStateMaps(&state)
-	if err := state.Validate(); err != nil {
-		return sqlLoadedActor{}, false, fmt.Errorf("validate chat state: %w", err)
-	}
-	state, err = replaySQLJournal(tx, chatID, state)
-	if err != nil {
-		return sqlLoadedActor{}, false, fmt.Errorf("replay provider event journal: %w", err)
-	}
-	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen}, true, nil
+	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen)
 }
 
-func loadSQLLedger(tx *store.Tx, chatID string, ledgerLen int) ([]LedgerEvent, error) {
-	rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? ORDER BY seq`, chatID)
+// readSQLActorHead reads one chats row as stored.
+func readSQLActorHead(tx *store.Tx, chatID string) (sqlActorHeadRow, bool, error) {
+	var head sqlActorHeadRow
+	err := tx.QueryRow(`SELECT envelope_version, revision, state_json, ledger_len, ledger_gen, updated_at FROM chats WHERE chat_id = ?`, chatID).
+		Scan(&head.version, &head.revision, &head.stateJSON, &head.ledgerLen, &head.ledgerGen, &head.updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sqlActorHeadRow{}, false, nil
+	}
 	if err != nil {
-		return nil, err
+		return sqlActorHeadRow{}, false, err
+	}
+	return head, true, nil
+}
+
+// readSQLLedgerChunk appends to into the rows after seq `after`, in order,
+// until at least budget bytes are copied (budget <= 0: every row). done
+// reports that the last row was read.
+func readSQLLedgerChunk(tx *store.Tx, chatID string, after int64, budget int, into []sqlRawRow) ([]sqlRawRow, bool, error) {
+	rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq > ? ORDER BY seq`, chatID, after)
+	if err != nil {
+		return into, false, err
 	}
 	defer rows.Close()
-	ledger := make([]LedgerEvent, 0, ledgerLen)
-	for rows.Next() {
-		var seq int
-		var raw []byte
-		if err := rows.Scan(&seq, &raw); err != nil {
-			return nil, err
+	copied := 0
+	for budget <= 0 || copied < budget {
+		if !rows.Next() {
+			return into, true, rows.Err()
 		}
-		if seq != len(ledger)+1 {
-			return nil, fmt.Errorf("chat ledger row %d is out of position %d", seq, len(ledger)+1)
+		var raw sqlRawRow
+		if err := rows.Scan(&raw.seq, &raw.eventJSON); err != nil {
+			return into, false, err
 		}
-		var event LedgerEvent
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, fmt.Errorf("decode chat ledger row %d: %w", seq, err)
-		}
-		ledger = append(ledger, event)
+		copied += len(raw.eventJSON)
+		into = append(into, raw)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(ledger) != ledgerLen {
-		return nil, fmt.Errorf("chat ledger has %d rows, its checkpoint expects %d", len(ledger), ledgerLen)
-	}
-	return ledger, nil
+	return into, false, rows.Err()
 }
 
-func replaySQLJournal(tx *store.Tx, chatID string, state State) (State, error) {
+func readSQLJournal(tx *store.Tx, chatID string) ([][]byte, error) {
 	rows, err := tx.Query(`SELECT record FROM chat_events WHERE chat_id = ? ORDER BY revision`, chatID)
 	if err != nil {
-		return State{}, err
+		return nil, err
 	}
 	defer rows.Close()
-	replayed, err := replayProviderEventRecords(state, func() ([]byte, error) {
-		if !rows.Next() {
-			return nil, rows.Err()
-		}
+	var records [][]byte
+	for rows.Next() {
 		var payload []byte
 		if err := rows.Scan(&payload); err != nil {
 			return nil, err
@@ -370,12 +457,117 @@ func replaySQLJournal(tx *store.Tx, chatID string, state State) (State, error) {
 		if len(payload) == 0 {
 			return nil, errors.New("provider event journal record is empty")
 		}
+		records = append(records, payload)
+	}
+	return records, rows.Err()
+}
+
+func decodeSQLHead(head sqlActorHeadRow, chatID string) (State, error) {
+	if head.version != currentStateEnvelopeVersion {
+		return State{}, fmt.Errorf("unsupported chat state version %d", head.version)
+	}
+	var state State
+	if err := json.Unmarshal(head.stateJSON, &state); err != nil {
+		return State{}, fmt.Errorf("decode chat state: %w", err)
+	}
+	if strings.TrimSpace(state.ChatID) != chatID {
+		return State{}, errors.New("chat state row belongs to another chat")
+	}
+	if state.Revision != head.revision {
+		return State{}, fmt.Errorf("chat state revision %d disagrees with its checkpoint row %d", state.Revision, head.revision)
+	}
+	return state, nil
+}
+
+// appendSQLLedgerRows decodes rows that continue ledger without a gap,
+// dropping each row's bytes once it is decoded.
+func appendSQLLedgerRows(ledger []LedgerEvent, rows []sqlRawRow) ([]LedgerEvent, error) {
+	for index := range rows {
+		raw := &rows[index]
+		if raw.seq != int64(len(ledger)+1) {
+			return nil, fmt.Errorf("chat ledger row %d is out of position %d", raw.seq, len(ledger)+1)
+		}
+		var event LedgerEvent
+		if err := json.Unmarshal(raw.eventJSON, &event); err != nil {
+			return nil, fmt.Errorf("decode chat ledger row %d: %w", raw.seq, err)
+		}
+		raw.eventJSON = nil
+		ledger = append(ledger, event)
+	}
+	return ledger, nil
+}
+
+// finishSQLActor turns a decoded checkpoint into the State FileStore.Load
+// returns for the equivalent files: ledger rows in place, maps normalized,
+// validated, journal replayed.
+func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal [][]byte, ledgerGen int64) (sqlLoadedActor, bool, error) {
+	var rows []LedgerEvent
+	if ledgerLen > 0 {
+		if len(ledger) != ledgerLen {
+			return sqlLoadedActor{}, false, fmt.Errorf("chat ledger has %d rows, its checkpoint expects %d", len(ledger), ledgerLen)
+		}
+		rows = ledger
+		state.Ledger = rows
+	}
+	normalizeStateMaps(&state)
+	if err := state.Validate(); err != nil {
+		return sqlLoadedActor{}, false, fmt.Errorf("validate chat state: %w", err)
+	}
+	next := 0
+	state, err := replayProviderEventRecords(state, func() ([]byte, error) {
+		if next == len(journal) {
+			return nil, nil
+		}
+		payload := journal[next]
+		journal[next] = nil
+		next++
 		return payload, nil
 	})
 	if err != nil {
-		return State{}, err
+		return sqlLoadedActor{}, false, fmt.Errorf("replay provider event journal: %w", err)
 	}
-	return replayed, rows.Err()
+	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen}, true, nil
+}
+
+// loadSQLActor reads the checkpoint, its ledger rows and journal, and returns
+// the same State FileStore.Load would for the equivalent files.
+func loadSQLActor(tx *store.Tx, chatID string) (State, bool, error) {
+	loaded, found, err := loadSQLActorRows(tx, chatID)
+	return loaded.state, found, err
+}
+
+// loadSQLActorRows is the whole load inside the caller's transaction: the
+// import, which runs at boot before any chat can commit. Runtime opens use
+// loadSQLActorInChunks.
+func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error) {
+	head, found, err := readSQLActorHead(tx, chatID)
+	if err != nil || !found {
+		return sqlLoadedActor{}, false, err
+	}
+	state, err := decodeSQLHead(head, chatID)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
+	head.stateJSON = nil
+	var ledger []LedgerEvent
+	if head.ledgerLen > 0 {
+		// Chunks here only bound the raw bytes held next to the decoded rows.
+		ledger = make([]LedgerEvent, 0, head.ledgerLen)
+		var chunk []sqlRawRow
+		for done := false; !done; {
+			if chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(len(ledger)), sqlLoadChunkBytes, chunk[:0]); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+			if ledger, err = appendSQLLedgerRows(ledger, chunk); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+		}
+	}
+	journal, err := readSQLJournal(tx, chatID)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
+	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen)
 }
 
 // Save is a checkpoint: the head, the ledger rows that differ from the ones
@@ -398,31 +590,52 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		return err
 	}
 	cache := s.cache
-	unchanged := cache != nil && cache.sameLedger(state.Ledger)
-	var plan sqlLedgerPlan
-	err = s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
-		var storedGen int64
-		err := tx.QueryRow(`SELECT ledger_gen FROM chats WHERE chat_id = ?`, s.chatID).Scan(&storedGen)
-		exists := err == nil
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		plan = sqlLedgerPlan{}
-		if !exists || cache == nil || cache.gen != storedGen || storedGen == 0 {
-			plan.full = true
-		} else if !unchanged {
-			plan.diff(cache.rows, state.Ledger)
-		}
-		plan.gen = storedGen + 1
-		if err := upsertSQLChatHead(tx, s.chatID, state.Revision, head, len(state.Ledger), plan.gen); err != nil {
-			return err
-		}
-		if err := plan.apply(tx, s.chatID, state.Ledger); err != nil {
-			return err
-		}
-		_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, s.chatID)
+	// The plan, the row diff and every changed row's JSON are worked out
+	// before the write transaction. On a large ledger they cost far more than
+	// the writes, and every chat shares the one connection. The transaction
+	// only confirms the plan still applies (the stored ledger_gen is the one
+	// the cache describes) and writes. A full plan (no usable cache: a new
+	// chat, a failed commit, another writer) still writes every row in one
+	// transaction, which a checkpoint must; an open actor's ordinary
+	// checkpoints are incremental.
+	plan := sqlLedgerPlan{full: cache == nil || cache.gen == 0}
+	if !plan.full && !cache.sameLedger(state.Ledger) {
+		plan.diff(cache.rows, state.Ledger)
+	}
+	if err := plan.encode(state.Ledger); err != nil {
 		return err
-	})
+	}
+	for {
+		err = s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
+			var storedGen int64
+			err := tx.QueryRow(`SELECT ledger_gen FROM chats WHERE chat_id = ?`, s.chatID).Scan(&storedGen)
+			exists := err == nil
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if !plan.full && (!exists || storedGen != cache.gen) {
+				return errSQLPlanStale
+			}
+			plan.gen = storedGen + 1
+			if err := upsertSQLChatHead(tx, s.chatID, state.Revision, head, len(state.Ledger), plan.gen); err != nil {
+				return err
+			}
+			if err := plan.apply(tx, s.chatID, state.Ledger); err != nil {
+				return err
+			}
+			_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, s.chatID)
+			return err
+		})
+		if !errors.Is(err, errSQLPlanStale) || plan.full {
+			break
+		}
+		// Another writer moved the rows since this handle read them: rewrite
+		// every row, as the in-transaction plan always did in this case.
+		plan = sqlLedgerPlan{full: true}
+		if err = plan.encode(state.Ledger); err != nil {
+			break
+		}
+	}
 	if err != nil {
 		// The table may or may not hold the rows this commit tried to write:
 		// forget the cache so the next checkpoint rewrites every row.
@@ -432,6 +645,10 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	s.cache = plan.nextCache(cache, state.Ledger)
 	return nil
 }
+
+// errSQLPlanStale: the incremental plan was made against rows another writer
+// has since replaced.
+var errSQLPlanStale = errors.New("chat ledger rows changed since this handle read them")
 
 // sameLedger reports whether ledger is the committed ledger this cache
 // describes. The O(1) proof is the identical slice header (the engine shares
@@ -456,7 +673,8 @@ func (c *sqlLedgerCache) sameLedger(ledger []LedgerEvent) bool {
 // sqlLedgerPlan is the row-level difference one checkpoint writes.
 type sqlLedgerPlan struct {
 	full    bool
-	changed []int // positions (0-based) to upsert
+	changed []int    // positions (0-based) to upsert
+	encoded [][]byte // the JSON of each changed row, in changed order
 	gen     int64
 }
 
@@ -475,14 +693,30 @@ func (p *sqlLedgerPlan) diff(stored, next []LedgerEvent) {
 	}
 }
 
+// encode settles which rows the plan writes (every row for a full plan) and
+// marshals them, so the write transaction does no encoding.
+func (p *sqlLedgerPlan) encode(ledger []LedgerEvent) error {
+	if p.full {
+		p.changed = p.changed[:0]
+		for index := range ledger {
+			p.changed = append(p.changed, index)
+		}
+	}
+	p.encoded = make([][]byte, len(p.changed))
+	for position, index := range p.changed {
+		raw, err := json.Marshal(ledger[index])
+		if err != nil {
+			return err
+		}
+		p.encoded[position] = raw
+	}
+	return nil
+}
+
 func (p *sqlLedgerPlan) apply(tx *store.Tx, chatID string, ledger []LedgerEvent) error {
 	if p.full {
 		if _, err := tx.Exec(`DELETE FROM messages WHERE chat_id = ?`, chatID); err != nil {
 			return err
-		}
-		p.changed = p.changed[:0]
-		for index := range ledger {
-			p.changed = append(p.changed, index)
 		}
 	} else if _, err := tx.Exec(`DELETE FROM messages WHERE chat_id = ? AND seq > ?`, chatID, len(ledger)); err != nil {
 		return err
@@ -490,19 +724,18 @@ func (p *sqlLedgerPlan) apply(tx *store.Tx, chatID string, ledger []LedgerEvent)
 	if len(p.changed) == 0 {
 		return nil
 	}
+	if len(p.encoded) != len(p.changed) {
+		return errors.New("chat ledger plan was not encoded")
+	}
 	stmt, err := tx.Prepare(`INSERT INTO messages(chat_id, seq, message_id, role, event_json) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, seq) DO UPDATE SET message_id = excluded.message_id, role = excluded.role, event_json = excluded.event_json`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	for _, index := range p.changed {
+	for position, index := range p.changed {
 		event := ledger[index]
-		raw, err := json.Marshal(event)
-		if err != nil {
-			return err
-		}
-		if _, err := stmt.Exec(chatID, index+1, event.MessageID, event.Role, sqlText(raw)); err != nil {
+		if _, err := stmt.Exec(chatID, index+1, event.MessageID, event.Role, sqlText(p.encoded[position])); err != nil {
 			return err
 		}
 	}
@@ -611,7 +844,8 @@ func encodeSQLHead(state State) ([]byte, error) {
 }
 
 // writeSQLFullCheckpoint replaces one chat's head, every ledger row and its
-// journal; used where no handle cache exists (import).
+// journal; used where no handle cache exists (import, which owns the
+// connection at boot).
 func writeSQLFullCheckpoint(tx *store.Tx, chatID string, state State) error {
 	head, err := encodeSQLHead(state)
 	if err != nil {
@@ -622,6 +856,9 @@ func writeSQLFullCheckpoint(tx *store.Tx, chatID string, state State) error {
 		return err
 	}
 	plan := sqlLedgerPlan{full: true, gen: storedGen + 1}
+	if err := plan.encode(state.Ledger); err != nil {
+		return err
+	}
 	if err := upsertSQLChatHead(tx, chatID, state.Revision, head, len(state.Ledger), plan.gen); err != nil {
 		return err
 	}

@@ -61,11 +61,20 @@ type ImportResult struct {
 //     sha256 receipt, so a crash at any point leaves every actor either fully
 //     imported or untouched; a re-run resumes from the receipts.
 //   - Files are stream-decoded: the ledger goes to the messages table one
-//     LedgerEvent at a time, so a 300 MB actor is never held whole.
+//     LedgerEvent at a time, so a 300 MB file is never held whole.
+//   - Each imported actor is then opened once, in the same transaction, as
+//     FileStore discovery loads it (decode, validate, journal replay). An
+//     actor that does not open fails the import where JSON mode would fail
+//     to start: the store stays importing, the JSON stays authoritative, and
+//     the decision is logged and kept in ImportRefusalFileName.
 //   - A file whose digest matches its receipt is not imported again. A file
 //     that changed while the store is still importing (the JSON is still
 //     authoritative) is re-imported in place.
 //   - The JSON is only read. It is never rewritten, renamed or deleted.
+//   - It runs at boot, before any chat actor exists. A file's transaction
+//     holds the shared connection for the whole file (a 300 MB actor takes
+//     seconds), which is acceptable only because nothing else can commit
+//     yet; runtime reads and checkpoints keep their transactions short.
 //
 // When every file has a receipt the store flips to live. ImportFileActors on
 // a live store does nothing; use VerifyLiveFileActors to detect a JSON
@@ -110,9 +119,20 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 		}
 		rel := path.Join(filepath.ToSlash(relOrBase(stateDir, actorDir)), name)
 		present[rel] = struct{}{}
-		outcome, err := importActorFile(ctx, db, opts, filepath.Join(actorDir, name), rel)
+		filePath := filepath.Join(actorDir, name)
+		outcome, err := importActorFile(ctx, db, opts, filePath, rel)
 		if err != nil {
-			return result, fmt.Errorf("import chat actor %q: %w", name, err)
+			if ctx.Err() != nil {
+				return result, fmt.Errorf("import chat actor %q: %w", name, err)
+			}
+			// File discovery refuses to start on this file too. The import
+			// stops here, as discovery does: no receipt in the store for it,
+			// so the store cannot go live without it, and its JSON untouched.
+			receiptPath := recordImportRefusal(stateDir, rel, filePath, err, db.BinaryVersion(), logf)
+			if receiptPath != "" {
+				return result, fmt.Errorf("import chat actor %q: %w (the JSON is left in place and chats stay in it until this file is fixed or removed; receipt %s)", name, err, receiptPath)
+			}
+			return result, fmt.Errorf("import chat actor %q: %w (the JSON is left in place and chats stay in it until this file is fixed or removed)", name, err)
 		}
 		switch outcome.kind {
 		case importOutcomeImported:
@@ -164,6 +184,7 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 		return result, err
 	}
 	result.Live = true
+	clearImportRefusal(stateDir, logf)
 	return result, nil
 }
 
@@ -173,13 +194,37 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 // be trusted to be the newer one, so the daemon refuses to guess.
 var ErrFileActorsChangedAfterCutover = errors.New("provider-chats JSON changed after the chat store moved to SQLite")
 
-// VerifyLiveFileActors checks, cheaply (directory listing and stat; a hash
-// only for journals), that no JSON actor was created or changed since its
-// receipt.
+// changedAfterCutover names the file that diverged and what to do about it.
+// The usual cause is a rollback cycle: an older or JSON-only build ran on this
+// state directory and rewrote the JSON, then state.db was put back.
+func changedAfterCutover(stateDir, rel, what string) error {
+	dbPath := filepath.Join(stateDir, store.FileName)
+	return fmt.Errorf("%w: %s %s; a build without the SQLite chat store wrote it, so it and %s disagree. "+
+		"To start from the JSON as it is now, quit Workass and move %s, %s-wal and %s-shm (those that exist) out of %s: "+
+		"the next start imports the current JSON, and chat changes saved only in the moved %s since the switch are not carried over",
+		ErrFileActorsChangedAfterCutover, filepath.Join(stateDir, filepath.FromSlash(rel)), what, dbPath,
+		store.FileName, store.FileName, store.FileName, stateDir, store.FileName)
+}
+
+// VerifyLiveFileActors checks that no JSON actor was created or changed since
+// its receipt. It is cheap on an untouched directory: a listing and a stat
+// per file, plus a hash of each journal.
+//
+// A file whose size and modification time still match its receipt is
+// unchanged. One whose time moved but whose size did not is hashed: a copy or
+// a restore (cp -R, the macOS updater's state snapshot, which keeps times
+// only to the microsecond) moves the time without changing a byte. Identical
+// bytes are accepted and the receipt takes the new size and time, so the
+// next boot is a stat again; different bytes are a write after the cutover
+// and fail closed. A different size is different bytes and is never hashed.
 func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions) error {
 	stateDir, actorDir, _, err := importDirs(opts)
 	if err != nil {
 		return err
+	}
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
 	files, err := listActorFiles(actorDir)
 	if err != nil {
@@ -199,18 +244,31 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 	}); err != nil {
 		return err
 	}
+	var refreshed []store.ImportReceipt
 	for _, name := range files {
 		rel := path.Join(filepath.ToSlash(relOrBase(stateDir, actorDir)), name)
 		receipt, ok := receipts[rel]
 		if !ok {
-			return fmt.Errorf("%w: %s has no import receipt", ErrFileActorsChangedAfterCutover, rel)
+			return changedAfterCutover(stateDir, rel, "was created after the switch (it has no import receipt)")
 		}
-		info, err := os.Stat(filepath.Join(actorDir, name))
+		filePath := filepath.Join(actorDir, name)
+		info, err := os.Stat(filePath)
 		if err != nil {
 			return err
 		}
-		if info.Size() != receipt.Size || info.ModTime().UnixNano() != receipt.MTimeNS {
-			return fmt.Errorf("%w: %s was modified after its import", ErrFileActorsChangedAfterCutover, rel)
+		if info.Size() != receipt.Size {
+			return changedAfterCutover(stateDir, rel, "was modified after its import")
+		}
+		if info.ModTime().UnixNano() != receipt.MTimeNS {
+			digest, hashed, err := statAndSHA256(filePath)
+			if err != nil {
+				return err
+			}
+			if digest != receipt.SHA256 || hashed.Size() != receipt.Size {
+				return changedAfterCutover(stateDir, rel, "was modified after its import")
+			}
+			receipt.Size, receipt.MTimeNS = hashed.Size(), hashed.ModTime().UnixNano()
+			refreshed = append(refreshed, receipt)
 		}
 		companion := filepath.Join(actorDir, name+".events")
 		digest, exists, err := fileSHA256(companion)
@@ -218,10 +276,45 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 			return err
 		}
 		if exists != (receipt.Companion != "") || (exists && digest != receipt.CompanionSHA256) {
-			return fmt.Errorf("%w: %s.events changed after its import", ErrFileActorsChangedAfterCutover, rel)
+			return changedAfterCutover(stateDir, rel+".events", "changed after its import")
 		}
 	}
+	if len(refreshed) == 0 {
+		return nil
+	}
+	if err := db.Write(ctx, func(tx *store.Tx) error {
+		for _, receipt := range refreshed {
+			if err := tx.PutImportReceipt(receipt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, receipt := range refreshed {
+		logf("[store] chat actor %s has new file times but the bytes of its import; receipt refreshed", receipt.Source)
+	}
 	return nil
+}
+
+// statAndSHA256 hashes a file and stats the same open file once the hash is
+// read, so the size and time it returns describe the bytes it hashed.
+func statAndSHA256(filePath string) (string, os.FileInfo, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", nil, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), info, nil
 }
 
 func importDirs(opts ImportOptions) (stateDir, actorDir, source string, err error) {
@@ -382,9 +475,9 @@ func streamActorFile(tx *store.Tx, opts ImportOptions, filePath, companionPath s
 		if err := importer.importJournal(companionPath); err != nil {
 			return importOutcome{}, fmt.Errorf("import provider event journal: %w", err)
 		}
-		if err := checkpointImportedJournal(tx, importer.chatID); err != nil {
-			return importOutcome{}, fmt.Errorf("checkpoint imported journal: %w", err)
-		}
+	}
+	if err := openImportedActor(tx, importer.chatID); err != nil {
+		return importOutcome{}, err
 	}
 	if opts.afterRows != nil {
 		if err := opts.afterRows(importer.chatID, importer.rows); err != nil {
@@ -714,14 +807,26 @@ func fileSHA256(filePath string) (digest string, exists bool, err error) {
 	return hex.EncodeToString(hasher.Sum(nil)), true, nil
 }
 
-// checkpointImportedJournal folds an imported .events journal into its
-// checkpoint inside the import transaction, exactly as the first actor open
-// would (Load replays, Save checkpoints). Afterwards the imported actor's
-// heads and ledger rows describe its committed state, and chat_events only
-// ever holds journal records the SQLite store wrote itself. This is the one
-// import step that decodes a whole actor; it runs only for chats a crash or
-// shutdown left with an open journal.
-func checkpointImportedJournal(tx *store.Tx, chatID string) error {
+// openImportedActor opens the actor just imported, inside the import
+// transaction, exactly as the runtime will open it: decode, validate and
+// journal replay, which is what FileStore.Load does for the file. File
+// discovery loads every JSON actor that way at boot and refuses to start on
+// one that does not load, so an actor that does not open here fails the
+// import the same way, instead of importing and failing only when the chat
+// is first opened, with its JSON already a frozen backup.
+//
+// An imported .events journal is then folded into the checkpoint, as the
+// first open would (Load replays, Save checkpoints): afterwards the heads and
+// ledger rows describe the committed state, and chat_events only ever holds
+// journal records the SQLite store wrote itself.
+func openImportedActor(tx *store.Tx, chatID string) error {
+	state, found, err := loadSQLActor(tx, chatID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("imported actor disappeared before it was opened")
+	}
 	var pending int
 	if err := tx.QueryRow(`SELECT count(*) FROM chat_events WHERE chat_id = ?`, chatID).Scan(&pending); err != nil {
 		return err
@@ -729,15 +834,91 @@ func checkpointImportedJournal(tx *store.Tx, chatID string) error {
 	if pending == 0 {
 		return nil
 	}
-	state, found, err := loadSQLActor(tx, chatID)
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("validate replayed chat state: %w", err)
+	}
+	if err := writeSQLFullCheckpoint(tx, chatID, state); err != nil {
+		return fmt.Errorf("checkpoint imported journal: %w", err)
+	}
+	return nil
+}
+
+// ImportRefusalFileName is the receipt, in the state directory, of the last
+// chat actor file the import refused. The refused JSON is never touched and
+// the chat store stays on JSON (importing) until the file is fixed or
+// removed; a completed import removes the receipt.
+const ImportRefusalFileName = "chat-import-refused.json"
+
+// ImportRefusal is the content of ImportRefusalFileName.
+type ImportRefusal struct {
+	Store         string `json:"store"`
+	Source        string `json:"source"`
+	SHA256        string `json:"sha256,omitempty"`
+	Size          int64  `json:"size"`
+	MTimeNS       int64  `json:"mtimeNs"`
+	Reason        string `json:"reason"`
+	JSON          string `json:"json"`
+	BinaryVersion string `json:"binaryVersion"`
+	RefusedAt     string `json:"refusedAt"`
+}
+
+// recordImportRefusal writes the refusal receipt for one source file. It is
+// best effort: the import fails either way, and a receipt that cannot be
+// written is logged.
+func recordImportRefusal(stateDir, rel, filePath string, cause error, binaryVersion string, logf func(string, ...any)) string {
+	refusal := ImportRefusal{
+		Store: ActorStoreName, Source: rel, Reason: cause.Error(),
+		JSON:          "left in place, unchanged; chats stay in the provider-chats JSON until this file is fixed or removed",
+		BinaryVersion: binaryVersion, RefusedAt: sqlNow(),
+	}
+	if digest, info, err := statAndSHA256(filePath); err == nil {
+		refusal.SHA256, refusal.Size, refusal.MTimeNS = digest, info.Size(), info.ModTime().UnixNano()
+	}
+	receiptPath := filepath.Join(stateDir, ImportRefusalFileName)
+	logf("[store] refused chat actor %s: %v; the JSON is left in place and the chat store stays on JSON (receipt %s)", rel, cause, receiptPath)
+	raw, err := json.MarshalIndent(refusal, "", "  ")
+	if err == nil {
+		err = writeFileAtomically(receiptPath, append(raw, '\n'))
+	}
+	if err != nil {
+		logf("[store] could not write the import refusal receipt %s: %v", receiptPath, err)
+		return ""
+	}
+	return receiptPath
+}
+
+// clearImportRefusal removes a refusal receipt once the import it blocked
+// has completed.
+func clearImportRefusal(stateDir string, logf func(string, ...any)) {
+	receiptPath := filepath.Join(stateDir, ImportRefusalFileName)
+	if err := os.Remove(receiptPath); err == nil {
+		logf("[store] chat import completed; removed the earlier refusal receipt %s", receiptPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		logf("[store] could not remove the import refusal receipt %s: %v", receiptPath, err)
+	}
+}
+
+func writeFileAtomically(target string, data []byte) error {
+	temp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	if !found {
-		return errors.New("imported actor disappeared before its journal checkpoint")
-	}
-	if err := state.Validate(); err != nil {
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
 		return err
 	}
-	return writeSQLFullCheckpoint(tx, chatID, state)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, target)
 }

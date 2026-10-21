@@ -733,6 +733,91 @@ func TestVerifyLiveFileActorsDetectsJSONWrittenAfterTheCutover(t *testing.T) {
 	}
 }
 
+// A copy or restore of the state directory moves file times without changing
+// a byte (touch, cp -R, the updater's snapshot keeping only microseconds).
+// Only different bytes are a write after the cutover.
+func TestVerifyLiveFileActorsAcceptsSameBytesWithNewTimes(t *testing.T) {
+	stateDir := t.TempDir()
+	actorDir := filepath.Join(stateDir, "provider-chats")
+	if err := os.MkdirAll(actorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(actorDir, actorFileName("touched-chat"))
+	if _, err := NewDurableEngine("touched-chat", FileStore{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	actors := openTestActors(t)
+	if _, err := ImportFileActors(context.Background(), actors.db, corpusImportOptions(stateDir)); err != nil {
+		t.Fatal(err)
+	}
+	receiptFor := func() store.ImportReceipt {
+		t.Helper()
+		var receipt store.ImportReceipt
+		if err := actors.db.Read(context.Background(), func(tx *store.Tx) error {
+			var err error
+			receipt, _, err = tx.ImportReceiptFor(ActorStoreName, "provider-chats/"+actorFileName("touched-chat"))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	imported := receiptFor()
+	var logged []string
+	options := corpusImportOptions(stateDir)
+	options.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	for _, moved := range []time.Time{
+		time.Now().Add(time.Hour),
+		// The updater's copy: the same second, the nanoseconds cut to microseconds.
+		time.Unix(0, imported.MTimeNS-imported.MTimeNS%1000+1000),
+	} {
+		if err := os.Chtimes(path, moved, moved); err != nil {
+			t.Fatal(err)
+		}
+		logged = nil
+		if err := VerifyLiveFileActors(context.Background(), actors.db, options); err != nil {
+			t.Fatalf("same bytes at %v refused: %v", moved, err)
+		}
+		info, _ := os.Stat(path)
+		if receipt := receiptFor(); receipt.MTimeNS != info.ModTime().UnixNano() || receipt.SHA256 != imported.SHA256 || receipt.Size != imported.Size {
+			t.Fatalf("receipt was not refreshed to the new time: %+v", receipt)
+		}
+		if len(logged) != 1 || !strings.Contains(logged[0], "receipt refreshed") {
+			t.Fatalf("refresh log = %q", logged)
+		}
+		logged = nil
+		if err := VerifyLiveFileActors(context.Background(), actors.db, options); err != nil || len(logged) != 0 {
+			t.Fatalf("second check after the refresh: %v %q", err, logged)
+		}
+	}
+
+	// A write that keeps the size is still a write.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := []byte(strings.Replace(string(raw), `"Revision":0`, `"Revision":9`, 1))
+	if string(changed) == string(raw) || len(changed) != len(raw) {
+		t.Fatal("fixture has no same-size edit")
+	}
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLiveFileActors(context.Background(), actors.db, options); !errors.Is(err, ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("same-size write after the cutover: %v", err)
+	}
+	if receipt := receiptFor(); receipt.SHA256 != imported.SHA256 {
+		t.Fatal("a refused write changed the receipt")
+	}
+	if err := os.WriteFile(path, append(raw, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLiveFileActors(context.Background(), actors.db, options); !errors.Is(err, ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("grown write after the cutover: %v", err)
+	}
+}
+
 func TestImportFailsClosedLikeFileDiscovery(t *testing.T) {
 	cases := map[string]func(t *testing.T, dir string){
 		"unsupported version": func(t *testing.T, dir string) {
@@ -759,6 +844,23 @@ func TestImportFailsClosedLikeFileDiscovery(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// Well-formed JSON that FileStore.Load refuses (State.Validate), with no
+		// journal: the import used to accept it and fail only on first open.
+		"invalid ledger sequence": func(t *testing.T, dir string) {
+			writeInvalidSequenceActor(t, dir, "bad-sequence")
+		},
+		"row of an unknown lane": func(t *testing.T, dir string) {
+			state, _ := NewState("bad-lane-row")
+			state.Revision = 1
+			row := historyRow(1)
+			row.ContextExcluded = false // owned by a lane the actor does not have
+			row.LaneID, row.ProviderID = "missing-lane", "mock"
+			state.Ledger = []LedgerEvent{row}
+			raw, _ := json.Marshal(stateEnvelope{Version: currentStateEnvelopeVersion, State: state})
+			if err := os.WriteFile(filepath.Join(dir, actorFileName("bad-lane-row")), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
 	for name, write := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -782,6 +884,116 @@ func TestImportFailsClosedLikeFileDiscovery(t *testing.T) {
 				t.Fatalf("failed import left %d chats (%v)", chats, err)
 			}
 		})
+	}
+}
+
+// writeInvalidSequenceActor writes a well-formed actor file whose only ledger
+// row has sequence 5, which State.Validate (and so FileStore.Load) refuses.
+func writeInvalidSequenceActor(t *testing.T, dir, chatID string) string {
+	t.Helper()
+	state, err := NewState(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Revision = 1
+	state.Ledger = []LedgerEvent{historyRow(5)}
+	raw, err := json.Marshal(stateEnvelope{Version: currentStateEnvelopeVersion, State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, actorFileName(chatID))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The import refuses what file discovery refuses, exactly where JSON mode
+// would refuse to start: the store stays importing, nothing of the file is
+// imported, its JSON is untouched, and the decision is logged and kept in a
+// receipt. Once the file is fixed the import completes and the receipt goes.
+func TestImportRefusesAnInvalidActorAndRecordsWhy(t *testing.T) {
+	stateDir := t.TempDir()
+	dir := filepath.Join(stateDir, "provider-chats")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewDurableEngine("good-chat", FileStore{Path: filepath.Join(dir, actorFileName("good-chat"))}); err != nil {
+		t.Fatal(err)
+	}
+	badPath := writeInvalidSequenceActor(t, dir, "bad-sequence")
+	_, discoveryErr := DiscoverFileStates(dir)
+	if discoveryErr == nil {
+		t.Fatal("file discovery accepted the fixture")
+	}
+	before := snapshotDir(t, dir)
+
+	actors := openTestActors(t)
+	var logged []string
+	options := corpusImportOptions(stateDir)
+	options.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	result, err := ImportFileActors(context.Background(), actors.db, options)
+	if err == nil || result.Live {
+		t.Fatalf("import accepted an actor discovery refuses: %+v %v", result, err)
+	}
+	if !strings.Contains(err.Error(), "ledger sequence 5 is not contiguous") || !strings.Contains(discoveryErr.Error(), "ledger sequence 5 is not contiguous") {
+		t.Fatalf("import and discovery refuse for different reasons:\nimport:    %v\ndiscovery: %v", err, discoveryErr)
+	}
+	var status store.MigratedStore
+	var live bool
+	var badRows, badReceipts int
+	if err := actors.db.Read(context.Background(), func(tx *store.Tx) error {
+		var err error
+		if status, live, err = tx.MigratedStoreStatus(ActorStoreName); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(`SELECT count(*) FROM chats WHERE chat_id = 'bad-sequence'`).Scan(&badRows); err != nil {
+			return err
+		}
+		return tx.QueryRow(`SELECT count(*) FROM import_receipts WHERE item_key = 'bad-sequence'`).Scan(&badReceipts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !live || status.Status != store.StoreImporting || badRows != 0 || badReceipts != 0 {
+		t.Fatalf("refused file left state: status=%+v rows=%d receipts=%d", status, badRows, badReceipts)
+	}
+	if after := snapshotDir(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatal("the refused import changed the JSON directory")
+	}
+	if len(logged) == 0 || !strings.Contains(logged[len(logged)-1], "refused chat actor") {
+		t.Fatalf("refusal not logged: %q", logged)
+	}
+	raw, err := os.ReadFile(filepath.Join(stateDir, ImportRefusalFileName))
+	if err != nil {
+		t.Fatalf("refusal receipt: %v", err)
+	}
+	var refusal ImportRefusal
+	if err := json.Unmarshal(raw, &refusal); err != nil {
+		t.Fatal(err)
+	}
+	badRaw, _ := os.ReadFile(badPath)
+	digest := sha256.Sum256(badRaw)
+	if refusal.Store != ActorStoreName || refusal.Source != "provider-chats/"+actorFileName("bad-sequence") ||
+		refusal.SHA256 != hex.EncodeToString(digest[:]) || refusal.Size != int64(len(badRaw)) ||
+		!strings.Contains(refusal.Reason, "ledger sequence 5") || refusal.JSON == "" || refusal.RefusedAt == "" {
+		t.Fatalf("refusal receipt = %+v", refusal)
+	}
+	// Fixing the file lets the import complete; the receipt goes with it.
+	state, _ := NewState("bad-sequence")
+	state.Revision = 1
+	state.Ledger = []LedgerEvent{historyRow(1)}
+	fixed, _ := json.Marshal(stateEnvelope{Version: currentStateEnvelopeVersion, State: state})
+	if err := os.WriteFile(badPath, fixed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := ImportFileActors(context.Background(), actors.db, options); err != nil || !result.Live {
+		t.Fatalf("import after the fix: %+v %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, ImportRefusalFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refusal receipt outlived the completed import: %v", err)
+	}
+	if loaded, found, err := actors.Store("bad-sequence").Load("bad-sequence"); err != nil || !found || len(loaded.Ledger) != 1 {
+		t.Fatalf("fixed actor: found=%v err=%v", found, err)
 	}
 }
 

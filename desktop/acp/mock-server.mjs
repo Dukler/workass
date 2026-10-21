@@ -362,7 +362,8 @@ async function runPrompt(id, params) {
     const say = (chunk) => notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } });
     say(hostile ? 'Lo publico como página para verlo dentro del sandbox:\n\n' : 'Con los números de la corrida de hoy:\n\n');
     await pause();
-    const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'mock-render-html-'));
+    // Workass reads a page path only inside the chat's working directory.
+    const dir = fs.mkdtempSync(path.join(session.cwd || process.cwd(), '.workass-mock-render-html-'));
     const pagePath = path.join(dir, hostile ? 'verificacion.html' : 'cobertura.html');
     const argsPath = path.join(dir, 'args.json');
     fs.writeFileSync(pagePath, hostile ? PAGE_EVIL : PAGE_COV);
