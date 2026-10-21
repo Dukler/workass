@@ -26,6 +26,7 @@ const {
   runUpdateProgressProcess,
 } = require('./update-progress');
 const { CertificatePins, certificateVerificationSessions, trustCertificatePEM } = require('./certificate-pins');
+const { installRenderFrameGuard } = require('./render-frame-guard');
 
 const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
 let updateProgressTransaction = '';
@@ -414,6 +415,12 @@ function createWindow(url, browserReporter, isController) {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+  // HTML pages in the chat are sandboxed srcdoc frames with no network; this
+  // cancels any navigation of them (and of frames nested inside them) and keeps
+  // WebRTC off direct UDP. The preload advertises it as
+  // window.workassRenderFrames.navigationGuard, which is what lets the renderer
+  // run a page's scripts at all.
+  installRenderFrameGuard(win.webContents);
   // Dev screenshot: hand the view server a capture fn bound to THIS window so
   // GET /__workass-shell/screenshot returns a PNG of the user's real view.
   // Captures at the window's current content size (i.e. maximized if they are).

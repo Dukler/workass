@@ -1,0 +1,81 @@
+'use strict';
+
+// HTML pages in the chat render in sandboxed `srcdoc` frames with no network
+// (desktop/docs/mocks/html-render/PLAN.md, "Security model"). Their CSP stops
+// every fetch, but no CSP stops a frame from navigating itself
+// (`location = …`, a meta refresh, a link click the page's bootstrap missed),
+// and a navigation is a request that can carry data. The shell cancels every
+// navigation of a render frame and of anything nested inside one.
+//
+// A render frame is an `about:srcdoc` document whose frame is not itself inside
+// another render frame. Its own (re)load of `about:srcdoc` is allowed: that is
+// the renderer setting or replacing the page. Everything else is refused:
+//   • a render frame navigating anywhere but about:srcdoc;
+//   • any frame (srcdoc, about:blank, a URL) nested under a render frame.
+// The main frame, the browser pane (its own webContents, never consulted here)
+// and a visualization frame loaded from /workass/artifacts/ are untouched.
+
+const SRCDOC = 'about:srcdoc';
+
+function isSrcdoc(url) {
+  return String(url || '').split('#')[0] === SRCDOC;
+}
+
+/**
+ * @param {{ isMainFrame: boolean, url: string, frameUrls: string[] }} details
+ *   frameUrls[0] is the navigating frame's current URL, then its ancestors up
+ *   to (and including) the main frame.
+ */
+function shouldBlockFrameNavigation({ isMainFrame, url, frameUrls } = {}) {
+  if (isMainFrame) return false;
+  const chain = Array.isArray(frameUrls) ? frameUrls : [];
+  if (chain.slice(1).some(isSrcdoc)) return true;
+  return isSrcdoc(chain[0]) && !isSrcdoc(url);
+}
+
+// WebFrameMain → [its url, parent url, …]. A frame torn down mid-walk throws;
+// an unknown chain is treated as the frame alone.
+function frameUrlChain(frame) {
+  const urls = [];
+  let current = frame;
+  for (let depth = 0; current && depth < 32; depth++) {
+    try {
+      urls.push(String(current.url || ''));
+      current = current.parent;
+    } catch {
+      break;
+    }
+  }
+  return urls;
+}
+
+// Only the origin of a refused target is logged: its path and query are page
+// data, which may be exactly what the page tried to send.
+function navigationOrigin(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin && parsed.origin !== 'null' ? parsed.origin : `${parsed.protocol}`;
+  } catch {
+    return 'invalid-url';
+  }
+}
+
+function installRenderFrameGuard(webContents, log = (line) => console.error(line)) {
+  webContents.on('will-frame-navigate', (event) => {
+    const details = event && typeof event === 'object' ? event : {};
+    const frameUrls = frameUrlChain(details.frame);
+    if (!shouldBlockFrameNavigation({ isMainFrame: !!details.isMainFrame, url: details.url, frameUrls })) return;
+    event.preventDefault();
+    log(`[shell] render frame navigation blocked ${navigationOrigin(details.url)}`);
+  });
+  // WebRTC is the one way out that no CSP covers. The frame bootstrap removes
+  // RTCPeerConnection; this keeps any connection that survives off direct UDP.
+  // Voice input uses getUserMedia only, which this policy does not affect.
+  try {
+    webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  } catch (err) {
+    log(`[shell] webrtc policy unavailable: ${err && err.message ? err.message : err}`);
+  }
+}
+
+module.exports = { shouldBlockFrameNavigation, frameUrlChain, navigationOrigin, installRenderFrameGuard };
