@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,6 +121,107 @@ func TestAgentControlCreatedChatSurvivesStaleSessionSaveBeforeSend(t *testing.T)
 	if receipt := mapFromAnyMain(sentRaw); fieldString(receipt, "queueId") == "" {
 		t.Fatalf("chat.send receipt missing queue id: %#v", sentRaw)
 	}
+}
+
+// An agent-queued turn (chat.send, delivery queue) runs on the coordinator's
+// own effect worker, which runtime Close cancels and awaits. Nothing may
+// write into the state directory or the session store once Close returned:
+// an untracked Drain on a background context used to go on starting the
+// lane and writing provider-chats, provider-lanes and the mock session file.
+func TestAgentQueuedTurnWritesNothingAfterRuntimeClose(t *testing.T) {
+	root := repoRoot(t)
+	sessionDir, stateDir := t.TempDir(), filepath.Join(t.TempDir(), "state")
+	store := newSessionStore(filepath.Join(sessionDir, sessionStateFilename))
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true, Label: "Workass Mock ACP",
+			Env: map[string]string{"WORKASS_MOCK_ACP_SESSION_STORE": filepath.Join(stateDir, "mock-provider.json")}},
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	if _, err := runtime.CreateRendererChat(map[string]any{
+		"operationId": "test:create-close-parent", "tabId": "close-parent-tab", "chatId": "close-parent-chat",
+		"title": "Close parent", "cwd": root, "providerId": "mock", "currentModelId": "mock-deterministic", "currentModeId": "ask",
+	}); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := manager.NewSession(ctx, acp.SessionOptions{
+		ChatID: "close-parent-chat", TabID: "close-parent-tab", CWD: root, AgentOwnerKey: "close-owner",
+	}); err != nil {
+		t.Fatalf("new owner session: %v", err)
+	}
+	handler := &agentControlHandler{manager: manager, chats: newChatControlCoordinator(manager, nil, runtime)}
+	request := httptest.NewRequest(http.MethodPost, toolsPath, nil)
+	owner := func(params map[string]any) map[string]any {
+		params["owner_key"], params["parent_chat_id"], params["parent_tab_id"] = "close-owner", "close-parent-chat", "close-parent-tab"
+		return params
+	}
+	createdRaw, err := handler.call(request, agentControlRequest{Method: "chat.create", Params: owner(map[string]any{
+		"operation_id": "test:create-close-child", "title": "Close child", "cwd": "inherit",
+		"provider_id": "mock", "model_id": "mock-deterministic", "mode_id": "ask",
+	})})
+	if err != nil {
+		t.Fatalf("chat.create: %v", err)
+	}
+	created := mapFromAnyMain(createdRaw)
+	sentRaw, err := handler.call(request, agentControlRequest{Method: "chat.send", Params: owner(map[string]any{
+		"operation_id": "test:send-before-close", "tab_id": fieldString(created, "tabId"), "chat_id": fieldString(created, "chatId"),
+		"message": "queued right before close", "delivery": "queue",
+	})})
+	if err != nil || fieldString(mapFromAnyMain(sentRaw), "queueId") == "" {
+		t.Fatalf("chat.send = %#v, %v", sentRaw, err)
+	}
+	// Close at once, while the queued turn is still opening its lane.
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	manager.Reset()
+	before := writtenFiles(t, stateDir, sessionDir)
+	time.Sleep(1500 * time.Millisecond)
+	after := writtenFiles(t, stateDir, sessionDir)
+	for path, stamp := range after {
+		if before[path] != stamp {
+			t.Errorf("%s was written after the runtime closed (%q -> %q)", path, before[path], stamp)
+		}
+	}
+	for path := range before {
+		if _, ok := after[path]; !ok {
+			t.Errorf("%s was removed after the runtime closed", path)
+		}
+	}
+}
+
+// writtenFiles stamps every file under the given roots with its size and
+// modification time.
+func writtenFiles(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			info, err := entry.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			files[path] = fmt.Sprintf("%d bytes at %d", info.Size(), info.ModTime().UnixNano())
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return files
 }
 
 func TestAgentControlTurnlessSpawnNeverUsesLegacySessionMirrorAsOwner(t *testing.T) {
