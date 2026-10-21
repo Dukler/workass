@@ -568,7 +568,9 @@ func (im *actorStreamImporter) decodeState(dec *json.Decoder) error {
 		return errors.New("chat actor changed its chat id mid-file")
 	}
 	im.revision = state.Revision
-	_, err = im.tx.Exec(`UPDATE chats SET revision = ?, state_json = ?, ledger_len = ? WHERE chat_id = ?`,
+	// ledger_gen 1: these rows are the committed ledger (an open journal is
+	// folded in below before the receipt commits).
+	_, err = im.tx.Exec(`UPDATE chats SET revision = ?, state_json = ?, ledger_len = ?, ledger_gen = 1 WHERE chat_id = ?`,
 		int64(state.Revision), sqlText(head.Bytes()), im.rows, im.chatID)
 	return err
 }
@@ -737,9 +739,5 @@ func checkpointImportedJournal(tx *store.Tx, chatID string) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}
-	head, rows, err := encodeSQLActor(state)
-	if err != nil {
-		return err
-	}
-	return writeSQLCheckpoint(tx, chatID, state.Revision, head, rows)
+	return writeSQLFullCheckpoint(tx, chatID, state)
 }

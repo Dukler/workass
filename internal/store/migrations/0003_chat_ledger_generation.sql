@@ -1,0 +1,12 @@
+-- Phase 1b: incremental checkpoints.
+--
+-- A checkpoint now writes only the ledger rows that changed, diffing against
+-- the rows its store handle last read or wrote. ledger_gen counts ledger
+-- writes so a handle can tell its copy still describes the table (another
+-- writer bumps it and forces a full rewrite).
+--
+-- ledger_gen = 0 also marks rows written before this migration: such a chat
+-- may hold journal records that change the ledger, so its rows are not yet
+-- the committed ledger. Opening the actor checkpoints it (gen >= 1), after
+-- which every journal record the store keeps leaves the ledger unchanged.
+ALTER TABLE chats ADD COLUMN ledger_gen INTEGER NOT NULL DEFAULT 0 CHECK (ledger_gen >= 0);

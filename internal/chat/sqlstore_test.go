@@ -252,6 +252,7 @@ func TestSQLStoreMatchesFileStoreThroughTheEngineLifecycle(t *testing.T) {
 	for _, step := range actorLifecycleScript(chatID) {
 		step.run(t, engine)
 		snapshot := engine.Snapshot()
+		ledgerRows := len(snapshot.Ledger)
 		fileLoaded, found, err := (FileStore{Path: path}).Load(chatID)
 		if err != nil || !found {
 			t.Fatalf("%s: file load: found=%v err=%v", step.name, found, err)
@@ -261,12 +262,36 @@ func TestSQLStoreMatchesFileStoreThroughTheEngineLifecycle(t *testing.T) {
 			t.Fatalf("%s: sql load: found=%v err=%v", step.name, found, err)
 		}
 		frames, rows := journalFrameCount(t, path), sqlJournalCount(t, actors, chatID)
-		assertSameDurableState(t, step.name, fileLoaded, sqlLoaded, rows > 0)
+		assertSameDurableState(t, step.name, fileLoaded, sqlLoaded, frames > 0 || rows > 0)
 		if rows == 0 && !equalCancelDurableState(t, sqlLoaded, snapshot) {
 			t.Fatalf("%s: SQLite readback lost a committed boundary", step.name)
 		}
-		if frames != rows {
-			t.Fatalf("%s: checkpoint cadence diverged: %d file frames, %d SQLite journal rows", step.name, frames, rows)
+		// Same journal budget, except that SQLite checkpoints every record
+		// that changes the ledger (the file store journals the terminal).
+		if rows > frames {
+			t.Fatalf("%s: SQLite journaled %d records, the file store %d", step.name, rows, frames)
+		}
+		if step.name == "terminal" && (rows != 0 || frames == 0) {
+			t.Fatalf("terminal receipt: SQLite journal rows %d (want a checkpoint), file frames %d", rows, frames)
+		}
+		// The message rows are the committed ledger at every step.
+		page, found, err := actors.ReadMessages(chatID, 0, ledgerRows+1)
+		if err != nil || !found || int(page.Total) != ledgerRows || len(page.Events) != ledgerRows {
+			t.Fatalf("%s: paged rows = %d/%d found=%v err=%v, want %d", step.name, len(page.Events), page.Total, found, err, ledgerRows)
+		}
+		// Snapshot() is a Clone (nil and empty slices normalized), so compare
+		// it clone-normalized; with no file journal the file holds the
+		// committed ledger exactly, so compare that byte for byte.
+		if ledgerRows > 0 && !reflect.DeepEqual(cloneLedgerEvents(page.Events), snapshot.Ledger) {
+			x, _ := json.Marshal(cloneLedgerEvents(page.Events))
+			y, _ := json.Marshal(snapshot.Ledger)
+			t.Fatalf("%s: message rows differ from the committed ledger: %s", step.name, firstJSONDifference(x, y))
+		}
+		if frames == 0 && ledgerRows > 0 && !bytes.Equal(stateJSON(t, State{Ledger: page.Events}), stateJSON(t, State{Ledger: fileLoaded.Ledger})) {
+			t.Fatalf("%s: message rows are not the file store's ledger bytes", step.name)
+		}
+		if page.Revision != snapshot.Revision {
+			t.Fatalf("%s: page revision %d, actor revision %d", step.name, page.Revision, snapshot.Revision)
 		}
 		if rows > 0 {
 			sawJournal = true
@@ -287,47 +312,52 @@ func TestSQLStoreMatchesFileStoreThroughTheEngineLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSameDurableState(t, "restart", fileRestarted.Snapshot(), sqlRestarted.Snapshot(), false)
+	assertSameDurableState(t, "restart", fileRestarted.Snapshot(), sqlRestarted.Snapshot(), true)
 }
 
-func TestSQLStoreReplaysAJournalLeftByACrashAfterTheTerminalReceipt(t *testing.T) {
-	const chatID = "crash-chat"
-	actors := openTestActors(t)
-	path := filepath.Join(t.TempDir(), "provider-chats", actorFileName(chatID))
-	engine, err := NewDurableEngine(chatID, teeStore{file: FileStore{Path: path}, sql: actors.Store(chatID)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stop right after the urgent records: the journal holds a cancel and a
-	// terminal that promoted a queued turn. No checkpoint follows: this is
-	// the state a kill leaves.
-	for _, step := range actorLifecycleScript(chatID) {
-		step.run(t, engine)
-		if step.name == "terminal" {
-			break
-		}
-	}
-	if sqlJournalCount(t, actors, chatID) == 0 {
-		t.Fatal("fixture left no journal to replay")
-	}
-	fileRestarted, err := NewDurableEngine(chatID, FileStore{Path: path})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlRestarted, err := NewDurableEngine(chatID, actors.Store(chatID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSameDurableState(t, "replayed restart", fileRestarted.Snapshot(), sqlRestarted.Snapshot(), true)
-	// The promoted queued turn is reconstructed exactly once.
-	pending := 0
-	for _, entry := range sqlRestarted.Snapshot().Outbox {
-		if entry.ID == startTurnEffectID("turn-2") {
-			pending++
-		}
-	}
-	if pending != 1 {
-		t.Fatalf("queued turn effect replayed %d times", pending)
+func TestSQLStoreRecoversTheStateACrashLeavesBehind(t *testing.T) {
+	for _, killAfter := range []string{"media", "cancel-ack", "terminal"} {
+		t.Run(killAfter, func(t *testing.T) {
+			chatID := "crash-chat-" + killAfter
+			actors := openTestActors(t)
+			path := filepath.Join(t.TempDir(), "provider-chats", actorFileName(chatID))
+			engine, err := NewDurableEngine(chatID, teeStore{file: FileStore{Path: path}, sql: actors.Store(chatID)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Stop with whatever journal the step left: streamed events,
+			// cancellation records, or (file store only) the terminal.
+			for _, step := range actorLifecycleScript(chatID) {
+				step.run(t, engine)
+				if step.name == killAfter {
+					break
+				}
+			}
+			if killAfter != "terminal" && sqlJournalCount(t, actors, chatID) == 0 {
+				t.Fatal("fixture left no SQLite journal to replay")
+			}
+			fileRestarted, err := NewDurableEngine(chatID, FileStore{Path: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sqlRestarted, err := NewDurableEngine(chatID, actors.Store(chatID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSameDurableState(t, "restart after "+killAfter, fileRestarted.Snapshot(), sqlRestarted.Snapshot(), true)
+			if killAfter == "terminal" {
+				// The promoted queued turn is reconstructed exactly once.
+				pending := 0
+				for _, entry := range sqlRestarted.Snapshot().Outbox {
+					if entry.ID == startTurnEffectID("turn-2") {
+						pending++
+					}
+				}
+				if pending != 1 {
+					t.Fatalf("queued turn effect present %d times", pending)
+				}
+			}
+		})
 	}
 }
 
@@ -777,8 +807,7 @@ func TestSQLStoreLoadFailsClosedOnDamagedRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snapshot := dumpActorTables(t, actors.db)
-	restore := func() {
+	restore := func(t *testing.T) {
 		t.Helper()
 		if err := actors.db.Write(context.Background(), func(tx *store.Tx) error {
 			_, err := tx.Exec(`DELETE FROM chats`)
@@ -789,8 +818,8 @@ func TestSQLStoreLoadFailsClosedOnDamagedRows(t *testing.T) {
 		if err := actors.Store(chatID).Save(engine.Snapshot()); err != nil {
 			t.Fatal(err)
 		}
-		if dumpActorTables(t, actors.db) != snapshot {
-			t.Fatal("restore did not reproduce the checkpoint")
+		if loaded, found, err := actors.Store(chatID).Load(chatID); err != nil || !found || !equalCancelDurableState(t, loaded, engine.Snapshot()) {
+			t.Fatalf("restore did not reproduce the actor: found=%v err=%v", found, err)
 		}
 	}
 	for name, statement := range map[string]string{
@@ -804,7 +833,7 @@ func TestSQLStoreLoadFailsClosedOnDamagedRows(t *testing.T) {
 			if _, _, err := actors.Store(chatID).Load(chatID); err == nil {
 				t.Fatal("damaged actor loaded")
 			}
-			restore()
+			restore(t)
 		})
 	}
 	if _, _, err := actors.Store("other-chat").Load(chatID); err == nil {

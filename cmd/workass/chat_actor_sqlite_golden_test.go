@@ -188,6 +188,29 @@ func TestRealCopiedActorsProjectIdenticallyFromSQLite(t *testing.T) {
 		_, _, err := actors.Store(largestChat).Load(largestChat)
 		return err
 	})
+
+	// A message-sized commit on the largest actor (the shape of a terminal
+	// receipt or any ordinary mutation): one appended row.
+	sqlStore := actors.Store(largestChat)
+	state, _, err := sqlStore.Load(largestChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := state
+	next.Revision++
+	row := state.Ledger[len(state.Ledger)-1]
+	row.EventID, row.MessageID = row.EventID+":golden-append", row.MessageID+":golden-append"
+	row.Sequence = uint64(len(state.Ledger) + 1)
+	row.Text, row.Result, row.Timeline, row.Attachments = "appended", "", nil, nil
+	next.Ledger = append(state.Ledger[:len(state.Ledger):len(state.Ledger)], row)
+	if err := next.Validate(); err != nil {
+		t.Logf("append receipt skipped: synthetic row is not a valid actor transition: %v", err)
+		return
+	}
+	measure("SQLStore.Save (append one row)", func() error { return sqlStore.Save(next) })
+	measure("FileStore.Save (same state)", func() error {
+		return (chat.FileStore{Path: filepath.Join(t.TempDir(), largestName)}).Save(next)
+	})
 }
 
 func providerChatStatePathBase(chatID string) string {
