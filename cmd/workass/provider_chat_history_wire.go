@@ -31,7 +31,10 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		}
 		return false, os.ErrNotExist
 	})
-	hub.Register("chat:archive-load", func(args []any) (any, error) {
+	// History pages, one-row tool detail and image reads never wait behind
+	// the ordered lane (a provider probe, a first provider attachment, a
+	// whole-actor rewrite).
+	hub.RegisterHistoryRead("chat:archive-load", func(args []any) (any, error) {
 		if providerChats == nil {
 			return nil, os.ErrInvalid
 		}
