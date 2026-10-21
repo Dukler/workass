@@ -3,6 +3,7 @@ import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from 
 import { store, useApp, useMsgVersion, useClock } from '../store/store';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
+import { ToolHtmlPages } from '../markdown/HtmlToolPages';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
 import { IcStampCopy, IcFork, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } from '../icons';
 import { has } from '../wire/api';
@@ -183,12 +184,13 @@ function AssistantSliceBody({
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) {
           // Tool calls live in the Working line / Worked row, never inline.
-          // Subagent task rows and the images a tool returned stay where
-          // they landed: they are results, not steps.
+          // Subagent task rows, the images a tool returned and the pages the
+          // agent published stay where they landed: they are results, not steps.
           const tasks = s.tools.filter(isSubagentHeader);
           return (
             <Fragment key={s.key}>
               <ToolImageGallery tools={s.tools.filter((t) => !isSubagentHeader(t))} tabId={tabId} />
+              <ToolHtmlPages tools={s.tools.filter((t) => !isSubagentHeader(t))} artifactOrigin={artifactOrigin} />
               {tasks.length > 0 && <ToolGroup tabId={tabId} tools={tasks} revision={s.revision} />}
             </Fragment>
           );

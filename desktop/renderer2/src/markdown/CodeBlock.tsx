@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { IcStampCopy } from '../icons';
 import type { ImageClipboardBridge } from '../image-copy';
 import { codeLanguageLabel, renderCode } from './inline';
@@ -48,7 +48,9 @@ export function shouldHighlightCode(raw: string, closed: boolean): boolean {
     && new TextEncoder().encode(raw).byteLength <= MAX_HIGHLIGHTED_CODE_BYTES;
 }
 
-export function CodeBlock({ raw, language, closed }: { raw: string; language: string; closed: boolean }) {
+// `actions` render before Copiar (an HTML block's «Página» switch); `className`
+// is added to the box. Neither changes an ordinary code block.
+export function CodeBlock({ raw, language, closed, actions, className }: { raw: string; language: string; closed: boolean; actions?: ReactNode; className?: string }) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const label = codeLanguageLabel(language);
@@ -71,9 +73,10 @@ export function CodeBlock({ raw, language, closed }: { raw: string; language: st
 
   const copyLabel = copyState === 'copied' ? 'Copiado' : copyState === 'failed' ? 'Reintentar' : 'Copiar';
   return (
-    <div className="codebox" data-language={label}>
+    <div className={className ? `codebox ${className}` : 'codebox'} data-language={label}>
       <div className="code-head">
         <span className="code-lang">{label}</span>
+        {actions}
         <button
           type="button"
           className="code-copy"
