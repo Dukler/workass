@@ -991,7 +991,10 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if providerChats == nil {
 			return nil, errors.New("session:get requires the authoritative chat actor runtime")
 		}
-		raw, err := providerChats.ProjectSessionRaw()
+		// An optional {leanTools:true} is additive: older renderers send no
+		// argument and keep the byte-identical full projection.
+		read := archiveReadOptions{leanTools: len(args) > 0 && mapFromAnyMain(args[0])["leanTools"] == true}
+		raw, err := providerChats.ProjectSessionRaw(read)
 		if err != nil {
 			return nil, err
 		}

@@ -174,7 +174,7 @@ const LANBridgeJS = `(() => {
     getState: () => invoke('state:get'), jiraGet: () => invoke('jira:get'), activityGet: () => invoke('activity:get'),
     deployCatalog: () => invoke('deploy:catalog'), deployVersions: (o) => invoke('deploy:versions', o), deployPreflight: (o) => invoke('deploy:preflight', o),
     listSkills: () => invoke('skills:list'), appMeta: () => invoke('app:meta'), stateDigest: () => invoke('state:digest'), getSettings: () => invoke('settings:get'), setSettings: (s, o) => o ? invoke('settings:set', s, o) : invoke('settings:set', s),
-    getConfig: () => invoke('config:get'), setConfig: (p) => invoke('config:set', p), getSession: () => invoke('session:get'), saveSession: (s) => invoke('session:save', s),
+    getConfig: () => invoke('config:get'), setConfig: (p) => invoke('config:set', p), getSession: (o) => o ? invoke('session:get', o) : invoke('session:get'), saveSession: (s) => invoke('session:save', s),
     chatQueueReplace: (o) => invoke('chat:queue-replace', o),
     chatQueueResume: (o) => invoke('chat:queue-resume', o),
     chatCreate: (o) => invoke('chat:create', o),
