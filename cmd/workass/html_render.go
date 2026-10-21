@@ -127,8 +127,12 @@ func htmlRenderReferenceTitle(title string) string {
 }
 
 // The page comes inline (`html`) or from a file the agent wrote (`path`),
-// exactly one of them, at most maxHTMLRenderSourceBytes of UTF-8.
-func htmlRenderSource(params map[string]any) (string, error) {
+// exactly one of them, at most maxHTMLRenderSourceBytes of UTF-8. A path is
+// read only inside the chat's working directory, which workingDir returns
+// (called only for a path): it is resolved through every symlink first, and
+// the real file must lie inside the resolved directory and be an .html or
+// .htm file, so a page-named link cannot read a key or a file elsewhere.
+func htmlRenderSource(params map[string]any, workingDir func() (string, error)) (string, error) {
 	inline, hasInline := params["html"].(string)
 	rawPath := strings.TrimSpace(fieldString(params, "path"))
 	switch {
@@ -139,28 +143,9 @@ func htmlRenderSource(params map[string]any) (string, error) {
 	}
 	var data []byte
 	if rawPath != "" {
-		if len(rawPath) > 4096 || strings.ContainsAny(rawPath, "\x00\r\n") || strings.Contains(rawPath, "://") || !filepath.IsAbs(rawPath) {
-			return "", errors.New("workass_render_html path must be an absolute file path")
-		}
-		if ext := strings.ToLower(filepath.Ext(rawPath)); ext != ".html" && ext != ".htm" {
-			return "", errors.New("workass_render_html path must name an .html or .htm file")
-		}
-		resolved, err := filepath.EvalSymlinks(filepath.Clean(rawPath))
-		if err != nil {
-			return "", errors.New("workass_render_html path is not readable")
-		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.Mode().IsRegular() {
-			return "", errors.New("workass_render_html path is not a regular file")
-		}
-		file, err := os.Open(resolved)
-		if err != nil {
-			return "", errors.New("workass_render_html path is not readable")
-		}
-		defer file.Close()
-		data, err = io.ReadAll(io.LimitReader(file, maxHTMLRenderSourceBytes+1))
-		if err != nil {
-			return "", errors.New("workass_render_html path is not readable")
+		var err error
+		if data, err = readHTMLRenderFile(rawPath, workingDir); err != nil {
+			return "", err
 		}
 	} else {
 		data = []byte(inline)
@@ -175,6 +160,61 @@ func htmlRenderSource(params map[string]any) (string, error) {
 		return "", errors.New("workass_render_html page must be UTF-8 text")
 	}
 	return string(data), nil
+}
+
+func readHTMLRenderFile(rawPath string, workingDir func() (string, error)) ([]byte, error) {
+	if len(rawPath) > 4096 || strings.ContainsAny(rawPath, "\x00\r\n") || strings.Contains(rawPath, "://") || !filepath.IsAbs(rawPath) {
+		return nil, errors.New("workass_render_html path must be an absolute file path")
+	}
+	if workingDir == nil {
+		return nil, errors.New("workass_render_html path needs the chat's working directory")
+	}
+	root, err := workingDir()
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		return nil, errors.New("workass_render_html: the chat's working directory is not readable")
+	}
+	// Resolve first, then judge the real target: its name and its place.
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(rawPath))
+	if err != nil {
+		return nil, errors.New("workass_render_html path is not readable")
+	}
+	resolved = filepath.Clean(resolved)
+	if ext := strings.ToLower(filepath.Ext(resolved)); ext != ".html" && ext != ".htm" {
+		return nil, errors.New("workass_render_html path must name an .html or .htm file")
+	}
+	if !pathWithinRoot(root, resolved) {
+		return nil, errors.New("workass_render_html path must stay within the chat's working directory")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("workass_render_html path is not a regular file")
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil, errors.New("workass_render_html path is not readable")
+	}
+	defer file.Close()
+	// The file opened must be the one judged above, not a replacement swapped
+	// in between.
+	if opened, err := file.Stat(); err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("workass_render_html path changed while it was read")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxHTMLRenderSourceBytes+1))
+	if err != nil {
+		return nil, errors.New("workass_render_html path is not readable")
+	}
+	return data, nil
+}
+
+// pathWithinRoot reports whether candidate is root or lies beneath it; both
+// must be clean, symlink-free paths.
+func pathWithinRoot(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	return err == nil && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func wrapHTMLRenderPage(source string) []byte {
@@ -235,7 +275,9 @@ func (h *agentControlHandler) renderHTML(r *http.Request, ownerKey, tabID, chatI
 	if err != nil {
 		return nil, err
 	}
-	source, err := htmlRenderSource(params)
+	source, err := htmlRenderSource(params, func() (string, error) {
+		return h.chats.providerChats.AgentOwnerCWD(ownerKey, tabID, chatID)
+	})
 	if err != nil {
 		return nil, err
 	}
