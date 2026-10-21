@@ -75,6 +75,11 @@ export interface MessageImage {
   // suppress a redundant matching Open link; source-less structured ACP images
   // render as a gallery.
   source?: string;
+  // Pixel size read by the daemon from the image header (additive wire
+  // fields). The renderer reserves the image's final frame from them before
+  // its bytes arrive; absent from older daemons and for unreadable images.
+  width?: number;
+  height?: number;
 }
 
 // One queued follow-up: a distinct, editable, reorderable, removable message

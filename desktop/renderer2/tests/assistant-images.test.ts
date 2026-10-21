@@ -75,7 +75,7 @@ test('assistant transcript rows bind imported media to their authored Markdown p
     images: [{ mimeType: 'image/png', data: 'cG5n', name: 'Preview', source }],
   };
   const html = renderToStaticMarkup(React.createElement(AssistantMessage, { tabId: 'media-tab', msg, profile: 'dev' }));
-  assert.match(html, /class="assistant-inline-image"/);
+  assert.match(html, /class="assistant-inline-image ri ri-inline" data-state="loaded"/);
   assert.match(html, /src="data:image\/png;base64,cG5n"/);
   assert.doesNotMatch(html, /Open preview|assistant-image-open/);
   assert.doesNotMatch(html, /!<a|href="\/workspace/);
@@ -87,9 +87,10 @@ test('source-less saved assistant images recover their unique authored positions
     images: [{ mimeType: 'image/png', data: 'cG5n', name: 'Gold first RGB' }],
   };
   const html = renderToStaticMarkup(React.createElement(AssistantMessage, { tabId: 'media-tab', msg, profile: 'dev' }));
-  assert.match(html, /Before image\.[\s\S]*class="assistant-inline-image"[\s\S]*After image\./);
-  assert.equal((html.match(/class="assistant-inline-image"/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /Imágenes de la respuesta|Open gold|assistant-image-pending/);
+  assert.match(html, /Before image\.[\s\S]*class="assistant-inline-image ri ri-inline"[\s\S]*After image\./);
+  assert.equal((html.match(/class="assistant-inline-image ri ri-inline"/g) ?? []).length, 1);
+  // The loaded frame keeps its placeholder hidden; no unresolved pending label.
+  assert.doesNotMatch(html, /Imágenes de la respuesta|Open gold|class="assistant-image-pending"/);
 });
 
 test('repeated Markdown labels recover the first imported image position', () => {
@@ -98,7 +99,7 @@ test('repeated Markdown labels recover the first imported image position', () =>
     images: [{ mimeType: 'image/png', data: 'cG5n', name: 'Preview' }],
   };
   const html = renderToStaticMarkup(React.createElement(AssistantMessage, { tabId: 'media-tab', msg, profile: 'dev' }));
-  assert.match(html, /class="assistant-inline-image"[\s\S]*Later:[\s\S]*assistant-image-pending/);
+  assert.match(html, /class="assistant-inline-image ri ri-inline"[\s\S]*Later:[\s\S]*class="assistant-image-pending"/);
   assert.doesNotMatch(html, /aria-label="Imágenes de la respuesta"/);
 });
 
@@ -111,9 +112,9 @@ test('six saved training review images follow their authored positions despite a
     images: names.map((name) => ({ mimeType: 'image/png', data: 'cG5n', name })),
   };
   const html = renderToStaticMarkup(React.createElement(AssistantMessage, { tabId: 'media-tab', msg, profile: 'dev' }));
-  assert.equal((html.match(/class="assistant-inline-image"/g) ?? []).length, 6);
+  assert.equal((html.match(/class="assistant-inline-image ri ri-inline"/g) ?? []).length, 6);
   assert.doesNotMatch(html, /aria-label="Imágenes de la respuesta"/);
-  for (let index = 1; index <= 6; index += 1) assert.match(html, new RegExp(`Section ${index}:[\\s\\S]*?class="assistant-inline-image"`));
+  for (let index = 1; index <= 6; index += 1) assert.match(html, new RegExp(`Section ${index}:[\\s\\S]*?class="assistant-inline-image ri ri-inline"`));
   assert.match(html, /Later:[\s\S]*assistant-image-pending/);
 });
 
