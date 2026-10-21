@@ -194,6 +194,18 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 // be trusted to be the newer one, so the daemon refuses to guess.
 var ErrFileActorsChangedAfterCutover = errors.New("provider-chats JSON changed after the chat store moved to SQLite")
 
+// changedAfterCutover names the file that diverged and what to do about it.
+// The usual cause is a rollback cycle: an older or JSON-only build ran on this
+// state directory and rewrote the JSON, then state.db was put back.
+func changedAfterCutover(stateDir, rel, what string) error {
+	dbPath := filepath.Join(stateDir, store.FileName)
+	return fmt.Errorf("%w: %s %s; a build without the SQLite chat store wrote it, so it and %s disagree. "+
+		"To start from the JSON as it is now, quit Workass and move %s, %s-wal and %s-shm (those that exist) out of %s: "+
+		"the next start imports the current JSON, and chat changes saved only in the moved %s since the switch are not carried over",
+		ErrFileActorsChangedAfterCutover, filepath.Join(stateDir, filepath.FromSlash(rel)), what, dbPath,
+		store.FileName, store.FileName, store.FileName, stateDir, store.FileName)
+}
+
 // VerifyLiveFileActors checks that no JSON actor was created or changed since
 // its receipt. It is cheap on an untouched directory: a listing and a stat
 // per file, plus a hash of each journal.
@@ -237,7 +249,7 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 		rel := path.Join(filepath.ToSlash(relOrBase(stateDir, actorDir)), name)
 		receipt, ok := receipts[rel]
 		if !ok {
-			return fmt.Errorf("%w: %s has no import receipt", ErrFileActorsChangedAfterCutover, rel)
+			return changedAfterCutover(stateDir, rel, "was created after the switch (it has no import receipt)")
 		}
 		filePath := filepath.Join(actorDir, name)
 		info, err := os.Stat(filePath)
@@ -245,7 +257,7 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 			return err
 		}
 		if info.Size() != receipt.Size {
-			return fmt.Errorf("%w: %s was modified after its import", ErrFileActorsChangedAfterCutover, rel)
+			return changedAfterCutover(stateDir, rel, "was modified after its import")
 		}
 		if info.ModTime().UnixNano() != receipt.MTimeNS {
 			digest, hashed, err := statAndSHA256(filePath)
@@ -253,7 +265,7 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 				return err
 			}
 			if digest != receipt.SHA256 || hashed.Size() != receipt.Size {
-				return fmt.Errorf("%w: %s was modified after its import", ErrFileActorsChangedAfterCutover, rel)
+				return changedAfterCutover(stateDir, rel, "was modified after its import")
 			}
 			receipt.Size, receipt.MTimeNS = hashed.Size(), hashed.ModTime().UnixNano()
 			refreshed = append(refreshed, receipt)
@@ -264,7 +276,7 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 			return err
 		}
 		if exists != (receipt.Companion != "") || (exists && digest != receipt.CompanionSHA256) {
-			return fmt.Errorf("%w: %s.events changed after its import", ErrFileActorsChangedAfterCutover, rel)
+			return changedAfterCutover(stateDir, rel+".events", "changed after its import")
 		}
 	}
 	if len(refreshed) == 0 {

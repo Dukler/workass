@@ -334,6 +334,56 @@ func TestOpenChatActorBackendBootsFromARestoredCopy(t *testing.T) {
 	}
 }
 
+// A rollback cycle: the SQLite build switches, an older build runs and
+// rewrites the JSON, then state.db is put back. The refusal names the file
+// and says what to do, and doing it starts from the current JSON.
+func TestCutoverRefusalSaysHowToReimportAndThatWorks(t *testing.T) {
+	stateDir := t.TempDir()
+	engine := writeBackendTestActor(t, stateDir, "cycled-chat")
+	backend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.close(); err != nil {
+		t.Fatal(err)
+	}
+	// The older build writes the JSON.
+	next := engine.Snapshot().Presentation.Clone()
+	next.Draft = "written by the older build"
+	if err := engine.Apply(chat.SavePresentation{OperationID: "older-build-save", Digest: "older", Presentation: next}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("diverged JSON: %v", err)
+	}
+	jsonPath := providerChatStatePath(stateDir, "cycled-chat")
+	for _, want := range []string{jsonPath, "move state.db, state.db-wal and state.db-shm", "out of " + stateDir, "imports the current JSON"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal does not say %q:\n%v", want, err)
+		}
+	}
+	// Do what it says.
+	aside := filepath.Join(t.TempDir(), "aside")
+	if err := os.MkdirAll(aside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{store.FileName, store.FileName + "-wal", store.FileName + "-shm"} {
+		if err := os.Rename(filepath.Join(stateDir, name), filepath.Join(aside, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatalf("start after moving state.db aside: %v", err)
+	}
+	defer backend.close()
+	loaded, found, err := backend.store("cycled-chat").Load("cycled-chat")
+	if err != nil || !found || loaded.Presentation.Draft != "written by the older build" {
+		t.Fatalf("re-imported actor: found=%v draft=%q err=%v", found, loaded.Presentation.Draft, err)
+	}
+}
+
 // copyTreeWithTimes copies a directory tree, giving every file the time
 // adjust returns for its own.
 func copyTreeWithTimes(t *testing.T, from, to string, adjust func(time.Time) time.Time) {
