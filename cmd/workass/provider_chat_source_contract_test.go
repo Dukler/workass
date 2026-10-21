@@ -547,6 +547,12 @@ func phaseCStringLiteral(expr ast.Expr) (string, bool) {
 	return value, true
 }
 
+// A history read is an ordinary hub handler on its own lane; the ChatID
+// ingress contract covers it the same way.
+func phaseCHubRegistration(name string) bool {
+	return name == "Register" || name == "RegisterHistoryRead"
+}
+
 func phaseCRegisteredHandlers(source *phaseCSourceFile) []phaseCHandler {
 	var handlers []phaseCHandler
 	ast.Inspect(source.file, func(node ast.Node) bool {
@@ -555,7 +561,7 @@ func phaseCRegisteredHandlers(source *phaseCSourceFile) []phaseCHandler {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "Register" {
+		if !ok || !phaseCHubRegistration(selector.Sel.Name) {
 			return true
 		}
 		base, ok := selector.X.(*ast.Ident)
@@ -680,7 +686,7 @@ func TestPhaseCChatIngressManifestIsComplete(t *testing.T) {
 				return true
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != "Register" {
+			if !ok || !phaseCHubRegistration(selector.Sel.Name) {
 				return true
 			}
 			base, ok := selector.X.(*ast.Ident)
