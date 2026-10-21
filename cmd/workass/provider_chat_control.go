@@ -75,7 +75,7 @@ func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string
 	if err != nil {
 		return nil, err
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	globalRevision := uint64(0)
 	if focus {
 		globalRevision, err = r.sessions.SaveGlobalActiveTab(tabID, providercontract.OperationID("focus:"+string(operationID)))
@@ -108,7 +108,7 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	entries, attachmentPlans, err := r.rendererQueueEntries(rawEntries, state.Presentation)
 	if err != nil {
 		return nil, err
@@ -122,7 +122,7 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	}, func() error { return materializeProviderAttachmentPlans(attachmentPlans) }); err != nil {
 		return nil, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	receipt, ok := state.QueueMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return nil, errors.New("queue replacement lost its durable actor receipt")
@@ -151,7 +151,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	presentation := state.Presentation.Clone()
 	presentation.PresentationRevision = expectedRevision
 	presentation.Title = sanitizedChatTitle(fieldString(raw, "title"))
@@ -199,7 +199,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
 		return nil, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	receipt, ok := state.PresentationMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return nil, errors.New("presentation save lost its durable actor receipt")
@@ -271,7 +271,7 @@ func (r *providerChatRuntime) SaveRuntimeControls(tabID, chatID string, operatio
 	if err := actor.engine.Apply(chat.SaveRuntimeControls{OperationID: operationID, Digest: digest, Update: update}); err != nil {
 		return nil, err
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	receipt, ok := state.RuntimeControlMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return nil, errors.New("runtime-control save lost its durable actor receipt")
@@ -371,7 +371,7 @@ func (r *providerChatRuntime) exactActor(tabID, chatID string) (*providerChatAct
 	if err != nil {
 		return nil, chat.State{}, err
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if state.Deleted {
 		return nil, chat.State{}, errors.New("chat was deleted")
 	}
@@ -458,7 +458,7 @@ func (r *providerChatRuntime) Rewind(ctx context.Context, tabID, chatID string, 
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	var checkpoint json.RawMessage
 	var checkpointDigest string
 	for _, entry := range state.Outbox {
@@ -487,7 +487,7 @@ func (r *providerChatRuntime) Rewind(ctx context.Context, tabID, chatID string, 
 	if err := actor.coordinator.Drain(ctx); err != nil {
 		return nil, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	for _, entry := range state.Outbox {
 		if entry.Kind != chat.EffectCheckpointRestore || entry.OperationID != operationID {
 			continue
@@ -518,7 +518,7 @@ func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeE
 		return nil, err
 	}
 	actor.mu.Lock()
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	actor.mu.Unlock()
 	projected := map[string]any{}
 	if err := projectActorChat(projected, state); err != nil {
@@ -707,7 +707,7 @@ func (r *providerChatRuntime) Foreground(tabID, chatID string) (string, bool, er
 		return "", false, err
 	}
 	actor.mu.Lock()
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	actor.mu.Unlock()
 	if !actorForegroundRunning(state.Foreground) {
 		return "", false, nil
@@ -803,7 +803,7 @@ func (r *providerChatRuntime) createChatWithIntentDigest(presentation chat.Prese
 			return nil, err
 		}
 	}
-	return headlessCreateResult(actor.engine.Snapshot(), operationID, focus), nil
+	return headlessCreateResult(actor.engine.ReadSnapshot(), operationID, focus), nil
 }
 
 func (r *providerChatRuntime) existingHeadlessCreate(operationID providercontract.OperationID, digest string, focus bool) (map[string]any, bool, error) {
@@ -824,7 +824,7 @@ func (r *providerChatRuntime) existingHeadlessCreate(operationID providercontrac
 		return nil, true, err
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	actor.mu.Unlock()
 	if !state.Initialized || state.Deleted || state.Presentation.TabID != tabID || state.CreationOperationID != operationID || state.CreationDigest != digest {
 		return nil, true, errors.New("chat creation operation conflicts with the existing durable child")
@@ -880,7 +880,7 @@ func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationI
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if receipt, exists := state.PresentationMutationReceipts[operationID]; exists {
 		if receipt.Digest != digest {
 			return errors.New("presentation operation id was reused for different content")
@@ -893,7 +893,7 @@ func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationI
 	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
 		return err
 	}
-	receipt, ok := actor.engine.Snapshot().PresentationMutationReceipts[operationID]
+	receipt, ok := actor.engine.ReadSnapshot().PresentationMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return errors.New("chat rename lost its durable actor receipt")
 	}
@@ -926,7 +926,7 @@ func (r *providerChatRuntime) SettleChat(tabID, chatID string, settled bool, ope
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if receipt, exists := state.PresentationMutationReceipts[operationID]; exists {
 		if receipt.Digest != digest {
 			return errors.New("presentation operation id was reused for different content")
@@ -948,7 +948,7 @@ func (r *providerChatRuntime) SettleChat(tabID, chatID string, settled bool, ope
 	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
 		return err
 	}
-	receipt, ok := actor.engine.Snapshot().PresentationMutationReceipts[operationID]
+	receipt, ok := actor.engine.ReadSnapshot().PresentationMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return errors.New("chat settle lost its durable actor receipt")
 	}
@@ -999,7 +999,7 @@ func (r *providerChatRuntime) ConfigureChat(ctx context.Context, tabID, chatID, 
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	modelControls, err := updateActorModelControls(state.Presentation.ModelControls, controls)
 	if err != nil {
 		return err
@@ -1028,7 +1028,7 @@ func (r *providerChatRuntime) ConfigureChat(ctx context.Context, tabID, chatID, 
 	}); err != nil {
 		return err
 	}
-	committed := actor.engine.Snapshot()
+	committed := actor.engine.ReadSnapshot()
 	receipt, ok := committed.RuntimeControlMutationReceipts[operationID]
 	if !ok || receipt.Digest != digest {
 		return errors.New("chat configuration lost its durable controls receipt")
@@ -1074,7 +1074,7 @@ func (r *providerChatRuntime) DeleteChat(ctx context.Context, tabID, chatID stri
 		return err
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 		actor.mu.Unlock()
 		return errors.New("tab id does not own the requested chat")
@@ -1109,7 +1109,7 @@ func (r *providerChatRuntime) ApplySessionRefresh(payload map[string]any) error 
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	laneID := state.ActiveLaneID
 	if state.Foreground != nil {
 		laneID = state.Foreground.LaneID
@@ -1303,7 +1303,7 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 		}
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if state.ChatID != strings.TrimSpace(chatID) || state.Presentation.TabID != strings.TrimSpace(tabID) {
 		actor.mu.Unlock()
 		return nil, errors.New("chat.send requires the current exact tab/chat pair")
@@ -1349,7 +1349,7 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 				return nil, err
 			}
 			actor.mu.Lock()
-			result, err = r.agentSteerQueuedResultLocked(actor.engine.Snapshot(), actorOperationID)
+			result, err = r.agentSteerQueuedResultLocked(actor.engine.ReadSnapshot(), actorOperationID)
 			actor.mu.Unlock()
 			if err != nil {
 				return nil, err
@@ -1363,7 +1363,7 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 		result["delivery"] = firstNonEmptyString(fieldString(result, "strategy"), "steer")
 		return result, nil
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	if state.ChatID != strings.TrimSpace(chatID) || state.Presentation.TabID != strings.TrimSpace(tabID) {
 		actor.mu.Unlock()
 		return nil, errors.New("chat.send requires the current exact tab/chat pair")
@@ -1394,7 +1394,7 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 		actor.mu.Unlock()
 		return nil, err
 	}
-	receipt := queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID)
+	receipt := queuedActorReceipt(actor.engine.ReadSnapshot(), operationID, queueID)
 	actor.mu.Unlock()
 	// Agent control is headless. The durable queue receipt returns immediately;
 	// provider cold-start and turn execution continue from the actor outbox on
@@ -1423,7 +1423,7 @@ func (r *providerChatRuntime) steerQueuedLocked(actor *providerChatActor, tabID,
 	if actor == nil || actor.engine == nil {
 		return agentSteerNoAction, nil, errors.New("chat actor is unavailable")
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 		return agentSteerNoAction, nil, errors.New("steer tab attachment is stale")
 	}
@@ -1453,7 +1453,7 @@ func (r *providerChatRuntime) steerQueuedLocked(actor *providerChatActor, tabID,
 		}); err != nil {
 			return agentSteerNoAction, nil, err
 		}
-		result := queuedActorReceipt(actor.engine.Snapshot(), operationID, queueID)
+		result := queuedActorReceipt(actor.engine.ReadSnapshot(), operationID, queueID)
 		result["ok"] = false
 		result["queued"] = true
 		result["strategy"] = "queue"

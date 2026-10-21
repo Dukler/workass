@@ -310,7 +310,7 @@ func (h *workassToolHandler) callTool(r *http.Request, call browserMCPCallParams
 				return browserMCPErrorResult("browser chat attachment is stale"), nil
 			}
 			actor.mu.Lock()
-			state := actor.engine.Snapshot()
+			state := actor.engine.ReadSnapshot()
 			actor.mu.Unlock()
 			if state.Deleted || !state.Initialized || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 				return browserMCPErrorResult("browser chat attachment is stale"), nil

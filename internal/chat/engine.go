@@ -335,6 +335,18 @@ func (e *Engine) Snapshot() State {
 	return e.state.Clone()
 }
 
+// ReadSnapshot is Snapshot for a reader: every field is an isolated copy
+// except the ledger rows, which are shared with the committed state instead of
+// deep-copied (the bulk of a long chat; see State.cloneSharingLedger).
+// Committed rows are never modified in place, so the rows can be read at any
+// time, but the caller must treat them, and everything they reference, as
+// read-only.
+func (e *Engine) ReadSnapshot() State {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state.cloneSharingLedger()
+}
+
 // View runs read under the engine lock with the committed state itself, not
 // a copy: Snapshot deep-copies the whole history, which on a long chat costs
 // more than most reads that need a handful of fields. read may copy values

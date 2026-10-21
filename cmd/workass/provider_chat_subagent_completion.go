@@ -22,7 +22,7 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 	if err != nil {
 		return err
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if state.Deleted || state.Presentation.TabID != strings.TrimSpace(tabID) {
 		// A deleted or re-homed actor must never be recreated or addressed through
 		// another tab. Returning success acknowledges this permanently ineligible
@@ -37,7 +37,7 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 	legacy := formatSubagentCompletionLegacy(receipt)
 	laneID := providercontract.LaneID(strings.TrimSpace(receipt.OriginLaneID))
 	actor.mu.Lock()
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	if state.Deleted || state.Presentation.TabID != strings.TrimSpace(tabID) {
 		actor.mu.Unlock()
 		return nil
