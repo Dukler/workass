@@ -106,7 +106,7 @@ func main() {
 	compactionEnabled := flag.Bool("compaction-enabled", true, "enable ACP auto-compaction at turn boundaries")
 	compactionThresholdPct := flag.Int("compaction-threshold-pct", 80, "ACP auto-compaction threshold as context usage percent")
 	compactionKeepLastTurns := flag.Int("compaction-keep-last-turns", 4, "conversation turns to keep verbatim after ACP auto-compaction")
-	sqliteStoresFlag := flag.String("sqlite-stores", "", "comma-separated stores kept in state/state.db instead of JSON files (known: chats); also "+sqliteStoresEnv+"; when neither is given: chats in the dev profile, none otherwise")
+	sqliteStoresFlag := flag.String("sqlite-stores", "", sqliteStoresUsage)
 	flag.Parse()
 	acpOverride := false
 	flagOverrides := map[string]bool{}

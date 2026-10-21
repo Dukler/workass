@@ -82,6 +82,27 @@ func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T)
 	}
 }
 
+// The --sqlite-stores help states each profile default the parser applies.
+func TestSQLiteStoresHelpStatesTheProfileDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		profile, goos, phrase string
+		on                    bool
+	}{
+		{"dev", "windows", "chats in the dev profile", true},
+		{"prod", "darwin", "in prod on macOS", true},
+		{"prod", "windows", "none in Windows prod", false},
+		{"test", "darwin", "or the test profile", false},
+	} {
+		setSQLiteStoresGOOS(t, tc.goos)
+		if on := sqliteStoresProfileDefault(tc.profile) == sqliteStoreChats; on != tc.on {
+			t.Fatalf("%s on %s: default on=%v, want %v", tc.profile, tc.goos, on, tc.on)
+		}
+		if !strings.Contains(sqliteStoresUsage, tc.phrase) {
+			t.Fatalf("help %q does not say %q", sqliteStoresUsage, tc.phrase)
+		}
+	}
+}
+
 // main passes workassRuntimeProfile(): WORKASS_PROFILE=dev turns the default
 // on, and an unset or unknown profile is prod, which is on only on macOS.
 func TestSQLiteStoresFollowTheRuntimeProfile(t *testing.T) {
