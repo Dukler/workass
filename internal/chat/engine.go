@@ -125,6 +125,13 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			return nil
 		}
 	}
+	if prepare == nil && !e.state.Deleted && externalMutationReplayUnchanged(e.state, command) {
+		// Re-recording a journaled external mutation, or a receipt it already
+		// holds, is accepted and changes nothing but the revision. Opening a
+		// chat re-hosts its visualizations and a browser retry re-records its
+		// operation; neither may rewrite the whole actor.
+		return nil
+	}
 	providerStore, hasProviderStore := e.store.(providerEventStateStore)
 	providerEvent, isProviderEvent := command.(ProviderEventReceived)
 	useProviderEventJournal := prepare == nil && hasProviderStore && isProviderEvent && journalableProviderEvent(providerEvent.Event.Kind)
