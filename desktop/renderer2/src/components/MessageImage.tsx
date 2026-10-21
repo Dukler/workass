@@ -7,10 +7,11 @@ import { observeTranscriptImageOnce } from '../transcript-images';
 // A message image the daemon sent by reference (archive reads with
 // deferImages, 2026-10-13): the chat's text paints first, and each image's
 // bytes load once, when it comes into view. Loaded images stay cached, so
-// going back to a chat never fetches them again.
+// going back to a chat never fetches them again. Tool images share it, and a
+// windowed transcript remounts rows as the reader scrolls, so it holds more.
 const loaded = new Map<string, string>();
 const pending = new Map<string, Promise<string | null>>();
-const CACHE_LIMIT = 24;
+const CACHE_LIMIT = 48;
 
 function remember(ref: string, src: string) {
   loaded.delete(ref);

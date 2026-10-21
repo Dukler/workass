@@ -3,13 +3,17 @@ import type { Chat } from '../store/types';
 export const CHAT_MESSAGE_TAIL = 60;
 export const CHAT_INITIAL_HISTORY = 10;
 
+// The few most recently read chats keep what was loaded, so switching back
+// restores the same rows and reading position instead of a fresh tail.
+export const CHAT_RETAINED_HISTORIES = 4;
+
 // Full transcripts are resident only while explicitly reading older history or
-// searching it. Ordinary navigation keeps a small recent slice; inactive chats
-// retain at most the bounded actor tail.
-export function releaseInactiveHistories(chats: Chat[], activeId: string | null): string[] {
+// searching it. Ordinary navigation keeps a small recent slice; other inactive
+// chats retain at most the bounded actor tail.
+export function releaseInactiveHistories(chats: Chat[], activeId: string | null, retained: ReadonlySet<string> = new Set()): string[] {
   const released: string[] = [];
   for (const chat of chats) {
-    if (chat.id === activeId || chat.messages.length <= CHAT_MESSAGE_TAIL) continue;
+    if (chat.id === activeId || retained.has(chat.id) || chat.messages.length <= CHAT_MESSAGE_TAIL) continue;
     if (chat.messages.some((message) => message.status === 'running' || message.status === 'pending')) continue;
     chat.messageCount = Math.max(chat.messageCount ?? 0, chat.messages.length);
     chat.messages = chat.messages.slice(-CHAT_MESSAGE_TAIL);

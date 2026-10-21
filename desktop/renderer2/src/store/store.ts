@@ -23,7 +23,7 @@ import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, norma
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
-import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
+import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
@@ -715,8 +715,12 @@ export class Store {
   private markAllChatsDirty() {
     for (const chat of this.state.chats) this.touchChat(chat.id);
   }
+  // Most recently read first; these keep their loaded history while inactive.
+  private recentlyRead: string[] = [];
   private releaseInactiveHistories(activeId: string | null) {
-    for (const chatId of releaseInactiveHistories(this.state.chats, activeId)) this.fullHistoriesLoaded.delete(chatId);
+    if (activeId) this.recentlyRead = [activeId, ...this.recentlyRead.filter((id) => id !== activeId)].slice(0, CHAT_RETAINED_HISTORIES);
+    const retained = new Set(this.recentlyRead);
+    for (const chatId of releaseInactiveHistories(this.state.chats, activeId, retained)) this.fullHistoriesLoaded.delete(chatId);
   }
   private preserveUnchangedFullHistories(previous: Chat[], restored: Chat[]) {
     for (const chatId of preserveUnchangedFullHistories(previous, restored)) this.fullHistoriesLoaded.add(chatId);

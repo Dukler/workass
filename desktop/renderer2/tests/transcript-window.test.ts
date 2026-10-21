@@ -22,16 +22,19 @@ test('the reach back is bounded by the resident tail', () => {
   assert.equal(transcriptWindowStart(messages, CHAT_INITIAL_HISTORY), messages.length - CHAT_INITIAL_HISTORY);
 });
 
+// Every loaded row is part of the transcript (windowing mounts what the screen
+// needs, transcript-windowing.test.ts); the band under a short window cannot
+// come from rows held back in memory.
 test('the transcript shows more of what is loaded until the screen is full', () => {
-  assert.match(transcript, /visibleMessages\.slice\(transcriptWindowStart\(visibleMessages, reveal\)\)/);
-  assert.match(transcript, /doc\.offsetHeight >= el\.clientHeight\) return;\s*if \(residentHidden > 0\) \{\s*setReveal\(/);
+  assert.match(transcript, /: visibleMessages;/);
+  assert.doesNotMatch(transcript, /setReveal\(/);
 });
 
 // The screen-filling step first used only rows already in memory, so the band
 // stayed whenever the older rows were still on disk ("Ver 40 mensajes
 // anteriores" with nothing loaded to fill from).
 test('a short transcript fills the screen from disk when memory has nothing older', () => {
-  assert.match(transcript, /if \(hidden <= 0 \|\| historyLoading \|\| chat\.historyComplete \|\| autoFillStalled\.current\) return;/);
+  assert.match(transcript, /if \(hidden <= 0 \|\| historyLoadingNow\.current \|\| chat\.historyComplete \|\| autoFillStalled\.current\) return;/);
   assert.match(transcript, /void revealOlder\(\)\.then\(\(\) => \{\s*if \(\(store\.chat\(chatID\)\?\.messages\.length \?\? 0\) <= before\) autoFillStalled\.current = true;/);
 });
 
