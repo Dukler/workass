@@ -52,10 +52,21 @@ contextBridge.exposeInMainWorld('workassClipboard', {
 
 // main.js installs render-frame-guard.js on this window: every navigation of a
 // chat HTML page frame is cancelled. Pages run their scripts only when this
-// says so; without it (older shells, plain browsers) they render static.
+// says so; without it (older shells, plain browsers) they render static. It
+// says so only when the main process confirms the guard is attached to this
+// very window right now: a hardcoded `true` ran page scripts even when the
+// guard had never been installed (review 2026-10-21).
+function renderFrameGuardInstalled() {
+  try {
+    return ipcRenderer.sendSync('workass-render-frames:guard') === true;
+  } catch {
+    return false;
+  }
+}
+
 contextBridge.exposeInMainWorld('workassRenderFrames', {
   supported: true,
-  navigationGuard: true,
+  navigationGuard: renderFrameGuardInstalled(),
 });
 
 contextBridge.exposeInMainWorld('workassWindow', {
