@@ -58,7 +58,10 @@ test('the transcript shortcut searches semantic history in a bounded render wind
   assert.match(transcript, /const virtual = !selectedFindMatch;/);
   assert.match(transcript, /store\.loadFullHistory\(chat\.id\)/);
   assert.match(transcript, /store\.loadRecentHistory\(chat\.id, CHAT_MESSAGE_TAIL\)/);
-  assert.match(transcript, /store\.loadOlderHistory\(chat\.id, HISTORY_PAGE\)/);
+  // One older page per step: HISTORY_PAGE, unless a remembered position asks
+  // for the largest page the actor serves.
+  assert.match(transcript, /const revealOlder = async \(page = HISTORY_PAGE\)/);
+  assert.match(transcript, /store\.loadOlderHistoryPage\(chat\.id, page\)/);
   assert.doesNotMatch(transcript, /setReveal\(total\)/);
   assert.match(transcript, /data-chat-find-message=\{m\.id\}/);
   assert.match(styles, /::highlight\(workass-chat-find-current\)/);

@@ -1555,6 +1555,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 	hub.Register("providers:list", func(args []any) (any, error) {
 		return manager.ProvidersList(), nil
 	})
+	// Additive read: the chat:catalog payload state:digest hashes, without a
+	// detection pass. providers:list carries no catalog groups, so it could
+	// never heal a diverged catalog hash.
+	hub.Register("providers:catalog", func(args []any) (any, error) {
+		return manager.CatalogSnapshot(), nil
+	})
 	hub.Register("providers:detect", func(args []any) (any, error) {
 		return manager.DetectProviders(context.Background(), parseDetectOptions(firstMapArg(args))), nil
 	})

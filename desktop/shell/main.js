@@ -26,7 +26,7 @@ const {
   runUpdateProgressProcess,
 } = require('./update-progress');
 const { CertificatePins, certificateVerificationSessions, trustCertificatePEM } = require('./certificate-pins');
-const { installRenderFrameGuard } = require('./render-frame-guard');
+const { installRenderFrameGuard, hasRenderFrameGuard } = require('./render-frame-guard');
 
 const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
 let updateProgressTransaction = '';
@@ -305,6 +305,16 @@ function createWindow(url, browserReporter, isController) {
     console.error(`[shell] provider-neutral browser control unavailable: ${err.message}`);
   });
   const own = (event) => event.sender === win.webContents;
+  // HTML pages in the chat are sandboxed srcdoc frames with no network; this
+  // cancels any navigation of them (and of frames nested inside them) and keeps
+  // WebRTC off direct UDP. It is attached before the first load, and the
+  // preload asks for it over workass-render-frames:guard: only a yes from here
+  // sets window.workassRenderFrames.navigationGuard, which is what lets the
+  // renderer run a page's scripts at all.
+  installRenderFrameGuard(win.webContents);
+  ipcMain.on('workass-render-frames:guard', (event) => {
+    event.returnValue = own(event) && hasRenderFrameGuard(event.sender);
+  });
   const removeImageCopyMenu = installImageCopyMenu({ win, Menu });
   ipcMain.handle('workass-browser:activate', (event, payload) => own(event) ? browserManager.activate(payload || {}) : null);
   ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds, payload && payload.viewport) : false);
@@ -362,6 +372,7 @@ function createWindow(url, browserReporter, isController) {
     try { ipcMain.removeHandler('workass-image:open-external'); } catch { /* ignore */ }
     try { ipcMain.removeHandler('workass-artifact:reply'); } catch { /* ignore */ }
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
+    try { ipcMain.removeAllListeners('workass-render-frames:guard'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
     for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
@@ -415,12 +426,6 @@ function createWindow(url, browserReporter, isController) {
     shell.openExternal(url);
     return { action: 'deny' };
   });
-  // HTML pages in the chat are sandboxed srcdoc frames with no network; this
-  // cancels any navigation of them (and of frames nested inside them) and keeps
-  // WebRTC off direct UDP. The preload advertises it as
-  // window.workassRenderFrames.navigationGuard, which is what lets the renderer
-  // run a page's scripts at all.
-  installRenderFrameGuard(win.webContents);
   // Dev screenshot: hand the view server a capture fn bound to THIS window so
   // GET /__workass-shell/screenshot returns a PNG of the user's real view.
   // Captures at the window's current content size (i.e. maximized if they are).

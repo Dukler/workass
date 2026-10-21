@@ -222,6 +222,7 @@ func TestPhaseCSessionStoreSurfaceIsExplicit(t *testing.T) {
 
 var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"Catalog":                        {},
+	"CatalogSnapshot":                {},
 	"CatalogSnapshotGroups":          {},
 	"ChatGoal":                       {},
 	"ConsumeRateLimitResetCredit":    {},

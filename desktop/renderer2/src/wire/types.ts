@@ -809,6 +809,9 @@ export interface WorkassApi {
   // hidden unless a future bridge surfaces it.
   appChatDetectAcp?: (opts?: Record<string, unknown>) => Promise<DetectAcpResult>;
   providersList?: () => Promise<ProviderRecord[]>;
+  // Additive read: the chat:catalog payload the daemon's state:digest hashes,
+  // without a detection pass. Absent on older daemon bridges.
+  providersCatalog?: () => Promise<ChatCatalog>;
   providersDetect?: (opts?: { provider?: string }) => Promise<DetectAcpResult>;
   providersToggle?: (providerId: string, enabled: boolean) => Promise<ProviderRecord[]>;
   // Click-to-update: run the daemon's provider-owned updater for a provider

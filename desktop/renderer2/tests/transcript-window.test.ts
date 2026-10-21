@@ -34,8 +34,19 @@ test('the transcript shows more of what is loaded until the screen is full', () 
 // stayed whenever the older rows were still on disk ("Ver 40 mensajes
 // anteriores" with nothing loaded to fill from).
 test('a short transcript fills the screen from disk when memory has nothing older', () => {
-  assert.match(transcript, /if \(hidden <= 0 \|\| historyLoadingNow\.current \|\| chat\.historyComplete \|\| autoFillStalled\.current\) return;/);
-  assert.match(transcript, /void revealOlder\(\)\.then\(\(\) => \{\s*if \(\(store\.chat\(chatID\)\?\.messages\.length \?\? 0\) <= before\) autoFillStalled\.current = true;/);
+  assert.match(transcript, /if \(hidden <= 0 \|\| historyLoadingNow\.current \|\| chat\.historyComplete \|\| autoFillStalled\.current \|\| olderRetryPending\(\)\) return;/);
+  // A load that brings nothing stops it; a read that failed is tried again.
+  assert.match(transcript, /void revealOlder\(\)\.then\(\(outcome\) => \{\s*if \(outcome !== 'failed' && \(store\.chat\(chatID\)\?\.messages\.length \?\? 0\) <= before\) autoFillStalled\.current = true;/);
+});
+
+// A 225 MB chat's automatic upward load stopped for good on its first failed
+// read (a timeout behind thousands of queued image reads) and fell back to
+// "Ver anteriores": five clicks and 199 s to reach the first message.
+test('a failed older read is retried with a growing pause; only an empty one stops the load', () => {
+  assert.match(transcript, /void revealOlder\(\)\.then\(\(outcome\) => \{ if \(outcome === 'empty'\) olderStalledAt\.current = before; \}\);/);
+  assert.match(transcript, /el\.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX \|\| olderRetryPending\(\)\) return;/);
+  assert.match(transcript, /retry\.delay = Math\.min\(OLDER_RETRY_MAX_MS, Math\.max\(OLDER_RETRY_MIN_MS, retry\.delay \* 2\)\);/);
+  assert.match(transcript, /if \(outcome === 'empty'\) restoreStalled\.current = true;/);
 });
 
 // Holding the tallest height for a whole long-running turn kept any real
