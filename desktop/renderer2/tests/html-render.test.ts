@@ -49,6 +49,8 @@ test('the CSP is the first element of the head, and a page cannot loosen it', ()
   assert.ok(srcdoc.indexOf('content="default-src *"') > body);
   assert.ok(srcdoc.indexOf('<base href="https://evil.example/">') > body);
   assert.ok(srcdoc.endsWith(page), 'the page follows verbatim');
+  const shadowed = buildHtmlSrcdoc('<div><template shadowrootmode="open"><iframe srcdoc="x"></iframe></template></div>', { vars: VARS, scheme: 'dark', mode: 'scripted' });
+  assert.match(shadowed, /<template data-wa-shadowrootmode="open">/, 'a declarative shadow root is never created');
   assert.match(srcdoc, /<meta http-equiv="x-dns-prefetch-control" content="off">/);
   // The bootstrap runs before any byte of the page.
   assert.ok(srcdoc.indexOf('<script>(') < body);
@@ -206,24 +208,34 @@ function bootstrapHarness() {
   const listeners: Record<string, Array<(event: unknown) => void>> = {};
   const parent = { postMessage: (message: unknown) => { posted.push(message); } };
   const style = { textContent: '' };
-  const frameWindow = { RTCPeerConnection: function RTC() {}, webkitRTCPeerConnection: function RTC() {} };
-  class FakeIframe {}
-  Object.defineProperty(FakeIframe.prototype, 'contentWindow', { configurable: true, enumerable: true, get() { return frameWindow; } });
-  Object.defineProperty(FakeIframe.prototype, 'contentDocument', { configurable: true, enumerable: true, get() { return { defaultView: frameWindow }; } });
+  const observers: Array<{ callback: (records: unknown[]) => void; targets: unknown[] }> = [];
+  class FakeMutationObserver {
+    entry: { callback: (records: unknown[]) => void; targets: unknown[] };
+    constructor(callback: (records: unknown[]) => void) { this.entry = { callback, targets: [] }; observers.push(this.entry); }
+    observe(target: unknown) { this.entry.targets.push(target); }
+  }
+  const shadowRoot = { kind: 'shadow-root' };
+  class FakeElement { attachShadow() { return shadowRoot; } setHTMLUnsafe() {} }
+  class FakeShadowRoot { setHTMLUnsafe() {} }
+  const written: string[] = [];
   const documentElement = { scrollHeight: 640, clientHeight: 150, getBoundingClientRect: () => ({ height: 120 }) };
   const win: Record<string, unknown> = {
     parent,
     RTCPeerConnection: function RTC() {},
     webkitRTCPeerConnection: function RTC() {},
     RTCDataChannel: function RTC() {},
-    HTMLIFrameElement: FakeIframe,
-    frames: { length: 0 },
+    MutationObserver: FakeMutationObserver,
+    Element: FakeElement,
+    ShadowRoot: FakeShadowRoot,
+    Document: { parseHTMLUnsafe() {} },
     addEventListener: (type: string, listener: (event: unknown) => void) => { (listeners[type] ??= []).push(listener); },
   };
   const doc = {
     documentElement,
     getElementById: (id: string) => (id === 'wa-theme' ? style : null),
     addEventListener: (type: string, listener: (event: unknown) => void) => { (listeners[`doc:${type}`] ??= []).push(listener); },
+    write: (text: string) => { written.push(text); },
+    writeln: (text: string) => { written.push(text); },
   };
   win.document = doc;
   const context = vm.createContext({ window: win, document: doc, URL });
@@ -231,17 +243,51 @@ function bootstrapHarness() {
   const fire = (type: string, event: unknown) => { for (const listener of listeners[type] ?? []) listener(event); };
   // Messages are built in the bootstrap's own realm; compare them as data.
   const messages = () => JSON.parse(JSON.stringify(posted)) as unknown[];
-  return { posted, messages, win, style, parent, fire, frameWindow, FakeIframe, documentElement };
+  return { posted, messages, win, doc, style, parent, fire, documentElement, observers, shadowRoot, FakeElement, FakeShadowRoot, written };
 }
 
-test('the bootstrap is self-contained and removes WebRTC, here and in frames the page nests', () => {
-  const { win, frameWindow, FakeIframe } = bootstrapHarness();
+function fakeNode(tag: string, children: Array<ReturnType<typeof fakeNode>> = []) {
+  const node = {
+    nodeType: 1, tag, removed: false,
+    matches: (selector: string) => selector.split(',').includes(tag),
+    querySelectorAll: (selector: string) => children.filter((child) => selector.split(',').includes(child.tag)),
+    remove() { node.removed = true; },
+  };
+  return node;
+}
+
+test('the bootstrap is self-contained, removes WebRTC and gives the page no nested frames', () => {
+  const { win, doc, observers, shadowRoot, FakeElement, FakeShadowRoot, written } = bootstrapHarness();
   assert.equal(win.RTCPeerConnection, undefined);
   assert.equal(win.webkitRTCPeerConnection, undefined);
   assert.equal(win.RTCDataChannel, undefined);
-  const nested = Object.create(FakeIframe.prototype) as { contentWindow: Record<string, unknown> };
-  assert.equal(nested.contentWindow, frameWindow);
-  assert.equal(frameWindow.RTCPeerConnection, undefined, 'a nested frame is stripped as soon as the page reaches it');
+
+  // One watch over the document, and over every shadow root the page opens.
+  assert.equal(observers.length, 1);
+  assert.deepEqual(observers[0].targets, [doc]);
+  const root = (new (FakeElement as unknown as { new(): { attachShadow(init: unknown): unknown } })()).attachShadow({ mode: 'closed' });
+  assert.equal(root, shadowRoot);
+  assert.deepEqual(observers[0].targets, [doc, shadowRoot]);
+
+  // A nested frame is removed as it is inserted, alone or inside other markup.
+  const frame = fakeNode('iframe');
+  const inner = fakeNode('iframe');
+  const holder = fakeNode('div', [inner, fakeNode('p')]);
+  const text = { nodeType: 3 };
+  observers[0].callback([{ addedNodes: [frame, holder, text] }]);
+  assert.equal(frame.removed, true);
+  assert.equal(inner.removed, true);
+  assert.equal(holder.removed, false);
+  const embed = fakeNode('embed');
+  observers[0].callback([{ addedNodes: [embed] }]);
+  assert.equal(embed.removed, true);
+
+  // No declarative shadow roots, which the watch could not see into.
+  assert.equal('setHTMLUnsafe' in (FakeElement as unknown as { prototype: object }).prototype, false);
+  assert.equal('setHTMLUnsafe' in (FakeShadowRoot as unknown as { prototype: object }).prototype, false);
+  assert.equal('parseHTMLUnsafe' in (win.Document as object), false);
+  (doc.write as (text: string) => void)('<div><template shadowrootmode="closed"><iframe></iframe></template></div>');
+  assert.deepEqual(written, ['<div><template data-wa-shadowrootmode="closed"><iframe></iframe></template></div>']);
 });
 
 test('the bootstrap reports the page height and follows the theme only from its parent', () => {

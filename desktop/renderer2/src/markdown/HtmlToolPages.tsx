@@ -47,6 +47,9 @@ function ToolHtmlPage({ reference, artifactOrigin }: { reference: HtmlRenderRefe
 
 export function ToolHtmlPages({ tools, artifactOrigin }: { tools: ToolEvent[]; artifactOrigin?: string }) {
   const pages = tools.flatMap((tool) => {
+    // Only the chat's own calls: a subagent reports to its parent, and its
+    // call stays an ordinary row inside the subagent's work.
+    if (tool.subagentId) return [];
     const reference = htmlRenderFromToolCall(tool);
     return reference ? [{ tool, reference }] : [];
   });

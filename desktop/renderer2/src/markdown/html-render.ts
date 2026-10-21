@@ -57,52 +57,58 @@ export function isHtmlFence(lang: string): boolean {
 
 // Runs INSIDE the frame, before any page script. It is serialized with
 // toString(), so it must never reference anything outside its own body.
-// Ported from the mock's bootstrap(), with two additions: the WebRTC removal
-// also reaches frames the page nests inside itself, and link clicks are caught
-// on window (first in the capture order) rather than on document.
+// Ported from the mock's bootstrap(), with two additions: the page gets no
+// nested frames, and link clicks are caught on window (first in the capture
+// order) rather than on document.
 /* eslint-disable */
 export function htmlFrameBootstrap(BASE: string): void {
   var w: any = window, d: any = document, P: any = w.parent, last = -1;
-  var RTC = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate'];
-  function strip(x: any) {
-    try { if (!x || x.__waRtc) return; } catch (e) { return; }
-    for (var i = 0; i < RTC.length; i++) {
-      try { delete x[RTC[i]]; } catch (e) {}
-      try { if (typeof x[RTC[i]] !== 'undefined') Object.defineProperty(x, RTC[i], { value: undefined, writable: false, configurable: false }); } catch (e) {}
-    }
-    try { Object.defineProperty(x, '__waRtc', { value: 1 }); } catch (e) {}
-    try { nest(x); } catch (e) {}
+  // WebRTC is the one way out that no CSP governs (Chromium 140 ignores a CSP
+  // `webrtc` directive, and the shell's disable_non_proxied_udp policy still
+  // lets TURN over TCP connect): the page's own copy is removed here.
+  ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate'].forEach(function (k) {
+    try { delete w[k]; } catch (e) {}
+    try { if (typeof w[k] !== 'undefined') Object.defineProperty(w, k, { value: undefined, writable: false, configurable: false }); } catch (e) {}
+  });
+  // A frame the page nests gets a fresh window, WebRTC included, and neither
+  // frame-src nor the shell's navigation guard sees a nested srcdoc or
+  // javascript: frame load. Chromium gives every nested sandboxed document its
+  // own opaque origin, so the page cannot reach into one; it could only run
+  // that frame's own script. So the page gets no nested frames at all: each is
+  // removed as it is inserted, in the mutation microtask, before the nested
+  // document's load (a later task) can start any script. Shadow roots are
+  // watched too; declarative ones are disabled (the host also neutralizes
+  // `shadowrootmode` in the source).
+  var NEST = 'iframe,frame,object,embed,portal,fencedframe';
+  function prune(node: any) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.matches(NEST)) { node.remove(); return; }
+    var inner = node.querySelectorAll(NEST);
+    for (var i = 0; i < inner.length; i++) inner[i].remove();
   }
-  function onLoad(e: any) {
-    var t = e.target;
-    try { if (t && t.tagName === 'IFRAME') strip(t.contentWindow); } catch (x) {}
-  }
-  // A frame the page creates gets a fresh window with its own WebRTC. Strip it
-  // whenever the page can first reach it: the synchronous load of a new
-  // about:blank frame, its contentWindow/contentDocument getters, and (last)
-  // a mutation sweep over window.frames.
-  function nest(x: any) {
-    var proto = x.HTMLIFrameElement && x.HTMLIFrameElement.prototype;
-    if (proto) ['contentWindow', 'contentDocument'].forEach(function (name) {
-      var desc = Object.getOwnPropertyDescriptor(proto, name);
-      if (!desc || !desc.get) return;
-      var get = desc.get;
-      Object.defineProperty(proto, name, {
-        configurable: false, enumerable: desc.enumerable,
-        get: function () { var v = get.call(this); try { strip(name === 'contentWindow' ? v : v && v.defaultView); } catch (e) {} return v; },
-      });
-    });
-    var shadow = x.Element && x.Element.prototype.attachShadow;
-    if (shadow) x.Element.prototype.attachShadow = function () {
-      var root = shadow.apply(this, arguments);
-      try { root.addEventListener('load', onLoad, true); } catch (e) {}
-      return root;
+  var watch = new w.MutationObserver(function (records: any) {
+    for (var i = 0; i < records.length; i++) for (var j = 0; j < records[i].addedNodes.length; j++) prune(records[i].addedNodes[j]);
+  });
+  watch.observe(d, { childList: true, subtree: true });
+  var attach = w.Element.prototype.attachShadow;
+  w.Element.prototype.attachShadow = function () {
+    var root = attach.apply(this, arguments);
+    watch.observe(root, { childList: true, subtree: true });
+    return root;
+  };
+  [w.Element && w.Element.prototype, w.ShadowRoot && w.ShadowRoot.prototype, w.Document].forEach(function (o: any) {
+    if (!o) return;
+    try { delete o.setHTMLUnsafe; } catch (e) {}
+    try { delete o.parseHTMLUnsafe; } catch (e) {}
+  });
+  ['write', 'writeln'].forEach(function (k) {
+    var original = d[k];
+    if (typeof original !== 'function') return;
+    d[k] = function () {
+      var text = Array.prototype.join.call(arguments, '').replace(/shadowroot/gi, 'data-wa-shadowroot');
+      return original.call(d, text);
     };
-    x.addEventListener('load', onLoad, true);
-    var sweep = function () { try { for (var i = 0; i < x.frames.length; i++) strip(x.frames[i]); } catch (e) {} };
-    try { new x.MutationObserver(sweep).observe(x.document, { childList: true, subtree: true }); } catch (e) {}
-  }
-  strip(w);
+  });
 
   var s = d.getElementById('wa-theme');
   function apply(m: any) {
@@ -186,6 +192,12 @@ function neutralizeTargets(source: string): string {
   return source.replace(/([\s"'/])target(\s*=)/gi, '$1data-wa-target$2');
 }
 
+// A declarative shadow root (<template shadowrootmode>) would hide a nested
+// frame from the bootstrap's watch, so the page never gets one.
+function neutralizeShadowRoots(source: string): string {
+  return source.replace(/([\s"'/])shadowroot/gi, '$1data-wa-shadowroot');
+}
+
 export function buildHtmlSrcdoc(
   source: string,
   options: { vars: Record<string, string>; scheme: HtmlScheme; mode: HtmlRenderMode },
@@ -200,7 +212,7 @@ export function buildHtmlSrcdoc(
     + `<style id="wa-theme">${htmlThemeRule(options.vars, options.scheme)}${base}</style>`
     + (scripted ? `<script>(${htmlFrameBootstrap.toString()})(${JSON.stringify(base)});</script>` : '')
     + '</head><body>'
-    + (scripted ? source : neutralizeTargets(source));
+    + neutralizeShadowRoots(scripted ? source : neutralizeTargets(source));
 }
 
 export type HtmlFrameMessage =
