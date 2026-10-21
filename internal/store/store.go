@@ -142,6 +142,18 @@ func Open(opts Options) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	// Owner-only, like every other state file. SQLite gives the -wal file
+	// the database file's permissions, so setting them here covers both.
+	file, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
 	busy := opts.BusyTimeout
 	if busy <= 0 {
 		busy = defaultBusyTimeout
