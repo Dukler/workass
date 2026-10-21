@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -4079,6 +4080,43 @@ func reduceDetachLaneFailed(state *State, command DetachLaneFailed) error {
 		entry.Status = OutboxFailed
 	}
 	return nil
+}
+
+// externalMutationReplayUnchanged reports whether command is a
+// RecordExternalMutation or ExternalMutationReceipt that the reducer accepts
+// for an already-journaled operation while leaving that operation exactly as
+// it is: the transition would change only the actor revision. It runs the
+// reducer itself on a copy of the one outbox entry the command can touch, so
+// it decides exactly what the reducer decides. The caller owns the deleted
+// check (Reduce refuses both commands on a deleted chat).
+func externalMutationReplayUnchanged(state State, command Command) bool {
+	switch command := command.(type) {
+	case RecordExternalMutation:
+		existing := externalMutationEntryForOperation(state, command.OperationID)
+		if existing == nil {
+			return false
+		}
+		// With the operation journaled the reducer only compares; it reserves
+		// nothing and emits nothing.
+		probe := State{
+			ChatID: state.ChatID, Initialized: state.Initialized, Deleted: state.Deleted,
+			Presentation: PresentationState{TabID: state.Presentation.TabID},
+			Outbox:       []OutboxEntry{*existing},
+		}
+		effects, err := reduceRecordExternalMutation(&probe, command)
+		return err == nil && len(effects) == 0
+	case ExternalMutationReceipt:
+		existing := externalMutationEntryForOperation(state, command.OperationID)
+		if existing == nil {
+			return false
+		}
+		probe := State{ChatID: state.ChatID, Outbox: []OutboxEntry{*existing}}
+		if err := reduceExternalMutationReceipt(&probe, command); err != nil {
+			return false
+		}
+		return reflect.DeepEqual(probe.Outbox[0], *existing)
+	}
+	return false
 }
 
 func externalMutationEntryForOperation(state State, operationID provider.OperationID) *OutboxEntry {
