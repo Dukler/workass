@@ -125,6 +125,11 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			return nil
 		}
 	}
+	if update, ok := command.(UpdateEnvironment); ok && prepare == nil && !e.state.Deleted && environmentUpdateUnchanged(e.state, update) {
+		// Re-observing the same Entorno (every provider session bind, and
+		// turns that change no file) would only advance an unread counter.
+		return nil
+	}
 	if prepare == nil && !e.state.Deleted && externalMutationReplayUnchanged(e.state, command) {
 		// Re-recording a journaled external mutation, or a receipt it already
 		// holds, is accepted and changes nothing but the revision. Opening a

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -799,7 +800,12 @@ func (r *providerChatRuntime) observeChatEnv(payload acp.ChatEnvPayload) error {
 		return err
 	}
 	committed := readChatSurfaceHead(actor.engine)
-	if committed.Revision <= state.Revision || committed.Environment.TabID != tabID || len(committed.Environment.Payload) == 0 {
+	// An observation identical to the committed one is accepted without a
+	// commit; its readback is the committed projection itself.
+	unchanged := committed.Revision == state.Revision && committed.Environment.CWD == strings.TrimSpace(payload.CWD) &&
+		bytes.Equal(committed.Environment.Payload, payloadRaw) && bytes.Equal(committed.Environment.Checkpoints, checkpointRaw) &&
+		bytes.Equal(committed.Environment.Reference, reference)
+	if committed.Revision <= state.Revision && !unchanged || committed.Environment.TabID != tabID || len(committed.Environment.Payload) == 0 {
 		return errors.New("chat environment actor commit failed durable readback")
 	}
 	if r.publish != nil {
