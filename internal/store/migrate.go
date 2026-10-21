@@ -1,0 +1,190 @@
+package store
+
+import (
+	"context"
+	"embed"
+	"fmt"
+	"io/fs"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"time"
+)
+
+// Migration is one ordered schema step. Version starts at 1 and is
+// contiguous; a shipped migration is never edited or renumbered, a change is
+// a new migration. SQL runs first, then Up (for data steps SQL cannot
+// express), in the same transaction as the schema_migrations row and the
+// PRAGMA user_version bump.
+type Migration struct {
+	Version int
+	Name    string
+	SQL     string
+	Up      func(*Tx) error
+}
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+var migrationFileName = regexp.MustCompile(`^([0-9]{4})_([a-z0-9_]+)\.sql$`)
+
+// EmbeddedMigrations returns the schema shipped with this build, ordered.
+func EmbeddedMigrations() ([]Migration, error) {
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		return nil, err
+	}
+	migrations := make([]Migration, 0, len(entries))
+	for _, entry := range entries {
+		match := migrationFileName.FindStringSubmatch(entry.Name())
+		if match == nil {
+			return nil, fmt.Errorf("migration file %q is not named NNNN_name.sql", entry.Name())
+		}
+		version, _ := strconv.Atoi(match[1])
+		raw, err := migrationFiles.ReadFile(path.Join("migrations", entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		migrations = append(migrations, Migration{Version: version, Name: match[2], SQL: string(raw)})
+	}
+	sort.Slice(migrations, func(i, j int) bool { return migrations[i].Version < migrations[j].Version })
+	if err := validateMigrationList(migrations); err != nil {
+		return nil, err
+	}
+	return migrations, nil
+}
+
+func validateMigrationList(migrations []Migration) error {
+	seen := make(map[string]struct{}, len(migrations))
+	for index, migration := range migrations {
+		if migration.Version != index+1 {
+			return fmt.Errorf("migration %q has version %d, want %d (versions are contiguous from 1)", migration.Name, migration.Version, index+1)
+		}
+		if migration.Name == "" {
+			return fmt.Errorf("migration %d has no name", migration.Version)
+		}
+		if _, duplicate := seen[migration.Name]; duplicate {
+			return fmt.Errorf("migration name %q is not unique", migration.Name)
+		}
+		seen[migration.Name] = struct{}{}
+		if migration.SQL == "" && migration.Up == nil {
+			return fmt.Errorf("migration %d %q is empty", migration.Version, migration.Name)
+		}
+	}
+	return nil
+}
+
+const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+	version        INTEGER PRIMARY KEY,
+	name           TEXT NOT NULL,
+	applied_at     TEXT NOT NULL,
+	binary_version TEXT NOT NULL
+)`
+
+// migrate verifies the recorded history and applies pending migrations, one
+// transaction each. It returns the resulting user_version.
+func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
+	var current int
+	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
+		return 0, classify(err)
+	}
+	if current > len(migrations) {
+		return 0, fmt.Errorf("%w: schema version %d, this build knows %d; update Workass or restore a backup", ErrSchemaTooNew, current, len(migrations))
+	}
+	if err := verifyHistory(db, migrations, current); err != nil {
+		return 0, err
+	}
+	if current == len(migrations) {
+		return current, nil
+	}
+	if current > 0 && backupDir != "" {
+		name := fmt.Sprintf("state-v%d-%s.db", current, time.Now().UTC().Format("20060102T150405.000000000Z"))
+		if err := db.Backup(filepath.Join(backupDir, name)); err != nil {
+			return 0, fmt.Errorf("back up state database before migration: %w", err)
+		}
+	}
+	for _, migration := range migrations[current:] {
+		migration := migration
+		err := db.Write(context.Background(), func(tx *Tx) error {
+			if _, err := tx.Exec(schemaMigrationsDDL); err != nil {
+				return err
+			}
+			if migration.SQL != "" {
+				if _, err := tx.Exec(migration.SQL); err != nil {
+					return err
+				}
+			}
+			if migration.Up != nil {
+				if err := migration.Up(tx); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(`INSERT INTO schema_migrations(version, name, applied_at, binary_version) VALUES (?, ?, ?, ?)`,
+				migration.Version, migration.Name, nowText(), db.binaryVersion); err != nil {
+				return err
+			}
+			// user_version lives in the database header, which this
+			// transaction owns: it commits or rolls back with the schema.
+			_, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", migration.Version))
+			return err
+		})
+		if err != nil {
+			return 0, fmt.Errorf("apply migration %04d_%s: %w", migration.Version, migration.Name, err)
+		}
+		current = migration.Version
+	}
+	return current, nil
+}
+
+func verifyHistory(db *DB, migrations []Migration, current int) error {
+	var tables int
+	if err := db.sql.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return classify(err)
+	}
+	if tables == 0 {
+		if current != 0 {
+			return fmt.Errorf("%w: user_version %d without schema_migrations", ErrSchemaMismatch, current)
+		}
+		var others int
+		if err := db.sql.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table'`).Scan(&others); err != nil {
+			return classify(err)
+		}
+		if others != 0 {
+			return fmt.Errorf("%w: database has tables but no migration history", ErrSchemaMismatch)
+		}
+		return nil
+	}
+	rows, err := db.sql.Query(`SELECT version, name FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return classify(err)
+	}
+	defer rows.Close()
+	expected := 1
+	for rows.Next() {
+		var version int
+		var name string
+		if err := rows.Scan(&version, &name); err != nil {
+			return err
+		}
+		if version != expected || version > current {
+			return fmt.Errorf("%w: recorded migration %d, want %d of %d", ErrSchemaMismatch, version, expected, current)
+		}
+		if name != migrations[version-1].Name {
+			return fmt.Errorf("%w: migration %d is %q here but %q in the database", ErrSchemaMismatch, version, migrations[version-1].Name, name)
+		}
+		expected++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if expected-1 != current {
+		return fmt.Errorf("%w: %d recorded migrations, user_version %d", ErrSchemaMismatch, expected-1, current)
+	}
+	return nil
+}
+
+func nowText() string {
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
