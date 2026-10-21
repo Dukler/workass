@@ -173,13 +173,25 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 // be trusted to be the newer one, so the daemon refuses to guess.
 var ErrFileActorsChangedAfterCutover = errors.New("provider-chats JSON changed after the chat store moved to SQLite")
 
-// VerifyLiveFileActors checks, cheaply (directory listing and stat; a hash
-// only for journals), that no JSON actor was created or changed since its
-// receipt.
+// VerifyLiveFileActors checks that no JSON actor was created or changed since
+// its receipt. It is cheap on an untouched directory: a listing and a stat
+// per file, plus a hash of each journal.
+//
+// A file whose size and modification time still match its receipt is
+// unchanged. One whose time moved but whose size did not is hashed: a copy or
+// a restore (cp -R, the macOS updater's state snapshot, which keeps times
+// only to the microsecond) moves the time without changing a byte. Identical
+// bytes are accepted and the receipt takes the new size and time, so the
+// next boot is a stat again; different bytes are a write after the cutover
+// and fail closed. A different size is different bytes and is never hashed.
 func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions) error {
 	stateDir, actorDir, _, err := importDirs(opts)
 	if err != nil {
 		return err
+	}
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
 	files, err := listActorFiles(actorDir)
 	if err != nil {
@@ -199,18 +211,31 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 	}); err != nil {
 		return err
 	}
+	var refreshed []store.ImportReceipt
 	for _, name := range files {
 		rel := path.Join(filepath.ToSlash(relOrBase(stateDir, actorDir)), name)
 		receipt, ok := receipts[rel]
 		if !ok {
 			return fmt.Errorf("%w: %s has no import receipt", ErrFileActorsChangedAfterCutover, rel)
 		}
-		info, err := os.Stat(filepath.Join(actorDir, name))
+		filePath := filepath.Join(actorDir, name)
+		info, err := os.Stat(filePath)
 		if err != nil {
 			return err
 		}
-		if info.Size() != receipt.Size || info.ModTime().UnixNano() != receipt.MTimeNS {
+		if info.Size() != receipt.Size {
 			return fmt.Errorf("%w: %s was modified after its import", ErrFileActorsChangedAfterCutover, rel)
+		}
+		if info.ModTime().UnixNano() != receipt.MTimeNS {
+			digest, hashed, err := statAndSHA256(filePath)
+			if err != nil {
+				return err
+			}
+			if digest != receipt.SHA256 || hashed.Size() != receipt.Size {
+				return fmt.Errorf("%w: %s was modified after its import", ErrFileActorsChangedAfterCutover, rel)
+			}
+			receipt.Size, receipt.MTimeNS = hashed.Size(), hashed.ModTime().UnixNano()
+			refreshed = append(refreshed, receipt)
 		}
 		companion := filepath.Join(actorDir, name+".events")
 		digest, exists, err := fileSHA256(companion)
@@ -221,7 +246,42 @@ func VerifyLiveFileActors(ctx context.Context, db *store.DB, opts ImportOptions)
 			return fmt.Errorf("%w: %s.events changed after its import", ErrFileActorsChangedAfterCutover, rel)
 		}
 	}
+	if len(refreshed) == 0 {
+		return nil
+	}
+	if err := db.Write(ctx, func(tx *store.Tx) error {
+		for _, receipt := range refreshed {
+			if err := tx.PutImportReceipt(receipt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, receipt := range refreshed {
+		logf("[store] chat actor %s has new file times but the bytes of its import; receipt refreshed", receipt.Source)
+	}
 	return nil
+}
+
+// statAndSHA256 hashes a file and stats the same open file once the hash is
+// read, so the size and time it returns describe the bytes it hashed.
+func statAndSHA256(filePath string) (string, os.FileInfo, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", nil, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), info, nil
 }
 
 func importDirs(opts ImportOptions) (stateDir, actorDir, source string, err error) {

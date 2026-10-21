@@ -733,6 +733,91 @@ func TestVerifyLiveFileActorsDetectsJSONWrittenAfterTheCutover(t *testing.T) {
 	}
 }
 
+// A copy or restore of the state directory moves file times without changing
+// a byte (touch, cp -R, the updater's snapshot keeping only microseconds).
+// Only different bytes are a write after the cutover.
+func TestVerifyLiveFileActorsAcceptsSameBytesWithNewTimes(t *testing.T) {
+	stateDir := t.TempDir()
+	actorDir := filepath.Join(stateDir, "provider-chats")
+	if err := os.MkdirAll(actorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(actorDir, actorFileName("touched-chat"))
+	if _, err := NewDurableEngine("touched-chat", FileStore{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	actors := openTestActors(t)
+	if _, err := ImportFileActors(context.Background(), actors.db, corpusImportOptions(stateDir)); err != nil {
+		t.Fatal(err)
+	}
+	receiptFor := func() store.ImportReceipt {
+		t.Helper()
+		var receipt store.ImportReceipt
+		if err := actors.db.Read(context.Background(), func(tx *store.Tx) error {
+			var err error
+			receipt, _, err = tx.ImportReceiptFor(ActorStoreName, "provider-chats/"+actorFileName("touched-chat"))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	imported := receiptFor()
+	var logged []string
+	options := corpusImportOptions(stateDir)
+	options.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	for _, moved := range []time.Time{
+		time.Now().Add(time.Hour),
+		// The updater's copy: the same second, the nanoseconds cut to microseconds.
+		time.Unix(0, imported.MTimeNS-imported.MTimeNS%1000+1000),
+	} {
+		if err := os.Chtimes(path, moved, moved); err != nil {
+			t.Fatal(err)
+		}
+		logged = nil
+		if err := VerifyLiveFileActors(context.Background(), actors.db, options); err != nil {
+			t.Fatalf("same bytes at %v refused: %v", moved, err)
+		}
+		info, _ := os.Stat(path)
+		if receipt := receiptFor(); receipt.MTimeNS != info.ModTime().UnixNano() || receipt.SHA256 != imported.SHA256 || receipt.Size != imported.Size {
+			t.Fatalf("receipt was not refreshed to the new time: %+v", receipt)
+		}
+		if len(logged) != 1 || !strings.Contains(logged[0], "receipt refreshed") {
+			t.Fatalf("refresh log = %q", logged)
+		}
+		logged = nil
+		if err := VerifyLiveFileActors(context.Background(), actors.db, options); err != nil || len(logged) != 0 {
+			t.Fatalf("second check after the refresh: %v %q", err, logged)
+		}
+	}
+
+	// A write that keeps the size is still a write.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := []byte(strings.Replace(string(raw), `"Revision":0`, `"Revision":9`, 1))
+	if string(changed) == string(raw) || len(changed) != len(raw) {
+		t.Fatal("fixture has no same-size edit")
+	}
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLiveFileActors(context.Background(), actors.db, options); !errors.Is(err, ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("same-size write after the cutover: %v", err)
+	}
+	if receipt := receiptFor(); receipt.SHA256 != imported.SHA256 {
+		t.Fatal("a refused write changed the receipt")
+	}
+	if err := os.WriteFile(path, append(raw, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLiveFileActors(context.Background(), actors.db, options); !errors.Is(err, ErrFileActorsChangedAfterCutover) {
+		t.Fatalf("grown write after the cutover: %v", err)
+	}
+}
+
 func TestImportFailsClosedLikeFileDiscovery(t *testing.T) {
 	cases := map[string]func(t *testing.T, dir string){
 		"unsupported version": func(t *testing.T, dir string) {

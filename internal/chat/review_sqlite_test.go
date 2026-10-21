@@ -11,7 +11,6 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,11 +52,12 @@ func TestReviewLedgerCacheOverhead(t *testing.T) {
 	runtime.KeepAlive(state)
 }
 
-// R1: once the store is live, a JSON backup whose bytes are unchanged but whose
-// mtime moved (touch, cp without -p, a restore tool) makes VerifyLiveFileActors
-// fail, and openChatActorBackend turns that into a refused daemon start. The
-// importing-phase code refreshes metadata for identical bytes; the live check
-// never hashes the main file, so it cannot tell a touch from a write.
+// R1 (fixed, inverted): once the store is live, a JSON backup whose bytes are
+// unchanged but whose mtime moved (touch, cp without -p, a restore tool) used
+// to make VerifyLiveFileActors fail, and openChatActorBackend turned that into
+// a refused daemon start. The live check now hashes a file whose time moved and
+// accepts identical bytes; TestVerifyLiveFileActorsAcceptsSameBytesWithNewTimes
+// is the regression test in the normal suite.
 func TestReviewLiveVerifyRefusesTouchedButIdenticalJSON(t *testing.T) {
 	stateDir := t.TempDir()
 	actorDir := filepath.Join(stateDir, "provider-chats")
@@ -92,11 +92,10 @@ func TestReviewLiveVerifyRefusesTouchedButIdenticalJSON(t *testing.T) {
 	if err != nil || !result.Live {
 		t.Fatalf("import on live store: %+v %v", result, err)
 	}
-	err = VerifyLiveFileActors(context.Background(), actors.db, corpusImportOptions(stateDir))
-	if !errors.Is(err, ErrFileActorsChangedAfterCutover) {
-		t.Fatalf("expected the touched-but-identical JSON to be refused, got %v", err)
+	if err := VerifyLiveFileActors(context.Background(), actors.db, corpusImportOptions(stateDir)); err != nil {
+		t.Fatalf("touched-but-identical JSON is still refused: %v", err)
 	}
-	t.Logf("REPRODUCED: byte-identical JSON with a new mtime -> %v", err)
+	t.Logf("FIXED: byte-identical JSON with a new mtime is accepted")
 }
 
 // R2: import does not run State.Validate on an actor without a journal, so a

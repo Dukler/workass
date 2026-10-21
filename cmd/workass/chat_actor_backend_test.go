@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -219,4 +221,129 @@ func setSQLiteStoresGOOS(t *testing.T, goos string) {
 	previous := sqliteStoresGOOS
 	sqliteStoresGOOS = goos
 	t.Cleanup(func() { sqliteStoresGOOS = previous })
+}
+
+// A rollback or backup restore puts back a copy of a SQLite-live state
+// directory. The copy has the same bytes and new file times: the macOS
+// updater's snapshot (fs.cpSync with preserveTimestamps keeps microseconds),
+// a plain `cp -R`, or any tool that rounds times. Each must boot, and a real
+// JSON write after the cutover must still be refused.
+func TestOpenChatActorBackendBootsFromARestoredCopy(t *testing.T) {
+	copies := map[string]func(t *testing.T, from, to string){
+		"updater snapshot": func(t *testing.T, from, to string) {
+			node, err := exec.LookPath("node")
+			if err != nil {
+				t.Skip("node is not on PATH")
+			}
+			// desktop/shell/update-worker.js, the mutable-state snapshot.
+			script := `const fs=require("fs");fs.cpSync(process.argv[1],process.argv[2],{recursive:true,errorOnExist:true,force:false,dereference:false,preserveTimestamps:true,verbatimSymlinks:true,mode:fs.constants.COPYFILE_FICLONE});`
+			if out, err := exec.Command(node, "-e", script, from, to).CombinedOutput(); err != nil {
+				t.Fatalf("cpSync: %v %s", err, out)
+			}
+		},
+		"cp -R": func(t *testing.T, from, to string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("no cp on Windows")
+			}
+			if out, err := exec.Command("cp", "-R", from, to).CombinedOutput(); err != nil {
+				t.Fatalf("cp -R: %v %s", err, out)
+			}
+		},
+		"microsecond times": func(t *testing.T, from, to string) {
+			copyTreeWithTimes(t, from, to, func(at time.Time) time.Time { return at.Truncate(time.Microsecond) })
+		},
+	}
+	for name, copyTree := range copies {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			stateDir := filepath.Join(root, "state")
+			engine := writeBackendTestActor(t, stateDir, "restored-chat")
+			// The JSON times must carry nanoseconds for a microsecond copy to move them.
+			jsonPath := providerChatStatePath(stateDir, "restored-chat")
+			withNanos := time.Unix(1_700_000_000, 123_456_789)
+			if err := os.Chtimes(jsonPath, withNanos, withNanos); err != nil {
+				t.Fatal(err)
+			}
+			backend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.close(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := filepath.Join(root, "snapshot")
+			copyTree(t, stateDir, snapshot)
+			before, _ := os.Stat(jsonPath)
+			// The restore: the live directory moves aside, the copy takes its place.
+			if err := os.Rename(stateDir, filepath.Join(root, "failed")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(snapshot, stateDir); err != nil {
+				t.Fatal(err)
+			}
+			if after, _ := os.Stat(jsonPath); after.ModTime().Equal(before.ModTime()) {
+				t.Logf("this copy kept the exact file time")
+			}
+			backend, err = openChatActorBackend(stateDir, true, "test", t.Logf)
+			if err != nil {
+				t.Fatalf("restored copy refused: %v", err)
+			}
+			heads, err := backend.discover()
+			if err != nil || len(heads) != 1 || heads[0].State.ChatID != "restored-chat" {
+				t.Fatalf("restored discovery = %#v %v", heads, err)
+			}
+			if err := backend.close(); err != nil {
+				t.Fatal(err)
+			}
+
+			// A JSON-only build writes the restored JSON: refused.
+			restored, err := chat.NewDurableEngine("restored-chat", chat.FileStore{Path: jsonPath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := engine.Snapshot().Presentation.Clone()
+			next.Draft = "written after the restore"
+			if err := restored.Apply(chat.SavePresentation{OperationID: "late-save", Digest: "late", Presentation: next}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := openChatActorBackend(stateDir, true, "test", t.Logf); !errors.Is(err, chat.ErrFileActorsChangedAfterCutover) {
+				t.Fatalf("JSON written after the restore: %v", err)
+			}
+		})
+	}
+}
+
+// copyTreeWithTimes copies a directory tree, giving every file the time
+// adjust returns for its own.
+func copyTreeWithTimes(t *testing.T, from, to string, adjust func(time.Time) time.Time) {
+	t.Helper()
+	err := filepath.WalkDir(from, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(from, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(to, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, raw, info.Mode().Perm()); err != nil {
+			return err
+		}
+		at := adjust(info.ModTime())
+		return os.Chtimes(target, at, at)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
