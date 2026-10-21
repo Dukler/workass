@@ -1783,6 +1783,94 @@ func TestWirePiImageSteerConsumptionAndArchive(t *testing.T) {
 	}
 }
 
+// The renderer reads history with deferImages and then fetches each image by
+// its reference. A pending steer is a row of its own, so its image (distinct
+// from the turn's, so no other row owns the reference) must read back too.
+func TestWirePendingSteerDeferredImageReadsBack(t *testing.T) {
+	root, stateDir, renderer := repoRoot(t), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(renderer, "index.html"), []byte("<!doctype html><body></body>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub := wire.NewHub()
+	sessionState := sharedSessionStore(stateDir)
+	manager := acp.NewManager(acp.Options{
+		RootDir: root, StateDir: stateDir,
+		Provider: acp.ProviderConfig{ID: "pi", Command: "node", Args: []string{filepath.Join(root, "scripts", "pi-native-host.mjs")}, CWD: root, Enabled: true,
+			Env: map[string]string{"WORKASS_PI_SDK_MODULE": filepath.Join(root, "desktop", "acp", "mock-pi-sdk.mjs"), "WORKASS_PI_FIXTURE_DIR": stateDir}},
+		DefaultProviderID: "pi", Broadcast: daemonEventBroadcaster(sessionState, hub.Broadcast),
+	})
+	providerChats := newProviderChatRuntime(manager, sessionState, stateDir, hub.Broadcast)
+	t.Cleanup(func() { _ = providerChats.Close(context.Background()); manager.Reset() })
+	registerDaemonHandlers(hub, root, manager, daemonOptions{StateDir: stateDir, ProviderChats: providerChats})
+	client := dialTestWSHandler(t, httpserve.New(renderer, hub, nil), "/")
+	defer client.conn.Close()
+	const tabID, chatID = "steer-image-ref-tab", "steer-image-ref-chat"
+	// Two distinct 3x2 PNGs.
+	const firstData = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAFElEQVR4nGLiYmD4z4ANAAIAAP//FzIBDKp0l8cAAAAASUVORK5CYII="
+	const steeredData = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAFElEQVR4nGI6wcDwnwEbAAQAAP//KcAByjjsMQUAAAAASUVORK5CYII="
+	createWireActorChat(t, client, 100, tabID, chatID, "pi")
+	client.invoke(t, 1, "app-chat:new-session", map[string]any{"tabId": tabID, "chatId": chatID, "providerId": "pi"})
+	sessionReply := client.waitReply(t, 1, 5*time.Second)
+	if sessionReply.Error != nil {
+		t.Fatalf("Pi session: %s", *sessionReply.Error)
+	}
+	sessionID := fieldString(mapFromAnyMain(sessionReply.Result), "sessionId")
+	client.invoke(t, 2, "job:start", map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": sessionID,
+		"providerId": "pi", "prompt": "[fixture:wait-file] inspect initial image",
+		"images":      []any{map[string]any{"mimeType": "image/png", "data": firstData, "name": "first.png"}},
+		"operationId": "steer-image-ref-turn", "userMessageId": "steer-image-ref-user", "assistantMessageId": "steer-image-ref-assistant",
+	})
+	start := client.waitReply(t, 2, 5*time.Second)
+	if start.Error != nil {
+		t.Fatalf("start: %s", *start.Error)
+	}
+	jobID := fieldString(mapFromAnyMain(start.Result), "id")
+	startEvent := waitProviderAttachedJobStartEvent(t, client, jobID, "", 5*time.Second)
+	sessionID = fieldString(mapFromAnyMain(startEvent["job"]), "sessionId")
+	client.waitJobEvent(t, jobID, "acp", 5*time.Second)
+	client.invoke(t, 3, "app-chat:steer", map[string]any{
+		"sessionId": sessionID, "prompt": "inspect steered image",
+		"images":              []any{map[string]any{"mimeType": "image/png", "data": steeredData, "name": "steered.png"}},
+		"clientUserMessageId": "steer-image-ref-steer", "continuationAssistantMessageId": "steer-image-ref-continuation",
+		"boundary": map[string]any{"assistantMessageId": "steer-image-ref-assistant", "deferUntilConsumed": true},
+	})
+	if steer := client.waitReply(t, 3, 5*time.Second); steer.Error != nil {
+		t.Fatalf("steer: %s", *steer.Error)
+	}
+	client.invoke(t, 4, "chat:archive-load", tabID, map[string]any{"tail": 10, "deferImages": true, "leanTools": true})
+	recent := client.waitReply(t, 4, 5*time.Second)
+	if recent.Error != nil {
+		t.Fatalf("recent read: %s", *recent.Error)
+	}
+	refs := map[string]string{}
+	for _, raw := range anySlice(recent.Result) {
+		row := mapFromAnyMain(raw)
+		for _, rawImage := range anySlice(row["images"]) {
+			refs[fieldString(row, "id")] = fieldString(mapFromAnyMain(rawImage), "deferredImageRef")
+		}
+	}
+	steerRef, userRef := refs["steer-image-ref-steer"], refs["steer-image-ref-user"]
+	if steerRef == "" || userRef == "" || steerRef == userRef {
+		t.Fatalf("pending steer image was not deferred under its own reference: %#v", refs)
+	}
+	for id, want := range map[string]string{"steer-image-ref-user": firstData, "steer-image-ref-steer": steeredData} {
+		client.invoke(t, 10, "chat:archive-load", tabID, map[string]any{"imageRef": refs[id]})
+		reply := client.waitReply(t, 10, 5*time.Second)
+		if reply.Error != nil {
+			t.Fatalf("%s deferred image cannot be read back: %s", id, *reply.Error)
+		}
+		images := anySlice(reply.Result)
+		if len(images) != 1 || fieldString(mapFromAnyMain(images[0]), "data") != want {
+			t.Fatalf("%s deferred image read back as %#v", id, reply.Result)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionID+".release"), []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client.waitJobEvent(t, jobID, "end", 5*time.Second)
+}
+
 func TestWireTraceMockEngineCrashTerminalizesThenNextPromptResumesExactThread(t *testing.T) {
 	root := repoRoot(t)
 	stateDir := t.TempDir()
