@@ -663,3 +663,92 @@ func (a *SQLActors) LedgerHasNativeTurn(chatID, jobID string) (bool, error) {
 	}
 	return false, nil
 }
+
+// sqlRowDecoder decodes an actor's ledger rows on worker goroutines while
+// its load keeps reading chunks: decoding is most of opening a large actor,
+// and rows decode independently. Each row lands in its position, so the
+// result is what decoding them in order gives. In-flight raw bytes are
+// bounded.
+type sqlRowDecoder struct {
+	ledger []LedgerEvent
+	read   int
+	work   chan sqlRawRow
+	wg     sync.WaitGroup
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	inflight int
+	err      error
+	stopped  bool
+}
+
+// sqlDecodeInflightBytes bounds the raw row bytes waiting for a decoder.
+const sqlDecodeInflightBytes = 64 << 20
+
+func newSQLRowDecoder(rows int) *sqlRowDecoder {
+	decoder := &sqlRowDecoder{ledger: make([]LedgerEvent, rows), work: make(chan sqlRawRow, 64)}
+	decoder.cond = sync.NewCond(&decoder.mu)
+	for worker := 0; worker < min(runtime.GOMAXPROCS(0), 8); worker++ {
+		decoder.wg.Add(1)
+		go func() {
+			defer decoder.wg.Done()
+			for raw := range decoder.work {
+				err := json.Unmarshal(raw.eventJSON, &decoder.ledger[raw.seq-1])
+				decoder.mu.Lock()
+				decoder.inflight -= len(raw.eventJSON)
+				if err != nil && decoder.err == nil {
+					decoder.err = fmt.Errorf("decode chat ledger row %d: %w", raw.seq, err)
+				}
+				decoder.cond.Broadcast()
+				decoder.mu.Unlock()
+			}
+		}()
+	}
+	return decoder
+}
+
+// submit queues rows that continue the ledger without a gap.
+func (d *sqlRowDecoder) submit(rows []sqlRawRow) error {
+	for index := range rows {
+		raw := rows[index]
+		rows[index].eventJSON = nil
+		if raw.seq != int64(d.read+1) || d.read >= len(d.ledger) {
+			return fmt.Errorf("chat ledger row %d is out of position %d", raw.seq, d.read+1)
+		}
+		d.read++
+		d.mu.Lock()
+		for d.inflight > 0 && d.inflight+len(raw.eventJSON) > sqlDecodeInflightBytes && d.err == nil {
+			d.cond.Wait()
+		}
+		err := d.err
+		d.inflight += len(raw.eventJSON)
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		d.work <- raw
+	}
+	return nil
+}
+
+// finish waits for every queued row and returns the decoded ledger.
+func (d *sqlRowDecoder) finish() ([]LedgerEvent, error) {
+	d.stop()
+	if d.err != nil {
+		return nil, d.err
+	}
+	if d.read != len(d.ledger) {
+		return nil, fmt.Errorf("chat ledger has %d rows, its checkpoint expects %d", d.read, len(d.ledger))
+	}
+	return d.ledger, nil
+}
+
+// stop ends the workers; it is safe to call more than once.
+func (d *sqlRowDecoder) stop() {
+	if d == nil || d.stopped {
+		return
+	}
+	d.stopped = true
+	close(d.work)
+	d.wg.Wait()
+}

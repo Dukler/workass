@@ -328,7 +328,10 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 		ledger  []LedgerEvent
 		chunk   []sqlRawRow
 		journal [][]byte
+		// rows decodes while later chunks are read (sqlread.go).
+		rows *sqlRowDecoder
 	)
+	defer func() { rows.stop() }()
 	for first, done := true, false; !done; first = false {
 		found := false
 		err := db.Read(context.Background(), func(tx *store.Tx) error {
@@ -348,7 +351,11 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			}
 			done = true
 			if head.ledgerLen > 0 {
-				chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(len(ledger)), sqlLoadChunkBytes, chunk)
+				read := 0
+				if rows != nil {
+					read = rows.read
+				}
+				chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(read), sqlLoadChunkBytes, chunk)
 				if err != nil {
 					return err
 				}
@@ -367,14 +374,22 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			}
 			head.stateJSON = nil
 			if head.ledgerLen > 0 {
-				ledger = make([]LedgerEvent, 0, head.ledgerLen)
+				rows = newSQLRowDecoder(head.ledgerLen)
 			}
 		}
-		if ledger, err = appendSQLLedgerRows(ledger, chunk); err != nil {
-			return sqlLoadedActor{}, false, err
+		if rows != nil {
+			if err := rows.submit(chunk); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
 		}
 		if !done && sqlLoadBetweenChunks != nil {
-			sqlLoadBetweenChunks(chatID, len(ledger))
+			sqlLoadBetweenChunks(chatID, rows.read)
+		}
+	}
+	if rows != nil {
+		var err error
+		if ledger, err = rows.finish(); err != nil {
+			return sqlLoadedActor{}, false, err
 		}
 	}
 	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
