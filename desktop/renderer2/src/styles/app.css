@@ -818,8 +818,10 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .ri[data-state="failed"] .ri-media::after { display: none; }
 /* Variant C: a 2px accent bar runs along the bottom edge while the bytes are
    on the way. Deliberately not gated on prefers-reduced-motion (this Mac runs
-   Reduce Motion ON; the approved mock runs it unconditionally). */
-.ri[data-state="pending"] .ri-media::after {
+   Reduce Motion ON; the approved mock runs it unconditionally). It runs on the
+   frames near the viewport (data-near, set by the image load gate): a long
+   message mounts thousands of pending frames nobody can see. */
+.ri[data-state="pending"][data-near] .ri-media::after {
   content: ""; position: absolute; bottom: 0; left: 0; width: 30%; height: 2px; border-radius: 2px;
   background: var(--acc); animation: ri-bar 1.3s ease-in-out infinite;
 }
