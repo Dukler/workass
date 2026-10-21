@@ -143,12 +143,13 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	var (
 		next State
 		err  error
+		undo = func() {}
 	)
 	if useProviderEventJournal {
 		// The journaled reducer shares unchanged structure with the committed
 		// state; stop vouching for it before running.
 		e.validated = false
-		next, err = reduceJournaledProviderEvent(e.state, providerEvent)
+		next, undo, err = reduceJournaledProviderEventSharingTools(e.state, providerEvent)
 	} else {
 		next, _, err = reduce(e.state, command, e.validated)
 	}
@@ -157,6 +158,7 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	}
 	if prepare != nil {
 		if err := prepare(); err != nil {
+			undo()
 			return err
 		}
 	}
@@ -170,6 +172,7 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			persistErr = e.saveReduced(next)
 		}
 		if persistErr != nil {
+			undo()
 			return persistErr
 		}
 	}
