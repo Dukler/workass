@@ -76,7 +76,7 @@ func (c *chatControlCoordinator) authorize(ownerKey, parentChatID, parentTabID s
 	}
 	// The durable actor pair is the identity fence. Manager capabilities are
 	// disposable execution state and must not be consulted for a stale pair.
-	if _, _, err := c.providerChats.exactActor(parentTabID, parentChatID); err != nil {
+	if _, err := c.providerChats.exactActorFence(parentTabID, parentChatID); err != nil {
 		return err
 	}
 	if !c.manager.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
@@ -135,7 +135,7 @@ func (c *chatControlCoordinator) validateMutationTarget(tabID, chatID string, op
 	if c == nil || c.providerChats == nil {
 		return errors.New("Workass chat actor is unavailable")
 	}
-	if _, _, err := c.providerChats.exactActor(tabID, chatID); err != nil {
+	if _, err := c.providerChats.exactActorFence(tabID, chatID); err != nil {
 		return err
 	}
 	return nil
@@ -195,7 +195,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 	if operationID == "" {
 		return "", acp.JobCancelResult{}, true, errors.New("chat.cancel requires a stable operation_id")
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return "", acp.JobCancelResult{}, false, err
 	}

@@ -45,14 +45,15 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 		if providerChats == nil {
 			return nil, fmt.Errorf("visualization chat ownership is unavailable")
 		}
-		_, state, err := providerChats.exactActor(tabID, chatID)
+		actor, err := providerChats.exactActorFence(tabID, chatID)
 		if err != nil {
 			return nil, fmt.Errorf("visualization chat is not known to this daemon: %w", err)
 		}
-		if !state.Initialized || state.Deleted {
+		view := readBrowserMutationView(actor.engine)
+		if !view.initialized || view.deleted {
 			return nil, errors.New("visualization chat is not an active actor")
 		}
-		workspaceCWD := visualizationWorkspaceCWD(state)
+		workspaceCWD := view.workspaceCWD
 
 		mode, title, err := visualizeRequestPresentation(arg)
 		if err != nil {
@@ -73,7 +74,7 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 			if err != nil {
 				return nil, err
 			}
-			existing, exists = externalBrowserMutationEntry(state, operationID)
+			existing, exists = view.entry(operationID)
 			// A journaled terminal operation is authoritative. In particular, a
 			// completed retry must not reread a source that may have disappeared or
 			// changed after the captured effect was committed. A new or pending
@@ -92,12 +93,12 @@ func registerVisualizeHandler(hub *wire.Hub, registry *artifacthost.Registry, pr
 			captureReady = prepareErr == nil
 			if captureReady {
 				operationID = derivedVisualizeOperationID(identityDigest, capture)
-				existing, exists = externalBrowserMutationEntry(state, operationID)
+				existing, exists = view.entry(operationID)
 			} else {
 				// On an exact lost-reply retry the executor-owned source may have
 				// disappeared. Recover the one prior operation by its safe immutable
 				// request identity; never guess among multiple content versions.
-				existing, exists, err = visualizeFallbackJournal(state, identityDigest)
+				existing, exists, err = visualizeFallbackJournal(view.external, identityDigest)
 				if err != nil {
 					return nil, err
 				}
@@ -309,10 +310,10 @@ func visualizeMutationParts(method string) (string, string, bool) {
 	return strings.ToLower(parts[0]), strings.ToLower(parts[1]), true
 }
 
-func visualizeFallbackJournal(state chat.State, identityDigest string) (chat.OutboxEntry, bool, error) {
+func visualizeFallbackJournal(outbox []chat.OutboxEntry, identityDigest string) (chat.OutboxEntry, bool, error) {
 	var match chat.OutboxEntry
 	count := 0
-	for _, entry := range state.Outbox {
+	for _, entry := range outbox {
 		if entry.Kind != chat.EffectExternalMutation || entry.MutationKind != visualizeMutationKind {
 			continue
 		}

@@ -327,6 +327,18 @@ func (e *Engine) Snapshot() State {
 	return e.state.Clone()
 }
 
+// View runs read under the engine lock with the committed state itself, not
+// a copy: Snapshot deep-copies the whole history, which on a long chat costs
+// more than most reads that need a handful of fields. read may copy values
+// out. It must not modify or keep anything reachable from the state (its
+// maps, slices and pointers are the live committed state) and must not call
+// back into this engine.
+func (e *Engine) View(read func(State)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	read(e.state)
+}
+
 // HasCancellableJob locates Stop's owner without copying transcript history or
 // taking the runtime's provider-attachment mutex. This is only a routing hint;
 // cancellation revalidates the exact job under the owning actor's lock.
