@@ -814,6 +814,7 @@ func TestPhaseCChatIDExecutorMutationInventoryIsExplicit(t *testing.T) {
 	allowed := map[string]int{
 		"cmd/workass/artifact_mutation.go:hostArtifact:RegisterForOperation":                 1,
 		"cmd/workass/visualize.go:registerVisualizeHandler:RegisterCapturedHTMLForOperation": 1,
+		"cmd/workass/html_render.go:renderHTML:RegisterCapturedHTMLForOperation":             1,
 	}
 	counts := make(map[string]int)
 	var violations []string
@@ -882,6 +883,7 @@ func TestPhaseCStatelessMCPMutationBoundaryIsExplicit(t *testing.T) {
 		"cmd/workass/stateless_mcp.go:callTool:invokeBrowserControlReceipt":          1,
 		"cmd/workass/stateless_mcp.go:callTool:callAgentMCPTool":                     1,
 		"cmd/workass/artifact_mutation.go:hostArtifact:executeBrowserMutation":       1,
+		"cmd/workass/html_render.go:renderHTML:executeBrowserMutation":               1,
 		"cmd/workass/visualize.go:registerVisualizeHandler:executeBrowserMutation":   4,
 	}
 	operationRequired := map[string]struct{}{
@@ -938,7 +940,7 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		"workass_create_chat": {}, "workass_create_subsession": {}, "workass_rename_chat": {}, "workass_settle_chat": {}, "workass_configure_chat": {},
 		"workass_focus_chat": {}, "workass_delete_chat": {}, "workass_send_chat_message": {},
 		"workass_schedule_message": {}, "workass_cancel_scheduled_message": {},
-		"workass_cancel_chat_turn": {}, "workass_host_artifact": {}, "workass_apply_update": {}, "workass_spawn_subagent": {},
+		"workass_cancel_chat_turn": {}, "workass_host_artifact": {}, "workass_render_html": {}, "workass_apply_update": {}, "workass_spawn_subagent": {},
 		"workass_wait_subagent": {}, "workass_wait_subagents": {}, "workass_message_subagent": {},
 		"workass_retry_subagent": {}, "workass_register_external_work": {}, "workass_settle_external_work": {},
 		"workass_cancel_subagent": {}, "workass_decide_subagent_permission": {}, "workass_ask_user_question": {},

@@ -25,8 +25,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// daemon-owned replacement for detached sleep/poll scripts.
 	// 2026-10-16: +1 workass_create_subsession, permanent child chats (fresh
 	// or forked) that are not subagents (user order).
-	if len(tools) != 40 {
-		t.Fatalf("tool count = %d, want 40", len(tools))
+	// 2026-10-21: +1 workass_render_html, the agent publishing a page the chat
+	// renders inline (user-approved mock html-render, t3code's html_render).
+	if len(tools) != 41 {
+		t.Fatalf("tool count = %d, want 41", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {
