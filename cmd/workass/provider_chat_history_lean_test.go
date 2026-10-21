@@ -254,3 +254,39 @@ func TestLedgerReaderPagesBySequenceAndReadsOneMessage(t *testing.T) {
 		t.Fatal("a missing message was found")
 	}
 }
+
+// The active chat's session tail carried its screenshots inline (720 KiB of a
+// lean session:get on the seeded chat). A renderer that asks for deferImages
+// gets them by reference, as on archive-load; one that does not keeps them.
+func TestSessionProjectionDefersMessageImagesOnlyWhenAsked(t *testing.T) {
+	stateDir, ref, data := imageReadFixture(t)
+	engine, err := chat.NewEngine("session-image-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Apply(chat.InitializeFork{Presentation: chat.PresentationState{TabID: "session-image-tab", Title: "Screenshots"},
+		SourceChatID: "source", OperationID: "create-session-images", Digest: "fixture", Messages: []chat.LedgerEvent{{
+			EventID: "reply", MessageID: "assistant-reply", OperationID: "turn", Role: "assistant", Text: "![shot](shot.png)", Status: "done",
+			Attachments: []providercontract.Attachment{{ID: "shot", Name: "shot", MIMEType: "image/png", Source: "shot.png", Ref: providerSessionImageRefPrefix + ref}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &providerChatRuntime{manager: &acp.Manager{}, sessions: sharedSessionStore(stateDir), stateDir: stateDir,
+		actors: map[string]*providerChatActor{"session-image-chat": {engine: engine}}, known: map[string]struct{}{"session-image-chat": {}}}
+	firstImage := func(root map[string]any) map[string]any {
+		row := mapFromAnyMain(anySlice(mapFromAnyMain(anySlice(root["chats"])[0])["messages"])[0])
+		return mapFromAnyMain(anySlice(row["images"])[0])
+	}
+	inline, err := runtime.ProjectSession()
+	if err != nil || fieldString(firstImage(inline), "data") != data {
+		t.Fatalf("a renderer that did not ask lost its inline image: err=%v", err)
+	}
+	deferred, err := runtime.ProjectSession(archiveReadOptions{leanTools: true, deferMessageImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image := firstImage(deferred); fieldString(image, "deferredImageRef") != ref || fieldString(image, "data") != "" {
+		t.Fatalf("session image was not deferred: %#v", image)
+	}
+}

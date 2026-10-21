@@ -704,7 +704,7 @@ export interface WorkassApi {
   getConfig?: () => Promise<DaemonConfig>;
   // leanTools: large committed tool payloads arrive as a bounded head plus
   // outputDeferred/outputBytes; an older daemon or bridge ignores it.
-  getSession?: (options?: { leanTools?: boolean }) => Promise<unknown>;
+  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];

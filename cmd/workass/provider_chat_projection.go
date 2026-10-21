@@ -159,6 +159,9 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 		projected["messages"] = messages
 		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
 		deferArchiveToolImages(messages)
+		for _, opt := range opts {
+			opt.apply(messages)
+		}
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
