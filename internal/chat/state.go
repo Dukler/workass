@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"workass/internal/provider"
@@ -474,23 +475,122 @@ func (s State) ResolveProviderActivityOwner(laneID provider.LaneID, operationID 
 }
 
 func validateProviderActivityOwner(state State, owner ProviderActivityOwner) error {
+	return validateProviderActivityOwnerWith(state.Lanes, owner, func(owner ProviderActivityOwner) bool {
+		return providerActivityOwnerMatches(state, owner)
+	})
+}
+
+// providerActivityOwnerIndex validates many provider activity owners against
+// one State. providerActivityOwnerMatches scans the whole ledger for every
+// owner; a long chat holds tens of thousands of tool owners and thousands of
+// rows, so State.Validate spent seconds in that nested scan while holding the
+// actor. The index reads the ledger once and answers each owner with a map
+// lookup. It decides exactly what providerActivityOwnerMatches decides.
+type providerActivityOwnerIndex struct {
+	state  State
+	built  bool
+	ledger map[providerActivityLedgerKey]*providerActivityLedgerTurns
+}
+
+type providerActivityLedgerKey struct {
+	laneID      provider.LaneID
+	operationID provider.OperationID
+}
+
+// providerActivityLedgerTurns is what the ledger rows of one (lane, operation)
+// say about native turns: whether any of them knows its native turn id, and
+// which ids they know. A key is present only when at least one row exists.
+type providerActivityLedgerTurns struct {
+	knownNativeTurn bool
+	nativeTurnIDs   []string
+}
+
+func newProviderActivityOwnerIndex(state State) *providerActivityOwnerIndex {
+	return &providerActivityOwnerIndex{state: state}
+}
+
+func (index *providerActivityOwnerIndex) build() {
+	if index.built {
+		return
+	}
+	index.built = true
+	index.ledger = make(map[providerActivityLedgerKey]*providerActivityLedgerTurns)
+	for _, event := range index.state.Ledger {
+		// providerActivityLedgerOwnsLane for the non-empty, trimmed lane every
+		// lookup uses: excluded and inherited rows own no lane, and a row owns
+		// exactly the lane it names (an empty name can never match).
+		if event.ContextExcluded || event.Inherited || event.LaneID == "" {
+			continue
+		}
+		key := providerActivityLedgerKey{event.LaneID, provider.NormalizeOperationID(string(event.OperationID))}
+		turns := index.ledger[key]
+		if turns == nil {
+			turns = &providerActivityLedgerTurns{}
+			index.ledger[key] = turns
+		}
+		if eventTurnID := strings.TrimSpace(event.NativeTurnID); eventTurnID != "" {
+			turns.knownNativeTurn = true
+			if !slices.Contains(turns.nativeTurnIDs, eventTurnID) {
+				turns.nativeTurnIDs = append(turns.nativeTurnIDs, eventTurnID)
+			}
+		}
+	}
+}
+
+// matches is providerActivityOwnerMatches(index.state, owner).
+func (index *providerActivityOwnerIndex) matches(owner ProviderActivityOwner) bool {
+	state := &index.state
+	laneID := provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	operationID := provider.NormalizeOperationID(string(owner.OperationID))
+	turnID := strings.TrimSpace(owner.TurnID)
+	if laneID == "" || operationID == "" {
+		return false
+	}
+	if _, ok := state.Lanes[laneID]; !ok {
+		return false
+	}
+	if foreground := state.Foreground; foreground != nil &&
+		foreground.LaneID == laneID && provider.NormalizeOperationID(string(foreground.OperationID)) == operationID {
+		return turnID != "" && strings.TrimSpace(foreground.Turn.NativeID) == turnID
+	}
+	index.build()
+	turns := index.ledger[providerActivityLedgerKey{laneID, operationID}]
+	if turns == nil {
+		return false
+	}
+	if turnID != "" {
+		return slices.Contains(turns.nativeTurnIDs, turnID)
+	}
+	return !turns.knownNativeTurn
+}
+
+// validate is validateProviderActivityOwner(index.state, owner).
+func (index *providerActivityOwnerIndex) validate(owner ProviderActivityOwner) error {
+	return validateProviderActivityOwnerWith(index.state.Lanes, owner, index.matches)
+}
+
+// validateProviderActivityOwnerWith is validateProviderActivityOwner for the
+// state whose lanes are given; matches must be providerActivityOwnerMatches of
+// that same state.
+func validateProviderActivityOwnerWith(lanes map[provider.LaneID]LaneState, owner ProviderActivityOwner, matches func(ProviderActivityOwner) bool) error {
 	owner.LaneID = provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
 	owner.OperationID = provider.NormalizeOperationID(string(owner.OperationID))
 	owner.TurnID = strings.TrimSpace(owner.TurnID)
 	if owner.LaneID == "" {
 		return errors.New("provider activity is missing lane ownership")
 	}
-	lane, ok := state.Lanes[owner.LaneID]
-	if !ok {
+	// Read one field rather than copy the lane: a LaneState is large and this
+	// runs for every tool entry of the chat.
+	if _, ok := lanes[owner.LaneID]; !ok {
 		return errors.New("provider activity belongs to an unknown lane")
 	}
-	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lane.ConnectionGeneration {
+	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lanes[owner.LaneID].ConnectionGeneration {
 		return errors.New("provider activity has an invalid connection generation")
 	}
 	if owner.OperationID == "" {
 		return errors.New("provider activity is missing operation ownership")
 	}
-	if !providerActivityOwnerMatches(state, owner) {
+	if !matches(owner) {
 		return errors.New("provider activity does not match an exact current or historical actor turn")
 	}
 	return nil
@@ -1409,7 +1509,8 @@ func (s State) Validate() error {
 			return errors.New("established lane cannot re-enter creating phase")
 		}
 	}
-	validateOwner := func(owner ProviderActivityOwner) error { return validateProviderActivityOwner(s, owner) }
+	owners := newProviderActivityOwnerIndex(s)
+	validateOwner := owners.validate
 	for id, value := range s.Tools {
 		if strings.TrimSpace(id) == "" {
 			return errors.New("tool activity is missing its provider id")
@@ -1660,7 +1761,7 @@ func (s State) Validate() error {
 			if effect.Background == nil || effect.Background.OperationID != effect.OperationID {
 				return errors.New("background outbox effect is missing its immutable action")
 			}
-			if err := effect.Background.Validate(s); err != nil {
+			if err := effect.Background.validateWith(s, owners.validate); err != nil {
 				return fmt.Errorf("background outbox effect: %w", err)
 			}
 			if len(effect.Result) > 0 && !json.Valid(effect.Result) {
