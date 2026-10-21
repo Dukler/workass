@@ -60,3 +60,27 @@ test('an image reference is fetched once and then served from the cache', async 
     if (previous === undefined) delete (globalThis as any).window; else (globalThis as any).window = previous;
   }
 });
+
+// A daemon that serves images by URL gives the device an image key; opening a
+// stored raster image then hands the viewer its URL and reads nothing over the
+// socket (the browser fetches, decodes and caches it off the main thread).
+test('with an image key, opening a stored image uses its URL and never reads the socket', async () => {
+  const calls: unknown[] = [];
+  const previous = (globalThis as any).window;
+  (globalThis as any).window = {
+    __workassLanAccess: { state: 'approved', imageKey: 'device.key' },
+    api: { archiveLoad: async (_tab: string, options: unknown) => { calls.push(options); return [{ data: 'iVBORw0KGgo=' }]; } },
+  };
+  try {
+    const digest = 'cd'.repeat(32);
+    const image = { ...shot, deferredImageRef: `images/${digest}` };
+    assert.equal(await loadImageSrc('tab-images', image), `/workass/chat-image/tab-images/${digest}?k=device.key`);
+    assert.equal(cachedImageSrc(image), '', 'not loaded yet: the frame waits for its <img>');
+    assert.deepEqual(calls, [], 'no socket read');
+    const svg = { ...image, mimeType: 'image/svg+xml', deferredImageRef: `images/${'ef'.repeat(32)}` };
+    assert.equal(await loadImageSrc('tab-images', svg), 'data:image/svg+xml;base64,iVBORw0KGgo=', 'an SVG is still read over the socket');
+    assert.equal(calls.length, 1);
+  } finally {
+    if (previous === undefined) delete (globalThis as any).window; else (globalThis as any).window = previous;
+  }
+});
