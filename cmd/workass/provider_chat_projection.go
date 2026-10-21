@@ -441,6 +441,11 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 	if !allowed && state.Foreground != nil {
 		allowed = owned(state.Foreground.Timeline) || ownedAttachment(state.Foreground.Input.Attachments) ||
 			ownedAttachment(state.Foreground.AssistantAttachments)
+		// A pending steer is projected as its own user row (projectPendingSteer)
+		// with its images deferred like any other message's.
+		for pending := state.PendingSteer; !allowed && pending != nil; pending = pending.Next {
+			allowed = ownedAttachment(pending.Attachments)
+		}
 	}
 	if !allowed {
 		return nil, false, errors.New("archive image does not belong to this chat")
