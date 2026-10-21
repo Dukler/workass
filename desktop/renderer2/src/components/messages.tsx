@@ -13,6 +13,7 @@ import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
 import { observeTranscriptImageOnce } from '../transcript-images';
+import { cachedToolOutput, loadToolOutput } from '../chat/tool-detail';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -251,6 +252,16 @@ export function toolLiveLine(t: ToolEvent): string {
 // group summary used to carry, now folded into this one line.
 export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?: boolean; trail?: ReactNode }) {
   const [showOut, setShowOut] = useState(false);
+  // Lean history carried only the head of a large output: the whole of it is
+  // read when the row opens. The head stays on screen until it arrives.
+  const [fullOutput, setFullOutput] = useState<string | null>(() => cachedToolOutput(t));
+  useEffect(() => {
+    if (!showOut || !t.outputDeferred || fullOutput !== null) return;
+    let current = true;
+    void loadToolOutput(t).then((text) => { if (current && text !== null) setFullOutput(text); });
+    return () => { current = false; };
+  }, [showOut, t, fullOutput]);
+  const output = t.outputDeferred ? fullOutput ?? t.output : t.output;
   const st = toolState(t.status);
   // A subagent header rendered inline as a task row: model brand instead of the
   // status glyph, a "Subagente ·" prefix, and a link to its detail in the rail
@@ -315,7 +326,7 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
           {/* the provider's own id, so a renamed row never hides WHICH tool ran */}
           {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{act.raw}</div>}
           {raw && raw !== detail && <div className="evt-full">{raw}</div>}
-          {t.output}
+          {output}
         </div>
       )}
     </div>

@@ -3,10 +3,14 @@ import type { Msg, TimelineEvent } from '../store/types';
 
 const STATUSES = new Set<Msg['status']>(['pending', 'running', 'done', 'failed', 'cancelled']);
 
+// Every history read asks for references instead of payloads: images load when
+// seen, large tool payloads when their row opens. Older daemons ignore both.
+export const HISTORY_READ_OPTIONS = { deferImages: true, leanTools: true } as const;
+
 // Actor projections already carry canonical chronology and stable message ids.
 // Hydration is therefore a validation + shape conversion, never a merge,
 // fingerprint match, replay, or chronology rewrite.
-export function actorMessages(records: readonly MirrorMsg[]): Msg[] {
+export function actorMessages(records: readonly MirrorMsg[], tabId?: string): Msg[] {
   return records.map((record) => {
     const id = String(record.id ?? '').trim();
     if (!id) throw new Error('actor history row is missing its stable message id');
@@ -40,7 +44,17 @@ export function actorMessages(records: readonly MirrorMsg[]): Msg[] {
       inherited: record.inherited === true ? true : undefined,
       notice: record.notice && typeof record.notice.kind === 'string' ? record.notice : undefined,
       images: record.images,
-      events: (Array.isArray(record.events) ? record.events : []) as TimelineEvent[],
+      events: stampToolDetail((Array.isArray(record.events) ? record.events : []) as TimelineEvent[], tabId, id),
     };
   });
+}
+
+// A deferred payload is read back by its exact owner: the tab the row was read
+// from (a tagged remote id routes to its machine) and the row's message id.
+function stampToolDetail(events: TimelineEvent[], tabId: string | undefined, messageId: string): TimelineEvent[] {
+  if (!tabId) return events;
+  for (const event of events) {
+    if (event.kind === 'tool' && (event.outputDeferred || event.inputDeferred)) event.detail = { tabId, messageId };
+  }
+  return events;
 }
