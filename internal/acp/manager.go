@@ -2011,6 +2011,7 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 			agenttext.Get("environment.artifacts")
 	}
 	return agenttext.Get("environment.context") +
+		agenttext.Get("rules.home-scan") +
 		browserLine +
 		agentLine +
 		agenttext.Get("environment.archive.prefix") + archivePath + ".\n" +

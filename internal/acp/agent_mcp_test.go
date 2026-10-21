@@ -85,6 +85,25 @@ func TestEnvironmentBriefAdvertisesAgentCatalogAndSpawnTools(t *testing.T) {
 	}
 }
 
+// A broad scan of the home folder makes macOS prompt the user for other apps'
+// data. Claude's host refuses it; every other provider is told, through native
+// instructions or the environment brief (fallback providers and subagents).
+func TestAgentInstructionsForbidRecursiveHomeScans(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
+	t.Cleanup(func() { manager.Reset() })
+	const rule = "Never search $HOME, ~/Library or / recursively"
+	for name, text := range map[string]string{
+		"native instructions":        workassNativeInstructions,
+		"environment brief":          manager.buildEnvironmentBrief(false),
+		"subagent environment brief": manager.buildEnvironmentBrief(true),
+	} {
+		if !strings.Contains(text, rule) {
+			t.Fatalf("%s missing the home-scan rule:\n%s", name, text)
+		}
+	}
+}
+
 func TestEnvironmentBriefOmitsDelegationAndResponseStyleDirectives(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
