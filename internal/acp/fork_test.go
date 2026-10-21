@@ -3,7 +3,6 @@ package acp
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"image"
 	"image/png"
@@ -68,23 +67,6 @@ func TestValidateImageAttachmentPaths(t *testing.T) {
 	writeTestPNG(t, filepath.Join(dir, "ok.png"), 10, 10)
 	if _, err := LoadImageAttachment(attachments[0]); err == nil || !strings.Contains(err.Error(), "changed after it was validated") {
 		t.Fatalf("changed file err = %v", err)
-	}
-}
-
-func TestWebPDimensions(t *testing.T) {
-	header := func(chunk string, body []byte) []byte {
-		data := append([]byte("RIFF\x00\x00\x00\x00WEBP"+chunk+"\x00\x00\x00\x00"), body...)
-		return append(data, make([]byte, 16)...)
-	}
-	lossless := make([]byte, 5)
-	lossless[0] = 0x2f
-	binary.LittleEndian.PutUint32(lossless[1:], uint32(851)|uint32(719)<<14)
-	if w, h, err := webpDimensions(header("VP8L", lossless)); err != nil || w != 852 || h != 720 {
-		t.Fatalf("VP8L = %d x %d, %v", w, h, err)
-	}
-	extended := []byte{0, 0, 0, 0, 0xb0, 0x04, 0, 0x7f, 0x02, 0}
-	if w, h, err := webpDimensions(header("VP8X", extended)); err != nil || w != 1201 || h != 640 {
-		t.Fatalf("VP8X = %d x %d, %v", w, h, err)
 	}
 }
 

@@ -1,21 +1,17 @@
 package acp
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"workass/internal/imagesize"
 )
 
 // Agent-supplied image attachments are local files carried inside ONE user
@@ -155,7 +151,7 @@ func readImageAttachment(raw, baseDir string) (ImageAttachment, []byte, error) {
 	if !safeToolImageMIME(mimeType) {
 		return ImageAttachment{}, nil, errors.New("not a PNG, JPEG, WebP or GIF raster")
 	}
-	width, height, err := imageDimensions(data, mimeType)
+	width, height, err := imagesize.Dimensions(data, mimeType)
 	if err != nil {
 		return ImageAttachment{}, nil, fmt.Errorf("cannot read image dimensions: %w", err)
 	}
@@ -164,50 +160,6 @@ func readImageAttachment(raw, baseDir string) (ImageAttachment, []byte, error) {
 		Path: path, Name: filepath.Base(path), MIME: mimeType, Bytes: int64(len(data)),
 		Width: width, Height: height, SHA256: hex.EncodeToString(digest[:]),
 	}, data, nil
-}
-
-func imageDimensions(data []byte, mimeType string) (int, int, error) {
-	if mimeType == "image/webp" {
-		return webpDimensions(data)
-	}
-	config, _, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return 0, 0, err
-	}
-	if config.Width <= 0 || config.Height <= 0 {
-		return 0, 0, errors.New("image has no pixels")
-	}
-	return config.Width, config.Height, nil
-}
-
-// webpDimensions reads the canvas size from the first RIFF chunk. The standard
-// library has no WebP decoder and Workass takes no third-party dependency.
-func webpDimensions(data []byte) (int, int, error) {
-	if len(data) < 30 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
-		return 0, 0, errors.New("truncated WebP header")
-	}
-	chunk, body := string(data[12:16]), data[20:]
-	switch chunk {
-	case "VP8 ":
-		if len(body) < 10 || body[3] != 0x9d || body[4] != 0x01 || body[5] != 0x2a {
-			return 0, 0, errors.New("invalid VP8 frame header")
-		}
-		return int(binary.LittleEndian.Uint16(body[6:8]) & 0x3fff), int(binary.LittleEndian.Uint16(body[8:10]) & 0x3fff), nil
-	case "VP8L":
-		if len(body) < 5 || body[0] != 0x2f {
-			return 0, 0, errors.New("invalid VP8L header")
-		}
-		bits := binary.LittleEndian.Uint32(body[1:5])
-		return int(bits&0x3fff) + 1, int((bits>>14)&0x3fff) + 1, nil
-	case "VP8X":
-		if len(body) < 10 {
-			return 0, 0, errors.New("invalid VP8X header")
-		}
-		width := int(body[4]) | int(body[5])<<8 | int(body[6])<<16
-		height := int(body[7]) | int(body[8])<<8 | int(body[9])<<16
-		return width + 1, height + 1, nil
-	}
-	return 0, 0, fmt.Errorf("unsupported WebP chunk %q", chunk)
 }
 
 func displayAttachmentPath(path string) string {
