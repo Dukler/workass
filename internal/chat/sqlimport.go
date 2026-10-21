@@ -66,6 +66,10 @@ type ImportResult struct {
 //     that changed while the store is still importing (the JSON is still
 //     authoritative) is re-imported in place.
 //   - The JSON is only read. It is never rewritten, renamed or deleted.
+//   - It runs at boot, before any chat actor exists. A file's transaction
+//     holds the shared connection for the whole file (a 300 MB actor takes
+//     seconds), which is acceptable only because nothing else can commit
+//     yet; runtime reads and checkpoints keep their transactions short.
 //
 // When every file has a receipt the store flips to live. ImportFileActors on
 // a live store does nothing; use VerifyLiveFileActors to detect a JSON

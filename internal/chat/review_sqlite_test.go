@@ -195,6 +195,10 @@ func TestReviewLargeLoadBlocksOtherChatsCommits(t *testing.T) {
 	blocked := time.Since(started)
 	wg.Wait()
 	t.Logf("MEASURED: ~150 MB chat Load %v; small chat commit idle %v, during that Load %v", loadTook, idle, blocked)
+	// Fixed: the load copies rows in short chunks and decodes outside them.
+	if blocked > loadTook/3 {
+		t.Fatalf("a small chat's commit still waited %v during a %v load", blocked, loadTook)
+	}
 }
 
 // R4 (measurement): import throughput, which bounds first-boot time on a
