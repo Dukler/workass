@@ -113,11 +113,10 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 	if err != nil {
 		return nil, err
 	}
-	rawDigest, err := json.Marshal(entries)
+	digest, err := stagedQueueRequestDigest(entries)
 	if err != nil {
 		return nil, err
 	}
-	digest := fmt.Sprintf("%x", sha256.Sum256(rawDigest))
 	if err := actor.engine.ApplyPrepared(chat.ReplaceStagedQueue{
 		OperationID: operationID, Digest: digest, ExpectedRevision: expectedRevision, Entries: entries,
 	}, func() error { return materializeProviderAttachmentPlans(attachmentPlans) }); err != nil {
@@ -328,6 +327,24 @@ func (r *providerChatRuntime) rendererQueueEntries(rawEntries []any, presentatio
 		entries = append(entries, entry)
 	}
 	return entries, plans, nil
+}
+
+// stagedQueueRequestDigest is the queue replacement receipt digest. It hashes
+// the staged entries with attachment pixel sizes cleared: the size is display
+// metadata read from bytes the attachment digest already names, and a receipt
+// recorded by a build without sizes must still match the same request replayed
+// by a newer build instead of failing as reused content.
+func stagedQueueRequestDigest(entries []chat.StagedQueueEntry) (string, error) {
+	hashed := make([]chat.StagedQueueEntry, len(entries))
+	for index, entry := range entries {
+		entry.Attachments = providercontract.WithoutImageSize(entry.Attachments)
+		hashed[index] = entry
+	}
+	raw, err := json.Marshal(hashed)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
 
 func materializeProviderAttachmentPlans(plans []providerAttachmentPlan) error {
