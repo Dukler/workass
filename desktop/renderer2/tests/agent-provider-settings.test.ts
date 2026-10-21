@@ -70,6 +70,61 @@ test('manual provider disable hides its updates and enable probes it again', asy
   assert.equal(targetStore.state.providers[0]?.status, 'ready');
 });
 
+// providers:detect probes every CLI and local server (2-4.5 s) and holds up
+// the connection; a changed catalog is the daemon's own news, so the digest
+// only re-reads providers:list. The Settings refresh still runs detection.
+test('a catalog digest re-reads providers:list and never runs a detection pass', async (t) => {
+  const previousWindow = (globalThis as any).window;
+  const calls: unknown[][] = [];
+  const bridge: Record<string, unknown> = {
+    providersDetect: async (opts: { provider?: string }) => {
+      calls.push(['detect', opts]);
+      return { providers: [{ id: 'qwen', name: 'Qwen Code', enabled: true, status: 'ready' }] };
+    },
+    providersList: async () => {
+      calls.push(['list']);
+      return [{ id: 'codex', name: 'Codex', enabled: true, status: 'ready' }];
+    },
+  };
+  (globalThis as any).window = { api: bridge };
+  t.after(() => {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  });
+
+  const server = await createServer({
+    root: fileURLToPath(new URL('..', import.meta.url)),
+    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+  });
+  const stores: Array<{ clearToastTimers(): void }> = [];
+  t.after(async () => { for (const store of stores) store.clearToastTimers(); await server.close(); });
+  const module = await server.ssrLoadModule('/src/store/store.ts') as {
+    store: { clearToastTimers(): void };
+    Store: new () => { state: Record<string, any>; clearToastTimers(): void; detectProvider(providerId: string): Promise<void> };
+  };
+  stores.push(module.store);
+  const subject = new module.Store();
+  stores.push(subject);
+
+  const scopes: Set<string> = (subject as any).digestSyncScopes({
+    chats: [], globalRevision: subject.state.globalRevision, catalogHash: { codex: 'daemon-hash' }, settingsRevision: '', procHash: '',
+  });
+  assert.equal(scopes.has('catalog'), true, 'a diverged catalog hash schedules the catalog scope');
+  await (subject as any).runScopedSync(new Set(['catalog']));
+  assert.deepEqual(calls, [['list']]);
+  assert.deepEqual(subject.state.providers.map((provider: { id: string }) => provider.id), ['codex']);
+
+  // The explicit Settings refresh keeps its detection pass.
+  await subject.detectProvider('qwen');
+  assert.deepEqual(calls, [['list'], ['detect', { provider: 'qwen' }]]);
+
+  // A bridge without providers:list (the oldest daemons) is a quiet no-op.
+  calls.length = 0;
+  delete bridge.providersList;
+  await assert.doesNotReject((subject as any).runScopedSync(new Set(['catalog'])));
+  assert.deepEqual(calls, []);
+});
+
 test('agent settings render a quiet list with provider marks and accessible manual switches', async (t) => {
   const previousWindow = (globalThis as any).window;
   (globalThis as any).window = { api: { providersToggle: async () => [] } };

@@ -106,7 +106,7 @@ func main() {
 	compactionEnabled := flag.Bool("compaction-enabled", true, "enable ACP auto-compaction at turn boundaries")
 	compactionThresholdPct := flag.Int("compaction-threshold-pct", 80, "ACP auto-compaction threshold as context usage percent")
 	compactionKeepLastTurns := flag.Int("compaction-keep-last-turns", 4, "conversation turns to keep verbatim after ACP auto-compaction")
-	sqliteStoresFlag := flag.String("sqlite-stores", "", "comma-separated stores kept in state/state.db instead of JSON files (known: chats); default none, also "+sqliteStoresEnv)
+	sqliteStoresFlag := flag.String("sqlite-stores", "", "comma-separated stores kept in state/state.db instead of JSON files (known: chats); also "+sqliteStoresEnv+"; when neither is given: chats in the dev profile, none otherwise")
 	flag.Parse()
 	acpOverride := false
 	flagOverrides := map[string]bool{}
@@ -117,7 +117,7 @@ func main() {
 		}
 	})
 	applyProductionDefaults(runtime.GOOS, *prod, flagOverrides, port, bind)
-	sqliteStores, err := parseSQLiteStores(*sqliteStoresFlag, flagOverrides["sqlite-stores"], os.Getenv)
+	sqliteStores, sqliteStoresSource, err := parseSQLiteStores(*sqliteStoresFlag, flagOverrides["sqlite-stores"], os.LookupEnv, workassRuntimeProfile())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid --sqlite-stores: %v\n", err)
 		os.Exit(2)
@@ -286,7 +286,7 @@ func main() {
 		os.Exit(1)
 	}
 	if len(sqliteStores) > 0 {
-		logger.Printf("[workass] SQLite stores enabled: %s; chat actors in %s", sortedSQLiteStores(sqliteStores), chatActors.description())
+		logger.Printf("[workass] SQLite stores enabled: %s (%s); chat actors in %s", sortedSQLiteStores(sqliteStores), sqliteStoresSource, chatActors.description())
 	}
 	providerChats := newProviderChatRuntimeBeforeProviderStartupWithBackend(acpManager, sessionState, stateDir, chatActors, hub.Broadcast)
 	if err := providerChats.StartupError(); err != nil {

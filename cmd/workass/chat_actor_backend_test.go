@@ -22,25 +22,65 @@ func newTestManagerForBackend(t *testing.T, stateDir string) *acp.Manager {
 	return manager
 }
 
-func TestParseSQLiteStoresDefaultsOffAndRejectsUnknownStores(t *testing.T) {
-	noEnv := func(string) string { return "" }
-	env := func(key string) string {
-		if key == sqliteStoresEnv {
-			return " Chats "
+func sqliteStoresTestEnv(value string, set bool) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		if key == sqliteStoresEnv && set {
+			return value, true
 		}
-		return ""
+		return "", false
 	}
-	if stores, err := parseSQLiteStores("", false, noEnv); err != nil || len(stores) != 0 {
-		t.Fatalf("default = %v %v, want none", stores, err)
+}
+
+func TestParseSQLiteStoresDefaultsByProfileAndRejectsUnknownStores(t *testing.T) {
+	unset := sqliteStoresTestEnv("", false)
+	for _, tc := range []struct {
+		name      string
+		flag      string
+		flagSet   bool
+		env       func(string) (string, bool)
+		profile   string
+		wantChats bool
+		source    string
+	}{
+		{name: "dev default", env: unset, profile: "dev", wantChats: true, source: "dev profile default"},
+		{name: "prod default", env: unset, profile: "prod", source: "prod profile default"},
+		{name: "test default", env: unset, profile: "test", source: "test profile default"},
+		{name: "env on in prod", env: sqliteStoresTestEnv(" Chats ", true), profile: "prod", wantChats: true, source: sqliteStoresEnv},
+		{name: "explicit empty env in dev", env: sqliteStoresTestEnv("", true), profile: "dev", source: sqliteStoresEnv},
+		{name: "explicit empty flag in dev", flagSet: true, env: unset, profile: "dev", source: "--sqlite-stores"},
+		{name: "explicit empty flag over env", flagSet: true, env: sqliteStoresTestEnv("chats", true), profile: "prod", source: "--sqlite-stores"},
+		{name: "flag on in prod", flag: "chats", flagSet: true, env: sqliteStoresTestEnv("", true), profile: "prod", wantChats: true, source: "--sqlite-stores"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stores, source, err := parseSQLiteStores(tc.flag, tc.flagSet, tc.env, tc.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stores[sqliteStoreChats] != tc.wantChats || len(stores) > 1 {
+				t.Fatalf("stores = %v, want chats=%v", stores, tc.wantChats)
+			}
+			if source != tc.source {
+				t.Fatalf("source = %q, want %q", source, tc.source)
+			}
+		})
 	}
-	if stores, err := parseSQLiteStores("", false, env); err != nil || !stores[sqliteStoreChats] {
-		t.Fatalf("env = %v %v", stores, err)
-	}
-	if stores, err := parseSQLiteStores("", true, env); err != nil || len(stores) != 0 {
-		t.Fatalf("an explicit empty flag must win over the env: %v %v", stores, err)
-	}
-	if _, err := parseSQLiteStores("chats,lanes", true, noEnv); err == nil || !strings.Contains(err.Error(), "lanes") {
+	if _, _, err := parseSQLiteStores("chats,lanes", true, unset, "dev"); err == nil || !strings.Contains(err.Error(), "lanes") {
 		t.Fatalf("unknown store accepted: %v", err)
+	}
+	if _, _, err := parseSQLiteStores("", false, sqliteStoresTestEnv("lanes", true), "dev"); err == nil || !strings.Contains(err.Error(), "lanes") {
+		t.Fatalf("unknown store from the env accepted: %v", err)
+	}
+}
+
+// main passes workassRuntimeProfile(): only WORKASS_PROFILE=dev turns the
+// default on; an unset or unknown profile is prod and keeps JSON.
+func TestSQLiteStoresFollowTheRuntimeProfile(t *testing.T) {
+	for profile, want := range map[string]bool{" Dev ": true, "test": false, "prod": false, "": false, "unexpected": false} {
+		t.Setenv("WORKASS_PROFILE", profile)
+		stores, _, err := parseSQLiteStores("", false, sqliteStoresTestEnv("", false), workassRuntimeProfile())
+		if err != nil || stores[sqliteStoreChats] != want {
+			t.Fatalf("WORKASS_PROFILE=%q: stores = %v %v, want chats=%v", profile, stores, err, want)
+		}
 	}
 }
 

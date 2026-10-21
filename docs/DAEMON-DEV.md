@@ -56,6 +56,11 @@ Defaults:
 - `--engine-max-rss-kb 4194304`
 - `--spare-sessions 0`
 - `--spare-ttl 5m`
+- `--sqlite-stores` (or `WORKASS_SQLITE_STORES`): stores kept in `state/state.db`. When neither
+  is given, `chats` in the dev profile (`WORKASS_PROFILE=dev`) and none otherwise; an explicit
+  value, even an empty one, wins.
+
+Rollback: once a state dir is on SQLite, a build with the SQLite store refuses to start without it, and a build from before it ignores `state.db` and starts from the stale pre-switch JSON; moving `state.db` aside rolls back to that JSON and loses every later write.
 
 Daemon logs are written to stderr. Stdout is unused.
 
