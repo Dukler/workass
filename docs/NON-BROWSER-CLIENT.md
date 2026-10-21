@@ -267,6 +267,11 @@ GET /workass/chat-image/<tabId, URL-escaped>/<sha256>?k=<imageKey>
 - `200` carries the image bytes with their sniffed `Content-Type`, `ETag:
   "<sha256>"` and `Cache-Control: private, max-age=31536000, immutable`;
   `If-None-Match` answers `304`.
+- `&w=<px>` asks for a display rendition at most that wide, rounded up to one
+  of 160, 240, 320, 480, 640, 960, 1280, 1920 (wider: the full image). PNG
+  stays PNG and JPEG stays JPEG; an image already that narrow, or any other
+  format, comes back as it is. Its ETag is `"<sha256>-w<px>"`. Size it to what
+  you draw (CSS width x device pixel ratio) and open the full image without it.
 
 ---
 
