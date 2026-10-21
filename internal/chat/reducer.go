@@ -5225,10 +5225,14 @@ func buildInitialSeedBatch(state State, from, through uint64) (ContextBatch, err
 	}, nil
 }
 
+// contextMessageForLedgerEvent is the semantic projection that seed, delta and
+// import digests hash. Attachment pixel sizes are display metadata, not
+// semantics: they are cleared here so a digest recorded by a build without
+// them still matches when a newer build replays the same ledger range.
 func contextMessageForLedgerEvent(event LedgerEvent) provider.ContextMessage {
 	return provider.ContextMessage{
 		EventID: event.EventID, LedgerSequence: event.Sequence, Role: event.Role, Text: event.Text, Result: event.Result,
-		Attachments:  append([]provider.Attachment(nil), event.Attachments...),
+		Attachments:  provider.WithoutImageSize(append([]provider.Attachment(nil), event.Attachments...)),
 		SourceLaneID: event.LaneID, SourceProvider: event.ProviderID, SourceModelID: event.ModelID,
 		OperationID: event.OperationID, NativeTurnID: event.NativeTurnID, TerminalStatus: event.TerminalState,
 		Inert: true,

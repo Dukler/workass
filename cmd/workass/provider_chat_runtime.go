@@ -2465,10 +2465,12 @@ func steerAttachmentInputIdentity(images []any, stores ...*sessionStore) ([]prov
 		ref := strings.TrimSpace(fieldString(image, sessionImageDataRefField))
 		digest := strings.TrimSpace(fieldString(image, "digest"))
 		var size int64
+		var width, height int
 		if data != "" {
 			digest = sessionImageName(data)
 			ref = sessionImageDirname + "/" + digest
 			size = int64(len(data))
+			width, height = sessionImageDataSize(digest, data)
 		} else {
 			cleanRef := filepath.ToSlash(filepath.Clean(ref))
 			if cleanRef == "." || cleanRef == "" || !strings.HasPrefix(cleanRef, sessionImageDirname+"/") || strings.Contains(cleanRef, "../") {
@@ -2481,6 +2483,7 @@ func steerAttachmentInputIdentity(images []any, stores ...*sessionStore) ([]prov
 					return nil, fmt.Errorf("provider image %d has an unreadable durable content reference: %w", index, refErr)
 				}
 				digest, size = name, info.Size()
+				width, height = sessionImageRefSize(ref, filepath.Dir(store.path))
 			} else {
 				if digest == "" {
 					digest = strings.TrimPrefix(ref, sessionImageDirname+"/")
@@ -2496,6 +2499,7 @@ func steerAttachmentInputIdentity(images []any, stores ...*sessionStore) ([]prov
 		attachments = append(attachments, providercontract.Attachment{
 			ID: "image-" + digest[:16], Name: name, MIMEType: mimeType,
 			Digest: digest, Size: size, Ref: providerSessionImageRefPrefix + ref,
+			Width: width, Height: height,
 		})
 	}
 	return attachments, nil
@@ -2507,7 +2511,10 @@ func sameSteerAttachmentIdentity(left, right providercontract.Attachment) bool {
 		return false
 	}
 	// A ref-native retry may not carry the optional size field. Digest, ref,
-	// MIME, and name remain the immutable identity in that case.
+	// MIME, and name remain the immutable identity in that case. Width and
+	// Height (pixel size) are never compared: they are display metadata read
+	// from the bytes Digest already names, a storeless ref retry cannot read
+	// them, and an attachment recorded before they existed has none.
 	return left.Size == 0 || right.Size == 0 || left.Size == right.Size
 }
 

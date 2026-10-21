@@ -589,10 +589,12 @@ func (s *sessionStore) PlanProviderAttachments(images []any) (providerAttachment
 		}
 		name := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(ref)), sessionImageDirname+"/")
 		var size int64
+		var width, height int
 		planned := false
 		for _, write := range writes {
 			if filepath.Clean(write.ref) == filepath.Clean(ref) {
 				size = int64(len(write.data))
+				width, height = sessionImageDataSize(name, write.data)
 				planned = true
 				break
 			}
@@ -605,14 +607,20 @@ func (s *sessionStore) PlanProviderAttachments(images []any) (providerAttachment
 				return providerAttachmentPlan{}, infoErr
 			}
 			size = info.Size()
+			width, height = sessionImageRefSize(ref, stateDir)
 		}
 		if len(name) < 16 || strings.Contains(name, "/") {
 			return providerAttachmentPlan{}, fmt.Errorf("provider image %d has invalid durable content identity", index)
 		}
 		attachmentName := firstNonEmptyString(fieldString(image, "name"), fmt.Sprintf("image-%d", index+1))
+		// Width/Height come from the image header and stay zero when it cannot
+		// be read. They are display metadata only: request digests hash
+		// providercontract.WithoutImageSize(...) and steering compares identity
+		// fields, so the size never changes an attachment's identity.
 		attachments = append(attachments, providercontract.Attachment{
 			ID: "image-" + name[:16], Name: attachmentName, MIMEType: mimeType,
 			Digest: name, Size: size, Source: fieldString(image, "source"), Ref: providerSessionImageRefPrefix + ref,
+			Width: width, Height: height,
 		})
 	}
 	return providerAttachmentPlan{Attachments: attachments, writes: writes, stateDir: stateDir}, nil

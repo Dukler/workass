@@ -158,6 +158,7 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 		}
 		projected["messages"] = messages
 		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
+		annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
 		deferArchiveToolImages(messages)
 		for _, opt := range opts {
 			opt.apply(messages)
@@ -298,6 +299,7 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 	if err != nil {
 		return nil, false, err
 	}
+	annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
 	deferArchiveToolImages(messages)
 	for _, opt := range opts {
 		opt.apply(messages)
@@ -343,6 +345,7 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 			return nil, false, err
 		}
 	}
+	annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
 	deferArchiveToolImages(messages)
 	for _, opt := range opts {
 		opt.apply(messages)
@@ -1346,6 +1349,7 @@ func projectionAttachments(attachments []providercontract.Attachment) ([]any, er
 		if attachment.Source != "" {
 			item["source"] = attachment.Source
 		}
+		setWireImageSize(item, attachment.Width, attachment.Height)
 		out = append(out, item)
 	}
 	return out, nil
