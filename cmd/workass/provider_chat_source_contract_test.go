@@ -286,6 +286,8 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/provider_chat_background.go:syncSpawnedWorkSnapshots:ListSpawnedWork":                               {1, "actor projection reconciliation"},
 		"cmd/workass/provider_chat_background.go:syncSpawnedWorkSnapshots:CommitActorSpawnedWorkProjection":              {1, "persist the exact actor-owned executor liveness projection"},
 		"cmd/workass/provider_chat_background.go:ReadBackground:ReadSpawnedWork":                                         {1, "bounded executor-cache enrichment"},
+		"cmd/workass/provider_chat_lazy.go:headMustOpen:ListSpawnedWork":                                                 {1, "boot opens an actor whose spawned work the executor cache still tracks"},
+		"cmd/workass/provider_chat_lazy.go:retireActor:ListSpawnedWork":                                                  {1, "an actor whose spawned work is tracked stays in memory"},
 		"cmd/workass/provider_chat_close.go:CloseSession:LiveSessionByID":                                                {1, "known session-id compatibility lookup before actor proof"},
 		"cmd/workass/provider_chat_runtime.go:configureCoordinator:ForgetChat":                                           {1, "actor cleanup executor receives the exact operation identity"},
 		"cmd/workass/provider_chat_runtime.go:configureCoordinator:RestoreChatCheckpoint":                                {1, "checkpoint executor receives the exact operation identity"},
