@@ -12,6 +12,7 @@ import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMes
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
+import { ChatFindQueryContext } from '../markdown/find-context';
 import { localBrowserOwnsChat } from '../browser';
 import { CHAT_MESSAGE_TAIL } from '../chat/residency';
 import { forkStore } from '../store/forks';
@@ -952,6 +953,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           onTouchEnd={onTouchEnd}
           onTouchCancel={onTouchEnd}
         >
+          <ChatFindQueryContext.Provider value={findOpen ? findQuery : ''}>
           <div className="doc" ref={docRef}>
             {inheritedFold && chat && (
               <button
@@ -1022,6 +1024,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
               </>
             )}
           </div>
+          </ChatFindQueryContext.Provider>
         </div>
         {runningMessage && <LiveTurnPulse msg={runningMessage} />}
         {newCount > 0 && (
