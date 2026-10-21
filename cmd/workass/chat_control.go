@@ -200,7 +200,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		return "", acp.JobCancelResult{}, false, err
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if receipt, ok := state.CancelMutationReceipts[operationID]; ok {
 		// A terminal actor receipt wins over current foreground state. This is the
 		// idempotency fence for an idle cancel that was acknowledged before a
@@ -231,7 +231,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 			return jobID, acp.JobCancelResult{}, true, err
 		}
-		state = actor.engine.Snapshot()
+		state = actor.engine.ReadSnapshot()
 		receipt, ok := cancelReceiptForOperation(state, operationID)
 		if !ok {
 			return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel receipt disappeared from actor state")
@@ -252,7 +252,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, err
 		}
-		state = actor.engine.Snapshot()
+		state = actor.engine.ReadSnapshot()
 		idleReceipt, ok := state.CancelMutationReceipts[operationID]
 		if !ok {
 			actor.mu.Unlock()
@@ -274,7 +274,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 	if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 		return jobID, acp.JobCancelResult{}, true, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	receipt, ok := cancelReceiptForOperation(state, operationID)
 	if !ok {
 		return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel did not produce an actor receipt")
@@ -628,7 +628,7 @@ func (c *chatControlCoordinator) committedDeleteReceipt(params map[string]any) (
 	if err != nil {
 		return nil, false
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if !state.Deleted || state.DeletionOperationID != providercontract.NormalizeOperationID(string(operationID)) ||
 		strings.TrimSpace(state.Presentation.TabID) != tabID {
 		return nil, false
