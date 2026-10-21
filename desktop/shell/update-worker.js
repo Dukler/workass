@@ -995,9 +995,30 @@ function defaultOperations(transaction, dependencies = {}) {
       if (existed) {
         const stat = fs.statSync(transaction.mutableStateTarget);
         if (!stat.isDirectory()) throw new Error('Workass mutable state target is not a directory');
+        // The copy is consistent only while nothing writes the state: a
+        // state.db and its -wal copied a moment apart under a running daemon
+        // can be a torn pair that fails integrity_check and refuses to boot.
+        // The ordinary path stopped the daemon just before, but a resumed
+        // transaction skips that step and a relaunched daemon would go
+        // unnoticed, so the exact daemon's absence is proved again around the
+        // copy. (macOS only: Windows keeps chats in JSON and its ZIP updater
+        // never snapshots mutable state.)
+        const proveQuiescent = transaction.platform === 'darwin'
+          ? async () => Boolean(await exactDaemonDown(transaction))
+          : async () => true;
+        if (!await proveQuiescent()) {
+          throw new Error('the Workass daemon is running; its state is not snapshotted while it can write');
+        }
+        // Any writer at all, an exact daemon or not, moves the database files.
+        const databaseStamp = () => ['state.db', 'state.db-wal'].map((name) => {
+          const info = fs.statSync(path.join(transaction.mutableStateTarget, name), { throwIfNoEntry: false, bigint: true });
+          return info ? `${name}:${info.size}:${info.mtimeNs}` : `${name}:absent`;
+        }).join('|');
+        const stampBefore = databaseStamp();
+        const copied = path.join(transaction.mutableStateBackupTarget, 'state');
         fs.cpSync(
           transaction.mutableStateTarget,
-          path.join(transaction.mutableStateBackupTarget, 'state'),
+          copied,
           {
             recursive: true,
             errorOnExist: true,
@@ -1008,6 +1029,10 @@ function defaultOperations(transaction, dependencies = {}) {
             mode: fs.constants.COPYFILE_FICLONE,
           },
         );
+        if (!await proveQuiescent() || databaseStamp() !== stampBefore) {
+          fs.rmSync(copied, { recursive: true, force: true });
+          throw new Error('the Workass state database was written while it was being snapshotted');
+        }
       }
       atomicJSON(snapshotFile, {
         schemaVersion: 1,

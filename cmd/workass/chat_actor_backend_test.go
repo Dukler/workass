@@ -1,13 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -416,5 +422,198 @@ func copyTreeWithTimes(t *testing.T, from, to string, adjust func(time.Time) tim
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+const snapshotWriterStateEnv = "WORKASS_TEST_SNAPSHOT_WRITER_STATE"
+
+// TestStateSnapshotWriterHelper is the child process of
+// TestUpdaterStateSnapshotUnderWriteLoadAlwaysBoots: a stand-in daemon that
+// commits chat checkpoints to state.db as fast as it can until it is killed,
+// or closes the database cleanly on SIGTERM.
+func TestStateSnapshotWriterHelper(t *testing.T) {
+	stateDir := os.Getenv(snapshotWriterStateEnv)
+	if stateDir == "" {
+		t.Skip("child process of the state snapshot test")
+	}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM)
+	backend, err := openChatActorBackend(stateDir, true, "snapshot-writer", nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	// Rows large enough that the WAL checkpoints into state.db every few
+	// commits: a raw copy under this load is torn about a third of the time.
+	text := strings.Repeat("w", 200_000)
+	type writer struct {
+		store chat.StateStore
+		state chat.State
+	}
+	writers := make([]*writer, 4)
+	for index := range writers {
+		chatID := fmt.Sprintf("load-chat-%d", index)
+		handle := backend.store(chatID)
+		state, found, err := handle.Load(chatID)
+		if err == nil && !found {
+			state, err = chat.NewState(chatID)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		writers[index] = &writer{store: handle, state: state}
+	}
+	for round := 0; ; round++ {
+		select {
+		case <-stop:
+			if err := backend.close(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		default:
+		}
+		for _, w := range writers {
+			next := w.state.Clone()
+			next.Revision++
+			if len(next.Ledger) >= 30 {
+				next.Ledger = next.Ledger[:10]
+			}
+			sequence := len(next.Ledger) + 1
+			next.Ledger = append(next.Ledger, chat.LedgerEvent{
+				EventID: fmt.Sprintf("load-event-%d-%d", sequence, next.Revision), MessageID: fmt.Sprintf("load-message-%d-%d", sequence, next.Revision),
+				Sequence: uint64(sequence), Role: "assistant", Status: "done", Text: text,
+				OperationID: providercontract.OperationID(fmt.Sprintf("load-operation-%d", next.Revision)), ContextExcluded: true,
+			})
+			if err := w.store.Save(next); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			w.state = next
+		}
+		if round == 0 {
+			fmt.Println("writing")
+		}
+	}
+}
+
+// The macOS updater snapshots state/ before it activates a release, and a
+// rollback renames that copy into place. A copy taken while the daemon
+// writes can pair a state.db with a -wal from a moment later and fail
+// integrity_check. The updater (update-worker.js snapshotMutableState, run
+// here for real) must refuse while a writer is alive, and its copy once the
+// writer is gone, killed mid-commit or closed cleanly, must pass
+// integrity_check and boot.
+func TestUpdaterStateSnapshotUnderWriteLoadAlwaysBoots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the macOS updater snapshot; Windows prod keeps chats in JSON")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH")
+	}
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	writeBackendTestActor(t, stateDir, "seed-chat")
+	script := filepath.Join(root, "snapshot.js")
+	if err := os.WriteFile(script, []byte(`'use strict';
+const [workerPath, stateDir, backupDir, writerPid] = process.argv.slice(2);
+const { defaultOperations } = require(workerPath);
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err.code !== 'ESRCH'; } };
+const tx = { platform: 'darwin', mutableStateTarget: stateDir, mutableStateBackupTarget: backupDir, failedMutableStateTarget: backupDir + '-failed' };
+defaultOperations(tx, { daemonServiceIsDown: () => !alive(Number(writerPid)) }).snapshotMutableState()
+  .then(() => process.stdout.write('snapshotted\n'))
+  .catch((err) => { process.stderr.write(String(err && err.message || err) + '\n'); process.exitCode = 3; });
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerPath := filepath.Join(repoRoot(t), "desktop", "shell", "update-worker.js")
+	snapshot := func(backupDir string, writerPID int) (string, error) {
+		out, err := exec.Command(node, script, workerPath, stateDir, backupDir, strconv.Itoa(writerPID)).CombinedOutput()
+		return string(out), err
+	}
+
+	const cycles = 12
+	for cycle := 0; cycle < cycles; cycle++ {
+		writer := exec.Command(os.Args[0], "-test.run=^TestStateSnapshotWriterHelper$")
+		writer.Env = append(os.Environ(), snapshotWriterStateEnv+"="+stateDir)
+		stdout, err := writer.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr strings.Builder
+		writer.Stderr = &stderr
+		if err := writer.Start(); err != nil {
+			t.Fatal(err)
+		}
+		line, err := bufio.NewReader(stdout).ReadString('\n')
+		if err != nil || strings.TrimSpace(line) != "writing" {
+			_ = writer.Process.Kill()
+			_ = writer.Wait()
+			t.Fatalf("cycle %d: writer did not start: %q %v %s", cycle, line, err, stderr.String())
+		}
+		go func() { _, _ = io.Copy(io.Discard, stdout) }()
+
+		// While it writes, the updater refuses to copy.
+		refusedDir := filepath.Join(root, fmt.Sprintf("refused-%d", cycle))
+		if out, err := snapshot(refusedDir, writer.Process.Pid); err == nil || !strings.Contains(out, "daemon is running") {
+			_ = writer.Process.Kill()
+			_ = writer.Wait()
+			t.Fatalf("cycle %d: snapshot under write load = %v %s", cycle, err, out)
+		}
+		if _, err := os.Stat(filepath.Join(refusedDir, "state")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("cycle %d: a refused snapshot left a copy: %v", cycle, err)
+		}
+
+		// Stop it mid-load: killed outright, or a clean close.
+		time.Sleep(time.Duration(40+cycle*17%120) * time.Millisecond)
+		if cycle%2 == 0 {
+			_ = writer.Process.Kill()
+		} else {
+			_ = writer.Process.Signal(syscall.SIGTERM)
+		}
+		waitErr := writer.Wait()
+		if cycle%2 == 1 && waitErr != nil {
+			t.Fatalf("cycle %d: writer did not close cleanly: %v %s", cycle, waitErr, stderr.String())
+		}
+
+		backupDir := filepath.Join(root, fmt.Sprintf("snapshot-%d", cycle))
+		if out, err := snapshot(backupDir, writer.Process.Pid); err != nil {
+			t.Fatalf("cycle %d: snapshot after the writer stopped: %v %s", cycle, err, out)
+		}
+		copied := filepath.Join(backupDir, "state")
+		if wal, err := os.Stat(filepath.Join(copied, store.FileName+"-wal")); err == nil {
+			t.Logf("cycle %d: snapshot holds a %d-byte WAL", cycle, wal.Size())
+		}
+		db, err := store.Open(store.Options{Path: filepath.Join(copied, store.FileName), BinaryVersion: "test"})
+		if err != nil {
+			t.Fatalf("cycle %d: open the snapshot: %v", cycle, err)
+		}
+		var integrity string
+		if err := db.Read(context.Background(), func(tx *store.Tx) error {
+			return tx.QueryRow(`PRAGMA integrity_check`).Scan(&integrity)
+		}); err != nil || integrity != "ok" {
+			t.Fatalf("cycle %d: snapshot integrity_check = %q %v", cycle, integrity, err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		backend, err := openChatActorBackend(copied, true, "test", nil)
+		if err != nil {
+			t.Fatalf("cycle %d: the snapshot does not boot: %v", cycle, err)
+		}
+		heads, err := backend.discover()
+		if err != nil || len(heads) != 5 {
+			t.Fatalf("cycle %d: snapshot discovery = %d heads, %v", cycle, len(heads), err)
+		}
+		for _, head := range heads {
+			if _, found, err := backend.store(head.State.ChatID).Load(head.State.ChatID); err != nil || !found {
+				t.Fatalf("cycle %d: snapshot actor %s: found=%v %v", cycle, head.State.ChatID, found, err)
+			}
+		}
+		if err := backend.close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

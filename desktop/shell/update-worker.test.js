@@ -843,6 +843,41 @@ test('a completed mutable-state snapshot is reconciled when its checkpoint was l
   assert.equal(fs.readFileSync(path.join(tx.mutableStateBackupTarget, 'state', 'provider-lanes.json'), 'utf8'), '{"v":1}\n');
 });
 
+test('the mutable-state snapshot is never copied while the daemon can write', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(tx.mutableStateTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'state.db'), 'db');
+  const copied = path.join(tx.mutableStateBackupTarget, 'state');
+
+  // A daemon still up (a resumed transaction skipped the stop step): no copy.
+  const running = defaultOperations(tx, { daemonServiceIsDown: () => false });
+  await assert.rejects(running.snapshotMutableState(), /daemon is running/);
+  assert.equal(fs.existsSync(copied), false);
+
+  // A daemon that comes up during the copy voids it.
+  let probes = 0;
+  const starts = defaultOperations(tx, { daemonServiceIsDown: () => { probes += 1; return probes === 1; } });
+  await assert.rejects(starts.snapshotMutableState(), /written while it was being snapshotted/);
+  assert.equal(fs.existsSync(copied), false);
+
+  // Any writer that moves the database during the copy voids it too.
+  const writes = defaultOperations(tx, {
+    daemonServiceIsDown: () => {
+      if (fs.existsSync(copied)) fs.appendFileSync(path.join(tx.mutableStateTarget, 'state.db-wal'), 'frame');
+      return true;
+    },
+  });
+  await assert.rejects(writes.snapshotMutableState(), /written while it was being snapshotted/);
+  assert.equal(fs.existsSync(copied), false);
+
+  // Quiescent: copied, and a later run reconciles the completed snapshot.
+  fs.rmSync(path.join(tx.mutableStateTarget, 'state.db-wal'), { force: true });
+  const quiet = defaultOperations(tx, { daemonServiceIsDown: () => true });
+  await quiet.snapshotMutableState();
+  assert.equal(fs.readFileSync(path.join(copied, 'state.db'), 'utf8'), 'db');
+  await defaultOperations(tx, { daemonServiceIsDown: () => false }).snapshotMutableState();
+});
+
 test('a completed macOS rollback is reconciled when its checkpoint was lost', async () => {
   const tx = transactionFixture();
   fs.mkdirSync(tx.installTarget, { recursive: true });
