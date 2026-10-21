@@ -562,14 +562,13 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 		}
 	}
 	var next State
-	sharesLedger := commandLeavesLedger(command)
-	if sharesLedger {
-		if checkLedgerSharing != nil {
-			defer checkLedgerSharing(command, exactLedgerCopy(current.Ledger), current.Ledger, &next)
-		}
+	if checkLedgerSharing != nil {
+		defer checkLedgerSharing(command, exactLedgerCopy(current.Ledger), current.Ledger, &next)
+	}
+	if commandLeavesLedger(command) {
 		next = current.cloneSharingLedger()
 	} else {
-		next = current.Clone()
+		next = current.cloneLedgerRows()
 	}
 	var (
 		effects []Effect
@@ -704,8 +703,9 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 	return next, effects, nil
 }
 
-// checkLedgerSharing is a test hook: when set, every transition that shares
-// the ledger reports the rows before it, the committed rows, and the result.
+// checkLedgerSharing is a test hook: when set, every transition reports the
+// committed rows as they were before it, the committed rows themselves, and
+// its result, so tests can prove a transition never edits committed rows.
 var checkLedgerSharing func(command Command, before, current []LedgerEvent, next *State)
 
 // commandLeavesLedger reports whether command's reducer, and everything it
