@@ -3,7 +3,7 @@ import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEven
 import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
-import { useMessageImageSrc } from './MessageImage';
+import { ImagePlaceholder, useReservedImage } from './MessageImage';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
@@ -16,23 +16,21 @@ export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
 
 // One attachment of a user message. Bytes sent by reference load once it is
-// in view (see MessageImage.tsx); until then a quiet placeholder holds its place.
+// in view (see MessageImage.tsx); until then its reserved frame holds the
+// image's final size, so nothing below moves when it arrives.
 function UserImage({ tabId, image, alt }: { tabId: string; image: MessageImage; alt: string }) {
-  const { target, src, failed } = useMessageImageSrc(tabId, image);
-  if (!src) {
-    return <span ref={(element) => { target.current = element; }} className="assistant-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>;
-  }
-  // Click to open full-size in the lightbox.
+  const { target, src, state, style, img } = useReservedImage(tabId, image, 'user');
   return (
-    <img
-      src={src}
-      alt={alt}
-      className="zoomable"
-      title="Ampliar"
-      tabIndex={0}
-      aria-keyshortcuts="Meta+C Control+C"
-      onClick={() => store.openImageLightbox(src, alt)}
-    />
+    <div ref={(element) => { target.current = element; }} className="ri ri-user" data-state={state} style={style}>
+      <span className="ri-media">
+        {/* Click to open full-size in the lightbox. */}
+        {img({
+          alt, className: 'zoomable', title: 'Ampliar', tabIndex: 0, 'aria-keyshortcuts': 'Meta+C Control+C',
+          onClick: () => { if (src) store.openImageLightbox(src, alt); },
+        })}
+        <ImagePlaceholder state={state} alias="assistant-image-pending" />
+      </span>
+    </div>
   );
 }
 
@@ -333,10 +331,13 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
 function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; alt: string }) {
   // The same once-per-image cache as message images: a windowed transcript
   // remounts rows as the reader scrolls, and a remount must not fetch again.
-  const { target, src, failed } = useMessageImageSrc(tabId, image);
+  const { target, src, state, style, img } = useReservedImage(tabId, image, 'tool');
   return (
-    <button ref={(element) => { target.current = element; }} className="tool-image" disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
-      {src ? <img src={src} alt={alt} /> : <span className="tool-image-pending">{failed ? 'Imagen no disponible' : 'Cargando imagen…'}</span>}
+    <button ref={(element) => { target.current = element; }} className="tool-image ri ri-tool" data-state={state} style={style} disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
+      <span className="ri-media">
+        {img({ alt })}
+        <ImagePlaceholder state={state} alias="tool-image-pending" />
+      </span>
     </button>
   );
 }

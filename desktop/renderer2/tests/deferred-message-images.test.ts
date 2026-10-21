@@ -39,7 +39,8 @@ test('a deferred reply image paints a placeholder, never inline bytes', () => {
   const html = renderToStaticMarkup(React.createElement(Transcript, { chat }));
   assert.equal((html.match(/Cargando imagen…/g) ?? []).length, 2, 'the inline reply image and the user attachment wait for their bytes');
   assert.doesNotMatch(html, /data:image\/png;base64,/);
-  assert.match(html, /class="assistant-inline-image"[^>]*disabled/);
+  assert.match(html, /class="assistant-inline-image ri ri-inline" data-state="pending"[^>]*disabled/);
+  assert.match(html, /class="ri ri-user" data-state="pending"/);
 });
 
 test('an image reference is fetched once and then served from the cache', async () => {

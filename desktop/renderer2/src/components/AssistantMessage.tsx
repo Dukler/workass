@@ -13,7 +13,7 @@ import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegment
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
 import { relTime } from '../rel-time';
-import { MessageImageButton, cachedImageSrc, loadImageSrc } from './MessageImage';
+import { MessageImageButton, loadImageSrc } from './MessageImage';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
 import { revealedText, settleMountFades } from '../stream-reveal';
@@ -56,8 +56,9 @@ function assistantMediaResolver(tabId: string, images: MessageImage[] | undefine
     resolve: (target) => {
       const image = bySource.get(normalizeMarkdownTarget(target));
       if (!image) return null;
-      const src = cachedImageSrc(image);
-      return src ? { src, alt: image.name || 'Imagen' } : { src: '', alt: image.name || 'Imagen', deferred: { tabId, image } };
+      // Every message image paints through its reserved frame (MessageImageButton),
+      // bytes in hand or not, so a remounted row keeps its final size.
+      return { src: '', alt: image.name || 'Imagen', deferred: { tabId, image } };
     },
     resolveLink: (target) => connectedArtifactURL(artifactOrigin, target, undefined, undefined, store.localMachineId()),
     openLink: (target) => store.openHostedArtifact(tabId, target, artifactOrigin),
@@ -76,7 +77,7 @@ function StructuredAssistantImages({ tabId, images }: { tabId: string; images: M
       {structured.map((image, index) => {
         const alt = image.name || `Imagen ${index + 1}`;
         return (
-          <MessageImageButton key={`${image.mimeType}-${index}`} tabId={tabId} image={image} alt={alt}
+          <MessageImageButton key={`${image.mimeType}-${index}`} tabId={tabId} image={image} alt={alt} surface="gallery"
             className="assistant-inline-image" onOpen={(src) => store.openImageLightbox(src, alt)} />
         );
       })}

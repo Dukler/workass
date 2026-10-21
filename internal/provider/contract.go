@@ -94,6 +94,30 @@ type Attachment struct {
 	// Ref is an immutable, daemon-resolvable content reference. Durable chat
 	// state never embeds arbitrary provider payloads or renderer-local blobs.
 	Ref string
+	// Width and Height are the image's pixel size, read from its header when
+	// the attachment was planned; zero when it could not be read (SVG, damaged
+	// bytes). They are display metadata derived from the bytes Digest already
+	// names, so they are never part of an attachment's identity or of any
+	// request digest. omitempty keeps a size-less attachment byte-identical to
+	// the encoding of builds that predate the fields.
+	Width  int `json:",omitempty"`
+	Height int `json:",omitempty"`
+}
+
+// WithoutImageSize returns the attachments with Width and Height cleared: the
+// form every identity and request digest hashes, so a digest recorded before
+// the size fields existed still matches the same request replayed later. A nil
+// slice stays nil, so the encoding of an empty list is unchanged too.
+func WithoutImageSize(attachments []Attachment) []Attachment {
+	if attachments == nil {
+		return nil
+	}
+	out := make([]Attachment, len(attachments))
+	for index, attachment := range attachments {
+		attachment.Width, attachment.Height = 0, 0
+		out[index] = attachment
+	}
+	return out
 }
 
 // TurnPresentation is Workass-owned public/journal metadata. It is carried by

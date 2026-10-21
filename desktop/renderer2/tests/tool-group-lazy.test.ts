@@ -127,6 +127,7 @@ test('a saved tool image reserves its place before the tool row while its bytes 
   const html = renderToStaticMarkup(React.createElement(ToolGroup, { tabId: 'image-chat', tools: [tool] }));
   assert.ok(html.indexOf('class="tool-images"') < html.indexOf('class="toolsolo"'));
   assert.match(html, /Cargando imagen/);
+  assert.match(html, /class="tool-image ri ri-tool" data-state="pending" style="--iw:1200;--ih:900"/);
   assert.doesNotMatch(html, /<img|data:image\/png;base64/);
 });
 

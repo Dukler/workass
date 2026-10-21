@@ -235,7 +235,7 @@ export function withoutDraftImages(current: DraftImage[] | undefined, ids: Itera
 // Copy the exact accepted payload into transcript-safe records. Invalid/empty
 // items never create broken image elements, and no object is shared with the
 // mutable draft array.
-export function messageImages(images: Array<{ mimeType: string; data: string; name?: string; source?: string }> | undefined): MessageImage[] | undefined {
+export function messageImages(images: Array<{ mimeType: string; data: string; name?: string; source?: string; width?: number; height?: number }> | undefined): MessageImage[] | undefined {
   const accepted = (images ?? [])
     .filter((image) => image.mimeType.startsWith('image/') && image.data.length > 0)
     .map((image) => ({
@@ -243,6 +243,7 @@ export function messageImages(images: Array<{ mimeType: string; data: string; na
       data: image.data,
       ...(image.name ? { name: image.name } : {}),
       ...(image.source ? { source: image.source } : {}),
+      ...(image.width && image.height ? { width: image.width, height: image.height } : {}),
     }));
   return accepted.length ? accepted : undefined;
 }
