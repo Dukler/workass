@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type ImgHTMLAttributes
 import type { MessageImage } from '../store/types';
 import { messageImageSrc } from '../image-drafts';
 import { call } from '../wire/api';
-import { observeTranscriptImageOnce } from '../transcript-images';
+import { transcriptImageGate } from '../transcript-images';
+import { chatImageURL } from '../chat-image-url';
 
 // A message image the daemon sent by reference (archive reads with
 // deferImages, 2026-10-13): the chat's text paints first, and each image's
@@ -18,9 +19,32 @@ function remember(ref: string, src: string) {
   while (loaded.size > CACHE_LIMIT) loaded.delete(loaded.keys().next().value as string);
 }
 
-export function cachedImageSrc(image: MessageImage): string {
+// Images served by URL (chat-image-url.ts) are cached by the browser, keyed by
+// URL. This set only remembers which URLs have already loaded, so a remounted
+// row paints its image at once instead of fading it in again. A URL that
+// failed (an expired key, an image the endpoint will not serve) is read over
+// the socket instead, once per session.
+const loadedURLs = new Set<string>();
+const brokenURLs = new Set<string>();
+const URL_MEMORY = 4096;
+
+function rememberURL(url: string) {
+  loadedURLs.delete(url);
+  loadedURLs.add(url);
+  while (loadedURLs.size > URL_MEMORY) loadedURLs.delete(loadedURLs.values().next().value as string);
+}
+
+function imageURL(tabId: string, image: MessageImage): string {
+  const url = chatImageURL(tabId, image);
+  return url && !brokenURLs.has(url) ? url : '';
+}
+
+export function cachedImageSrc(image: MessageImage, tabId?: string): string {
   if (!image.deferredImageRef) return messageImageSrc(image);
-  return loaded.get(image.deferredImageRef) ?? '';
+  const bytes = loaded.get(image.deferredImageRef);
+  if (bytes) return bytes;
+  const url = tabId === undefined ? '' : imageURL(tabId, image);
+  return url && loadedURLs.has(url) ? url : '';
 }
 
 // Image reads share the daemon's history lane with history pages, one at a
@@ -102,6 +126,9 @@ export function loadImageSrc(tabId: string, image: MessageImage): Promise<string
   if (!ref) return Promise.resolve(messageImageSrc(image));
   const hit = loaded.get(ref);
   if (hit) { remember(ref, hit); return Promise.resolve(hit); }
+  // By URL the viewer's own <img> fetches it (from the cache when it is shown).
+  const url = imageURL(tabId, image);
+  if (url) return Promise.resolve(url);
   const read = queueImageRead(tabId, image, true);
   startImageReads();
   return read.promise;
@@ -128,30 +155,65 @@ export function imageReadsPending(): { waiting: number; reading: number } {
   return { waiting: waiting.length, reading };
 }
 
-// The image's src: immediate for inline bytes or a cached reference, loaded
-// once the element scrolls into view otherwise.
+// The image's src: immediate for inline bytes or a cached reference;
+// otherwise it starts loading once the element is near the viewport and the
+// scroll has settled (transcript-images.ts), and stops if it leaves first.
+// By URL the <img> itself loads it; an older daemon's image is read over the
+// socket. onLoaded/onBroken report what the <img> did with the source.
 export function useMessageImageSrc(tabId: string, image: MessageImage) {
   const target = useRef<HTMLElement | null>(null);
-  const [src, setSrc] = useState(() => cachedImageSrc(image));
+  const [src, setSrc] = useState(() => cachedImageSrc(image, tabId));
   const [failed, setFailed] = useState(false);
+  // Bumped when a URL fails, so the image is asked for again over the socket.
+  const [attempt, setAttempt] = useState(0);
+  const loadedRef = useRef<() => void>(() => {});
   useEffect(() => {
-    const now = cachedImageSrc(image);
+    const now = cachedImageSrc(image, tabId);
     setSrc(now);
     setFailed(false);
+    loadedRef.current = () => {};
     if (now || !image.deferredImageRef || !target.current) return;
     let current = true;
-    let release = () => {};
-    const stop = observeTranscriptImageOnce(target.current, () => {
-      const request = requestImageSrc(tabId, image);
-      release = request.release;
-      void request.promise.then((next) => {
+    let request: ReturnType<typeof requestImageSrc> | null = null;
+    const url = imageURL(tabId, image);
+    const gate = transcriptImageGate().watch(target.current, {
+      start: () => {
         if (!current) return;
-        if (next) setSrc(next); else setFailed(true);
-      });
+        if (url) { setSrc(url); return; }
+        const mine = requestImageSrc(tabId, image);
+        request = mine;
+        void mine.promise.then((next) => {
+          // A read given up on (the image left first) settles without bytes;
+          // that is not a failure. Bytes it did bring are cached for next time.
+          if (!current || request !== mine) return;
+          if (next) { setSrc(next); gate.loaded(); } else setFailed(true);
+        });
+      },
+      cancel: () => {
+        if (!current) return;
+        // An <img> that loses its src aborts its fetch; the frame keeps its size.
+        if (url) setSrc((value) => (value === url ? '' : value));
+        request?.release();
+        request = null;
+      },
     });
-    return () => { current = false; stop(); release(); };
-  }, [tabId, image]);
-  return { target, src, failed };
+    loadedRef.current = gate.loaded;
+    return () => { current = false; gate.stop(); request?.release(); };
+  }, [tabId, image, attempt]);
+  const onLoaded = (loadedSrc: string) => {
+    if (loadedSrc && !loadedSrc.startsWith('data:')) rememberURL(loadedSrc);
+    loadedRef.current();
+  };
+  // A URL the <img> could not load (an expired key, an image the endpoint will
+  // not serve) is read over the socket instead: true means that is under way.
+  const onBroken = (brokenSrc: string) => {
+    if (!brokenSrc || brokenSrc.startsWith('data:') || brokenURLs.has(brokenSrc)) return false;
+    brokenURLs.add(brokenSrc);
+    loadedURLs.delete(brokenSrc);
+    setAttempt((value) => value + 1);
+    return true;
+  };
+  return { target, src, failed, onLoaded, onBroken };
 }
 
 // ── Reserved image frame (approved mock image-placeholder, variant C) ──────
@@ -211,8 +273,8 @@ export function reservedImageState(readFailed: boolean, src: string, readySrc: s
 // data, a cached reference) paint as loaded, exactly as before; bytes that
 // arrive later fade in over the reserved frame.
 export function useReservedImage(tabId: string, image: MessageImage, surface: ImageSurface) {
-  const { target, src, failed } = useMessageImageSrc(tabId, image);
-  const [readySrc, setReadySrc] = useState(() => cachedImageSrc(image));
+  const { target, src, failed, onLoaded, onBroken } = useMessageImageSrc(tabId, image);
+  const [readySrc, setReadySrc] = useState(() => cachedImageSrc(image, tabId));
   const [brokenSrc, setBrokenSrc] = useState('');
   const [measured, setMeasured] = useState<{ src: string; size: readonly [number, number] } | null>(null);
   const media = useRef<HTMLImageElement | null>(null);
@@ -225,6 +287,7 @@ export function useReservedImage(tabId: string, image: MessageImage, surface: Im
         ? current : { src: loadedSrc, size });
     }
     setReadySrc(loadedSrc);
+    onLoaded(loadedSrc);
   };
   // A load that finished before its listener was attached still settles.
   useEffect(() => {
@@ -239,8 +302,9 @@ export function useReservedImage(tabId: string, image: MessageImage, surface: Im
         ref={media}
         src={src}
         decoding="async"
+        {...(src.startsWith('data:') ? {} : { loading: 'lazy' as const })}
         onLoad={(event) => settle(event.currentTarget, src)}
-        onError={() => setBrokenSrc(src)}
+        onError={() => { if (!onBroken(src)) setBrokenSrc(src); }}
       />
     )
     : null;
