@@ -59,6 +59,9 @@ func TestOpenAppliesPragmasAndEmbeddedSchema(t *testing.T) {
 	if err := db.sql.QueryRow(`SELECT count(*) FROM schema_migrations WHERE binary_version = 'test'`).Scan(&recorded); err != nil || recorded != len(embedded) {
 		t.Fatalf("schema_migrations rows = %d (%v), want %d", recorded, err, len(embedded))
 	}
+	if info, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Fatalf("database file mode: %v %v", info.Mode(), err)
+	}
 	// EXCLUSIVE locking before WAL keeps the wal-index in heap memory.
 	if _, err := os.Stat(path + "-shm"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a -shm file exists beside the database: %v", err)
