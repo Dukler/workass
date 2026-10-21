@@ -976,6 +976,21 @@ func (s State) Clone() State {
 	return out
 }
 
+// cloneLedgerRows is Clone for a transition that may write the ledger: the
+// rows are copied into a new array, so the transition can rewrite a row's own
+// fields and append rows, but each row's slices and pointers stay shared with
+// s instead of being deep-copied. Committed rows are never edited through
+// them: a transition that changes a row's timeline or attachments replaces
+// the slice (upsertSettledSubagentTool copies the row's timeline first), and
+// tests verify every transition leaves the committed rows untouched. Sharing
+// the row data also lets the SQLite checkpoint recognise unchanged rows
+// without comparing their contents.
+func (s State) cloneLedgerRows() State {
+	out := s.cloneSharingLedger()
+	out.Ledger = append(make([]LedgerEvent, 0, len(s.Ledger)), s.Ledger...)
+	return out
+}
+
 // cloneValueMap copies a map whose values hold no references. maps.Clone
 // copies the table wholesale, several times faster than re-inserting each
 // entry (the tool-owner map of a long chat has 60k); like the loops it

@@ -13,12 +13,16 @@ import (
 	"testing"
 )
 
-// Every test in this package runs with the ledger-sharing check on: a
-// transition that shares the committed ledger rows (commandLeavesLedger) must
-// leave them exactly as they were, in the committed state and in its result.
+// Every test in this package runs with the ledger-sharing check on. No
+// transition may change the committed ledger rows, whose data the next state
+// shares (cloneLedgerRows); one that shares the whole ledger
+// (commandLeavesLedger) must also leave its result's rows exactly as they were.
 func TestMain(m *testing.M) {
 	checkLedgerSharing = func(command Command, before, current []LedgerEvent, next *State) {
-		if !sameLedgerRows(before, current) || !sameLedgerRows(before, next.Ledger) {
+		if !sameLedgerRows(before, current) {
+			panic(fmt.Sprintf("%T changed committed ledger rows in place", command))
+		}
+		if commandLeavesLedger(command) && !sameLedgerRows(before, next.Ledger) {
 			panic(fmt.Sprintf("%T shares the ledger but changed it", command))
 		}
 	}
@@ -148,7 +152,7 @@ func TestLedgerLeavingCommandsLeaveTheLedger(t *testing.T) {
 	}
 	// These build and return a new State; their only ledger writes set the
 	// copy's own field.
-	constructsState := map[string]bool{"Clone": true, "cloneSharingLedger": true}
+	constructsState := map[string]bool{"Clone": true, "cloneSharingLedger": true, "cloneLedgerRows": true}
 	for _, root := range roots {
 		command := root.command
 		if len(funcs[root.reducer]) == 0 {
