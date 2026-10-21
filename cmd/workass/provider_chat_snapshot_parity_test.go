@@ -372,6 +372,50 @@ func TestActorRendererSessionSnapshotParityAcrossRestart(t *testing.T) {
 	if !restartedManager.Reset() {
 		t.Fatal("reset restarted manager")
 	}
+
+	// Where the actor is stored must be invisible to the renderer. Import
+	// these exact durable bytes into SQLite, then compare a SQLite-backed
+	// restart with a file-backed restart from the same bytes, byte for byte.
+	sqlBackend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatalf("import actor into SQLite: %v", err)
+	}
+	defer sqlBackend.close()
+	projectRaw := func(runtime *providerChatRuntime) ([]byte, map[string]any, map[string]any, []any) {
+		t.Helper()
+		if err := runtime.StartupError(); err != nil {
+			t.Fatalf("start %s runtime: %v", runtime.backend.description(), err)
+		}
+		raw, err := runtime.ProjectSessionRaw()
+		if err != nil {
+			t.Fatalf("project %s session: %v", runtime.backend.description(), err)
+		}
+		root, projected, archived := snapshotParityProjection(t, runtime, tabID)
+		return raw, root, projected, archived
+	}
+	referenceManager := acp.NewManager(acp.Options{RootDir: workspace, StateDir: stateDir, RuntimeProfile: "dev"})
+	reference := newProviderChatRuntimeBeforeProviderStartup(referenceManager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	fileRaw, _, fileChat, fileArchive := projectRaw(reference)
+	if err := reference.Close(context.Background()); err != nil {
+		t.Fatalf("close file reference runtime: %v", err)
+	}
+	referenceManager.Reset()
+
+	sqlManager := acp.NewManager(acp.Options{RootDir: workspace, StateDir: stateDir, RuntimeProfile: "dev"})
+	sqlRuntime := newProviderChatRuntimeBeforeProviderStartupWithBackend(sqlManager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir, sqlBackend)
+	sqlRaw, sqlRoot, sqlChat, sqlArchive := projectRaw(sqlRuntime)
+	if !bytes.Equal(fileRaw, sqlRaw) {
+		t.Fatalf("session:get bytes differ between the JSON and SQLite actor stores:\nfile: %.600s\nsql:  %.600s", fileRaw, sqlRaw)
+	}
+	if !bytes.Equal(snapshotParityJSONBytes(t, fileArchive), snapshotParityJSONBytes(t, sqlArchive)) ||
+		!bytes.Equal(snapshotParityJSONBytes(t, fileChat), snapshotParityJSONBytes(t, sqlChat)) {
+		t.Fatal("archive or chat projection differs between the JSON and SQLite actor stores")
+	}
+	snapshotParityAssertRichRendererContract(t, sqlRuntime, sqlRoot, sqlChat, sqlArchive, tabID, chatID, identity, thread, sequence, workspace, baselineCommit, ownerKey)
+	if err := sqlRuntime.Close(context.Background()); err != nil {
+		t.Fatalf("close SQLite runtime: %v", err)
+	}
+	sqlManager.Reset()
 }
 
 func snapshotParityPresentation(workspace string, providerID providercontract.ID, modelID, modeID string) chat.PresentationState {

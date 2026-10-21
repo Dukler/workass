@@ -208,6 +208,32 @@ func (s FileStore) Save(state State) error {
 }
 
 func (s FileStore) commitProviderEvent(baseRevision uint64, next State, command ProviderEventReceived) error {
+	return commitProviderEventViaJournal(s, baseRevision, next, command)
+}
+
+func (s FileStore) appendJournalRecord(_ providerEventJournalRecord, payload []byte, urgent bool) (bool, error) {
+	frame := make([]byte, providerEventJournalFrameLen(payload))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(payload)))
+	copy(frame[4:], payload)
+	binary.BigEndian.PutUint32(frame[4+len(payload):], crc32.ChecksumIEEE(payload))
+	return appendProviderEventJournalFrame(s.Path, frame, urgent)
+}
+
+// journalStateStore is a StateStore with an ordered journal beside its
+// checkpoint. appendJournalRecord commits one validated record after the
+// checkpoint, or reports false when the journal's budget says this commit
+// must be a full checkpoint instead. urgent records (terminal receipts and
+// cancellation) may use the larger urgent budget.
+type journalStateStore interface {
+	StateStore
+	appendJournalRecord(record providerEventJournalRecord, payload []byte, urgent bool) (bool, error)
+}
+
+// commitProviderEventViaJournal is the one journal policy shared by every
+// store: which provider events may be journaled, the contiguity and
+// ownership fences, the bounded record, and when a commit falls back to a
+// checkpoint.
+func commitProviderEventViaJournal(s journalStateStore, baseRevision uint64, next State, command ProviderEventReceived) error {
 	if !providerEventJournalEligible(command.Event.Kind) {
 		return s.Save(next)
 	}
@@ -224,7 +250,7 @@ func (s FileStore) commitProviderEvent(baseRevision uint64, next State, command 
 		Version: providerEventJournalVersion, BaseRevision: baseRevision,
 		Revision: next.Revision, Command: command,
 	}
-	frame, err := encodeProviderEventJournalFrame(record)
+	payload, err := encodeProviderEventJournalPayload(record)
 	if err != nil {
 		// Preserve the pre-journal behavior for a pathological terminal payload
 		// that exceeds the bounded record format. It may be slower, but it must not
@@ -240,7 +266,7 @@ func (s FileStore) commitProviderEvent(baseRevision uint64, next State, command 
 	// renderer in "running" for seconds or minutes after the provider had already
 	// ended. The terminal frame itself remains bounded by the record limit; the
 	// next ordinary actor mutation checkpoints it normally.
-	appended, err := appendProviderEventJournalFrame(s.Path, frame, command.Event.Kind == provider.EventTurnTerminal)
+	appended, err := s.appendJournalRecord(record, payload, command.Event.Kind == provider.EventTurnTerminal)
 	if err != nil {
 		return err
 	}
@@ -279,6 +305,21 @@ func providerEventJournalPath(actorPath string) string {
 }
 
 func encodeProviderEventJournalFrame(record providerEventJournalRecord) ([]byte, error) {
+	payload, err := encodeProviderEventJournalPayload(record)
+	if err != nil {
+		return nil, err
+	}
+	frame := make([]byte, providerEventJournalFrameLen(payload))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(payload)))
+	copy(frame[4:], payload)
+	binary.BigEndian.PutUint32(frame[4+len(payload):], crc32.ChecksumIEEE(payload))
+	return frame, nil
+}
+
+// encodeProviderEventJournalPayload validates and encodes one journal
+// record. The payload is what every store persists; the file journal frames
+// it with a length and a CRC.
+func encodeProviderEventJournalPayload(record providerEventJournalRecord) ([]byte, error) {
 	if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
 		return nil, errors.New("provider event journal record has invalid version or revision")
 	}
@@ -292,12 +333,10 @@ func encodeProviderEventJournalFrame(record providerEventJournalRecord) ([]byte,
 	if len(payload) == 0 || len(payload) > providerEventJournalMaxRecordBytes {
 		return nil, errors.New("provider event journal record exceeds its bounded size")
 	}
-	frame := make([]byte, 4+len(payload)+4)
-	binary.BigEndian.PutUint32(frame[:4], uint32(len(payload)))
-	copy(frame[4:], payload)
-	binary.BigEndian.PutUint32(frame[4+len(payload):], crc32.ChecksumIEEE(payload))
-	return frame, nil
+	return payload, nil
 }
+
+func providerEventJournalFrameLen(payload []byte) int { return 4 + len(payload) + 4 }
 
 func appendProviderEventJournalFrame(actorPath string, frame []byte, terminal bool) (bool, error) {
 	journalPath := providerEventJournalPath(actorPath)
@@ -356,18 +395,7 @@ func appendProviderEventJournalFrame(actorPath string, frame []byte, terminal bo
 			return closeWithError(errors.New("provider event journal has an unsupported schema"))
 		}
 	}
-	additional := int64(len(frame))
-	if initializedEmpty {
-		additional += int64(len(providerEventJournalMagic))
-	}
-	journalLimit := int64(providerEventJournalCheckpointBytes)
-	if terminal {
-		// Cancellation commands and the terminal receipt may pass the ordinary
-		// checkpoint threshold. Keep this urgent region bounded as well; a later
-		// ordinary mutation checkpoints the combined stream and control records.
-		journalLimit += int64(providerEventJournalMaxRecordBytes) + int64(len(providerEventJournalMagic)) + 8
-	}
-	if originalSize+additional > journalLimit {
+	if _, fits := providerEventJournalAppendFits(originalSize, len(frame), terminal); !fits {
 		if err := file.Close(); err != nil {
 			return false, err
 		}
@@ -409,6 +437,28 @@ func appendProviderEventJournalFrame(actorPath string, frame []byte, terminal bo
 	return true, nil
 }
 
+// providerEventJournalAppendFits applies the journal's checkpoint budget to
+// one more frame: current is the journal's size including its header (0 for
+// none yet). It returns the size after the append and whether the frame fits;
+// a frame that does not fit becomes a full actor checkpoint instead.
+func providerEventJournalAppendFits(current int64, frameLen int, terminal bool) (int64, bool) {
+	additional := int64(frameLen)
+	if current == 0 {
+		additional += int64(len(providerEventJournalMagic))
+	}
+	limit := int64(providerEventJournalCheckpointBytes)
+	if terminal {
+		// Cancellation commands and the terminal receipt may pass the ordinary
+		// checkpoint threshold. Keep this urgent region bounded as well; a later
+		// ordinary mutation checkpoints the combined stream and control records.
+		limit += int64(providerEventJournalMaxRecordBytes) + int64(len(providerEventJournalMagic)) + 8
+	}
+	if current+additional > limit {
+		return current, false
+	}
+	return current + additional, true
+}
+
 func writeFull(writer io.Writer, data []byte) error {
 	for len(data) > 0 {
 		written, err := writer.Write(data)
@@ -432,57 +482,102 @@ func replayProviderEventJournal(actorPath string, state State) (State, error) {
 		return State{}, err
 	}
 	defer file.Close()
-
-	header := make([]byte, len(providerEventJournalMagic))
-	if _, err := io.ReadFull(file, header); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			// A header that never completed could not have acknowledged an event.
-			return state, nil
-		}
+	frames, err := newProviderEventJournalFrameReader(file)
+	if err != nil {
 		return State{}, err
 	}
-	if string(header) != providerEventJournalMagic {
-		return State{}, errors.New("provider event journal has an unsupported schema")
+	if frames == nil {
+		// A header that never completed could not have acknowledged an event.
+		return state, nil
 	}
+	return replayProviderEventRecords(state, frames.next)
+}
 
+// providerEventJournalFrameReader walks the len||json||crc32 frames of one
+// .events file. A torn final frame ends the journal: it was never
+// acknowledged. A checksum mismatch is corruption and fails closed.
+type providerEventJournalFrameReader struct {
+	reader io.Reader
+}
+
+// newProviderEventJournalFrameReader validates the journal header. It
+// returns nil, nil for a journal whose header never completed.
+func newProviderEventJournalFrameReader(reader io.Reader) (*providerEventJournalFrameReader, error) {
+	header := make([]byte, len(providerEventJournalMagic))
+	if _, err := io.ReadFull(reader, header); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if string(header) != providerEventJournalMagic {
+		return nil, errors.New("provider event journal has an unsupported schema")
+	}
+	return &providerEventJournalFrameReader{reader: reader}, nil
+}
+
+// next returns the next frame payload, or nil at the end of the journal.
+func (r *providerEventJournalFrameReader) next() ([]byte, error) {
+	var sizeBytes [4]byte
+	if _, err := io.ReadFull(r.reader, sizeBytes[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(sizeBytes[:])
+	if size == 0 || uint64(size) > providerEventJournalMaxRecordBytes {
+		return nil, errors.New("provider event journal record has invalid size")
+	}
+	payload := make([]byte, int(size))
+	if _, err := io.ReadFull(r.reader, payload); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var checksumBytes [4]byte
+	if _, err := io.ReadFull(r.reader, checksumBytes[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if got, want := binary.BigEndian.Uint32(checksumBytes[:]), crc32.ChecksumIEEE(payload); got != want {
+		return nil, errors.New("provider event journal checksum mismatch")
+	}
+	return payload, nil
+}
+
+func decodeProviderEventJournalRecord(payload []byte) (providerEventJournalRecord, error) {
+	var record providerEventJournalRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return providerEventJournalRecord{}, fmt.Errorf("decode provider event journal record: %w", err)
+	}
+	if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
+		return providerEventJournalRecord{}, errors.New("provider event journal record revision is invalid")
+	}
+	if err := record.validateCommand(); err != nil {
+		return providerEventJournalRecord{}, err
+	}
+	return record, nil
+}
+
+// replayProviderEventRecords folds journal record payloads, in commit order,
+// over the last checkpoint. It is the one replay used by every StateStore:
+// next returns nil when the journal is exhausted.
+func replayProviderEventRecords(state State, next func() ([]byte, error)) (State, error) {
 	applied := false
 	for {
-		var sizeBytes [4]byte
-		if _, err := io.ReadFull(file, sizeBytes[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				break
-			}
+		payload, err := next()
+		if err != nil {
 			return State{}, err
 		}
-		size := binary.BigEndian.Uint32(sizeBytes[:])
-		if size == 0 || uint64(size) > providerEventJournalMaxRecordBytes {
-			return State{}, errors.New("provider event journal record has invalid size")
+		if payload == nil {
+			break
 		}
-		payload := make([]byte, int(size))
-		if _, err := io.ReadFull(file, payload); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				break
-			}
-			return State{}, err
-		}
-		var checksumBytes [4]byte
-		if _, err := io.ReadFull(file, checksumBytes[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				break
-			}
-			return State{}, err
-		}
-		if got, want := binary.BigEndian.Uint32(checksumBytes[:]), crc32.ChecksumIEEE(payload); got != want {
-			return State{}, errors.New("provider event journal checksum mismatch")
-		}
-		var record providerEventJournalRecord
-		if err := json.Unmarshal(payload, &record); err != nil {
-			return State{}, fmt.Errorf("decode provider event journal record: %w", err)
-		}
-		if record.Revision == 0 || record.BaseRevision != record.Revision-1 {
-			return State{}, errors.New("provider event journal record revision is invalid")
-		}
-		if err := record.validateCommand(); err != nil {
+		record, err := decodeProviderEventJournalRecord(payload)
+		if err != nil {
 			return State{}, err
 		}
 		if record.Revision <= state.Revision {

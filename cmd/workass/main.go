@@ -106,6 +106,7 @@ func main() {
 	compactionEnabled := flag.Bool("compaction-enabled", true, "enable ACP auto-compaction at turn boundaries")
 	compactionThresholdPct := flag.Int("compaction-threshold-pct", 80, "ACP auto-compaction threshold as context usage percent")
 	compactionKeepLastTurns := flag.Int("compaction-keep-last-turns", 4, "conversation turns to keep verbatim after ACP auto-compaction")
+	sqliteStoresFlag := flag.String("sqlite-stores", "", "comma-separated stores kept in state/state.db instead of JSON files (known: chats); default none, also "+sqliteStoresEnv)
 	flag.Parse()
 	acpOverride := false
 	flagOverrides := map[string]bool{}
@@ -116,6 +117,11 @@ func main() {
 		}
 	})
 	applyProductionDefaults(runtime.GOOS, *prod, flagOverrides, port, bind)
+	sqliteStores, err := parseSQLiteStores(*sqliteStoresFlag, flagOverrides["sqlite-stores"], os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --sqlite-stores: %v\n", err)
+		os.Exit(2)
+	}
 
 	if *bind != "localhost" && *bind != "lan" {
 		fmt.Fprintln(os.Stderr, `invalid --bind: use "localhost" or "lan"`)
@@ -273,9 +279,19 @@ func main() {
 			logger.Printf("[acp] %s %s", message, data)
 		},
 	})
-	providerChats := newProviderChatRuntimeBeforeProviderStartup(acpManager, sessionState, stateDir, hub.Broadcast)
+	chatActors, err := openChatActorBackend(stateDir, sqliteStores[sqliteStoreChats], daemonVersion, logger.Printf)
+	if err != nil {
+		acpManager.Reset()
+		logger.Printf("[workass] open chat actor store: %v", err)
+		os.Exit(1)
+	}
+	if len(sqliteStores) > 0 {
+		logger.Printf("[workass] SQLite stores enabled: %s; chat actors in %s", sortedSQLiteStores(sqliteStores), chatActors.description())
+	}
+	providerChats := newProviderChatRuntimeBeforeProviderStartupWithBackend(acpManager, sessionState, stateDir, chatActors, hub.Broadcast)
 	if err := providerChats.StartupError(); err != nil {
 		acpManager.Reset()
+		_ = chatActors.close()
 		logger.Printf("[workass] initialize authoritative chat runtime: %v", err)
 		os.Exit(1)
 	}
@@ -385,6 +401,11 @@ func main() {
 			}
 			cancel()
 			acpManager.Reset()
+			// Last: the actors and the manager are quiet, so the final
+			// checkpoint leaves the database as one self-contained file.
+			if err := chatActors.close(); err != nil {
+				logger.Printf("[workass] close chat actor store: %v", err)
+			}
 		})
 	}
 	defer cleanup()

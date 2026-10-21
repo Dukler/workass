@@ -29,7 +29,10 @@ type providerChatRuntime struct {
 	manager  *acp.Manager
 	sessions *sessionStore
 	stateDir string
-	publish  func(string, any)
+	// backend is where durable actors are stored (provider-chats JSON by
+	// default, SQLite when the daemon enables it). Its owner closes it.
+	backend chatActorBackend
+	publish func(string, any)
 	// scheduled is the daemon-owned scheduled-message store; nil until the
 	// daemon (or a test) attaches one. Set before the runtime serves requests.
 	scheduled *scheduledmessage.Scheduler
@@ -81,10 +84,23 @@ func newProviderChatRuntimeBeforeProviderStartup(manager *acp.Manager, sessions 
 	return newProviderChatRuntimeWithStartupMode(manager, sessions, stateDir, true, publishers...)
 }
 
+// newProviderChatRuntimeBeforeProviderStartupWithBackend is the daemon's
+// constructor: the same staged startup, with actors in the backend main chose.
+func newProviderChatRuntimeBeforeProviderStartupWithBackend(manager *acp.Manager, sessions *sessionStore, stateDir string, backend chatActorBackend, publishers ...func(string, any)) *providerChatRuntime {
+	return newProviderChatRuntimeWithBackend(manager, sessions, stateDir, backend, true, publishers...)
+}
+
 func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessionStore, stateDir string, actorsPaused bool, publishers ...func(string, any)) *providerChatRuntime {
+	return newProviderChatRuntimeWithBackend(manager, sessions, stateDir, nil, actorsPaused, publishers...)
+}
+
+func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionStore, stateDir string, backend chatActorBackend, actorsPaused bool, publishers ...func(string, any)) *providerChatRuntime {
 	stateDir = strings.TrimSpace(stateDir)
+	if backend == nil {
+		backend = fileActorBackend{stateDir: stateDir}
+	}
 	runtime := &providerChatRuntime{
-		manager: manager, sessions: sessions, stateDir: stateDir,
+		manager: manager, sessions: sessions, stateDir: stateDir, backend: backend,
 		actors: make(map[string]*providerChatActor), known: make(map[string]struct{}), actorsPaused: actorsPaused,
 	}
 	if len(publishers) > 0 {
@@ -94,20 +110,19 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 		runtime.bootErr = errors.New("provider chat runtime requires manager, durable state, and state directory")
 		return runtime
 	}
-	actorDir := filepath.Join(stateDir, "provider-chats")
-	states, bootErr := chat.DiscoverFileStates(actorDir)
+	heads, bootErr := backend.discover()
 	runtime.bootErr = bootErr
 	if runtime.bootErr == nil {
-		for _, state := range states {
-			// FileStore may contain an empty envelope from a chat:create attempt
+		for _, head := range heads {
+			// The store may contain an empty envelope from a chat:create attempt
 			// that never committed InitializeChat. It has no
 			// accepted chat identity, so discovery must not turn it into a runtime
 			// chat. Any nonempty pre-initialization state still fails closed through
 			// actor construction.
-			if unacceptedEmptyActorState(state) {
+			if unacceptedEmptyActorHead(head.State, head.LedgerLength) {
 				continue
 			}
-			runtime.known[state.ChatID] = struct{}{}
+			runtime.known[head.State.ChatID] = struct{}{}
 		}
 	}
 	manager.SetProviderAttachmentResolver(sessions.ResolveProviderAttachment)
@@ -143,11 +158,17 @@ func newProviderChatRuntimeWithStartupMode(manager *acp.Manager, sessions *sessi
 }
 
 func unacceptedEmptyActorState(state chat.State) bool {
+	return unacceptedEmptyActorHead(state, len(state.Ledger))
+}
+
+// unacceptedEmptyActorHead decides acceptance from an actor head: discovery
+// may know the ledger's length without having decoded it.
+func unacceptedEmptyActorHead(state chat.State, ledgerLength int) bool {
 	if state.Initialized || state.Deleted ||
 		state.CreationOperationID != "" || strings.TrimSpace(state.CreationDigest) != "" || state.DeletionOperationID != "" ||
 		state.ContextFloor != 0 || state.ActiveLaneID != "" || state.DesiredLaneID != "" ||
 		state.Foreground != nil || state.PendingSteer != nil || state.PendingCancel != nil || state.Obligation != nil ||
-		len(state.Ledger) != 0 || len(state.Lanes) != 0 || len(state.StagedQueue) != 0 || len(state.Queue) != 0 ||
+		ledgerLength != 0 || len(state.Lanes) != 0 || len(state.StagedQueue) != 0 || len(state.Queue) != 0 ||
 		len(state.QueueMutationReceipts) != 0 || len(state.PresentationMutationReceipts) != 0 || len(state.RuntimeControlMutationReceipts) != 0 ||
 		len(state.WorkspaceMutationReceipts) != 0 || len(state.LaneSelectionMutationReceipts) != 0 || len(state.CancelMutationReceipts) != 0 ||
 		len(state.AgentWaitObservationReceipts) != 0 || len(state.Operations) != 0 || len(state.Outbox) != 0 || len(state.Tools) != 0 ||
@@ -184,6 +205,14 @@ func (r *providerChatRuntime) StartupError() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.bootErr
+}
+
+// actorStore is the durable store of one chat actor in this runtime's backend.
+func (r *providerChatRuntime) actorStore(chatID string) chat.StateStore {
+	if r.backend == nil {
+		return fileActorBackend{stateDir: r.stateDir}.store(chatID)
+	}
+	return r.backend.store(chatID)
 }
 
 func providerChatStatePath(stateDir, chatID string) string {
@@ -244,7 +273,7 @@ func (r *providerChatRuntime) actorForFork(chatID string, command chat.Initializ
 		}
 		return actor, nil
 	}
-	engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(r.stateDir, chatID)})
+	engine, err := chat.NewDurableEngine(chatID, r.actorStore(chatID))
 	if err != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("open fork chat actor: %w", err)
@@ -345,7 +374,7 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		}
 		return actor, nil
 	}
-	engine, err := chat.NewDurableEngine(chatID, chat.FileStore{Path: providerChatStatePath(r.stateDir, chatID)})
+	engine, err := chat.NewDurableEngine(chatID, r.actorStore(chatID))
 	if err != nil {
 		return nil, fmt.Errorf("open provider chat actor: %w", err)
 	}
