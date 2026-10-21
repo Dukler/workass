@@ -85,13 +85,13 @@ func (s *memoryStateStore) Save(state State) error {
 	return nil
 }
 
-func openReadyDurableLane(t *testing.T, engine *Engine, lane provider.LaneIdentity) {
+func openReadyDurableLane(t testing.TB, engine *Engine, lane provider.LaneIdentity) {
 	openReadyDurableLaneWithDelivery(t, engine, lane, provider.DeliveryCapabilities{
 		StableInputIdentity: true, ConsumptionReceipt: true,
 	})
 }
 
-func openReadyDurableLaneWithDelivery(t *testing.T, engine *Engine, lane provider.LaneIdentity, delivery provider.DeliveryCapabilities) {
+func openReadyDurableLaneWithDelivery(t testing.TB, engine *Engine, lane provider.LaneIdentity, delivery provider.DeliveryCapabilities) {
 	t.Helper()
 	if err := engine.Apply(SelectLane{Identity: lane}); err != nil {
 		t.Fatal(err)
