@@ -36,11 +36,16 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 	}
 	chats := make([]any, 0, len(ids))
 	for _, chatID := range ids {
-		actor, err := r.actor(chatID)
+		actor, summary, err := r.residentOrClosed(chatID)
 		if err != nil {
 			return nil, err
 		}
-		digest := actor.engine.DigestSnapshot()
+		var digest chat.DigestSnapshot
+		if summary != nil {
+			digest = summary.DigestSnapshot()
+		} else {
+			digest = actor.engine.DigestSnapshot()
+		}
 		if digest.Deleted {
 			continue
 		}
@@ -94,11 +99,10 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 	states := make([]chat.State, 0, len(known))
 	windows := make(map[string]actorLedgerWindow, len(known))
 	for _, chatID := range known {
-		actor, err := r.actor(chatID)
+		snapshot, err := r.sessionSnapshot(chatID, activeID, sessionProjectionMessageTail, opts)
 		if err != nil {
 			return nil, err
 		}
-		snapshot := actor.engine.ReadSessionProjectionSnapshot(activeID, sessionProjectionMessageTail)
 		state := snapshot.State
 		if !state.Deleted {
 			states = append(states, state)
@@ -125,11 +129,10 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 			if state.Presentation.TabID != activeID {
 				continue
 			}
-			actor, err := r.actor(state.ChatID)
+			snapshot, err := r.sessionSnapshot(state.ChatID, activeID, sessionProjectionMessageTail, opts)
 			if err != nil {
 				return nil, err
 			}
-			snapshot := actor.engine.ReadSessionProjectionSnapshot(activeID, sessionProjectionMessageTail)
 			states[i] = snapshot.State
 			windows[state.ChatID] = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount, lastActivityAt: snapshot.LastActivityAt}
 			break
@@ -284,11 +287,11 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 	if limit < 1 || limit > sessionProjectionMessageTail {
 		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
 	}
-	matched, found, err := r.actorByTab(tabID)
+	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	page, err := matched.engine.ReadLedgerPageBefore(beforeMessageID, limit)
+	page, err := r.ledgerPageBefore(chatID, beforeMessageID, limit, opts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -322,21 +325,41 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 }
 
 func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int, opts ...archiveReadOptions) ([]any, bool, error) {
-	matched, found, err := r.actorByTab(tabID)
+	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
 	var (
 		state  chat.State
 		window actorLedgerWindow
+		read   bool
 	)
-	if history == actorHistoryFull {
-		state = matched.engine.Snapshot()
-		window = actorLedgerWindow{count: len(state.Ledger)}
-	} else {
-		snapshot := matched.engine.ReadProjectionSnapshot(max(1, tailLimit))
-		state = snapshot.State
-		window = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+	if summary, closed := r.closedSummary(chatID); closed && history != actorHistoryFull {
+		// A bounded read of a closed actor comes from its rows. The complete
+		// archive opens the actor, whose load is chunked, rather than copying
+		// a whole transcript in one read transaction.
+		snapshot, err := r.closedProjectionSnapshot(summary, max(1, tailLimit), opts)
+		switch {
+		case err == nil:
+			state, read = snapshot.State, true
+			window = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+		case !errors.Is(err, errClosedActorChanged):
+			return nil, false, err
+		}
+	}
+	if !read {
+		matched, err := r.actor(chatID)
+		if err != nil {
+			return nil, false, err
+		}
+		if history == actorHistoryFull {
+			state = matched.engine.Snapshot()
+			window = actorLedgerWindow{count: len(state.Ledger)}
+		} else {
+			snapshot := matched.engine.ReadProjectionSnapshot(max(1, tailLimit))
+			state = snapshot.State
+			window = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+		}
 	}
 	if state.Deleted {
 		// A tombstone owns this historical tab. Never recreate its transcript.
@@ -412,14 +435,17 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 	if _, ok := validSessionImageRef(ref); !ok {
 		return nil, false, errors.New("invalid archive image reference")
 	}
-	actor, found, err := r.actorByTab(tabID)
+	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
 	// Tool media and, once deferred, a message's own images. The ownership
 	// check reads the actor in place: cloning it per image (Snapshot) made each
 	// read of a 225 MB chat cost ~15 ms before any image byte was read.
-	ownership := actor.engine.AttachmentRefOwnership(providerSessionImageRefPrefix + ref)
+	ownership, err := r.attachmentRefOwnership(chatID, providerSessionImageRefPrefix+ref)
+	if err != nil {
+		return nil, false, err
+	}
 	if ownership.Deleted {
 		return nil, false, errors.New("chat is deleted")
 	}
@@ -433,33 +459,86 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 	return []any{map[string]any{"data": data}}, true, nil
 }
 
+// actorByTab opens the one actor attached to tabID (chatByTab finds it
+// without opening any other).
 func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool, error) {
-	tabID = strings.TrimSpace(tabID)
-	if r == nil || tabID == "" {
-		return nil, false, nil
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
 	}
-	ids, err := r.knownChatIDs()
+	actor, err := r.actor(chatID)
 	if err != nil {
 		return nil, false, err
 	}
-	var matched *providerChatActor
-	for _, chatID := range ids {
-		actor, err := r.actor(chatID)
-		if err != nil {
-			return nil, false, err
+	return actor, true, nil
+}
+
+// ledgerPageBefore is Engine.ReadLedgerPageBefore of any known actor: a
+// closed one's page comes from its rows.
+// A closed actor's page carries only the rows the reply keeps under opts
+// (closedHistoryRows).
+func (r *providerChatRuntime) ledgerPageBefore(chatID, beforeMessageID string, limit int, opts []archiveReadOptions) (chat.LedgerPageSnapshot, error) {
+	if summary, closed := r.closedSummary(chatID); closed {
+		beforeMessageID = strings.TrimSpace(beforeMessageID)
+		if beforeMessageID == "" {
+			return chat.LedgerPageSnapshot{}, errors.New("ledger page requires a stable before-message identity")
 		}
-		if strings.TrimSpace(actor.engine.IdentitySnapshot().TabID) != tabID {
-			continue
+		rows, err := r.closedHistoryRows(summary, beforeMessageID, limit, opts)
+		if err == nil {
+			return chat.LedgerPageSnapshot{Events: rows, LedgerCount: summary.LedgerCount, Deleted: summary.Deleted}, nil
 		}
-		if matched != nil {
-			return nil, false, fmt.Errorf("multiple actor chats claim tab id %q", tabID)
+		if !errors.Is(err, errClosedActorChanged) {
+			return chat.LedgerPageSnapshot{}, err
 		}
-		matched = actor
 	}
-	if matched == nil {
-		return nil, false, nil
+	actor, err := r.actor(chatID)
+	if err != nil {
+		return chat.LedgerPageSnapshot{}, err
 	}
-	return matched, true, nil
+	return actor.engine.ReadLedgerPageBefore(beforeMessageID, limit)
+}
+
+// ledgerMessage is Engine.ReadMessage of any known actor.
+func (r *providerChatRuntime) ledgerMessage(chatID, messageID string) (chat.LedgerEvent, bool, error) {
+	if summary, closed := r.closedSummary(chatID); closed {
+		if summary.Deleted || strings.TrimSpace(messageID) == "" {
+			return chat.LedgerEvent{}, false, nil
+		}
+		event, found, revision, err := r.ledgers.ReadLedgerMessage(chatID, messageID)
+		if err == nil && revision == summary.Revision {
+			return event, found, nil
+		}
+		if _, stillClosed := r.closedSummary(chatID); stillClosed && err != nil {
+			return chat.LedgerEvent{}, false, err
+		}
+	}
+	actor, err := r.actor(chatID)
+	if err != nil {
+		return chat.LedgerEvent{}, false, err
+	}
+	event, found := actor.engine.ReadMessage(messageID)
+	return event, found, nil
+}
+
+// attachmentRefOwnership is Engine.AttachmentRefOwnership of any known actor.
+func (r *providerChatRuntime) attachmentRefOwnership(chatID, ref string) (chat.AttachmentOwnership, error) {
+	if summary, closed := r.closedSummary(chatID); closed {
+		if summary.Deleted {
+			return chat.AttachmentOwnership{Deleted: true}, nil
+		}
+		owned, revision, err := r.ledgers.LedgerOwnsAttachment(chatID, ref)
+		if err == nil && revision == summary.Revision {
+			return chat.AttachmentOwnership{Owned: owned}, nil
+		}
+		if _, stillClosed := r.closedSummary(chatID); stillClosed && err != nil {
+			return chat.AttachmentOwnership{}, err
+		}
+	}
+	actor, err := r.actor(chatID)
+	if err != nil {
+		return chat.AttachmentOwnership{}, err
+	}
+	return actor.engine.AttachmentRefOwnership(ref), nil
 }
 
 // ApplyRendererSnapshot translates the frozen session:save payload into typed

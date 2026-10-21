@@ -205,6 +205,11 @@ func (r *providerChatRuntime) findCloseJournal(sessionID string) (*providerChatA
 	var matchState chat.State
 	for _, chatID := range ids {
 		actor := actors[chatID]
+		if summary, closed := r.closedSummary(chatID); actor == nil && closed && !summary.NamesConnection(sessionID) {
+			// Neither a lane attachment nor a detach receipt of this closed
+			// actor names the session.
+			continue
+		}
 		if actor == nil {
 			var err error
 			actor, err = r.actor(chatID)

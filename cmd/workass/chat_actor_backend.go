@@ -50,6 +50,16 @@ func (fileActorBackend) description() string { return "provider-chats JSON" }
 type sqlActorBackend struct{ actors *chat.SQLActors }
 
 func (b sqlActorBackend) discover() ([]chat.ActorHead, error) { return b.actors.Discover() }
+
+// discoverEach visits the heads one at a time (chat.SQLActors.DiscoverEach),
+// so boot never holds every decoded head at once.
+func (b sqlActorBackend) discoverEach(visit func(chat.ActorHead) error) error {
+	return b.actors.DiscoverEach(visit)
+}
+
+// closedActorLedgers is where a closed actor's history is read: the rows
+// themselves, so a chat that is not in memory needs no actor to page.
+func (b sqlActorBackend) closedActorLedgers() *chat.SQLActors { return b.actors }
 func (b sqlActorBackend) store(chatID string) chat.StateStore {
 	return b.actors.Store(chatID)
 }
