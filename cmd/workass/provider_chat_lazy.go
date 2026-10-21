@@ -546,9 +546,40 @@ func (r *providerChatRuntime) retireActor(chatID string, actor *providerChatActo
 	delete(r.actors, chatID)
 	r.summaries[chatID] = summary
 	delete(r.liveScans, chatID)
+	delete(r.closedRefs, chatID)
 	r.mu.Unlock()
 	_ = actor.coordinator.Close(context.Background())
 	return true
+}
+
+// closedRefSet is the attachment references a closed actor's ledger owns, at
+// one revision.
+type closedRefSet struct {
+	revision uint64
+	refs     map[string]struct{}
+}
+
+// closedAttachmentRefs is the set every image read of a closed actor checks:
+// read from its rows once (chat.SQLActors.LedgerAttachmentRefs), then kept
+// until the actor opens, so scrolling a screenshot-heavy chat does not scan
+// it per image.
+func (r *providerChatRuntime) closedAttachmentRefs(summary chat.ActorSummary) (map[string]struct{}, error) {
+	r.mu.Lock()
+	cached := r.closedRefs[summary.ChatID]
+	r.mu.Unlock()
+	if cached != nil && cached.revision == summary.Revision {
+		return cached.refs, nil
+	}
+	refs, err := r.ledgers.LedgerAttachmentRefs(summary.ChatID, summary.Revision)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if current, stillClosed := r.summaries[summary.ChatID]; stillClosed && current.Revision == summary.Revision {
+		r.closedRefs[summary.ChatID] = &closedRefSet{revision: summary.Revision, refs: refs}
+	}
+	r.mu.Unlock()
+	return refs, nil
 }
 
 // closedChatIDs lists the known actors that are not open, sorted.

@@ -55,8 +55,10 @@ type providerChatRuntime struct {
 	// liveScans: what history reads have learned about closed actors' pending
 	// or running rows.
 	liveScans map[string]*closedLiveScan
-	bootErr   error
-	closed    bool
+	// closedRefs: attachment references of closed actors, read once each.
+	closedRefs map[string]*closedRefSet
+	bootErr    error
+	closed     bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is
@@ -120,7 +122,7 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 		manager: manager, sessions: sessions, stateDir: stateDir, backend: backend,
 		actors: make(map[string]*providerChatActor), known: make(map[string]struct{}), actorsPaused: actorsPaused,
 		summaries: make(map[string]chat.ActorSummary), opening: make(map[string]chan struct{}),
-		envRestored: make(map[string]struct{}), liveScans: make(map[string]*closedLiveScan),
+		envRestored: make(map[string]struct{}), liveScans: make(map[string]*closedLiveScan), closedRefs: make(map[string]*closedRefSet),
 	}
 	if len(publishers) > 0 {
 		runtime.publish = publishers[0]
@@ -423,6 +425,7 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		r.known[chatID] = struct{}{}
 		delete(r.summaries, chatID)
 		delete(r.liveScans, chatID)
+		delete(r.closedRefs, chatID)
 		paused := r.actorsPaused
 		r.mu.Unlock()
 		if !paused {

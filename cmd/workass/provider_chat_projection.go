@@ -432,31 +432,44 @@ func deferArchiveToolImages(messages []any) {
 }
 
 func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, bool, error) {
-	if _, ok := validSessionImageRef(ref); !ok {
-		return nil, false, errors.New("invalid archive image reference")
-	}
-	chatID, found, err := r.chatByTab(tabID)
+	found, err := r.authorizeSessionImageByTab(tabID, ref)
 	if err != nil || !found {
 		return nil, found, err
-	}
-	// Tool media and, once deferred, a message's own images. The ownership
-	// check reads the actor in place: cloning it per image (Snapshot) made each
-	// read of a 225 MB chat cost ~15 ms before any image byte was read.
-	ownership, err := r.attachmentRefOwnership(chatID, providerSessionImageRefPrefix+ref)
-	if err != nil {
-		return nil, false, err
-	}
-	if ownership.Deleted {
-		return nil, false, errors.New("chat is deleted")
-	}
-	if !ownership.Owned {
-		return nil, false, errors.New("archive image does not belong to this chat")
 	}
 	data, err := readExternalSessionImage(ref, filepath.Dir(r.sessions.path))
 	if err != nil {
 		return nil, false, err
 	}
 	return []any{map[string]any{"data": data}}, true, nil
+}
+
+// authorizeSessionImageByTab is the one ownership check every chat image read
+// passes, over the socket (archive-load imageRef) or HTTP (chat-image): the
+// tab's chat must exist, not be deleted, and own the reference. found is false
+// with no error when no chat has the tab. A closed chat answers from its rows
+// without being opened.
+func (r *providerChatRuntime) authorizeSessionImageByTab(tabID, ref string) (bool, error) {
+	if _, ok := validSessionImageRef(ref); !ok {
+		return false, errors.New("invalid archive image reference")
+	}
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return found, err
+	}
+	// Tool media and, once deferred, a message's own images. The ownership
+	// check reads the actor in place: cloning it per image (Snapshot) made each
+	// read of a 225 MB chat cost ~15 ms before any image byte was read.
+	ownership, err := r.attachmentRefOwnership(chatID, providerSessionImageRefPrefix+ref)
+	if err != nil {
+		return false, err
+	}
+	if ownership.Deleted {
+		return false, errors.New("chat is deleted")
+	}
+	if !ownership.Owned {
+		return false, errors.New("archive image does not belong to this chat")
+	}
+	return true, nil
 }
 
 // actorByTab opens the one actor attached to tabID (chatByTab finds it
@@ -473,10 +486,9 @@ func (r *providerChatRuntime) actorByTab(tabID string) (*providerChatActor, bool
 	return actor, true, nil
 }
 
-// ledgerPageBefore is Engine.ReadLedgerPageBefore of any known actor: a
-// closed one's page comes from its rows.
-// A closed actor's page carries only the rows the reply keeps under opts
-// (closedHistoryRows).
+// ledgerPageBefore is Engine.ReadLedgerPageBefore of any known actor. A
+// closed one's page comes from its rows and carries only the rows the reply
+// keeps under opts (closedHistoryRows).
 func (r *providerChatRuntime) ledgerPageBefore(chatID, beforeMessageID string, limit int, opts []archiveReadOptions) (chat.LedgerPageSnapshot, error) {
 	if summary, closed := r.closedSummary(chatID); closed {
 		beforeMessageID = strings.TrimSpace(beforeMessageID)
@@ -526,11 +538,12 @@ func (r *providerChatRuntime) attachmentRefOwnership(chatID, ref string) (chat.A
 		if summary.Deleted {
 			return chat.AttachmentOwnership{Deleted: true}, nil
 		}
-		owned, revision, err := r.ledgers.LedgerOwnsAttachment(chatID, ref)
-		if err == nil && revision == summary.Revision {
+		refs, err := r.closedAttachmentRefs(summary)
+		if err == nil {
+			_, owned := refs[ref]
 			return chat.AttachmentOwnership{Owned: owned}, nil
 		}
-		if _, stillClosed := r.closedSummary(chatID); stillClosed && err != nil {
+		if _, stillClosed := r.closedSummary(chatID); stillClosed {
 			return chat.AttachmentOwnership{}, err
 		}
 	}
