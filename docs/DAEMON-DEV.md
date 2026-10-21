@@ -57,8 +57,8 @@ Defaults:
 - `--spare-sessions 0`
 - `--spare-ttl 5m`
 - `--sqlite-stores` (or `WORKASS_SQLITE_STORES`): stores kept in `state/state.db`. When neither
-  is given, `chats` in the dev profile (`WORKASS_PROFILE=dev`) and none otherwise; an explicit
-  value, even an empty one, wins.
+  is given, `chats` in the dev profile (`WORKASS_PROFILE=dev`) and in prod on macOS, and none
+  in Windows prod or the test profile; an explicit value, even an empty one, wins.
 
 Rollback: once a state dir is on SQLite, a build with the SQLite store refuses to start without it, and a build from before it ignores `state.db` and starts from the stale pre-switch JSON; moving `state.db` aside rolls back to that JSON and loses every later write.
 
