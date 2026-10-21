@@ -372,9 +372,21 @@ func (db *DB) runOnce(ctx context.Context, fn func(*Tx) error) error {
 	if err != nil {
 		return err
 	}
+	// A panic inside fn must not leave the only connection inside an open
+	// transaction: every later caller would wait on it forever.
+	committed := false
+	defer func() {
+		if !committed {
+			if recovered := recover(); recovered != nil {
+				_ = tx.Rollback()
+				panic(recovered)
+			}
+		}
+	}()
 	if err := fn(&Tx{tx: tx}); err != nil {
 		return errors.Join(err, ignoreDone(tx.Rollback()))
 	}
+	committed = true
 	if err := tx.Commit(); err != nil {
 		return errors.Join(err, ignoreDone(tx.Rollback()))
 	}
