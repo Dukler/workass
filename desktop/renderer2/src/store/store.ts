@@ -91,6 +91,9 @@ const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
 type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
 
+/** What one older-history read did (Store.loadOlderHistoryPage). */
+export type OlderHistoryOutcome = 'loaded' | 'empty' | 'failed';
+
 type PendingTurnStart = {
   chatId: string;
   userId: string;
@@ -492,7 +495,7 @@ export class Store {
   // read-only archive channel for a tiny recent slice before handoff, so a
   // screenshot-heavy ledger is not expanded merely to paint the viewport.
   private recentHistoryLoads = new Map<string, Promise<void>>();
-  private olderHistoryLoads = new Map<string, Promise<boolean>>();
+  private olderHistoryLoads = new Map<string, Promise<OlderHistoryOutcome>>();
   // Keep a selected resident tail on screen while a metadata-only refresh with
   // a newer actor revision is reconciled. This is renderer residency state,
   // never transcript authority.
@@ -1360,21 +1363,30 @@ export class Store {
   // turn state, or delivery ownership. Old daemons ignore the additive options
   // and return the full archive, which this merge also accepts safely.
   async loadOlderHistory(chatId: string, requestedLimit: number): Promise<boolean> {
-    if (!has('archiveLoad') || !chatId) return false;
+    return (await this.loadOlderHistoryPage(chatId, requestedLimit)) === 'loaded';
+  }
+
+  // One older page, and what became of it: 'loaded' (rows arrived), 'empty'
+  // (there is nothing older to read) or 'failed' (the read timed out, failed,
+  // or raced another change; reading again may succeed). A caller that stops
+  // reading on 'failed' stops for good: that is how a slow history lane turned
+  // the automatic load into the "Ver anteriores" button.
+  async loadOlderHistoryPage(chatId: string, requestedLimit: number): Promise<OlderHistoryOutcome> {
+    if (!has('archiveLoad') || !chatId) return 'empty';
     const recent = this.recentHistoryLoads.get(chatId);
     if (recent) await recent;
     const full = this.fullHistoryLoads.get(chatId);
     if (full) await full;
     const resident = this.chat(chatId);
-    if (!resident || resident.historyComplete) return false;
+    if (!resident || resident.historyComplete) return 'empty';
     const beforeMessageId = resident.messages[0]?.id;
-    if (!beforeMessageId) return false;
+    if (!beforeMessageId) return 'empty';
     const limit = Math.max(1, Math.min(CHAT_MESSAGE_TAIL, Math.floor(requestedLimit)));
     const inflight = this.olderHistoryLoads.get(chatId);
     if (inflight) return inflight;
     const durableChatId = resident.chatId;
     const residentBefore = resident.messages.length;
-    const load = (async (): Promise<boolean> => {
+    const load = (async (): Promise<OlderHistoryOutcome> => {
       let projected: unknown;
       try {
         const step = await this.guardedStep(
@@ -1382,16 +1394,17 @@ export class Store {
           () => call('archiveLoad', chatId, { beforeMessageId, limit, ...HISTORY_READ_OPTIONS }),
         );
         projected = step.ok ? step.value : undefined;
-        if (!step.ok) return false;
-      } catch { return false; }
+        if (!step.ok) return 'failed';
+      } catch { return 'failed'; }
       const chat = this.chat(chatId);
-      if (!chat || chat.chatId !== durableChatId || chat.messages[0]?.id !== beforeMessageId || !Array.isArray(projected)) return false;
+      if (!chat || chat.chatId !== durableChatId) return 'empty';
+      if (chat.messages[0]?.id !== beforeMessageId || !Array.isArray(projected)) return 'failed';
       let page: Msg[];
       try {
         page = actorMessages(projected as MirrorMsg[], chatId);
       } catch (error) {
         console.warn(`[store] older actor history rejected (${chatId})`, error);
-        return false;
+        return 'failed';
       }
 
       // A mixed-version daemon may return the complete archive. If the stable
@@ -1400,7 +1413,7 @@ export class Store {
       const boundaryIndex = page.findIndex((message) => message.id === beforeMessageId);
       if (boundaryIndex < 0 && page.length > limit) {
         console.warn(`[store] older actor history exceeded its requested page (${chatId})`);
-        return false;
+        return 'failed';
       }
       const prefix = boundaryIndex >= 0 ? page.slice(0, boundaryIndex) : page;
       const residentIDs = new Set(chat.messages.map((message) => message.id));
@@ -1408,7 +1421,7 @@ export class Store {
       for (const message of prefix) {
         if (residentIDs.has(message.id) || prefixIDs.has(message.id)) {
           console.warn(`[store] older actor history overlaps resident rows (${chatId})`);
-          return false;
+          return 'failed';
         }
         prefixIDs.add(message.id);
       }
@@ -1423,7 +1436,7 @@ export class Store {
       this.staleRecentHistories.delete(chatId);
       this.rebuildJobRefs(new Set([chat.id]));
       this.bumpApp(false);
-      return chat.messages.length > residentBefore;
+      return chat.messages.length > residentBefore ? 'loaded' : 'empty';
     })();
     this.olderHistoryLoads.set(chatId, load);
     try { return await load; } finally { this.olderHistoryLoads.delete(chatId); }

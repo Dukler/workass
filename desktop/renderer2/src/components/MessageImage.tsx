@@ -10,7 +10,6 @@ import { observeTranscriptImageOnce } from '../transcript-images';
 // going back to a chat never fetches them again. Tool images share it, and a
 // windowed transcript remounts rows as the reader scrolls, so it holds more.
 const loaded = new Map<string, string>();
-const pending = new Map<string, Promise<string | null>>();
 const CACHE_LIMIT = 48;
 
 function remember(ref: string, src: string) {
@@ -24,24 +23,109 @@ export function cachedImageSrc(image: MessageImage): string {
   return loaded.get(image.deferredImageRef) ?? '';
 }
 
+// Image reads share the daemon's history lane with history pages, one at a
+// time and in arrival order. A reader scrolling a screenshot-heavy chat
+// mounted thousands of tool images on the way and queued a read for each, so
+// the next history page waited behind all of them (a 225 MB chat: ~6,000
+// queued reads, auto-loading stalled and fell back to "Ver anteriores"). So a
+// few reads are on the wire at once, the newest request goes first (what is
+// on screen now), and a read whose image has left the transcript before its
+// turn is dropped; it is asked for again if the image comes back.
+export const IMAGE_READS_AT_ONCE = 3;
+
+type ImageRead = {
+  ref: string;
+  tabId: string;
+  mimeType: string;
+  /** Mounted images still waiting for these bytes. */
+  holders: number;
+  /** An explicit request (opening the image) that must run regardless. */
+  pinned: boolean;
+  started: boolean;
+  promise: Promise<string | null>;
+  settle: (src: string | null) => void;
+};
+
+const reads = new Map<string, ImageRead>();
+const waiting: ImageRead[] = []; // newest last
+let reading = 0;
+
+function startImageReads() {
+  while (reading < IMAGE_READS_AT_ONCE) {
+    const next = waiting.pop();
+    if (!next) return;
+    if (!next.pinned && next.holders <= 0) {
+      reads.delete(next.ref);
+      next.settle(null);
+      continue;
+    }
+    next.started = true;
+    reading++;
+    call('archiveLoad', next.tabId, { imageRef: next.ref }).then((reply) => {
+      const data = Array.isArray(reply) && reply[0] && typeof reply[0] === 'object'
+        ? (reply[0] as { data?: unknown }).data : null;
+      if (typeof data !== 'string' || !data) return null;
+      const src = data.startsWith('data:') ? data : `data:${next.mimeType};base64,${data}`;
+      remember(next.ref, src);
+      return src;
+    }).catch(() => null).then((src) => {
+      reading--;
+      reads.delete(next.ref);
+      next.settle(src);
+      startImageReads();
+    });
+  }
+}
+
+function queueImageRead(tabId: string, image: MessageImage, pinned: boolean): ImageRead {
+  const ref = image.deferredImageRef!;
+  let read = reads.get(ref);
+  if (!read) {
+    let settle: (src: string | null) => void = () => {};
+    const promise = new Promise<string | null>((resolve) => { settle = resolve; });
+    read = { ref, tabId, mimeType: image.mimeType, holders: 0, pinned: false, started: false, promise, settle };
+    reads.set(ref, read);
+    waiting.push(read);
+  } else if (!read.started) {
+    // Wanted again: it moves to the front of the line.
+    const at = waiting.indexOf(read);
+    if (at >= 0) waiting.splice(at, 1);
+    waiting.push(read);
+  }
+  if (pinned) read.pinned = true;
+  return read;
+}
+
+/** Reads an image's bytes now (opening it); shares any read already queued. */
 export function loadImageSrc(tabId: string, image: MessageImage): Promise<string | null> {
   const ref = image.deferredImageRef;
   if (!ref) return Promise.resolve(messageImageSrc(image));
   const hit = loaded.get(ref);
   if (hit) { remember(ref, hit); return Promise.resolve(hit); }
-  let request = pending.get(ref);
-  if (!request) {
-    request = call('archiveLoad', tabId, { imageRef: ref }).then((reply) => {
-      const data = Array.isArray(reply) && reply[0] && typeof reply[0] === 'object'
-        ? (reply[0] as { data?: unknown }).data : null;
-      if (typeof data !== 'string' || !data) return null;
-      const src = data.startsWith('data:') ? data : `data:${image.mimeType};base64,${data}`;
-      remember(ref, src);
-      return src;
-    }).catch(() => null).finally(() => { pending.delete(ref); });
-    pending.set(ref, request);
-  }
-  return request;
+  const read = queueImageRead(tabId, image, true);
+  startImageReads();
+  return read.promise;
+}
+
+/**
+ * Reads an image's bytes for a mounted image. release() says it no longer
+ * needs them; a read nobody needs any more is dropped before it starts.
+ */
+export function requestImageSrc(tabId: string, image: MessageImage): { promise: Promise<string | null>; release: () => void } {
+  const ref = image.deferredImageRef;
+  if (!ref) return { promise: Promise.resolve(messageImageSrc(image)), release: () => {} };
+  const hit = loaded.get(ref);
+  if (hit) { remember(ref, hit); return { promise: Promise.resolve(hit), release: () => {} }; }
+  const read = queueImageRead(tabId, image, false);
+  read.holders++;
+  let released = false;
+  startImageReads();
+  return { promise: read.promise, release: () => { if (!released) { released = true; read.holders--; } } };
+}
+
+/** Image reads queued or on the wire (for tests and diagnostics). */
+export function imageReadsPending(): { waiting: number; reading: number } {
+  return { waiting: waiting.length, reading };
 }
 
 // The image's src: immediate for inline bytes or a cached reference, loaded
@@ -56,13 +140,16 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
     setFailed(false);
     if (now || !image.deferredImageRef || !target.current) return;
     let current = true;
+    let release = () => {};
     const stop = observeTranscriptImageOnce(target.current, () => {
-      void loadImageSrc(tabId, image).then((next) => {
+      const request = requestImageSrc(tabId, image);
+      release = request.release;
+      void request.promise.then((next) => {
         if (!current) return;
         if (next) setSrc(next); else setFailed(true);
       });
     });
-    return () => { current = false; stop(); };
+    return () => { current = false; stop(); release(); };
   }, [tabId, image]);
   return { target, src, failed };
 }
