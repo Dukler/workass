@@ -62,14 +62,44 @@ const sqliteStoreChats = "chats"
 
 const sqliteStoresEnv = "WORKASS_SQLITE_STORES"
 
-// parseSQLiteStores reads the per-store SQLite flag. The default is empty:
-// every store stays on its JSON files unless explicitly enabled. The flag
-// wins over the environment variable.
-func parseSQLiteStores(flagValue string, flagSet bool, env func(string) string) (map[string]bool, error) {
-	raw := flagValue
-	if !flagSet {
-		raw = env(sqliteStoresEnv)
+// sqliteStoresProfileDefault is what a profile runs with when neither the flag
+// nor the environment names the SQLite stores: the dev profile keeps chats in
+// SQLite, and every other profile (prod, test) keeps every store on JSON.
+//
+// profile is workassRuntimeProfile(): WORKASS_PROFILE, set by
+// config/environments/*.env, where anything but "dev" or "test" is "prod".
+// --prod and WORKASS_PROD do not select it; they only change the Windows
+// port and bind defaults.
+func sqliteStoresProfileDefault(profile string) string {
+	if profile == "dev" {
+		return sqliteStoreChats
 	}
+	return ""
+}
+
+// parseSQLiteStores resolves which stores live in state/state.db. The first
+// source that is present wins, and an explicitly empty value is present (it
+// turns SQLite off, even in the dev profile):
+//
+//  1. --sqlite-stores
+//  2. WORKASS_SQLITE_STORES
+//  3. the profile default (sqliteStoresProfileDefault)
+//
+// source names the winner, for the startup log.
+func parseSQLiteStores(flagValue string, flagSet bool, lookupEnv func(string) (string, bool), profile string) (stores map[string]bool, source string, err error) {
+	raw, source := flagValue, "--sqlite-stores"
+	if !flagSet {
+		if value, ok := lookupEnv(sqliteStoresEnv); ok {
+			raw, source = value, sqliteStoresEnv
+		} else {
+			raw, source = sqliteStoresProfileDefault(profile), profile+" profile default"
+		}
+	}
+	stores, err = parseSQLiteStoreList(raw)
+	return stores, source, err
+}
+
+func parseSQLiteStoreList(raw string) (map[string]bool, error) {
 	stores := map[string]bool{}
 	for _, part := range strings.Split(raw, ",") {
 		name := strings.ToLower(strings.TrimSpace(part))

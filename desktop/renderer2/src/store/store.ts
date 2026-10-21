@@ -2314,11 +2314,12 @@ export class Store {
     }
   }
 
+  // A catalog digest only re-reads the daemon's provider snapshot. It never
+  // asks for providers:detect: that probes every CLI and local server (2-4.5 s)
+  // and holds up every other request on this connection, while the daemon
+  // already detects on its own and pushes chat:catalog when the catalog
+  // changes. Explicit refreshes (Settings, re-enabling an agent) still detect.
   private async refreshCatalogSnapshot() {
-    if (has('providersDetect')) {
-      const detected = await call('providersDetect', {});
-      if (Array.isArray(detected?.providers)) this.onProvidersList(detected.providers);
-    }
     if (has('providersList')) {
       const providers = await call('providersList');
       if (Array.isArray(providers)) this.onProvidersList(providers);
