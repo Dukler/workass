@@ -46,8 +46,10 @@ func exifOrientationJPEG(t *testing.T, width, height int, orientation uint16) []
 	return append(out, data[2:]...)
 }
 
-// The wire size is the stored raster size; a browser shows an EXIF-rotated
+// The wire size was the stored raster size; a browser shows an EXIF-rotated
 // JPEG with its sides swapped (image-orientation: from-image is the default).
+// Fixed, inverted: the size is now the shown one. Normal-suite test:
+// TestJPEGEXIFOrientationSwapsTheShownSides.
 func TestReviewEXIFOrientationSizeIsUnrotated(t *testing.T) {
 	data := exifOrientationJPEG(t, 400, 200, 6)
 	w, h, err := Dimensions(data, "image/jpeg")
@@ -60,7 +62,7 @@ func TestReviewEXIFOrientationSizeIsUnrotated(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if w != 400 || h != 200 {
-		t.Fatalf("unexpected size %dx%d", w, h)
+	if w != 200 || h != 400 {
+		t.Fatalf("EXIF orientation 6 is still reported unrotated: %dx%d", w, h)
 	}
 }
