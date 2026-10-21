@@ -36,8 +36,12 @@ function localAccess(): ChatImageAccess | null {
   return key ? { origin: '', key } : null;
 }
 
-/** The image's URL, or '' when it must be read over the socket. */
-export function chatImageURL(tabId: string, image: MessageImage): string {
+/**
+ * The image's URL, or '' when it must be read over the socket. A width asks
+ * for a display rendition at most that wide (the daemon rounds it to one of
+ * CHAT_IMAGE_WIDTHS and serves the image itself when it is narrower).
+ */
+export function chatImageURL(tabId: string, image: MessageImage, width = 0): string {
   const match = REF.exec(image.deferredImageRef ?? '');
   if (!match || !RASTER.has(String(image.mimeType || '').toLowerCase())) return '';
   const machineId = machineOf(tabId);
@@ -45,5 +49,44 @@ export function chatImageURL(tabId: string, image: MessageImage): string {
   if (!access) return '';
   const tab = localId(tabId);
   if (!tab) return '';
-  return `${access.origin}${CHAT_IMAGE_PATH}${encodeURIComponent(tab)}/${match[1]}?k=${encodeURIComponent(access.key)}`;
+  const url = `${access.origin}${CHAT_IMAGE_PATH}${encodeURIComponent(tab)}/${match[1]}?k=${encodeURIComponent(access.key)}`;
+  return width > 0 ? `${url}&w=${Math.round(width)}` : url;
+}
+
+// Display renditions. A gallery draws ~2,000 px screenshots in 156 px cells;
+// decoding the full image for that cost the browser 7x the decode time and
+// 14x the memory of a rendition sized to the cell (300 images of the 225 MB
+// chat: 1.18 s vs 0.16 s, 1.3 GB vs 92 MB decoded). The widths match the
+// daemon's (chat_image_thumbs.go).
+export const CHAT_IMAGE_WIDTHS = [160, 240, 320, 480, 640, 960, 1280, 1920] as const;
+const RENDITION = /&w=\d+$/;
+
+/**
+ * The rendition width for an image drawn `displayWidth` CSS px wide at this
+ * pixel ratio, never narrower than what the screen shows; 0 means the full
+ * image (no size known, or a rendition would not be clearly smaller).
+ */
+export function chatImageRenditionWidth(displayWidth: number, pixelRatio: number, naturalWidth: number | undefined): number {
+  if (!(displayWidth > 0) || !(typeof naturalWidth === 'number' && naturalWidth > 0)) return 0;
+  const needed = Math.ceil(displayWidth * Math.max(1, Number.isFinite(pixelRatio) ? pixelRatio : 1));
+  const width = CHAT_IMAGE_WIDTHS.find((candidate) => candidate >= needed) ?? 0;
+  return width && width * 1.5 <= naturalWidth ? width : 0;
+}
+
+/** The full image's URL for a rendition URL; any other source is returned unchanged. */
+export function fullChatImageURL(src: string): string {
+  return src.includes(CHAT_IMAGE_PATH) ? src.replace(RENDITION, '') : src;
+}
+
+/** The rendition width a chat-image URL asks for; 0 for the full image. */
+export function chatImageURLWidth(src: string): number {
+  if (!src.includes(CHAT_IMAGE_PATH)) return 0;
+  const match = /&w=(\d+)$/.exec(src);
+  return match ? Number(match[1]) : 0;
+}
+
+/** Two sources that are renditions of one chat image (or the same source). */
+export function sameChatImage(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  return a === b || (a.includes(CHAT_IMAGE_PATH) && fullChatImageURL(a) === fullChatImageURL(b));
 }

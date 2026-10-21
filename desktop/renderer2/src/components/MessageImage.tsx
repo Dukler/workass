@@ -3,7 +3,7 @@ import type { MessageImage } from '../store/types';
 import { messageImageSrc } from '../image-drafts';
 import { call } from '../wire/api';
 import { transcriptImageGate } from '../transcript-images';
-import { chatImageURL } from '../chat-image-url';
+import { chatImageRenditionWidth, chatImageURL, chatImageURLWidth, fullChatImageURL, sameChatImage } from '../chat-image-url';
 
 // A message image the daemon sent by reference (archive reads with
 // deferImages, 2026-10-13): the chat's text paints first, and each image's
@@ -20,23 +20,39 @@ function remember(ref: string, src: string) {
 }
 
 // Images served by URL (chat-image-url.ts) are cached by the browser, keyed by
-// URL. This set only remembers which URLs have already loaded, so a remounted
-// row paints its image at once instead of fading it in again. A URL that
-// failed (an expired key, an image the endpoint will not serve) is read over
-// the socket instead, once per session.
-const loadedURLs = new Set<string>();
-const brokenURLs = new Set<string>();
+// URL. This map only remembers which source of each image (the full image or
+// a display rendition) has already loaded, so a remounted row paints it at
+// once instead of fading it in again. An image whose URL failed (an expired
+// key, an image the endpoint will not serve) is read over the socket instead,
+// once per session.
+const loadedURLs = new Map<string, string>(); // full URL -> loaded source
+const brokenURLs = new Set<string>(); // full URLs
 const URL_MEMORY = 4096;
 
-function rememberURL(url: string) {
-  loadedURLs.delete(url);
-  loadedURLs.add(url);
-  while (loadedURLs.size > URL_MEMORY) loadedURLs.delete(loadedURLs.values().next().value as string);
+function rememberURL(src: string) {
+  const full = fullChatImageURL(src);
+  loadedURLs.delete(full);
+  loadedURLs.set(full, src);
+  while (loadedURLs.size > URL_MEMORY) loadedURLs.delete(loadedURLs.keys().next().value as string);
 }
 
-function imageURL(tabId: string, image: MessageImage): string {
-  const url = chatImageURL(tabId, image);
-  return url && !brokenURLs.has(url) ? url : '';
+function imageURL(tabId: string, image: MessageImage, width = 0): string {
+  const full = chatImageURL(tabId, image);
+  if (!full || brokenURLs.has(full)) return '';
+  return width > 0 ? chatImageURL(tabId, image, width) : full;
+}
+
+// The rendition a frame needs: its drawn width (object-fit: contain inside
+// the media box) at this screen's pixel ratio. 0 is the full image; -1 means
+// the frame cannot be measured (not laid out, or no size on the wire).
+function renditionWidth(frame: Element | null, image: MessageImage): number {
+  if (!frame || typeof image.width !== 'number' || typeof image.height !== 'number' || !(image.height > 0)) return -1;
+  const media = frame.querySelector?.('.ri-media') ?? frame;
+  const rect = media.getBoundingClientRect?.();
+  if (!rect || !(rect.width > 0) || !(rect.height > 0)) return -1;
+  const drawn = Math.min(rect.width, rect.height * image.width / image.height);
+  const ratio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  return chatImageRenditionWidth(drawn, ratio, image.width);
 }
 
 export function cachedImageSrc(image: MessageImage, tabId?: string): string {
@@ -44,7 +60,7 @@ export function cachedImageSrc(image: MessageImage, tabId?: string): string {
   const bytes = loaded.get(image.deferredImageRef);
   if (bytes) return bytes;
   const url = tabId === undefined ? '' : imageURL(tabId, image);
-  return url && loadedURLs.has(url) ? url : '';
+  return (url && loadedURLs.get(url)) || '';
 }
 
 // Image reads share the daemon's history lane with history pages, one at a
@@ -176,10 +192,11 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
     let current = true;
     let request: ReturnType<typeof requestImageSrc> | null = null;
     const url = imageURL(tabId, image);
-    const gate = transcriptImageGate().watch(target.current, {
+    const frame = target.current;
+    const gate = transcriptImageGate().watch(frame, {
       start: () => {
         if (!current) return;
-        if (url) { setSrc(url); return; }
+        if (url) { setSrc(imageURL(tabId, image, renditionWidth(frame, image)) || url); return; }
         const mine = requestImageSrc(tabId, image);
         request = mine;
         void mine.promise.then((next) => {
@@ -192,7 +209,7 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
       cancel: () => {
         if (!current) return;
         // An <img> that loses its src aborts its fetch; the frame keeps its size.
-        if (url) setSrc((value) => (value === url ? '' : value));
+        if (url) setSrc((value) => (sameChatImage(value, url) ? '' : value));
         request?.release();
         request = null;
       },
@@ -207,13 +224,23 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
   // A URL the <img> could not load (an expired key, an image the endpoint will
   // not serve) is read over the socket instead: true means that is under way.
   const onBroken = (brokenSrc: string) => {
-    if (!brokenSrc || brokenSrc.startsWith('data:') || brokenURLs.has(brokenSrc)) return false;
-    brokenURLs.add(brokenSrc);
-    loadedURLs.delete(brokenSrc);
+    const full = fullChatImageURL(brokenSrc);
+    if (!brokenSrc || brokenSrc.startsWith('data:') || brokenURLs.has(full)) return false;
+    brokenURLs.add(full);
+    loadedURLs.delete(full);
     setAttempt((value) => value + 1);
     return true;
   };
-  return { target, src, failed, onLoaded, onBroken };
+  // Switch a loaded rendition to a larger one, or to the full image. The
+  // frame stays loaded (and keeps drawing the old pixels) until it arrives.
+  const upgrade = (width: number) => {
+    setSrc((value) => {
+      const current = chatImageURLWidth(value);
+      if (!current || (width > 0 && width <= current)) return value;
+      return width > 0 ? `${fullChatImageURL(value)}&w=${width}` : fullChatImageURL(value);
+    });
+  };
+  return { target, src, failed, onLoaded, onBroken, upgrade };
 }
 
 // ── Reserved image frame (approved mock image-placeholder, variant C) ──────
@@ -264,23 +291,43 @@ function rememberNaturalSize(image: MessageImage, size: readonly [number, number
 // failed: the read by reference failed, or the browser could not decode the
 // bytes; loaded: the <img> for the current source has loaded (or the source
 // was in hand on the first render); pending otherwise.
+// A rendition switching to a larger one (or the full image) stays loaded: the
+// <img> keeps drawing the old pixels until the new ones arrive.
 export function reservedImageState(readFailed: boolean, src: string, readySrc: string, brokenSrc: string): ImageFrameState {
   if (readFailed || (!!src && brokenSrc === src)) return 'failed';
-  return src && readySrc === src ? 'loaded' : 'pending';
+  return src && (readySrc === src || sameChatImage(readySrc, src)) ? 'loaded' : 'pending';
+}
+
+// Loaded renditions follow their frame (a wider window, a closed rail): one
+// shared ResizeObserver for every frame showing one.
+const frameWatchers = new Map<Element, () => void>();
+let frameObserver: ResizeObserver | null = null;
+
+function watchFrameSize(element: Element, onResize: () => void): () => void {
+  if (typeof ResizeObserver === 'undefined') return () => {};
+  frameObserver ??= new ResizeObserver((entries) => { for (const entry of entries) frameWatchers.get(entry.target)?.(); });
+  frameWatchers.set(element, onResize);
+  frameObserver.observe(element);
+  return () => {
+    if (frameWatchers.get(element) !== onResize) return;
+    frameWatchers.delete(element);
+    frameObserver?.unobserve(element);
+  };
 }
 
 // One image's frame state. Bytes already in hand on the first render (inline
 // data, a cached reference) paint as loaded, exactly as before; bytes that
 // arrive later fade in over the reserved frame.
 export function useReservedImage(tabId: string, image: MessageImage, surface: ImageSurface) {
-  const { target, src, failed, onLoaded, onBroken } = useMessageImageSrc(tabId, image);
+  const { target, src, failed, onLoaded, onBroken, upgrade } = useMessageImageSrc(tabId, image);
   const [readySrc, setReadySrc] = useState(() => cachedImageSrc(image, tabId));
   const [brokenSrc, setBrokenSrc] = useState('');
   const [measured, setMeasured] = useState<{ src: string; size: readonly [number, number] } | null>(null);
   const media = useRef<HTMLImageElement | null>(null);
   const natural = (measured && measured.src === src ? measured.size : null) ?? knownNaturalSize(image);
   const settle = (element: HTMLImageElement, loadedSrc: string) => {
-    const size = pixelSize(element.naturalWidth, element.naturalHeight);
+    // A rendition's pixel size is not the image's: the frame keeps the wire size.
+    const size = chatImageURLWidth(loadedSrc) ? null : pixelSize(element.naturalWidth, element.naturalHeight);
     if (size) {
       rememberNaturalSize(image, size);
       setMeasured((current) => current && current.src === loadedSrc && current.size[0] === size[0] && current.size[1] === size[1]
@@ -295,6 +342,29 @@ export function useReservedImage(tabId: string, image: MessageImage, surface: Im
     if (src && readySrc !== src && element?.complete && element.naturalWidth > 0) settle(element, src);
   });
   const state = reservedImageState(failed, src, readySrc, brokenSrc);
+  const rendition = chatImageURLWidth(src);
+  const fullSrc = fullChatImageURL(src);
+  useEffect(() => {
+    const frame = target.current;
+    if (!rendition || state !== 'loaded' || !frame) return;
+    // Copying or opening an image takes the full one: focusing it (the copy
+    // shortcut) or opening its context menu switches the frame to it first.
+    const toFull = () => upgrade(0);
+    const onPointerDown = (event: Event) => { if ((event as PointerEvent).button === 2) toFull(); };
+    frame.addEventListener('focusin', toFull);
+    frame.addEventListener('contextmenu', toFull);
+    frame.addEventListener('pointerdown', onPointerDown);
+    const stopWatching = watchFrameSize(frame, () => {
+      const wanted = renditionWidth(frame, image);
+      if (wanted === 0 || wanted > rendition) upgrade(wanted);
+    });
+    return () => {
+      frame.removeEventListener('focusin', toFull);
+      frame.removeEventListener('contextmenu', toFull);
+      frame.removeEventListener('pointerdown', onPointerDown);
+      stopWatching();
+    };
+  }, [rendition, state, image]);
   const img = (props: ImgHTMLAttributes<HTMLImageElement>) => src && state !== 'failed'
     ? (
       <img
@@ -303,12 +373,14 @@ export function useReservedImage(tabId: string, image: MessageImage, surface: Im
         src={src}
         decoding="async"
         {...(src.startsWith('data:') ? {} : { loading: 'lazy' as const })}
+        {...(rendition ? { 'data-full-src': fullSrc } : {})}
         onLoad={(event) => settle(event.currentTarget, src)}
         onError={() => { if (!onBroken(src)) setBrokenSrc(src); }}
       />
     )
     : null;
-  return { target, src, state, style: imageFrameStyle(image, surface, natural), img };
+  // fullSrc is what opening the image shows: never a rendition.
+  return { target, src, fullSrc, state, style: imageFrameStyle(image, surface, natural), img };
 }
 
 const IMAGE_GLYPH = (
@@ -345,7 +417,7 @@ export function MessageImageButton({ tabId, image, alt, className, onOpen, surfa
   surface?: 'inline' | 'gallery';
   children?: ReactNode;
 }) {
-  const { target, src, state, style, img } = useReservedImage(tabId, image, surface);
+  const { target, src, fullSrc, state, style, img } = useReservedImage(tabId, image, surface);
   return (
     <button
       ref={(element) => { target.current = element; }}
@@ -355,7 +427,7 @@ export function MessageImageButton({ tabId, image, alt, className, onOpen, surfa
       style={style}
       title={src ? 'Ampliar' : alt}
       disabled={!src}
-      onClick={() => { if (src) onOpen(src); }}
+      onClick={() => { if (fullSrc) onOpen(fullSrc); }}
     >
       <span className="ri-media">
         {img({ alt })}

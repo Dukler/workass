@@ -19,14 +19,14 @@ export type { SubagentNode } from '../subagent-layout';
 // in view (see MessageImage.tsx); until then its reserved frame holds the
 // image's final size, so nothing below moves when it arrives.
 function UserImage({ tabId, image, alt }: { tabId: string; image: MessageImage; alt: string }) {
-  const { target, src, state, style, img } = useReservedImage(tabId, image, 'user');
+  const { target, fullSrc, state, style, img } = useReservedImage(tabId, image, 'user');
   return (
     <div ref={(element) => { target.current = element; }} className="ri ri-user" data-state={state} style={style}>
       <span className="ri-media">
         {/* Click to open full-size in the lightbox. */}
         {img({
           alt, className: 'zoomable', title: 'Ampliar', tabIndex: 0, 'aria-keyshortcuts': 'Meta+C Control+C',
-          onClick: () => { if (src) store.openImageLightbox(src, alt); },
+          onClick: () => { if (fullSrc) store.openImageLightbox(fullSrc, alt); },
         })}
         <ImagePlaceholder state={state} alias="assistant-image-pending" />
       </span>
@@ -331,9 +331,9 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
 function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; alt: string }) {
   // The same once-per-image cache as message images: a windowed transcript
   // remounts rows as the reader scrolls, and a remount must not fetch again.
-  const { target, src, state, style, img } = useReservedImage(tabId, image, 'tool');
+  const { target, src, fullSrc, state, style, img } = useReservedImage(tabId, image, 'tool');
   return (
-    <button ref={(element) => { target.current = element; }} className="tool-image ri ri-tool" data-state={state} style={style} disabled={!src} onClick={() => src && store.openImageLightbox(src, alt)} title={src ? 'Ampliar' : alt}>
+    <button ref={(element) => { target.current = element; }} className="tool-image ri ri-tool" data-state={state} style={style} disabled={!src} onClick={() => fullSrc && store.openImageLightbox(fullSrc, alt)} title={src ? 'Ampliar' : alt}>
       <span className="ri-media">
         {img({ alt })}
         <ImagePlaceholder state={state} alias="tool-image-pending" />

@@ -112,7 +112,8 @@ export async function copyImageElement(image: HTMLImageElement): Promise<boolean
   const bridge = window.workassClipboard;
   if (bridge?.supported) return bridge.copyImageAt(point).catch(() => false);
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return false;
-  const src = image.currentSrc || image.src;
+  // A transcript frame may draw a display rendition; copy the full image.
+  const src = image.dataset?.fullSrc || image.currentSrc || image.src;
   if (!src) return false;
   try {
     // ClipboardItem accepts a promise, keeping the write inside the keyboard
@@ -129,7 +130,7 @@ const MAX_EXTERNAL_IMAGE_BYTES = 16 * 1024 * 1024;
 export async function openImageElementExternally(image: HTMLImageElement): Promise<boolean> {
   const bridge = window.workassClipboard;
   if (!bridge?.supported || typeof bridge.openImageExternal !== 'function') return false;
-  const src = image.currentSrc || image.src;
+  const src = image.dataset?.fullSrc || image.currentSrc || image.src;
   if (!src) return false;
   try {
     const response = await fetch(src);
