@@ -252,7 +252,7 @@ func (r *providerChatRuntime) executeAgentQuestion(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}

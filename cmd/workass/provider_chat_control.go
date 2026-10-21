@@ -95,7 +95,7 @@ func (r *providerChatRuntime) CreateRendererChat(raw map[string]any) (map[string
 const maxStagedQueueRows = 100
 
 func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, rawEntries []any) (map[string]any, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func (r *providerChatRuntime) ReplaceStagedQueue(tabID, chatID string, operation
 }
 
 func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, raw map[string]any) (map[string]any, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +211,7 @@ func (r *providerChatRuntime) SavePresentation(tabID, chatID string, operationID
 }
 
 func (r *providerChatRuntime) SaveRuntimeControls(tabID, chatID string, operationID providercontract.OperationID, expectedRevision uint64, raw map[string]any) (map[string]any, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -381,11 +381,35 @@ func (r *providerChatRuntime) exactActor(tabID, chatID string) (*providerChatAct
 	return actor, state, nil
 }
 
+// exactActorFence is exactActor for callers that need only the actor: the
+// same ownership checks, read without copying the chat's history.
+func (r *providerChatRuntime) exactActorFence(tabID, chatID string) (*providerChatActor, error) {
+	if r == nil {
+		return nil, errors.New("provider chat runtime is unavailable")
+	}
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	if tabID == "" || chatID == "" {
+		return nil, errors.New("exact tab and chat ids are required")
+	}
+	actor, err := r.actor(chatID)
+	if err != nil {
+		return nil, err
+	}
+	identity := actor.engine.IdentitySnapshot()
+	if identity.Deleted {
+		return nil, errors.New("chat was deleted")
+	}
+	if strings.TrimSpace(identity.TabID) != tabID {
+		return nil, errors.New("tab id does not own the requested chat")
+	}
+	return actor, nil
+}
+
 // ChatGoal reads the chat's latest provider goal (Codex /goal) once the tab is
 // proven to own the chat. The goal is live provider state, kept per chat by
 // the manager; connected clients already have it from the chat:goal event.
 func (r *providerChatRuntime) ChatGoal(tabID, chatID string) (map[string]any, error) {
-	if _, _, err := r.exactActor(tabID, chatID); err != nil {
+	if _, err := r.exactActorFence(tabID, chatID); err != nil {
 		return nil, err
 	}
 	if r.manager == nil {
@@ -398,19 +422,24 @@ func (r *providerChatRuntime) ChatGoal(tabID, chatID string) (map[string]any, er
 // The manager's command cache is executor materialization only and is never a
 // late-client or restart authority after cutover.
 func (r *providerChatRuntime) ChatCommands(tabID, chatID string) (map[string]any, error) {
-	_, state, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
-	laneID := state.ActiveLaneID
-	if laneID == "" {
-		laneID = state.DesiredLaneID
-	}
-	lane, ok := state.Lanes[laneID]
-	if !ok || lane.Attachment == nil {
+	var snapshot *providercontract.LaneAttachmentSnapshot
+	actor.engine.View(func(state chat.State) {
+		laneID := state.ActiveLaneID
+		if laneID == "" {
+			laneID = state.DesiredLaneID
+		}
+		if lane, ok := state.Lanes[laneID]; ok && lane.Attachment != nil {
+			attachment := lane.Attachment.Clone()
+			snapshot = &attachment
+		}
+	})
+	if snapshot == nil {
 		return map[string]any{"supported": false, "live": false, "commandCatalog": nil}, nil
 	}
-	snapshot := lane.Attachment
 	return map[string]any{
 		"supported":      snapshot.CommandCatalogSupported,
 		"live":           true,
@@ -419,7 +448,7 @@ func (r *providerChatRuntime) ChatCommands(tabID, chatID string) (map[string]any
 }
 
 func (r *providerChatRuntime) Rewind(ctx context.Context, tabID, chatID string, turnSequence int, operationID providercontract.OperationID) (map[string]any, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -845,7 +874,7 @@ func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationI
 		return err
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(digestRaw))
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return err
 	}
@@ -891,7 +920,7 @@ func (r *providerChatRuntime) SettleChat(tabID, chatID string, settled bool, ope
 		return err
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(digestRaw))
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return err
 	}
@@ -927,7 +956,7 @@ func (r *providerChatRuntime) SettleChat(tabID, chatID string, settled bool, ope
 }
 
 func (r *providerChatRuntime) FocusChat(tabID, chatID string, operationID providercontract.OperationID) error {
-	if _, _, err := r.exactActor(tabID, chatID); err != nil {
+	if _, err := r.exactActorFence(tabID, chatID); err != nil {
 		return err
 	}
 	_, err := r.sessions.SaveGlobalActiveTab(strings.TrimSpace(tabID), operationID)
@@ -1074,7 +1103,7 @@ func (r *providerChatRuntime) ApplySessionRefresh(payload map[string]any) error 
 	if tabID == "" || chatID == "" || sessionID == "" {
 		return errors.New("session refresh requires exact tab, chat, and provider connection ids")
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return err
 	}
@@ -1251,7 +1280,7 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 	if len(attachments) > 0 && delivery == "steer" {
 		return nil, errors.New("image attachments are not supported with steer; use auto or queue")
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}

@@ -702,33 +702,63 @@ func (r *providerChatRuntime) ChatWorkspaceForExactPair(tabID, chatID string) (s
 		}
 		return "", 0, false, err
 	}
-	if state.Presentation.CWD == nil {
-		return "", state.Presentation.WorkspaceRevision, false, nil
+	if state.CWD == nil {
+		return "", state.WorkspaceRevision, false, nil
 	}
-	return strings.TrimSpace(*state.Presentation.CWD), state.Presentation.WorkspaceRevision, true, nil
+	return strings.TrimSpace(*state.CWD), state.WorkspaceRevision, true, nil
 }
 
 // actorForExactChatPair is the ownership fence for chat-scoped diagnostic
 // surfaces. A ChatID alone is not sufficient: a stale renderer tab must not
 // read or mutate another attachment's Entorno/checkpoint state, and a deleted
 // actor must never be recreated through the manager cache.
-func (r *providerChatRuntime) actorForExactChatPair(tabID, chatID string) (*providerChatActor, chat.State, error) {
+func (r *providerChatRuntime) actorForExactChatPair(tabID, chatID string) (*providerChatActor, chatSurfaceHead, error) {
 	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
 	if tabID == "" || chatID == "" {
-		return nil, chat.State{}, errors.New("chat surface requires exact tabId and chatId")
+		return nil, chatSurfaceHead{}, errors.New("chat surface requires exact tabId and chatId")
 	}
 	actor, err := r.actor(chatID)
 	if err != nil {
-		return nil, chat.State{}, err
+		return nil, chatSurfaceHead{}, err
 	}
-	state := actor.engine.Snapshot()
-	if !state.Initialized || state.Deleted {
-		return nil, chat.State{}, errors.New("chat surface requires an active actor")
+	head := readChatSurfaceHead(actor.engine)
+	if !head.Initialized || head.Deleted {
+		return nil, chatSurfaceHead{}, errors.New("chat surface requires an active actor")
 	}
-	if strings.TrimSpace(state.Presentation.TabID) != tabID {
-		return nil, chat.State{}, errors.New("chat surface tab attachment is stale")
+	if strings.TrimSpace(head.TabID) != tabID {
+		return nil, chatSurfaceHead{}, errors.New("chat surface tab attachment is stale")
 	}
-	return actor, state, nil
+	return actor, head, nil
+}
+
+// chatSurfaceHead is everything the chat surfaces (Entorno, checkpoints,
+// workspace) read from an actor. Reading it copies the environment
+// observation but none of the history, which a Snapshot would deep-copy.
+type chatSurfaceHead struct {
+	ChatID            string
+	TabID             string
+	Revision          uint64
+	Initialized       bool
+	Deleted           bool
+	CWD               *string
+	WorkspaceRevision uint64
+	Environment       chat.EnvironmentState
+}
+
+func readChatSurfaceHead(engine *chat.Engine) chatSurfaceHead {
+	var head chatSurfaceHead
+	engine.View(func(state chat.State) {
+		head = chatSurfaceHead{
+			ChatID: state.ChatID, TabID: state.Presentation.TabID, Revision: state.Revision,
+			Initialized: state.Initialized, Deleted: state.Deleted,
+			WorkspaceRevision: state.Presentation.WorkspaceRevision, Environment: state.Environment.Clone(),
+		}
+		if state.Presentation.CWD != nil {
+			cwd := *state.Presentation.CWD
+			head.CWD = &cwd
+		}
+	})
+	return head
 }
 
 // observeChatEnv is the only actor-managed Entorno ingress. Manager remains a
@@ -768,7 +798,7 @@ func (r *providerChatRuntime) observeChatEnv(payload acp.ChatEnvPayload) error {
 	}); err != nil {
 		return err
 	}
-	committed := actor.engine.Snapshot()
+	committed := readChatSurfaceHead(actor.engine)
 	if committed.Revision <= state.Revision || committed.Environment.TabID != tabID || len(committed.Environment.Payload) == 0 {
 		return errors.New("chat environment actor commit failed durable readback")
 	}
@@ -788,10 +818,10 @@ func (r *providerChatRuntime) ChatEnvGet(tabID, chatID string) (acp.ChatEnvPaylo
 	}
 	if len(state.Environment.Payload) == 0 {
 		cwd := ""
-		if state.Presentation.CWD != nil {
-			cwd = strings.TrimSpace(*state.Presentation.CWD)
+		if state.CWD != nil {
+			cwd = strings.TrimSpace(*state.CWD)
 		}
-		return acp.ChatEnvPayload{ChatID: state.ChatID, TabID: state.Presentation.TabID, CWD: cwd,
+		return acp.ChatEnvPayload{ChatID: state.ChatID, TabID: state.TabID, CWD: cwd,
 			Repos: []acp.ChatEnvRepo{}, Unchanged: []string{}, RepoLimit: 12, FileLimit: 200,
 			Approximation: "changes are computed from this chat's git status/numstat baseline; edits to already-dirty files can only be approximated"}, nil
 	}
@@ -799,7 +829,7 @@ func (r *providerChatRuntime) ChatEnvGet(tabID, chatID string) (acp.ChatEnvPaylo
 	if err := json.Unmarshal(state.Environment.Payload, &payload); err != nil {
 		return acp.ChatEnvPayload{}, fmt.Errorf("decode actor chat environment: %w", err)
 	}
-	if payload.ChatID != state.ChatID || payload.TabID != state.Presentation.TabID {
+	if payload.ChatID != state.ChatID || payload.TabID != state.TabID {
 		return acp.ChatEnvPayload{}, errors.New("actor chat environment ownership does not match chat")
 	}
 	return payload, nil
@@ -2889,7 +2919,7 @@ func (r *providerChatRuntime) SteerQueued(ctx context.Context, tabID, chatID, qu
 	if r == nil {
 		return nil, false, nil
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, true, err
 	}
