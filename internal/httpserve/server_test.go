@@ -263,6 +263,11 @@ func TestLanBridgeServed(t *testing.T) {
 	if !strings.Contains(string(body), "machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname })") {
 		t.Fatalf("bridge missing controller-local machine nickname method")
 	}
+	// The renderer reads the catalog snapshot through this method when its
+	// catalog digest diverges; its absence is how it recognises an older daemon.
+	if !strings.Contains(string(body), "providersCatalog: () => invoke('providers:catalog')") {
+		t.Fatalf("bridge missing the providers:catalog read")
+	}
 }
 
 func TestLanBridgeRejectsPendingInvokeWhenSocketCloses(t *testing.T) {

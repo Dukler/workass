@@ -381,6 +381,60 @@ func TestCatalogRefreshAuthenticationFailurePreservesUsableLastGoodCatalog(t *te
 	assertProviderListItem(t, manager.ProvidersList(), "devin", providerStatusReady, true)
 }
 
+// state:digest hashes each catalog group whole, latency included, and the
+// renderer heals a diverged hash only from a published catalog. A refresh that
+// re-measured latency over unchanged models used to publish nothing, leaving
+// every renderer's catalog digest diverged for good (review 2026-10-21).
+func TestCatalogRefreshPublishesEveryDigestVisibleChange(t *testing.T) {
+	events := newEventCollector()
+	manager := catalogRefreshTestManager(t, events)
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = true
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "mock-deterministic", Name: "Mock deterministic"}}
+	sentinel := int64(-7)
+	runtime.LatencyMs = &sentinel
+	manager.mu.Unlock()
+	before := findCatalogGroup(manager.CatalogSnapshotGroups(), "mock")
+	if before == nil {
+		t.Fatal("mock catalog group missing")
+	}
+
+	manager.invalidateProviderCatalog("mock")
+	if !manager.refreshProviderCatalogNow(context.Background(), "mock") {
+		t.Fatal("refresh did not run")
+	}
+	after := findCatalogGroup(manager.CatalogSnapshotGroups(), "mock")
+	if after == nil || after.LatencyMs == nil || *after.LatencyMs == sentinel {
+		t.Fatalf("refresh did not re-measure latency: %#v", after)
+	}
+	event := events.waitChannel(t, "chat:catalog", 5*time.Second)
+	published := findCatalogGroupFromPayload(event.payload.(map[string]any), "mock")
+	if published == nil || !sameDigestCatalog(*published, *after) {
+		t.Fatalf("published group %#v, digest-visible group %#v", published, after)
+	}
+	if read := findCatalogGroupFromPayload(manager.CatalogSnapshot(), "mock"); read == nil || !sameDigestCatalog(*read, *after) {
+		t.Fatalf("providers:catalog read %#v, digest-visible group %#v", read, after)
+	}
+}
+
+func TestSameDigestCatalogSeesLatency(t *testing.T) {
+	one, two := int64(1), int64(2)
+	a := CatalogGroup{ProviderID: "mock", Models: []Model{}, Modes: []Mode{}, LatencyMs: &one}
+	b := a
+	if !sameDigestCatalog(a, b) {
+		t.Fatal("identical groups differ")
+	}
+	b.LatencyMs = &two
+	if sameDigestCatalog(a, b) {
+		t.Fatal("a latency change is digest-visible and must count as a change")
+	}
+	if !sameUsableCatalog(a, b) {
+		t.Fatal("latency alone is not a usable-catalog change (the old, too narrow test)")
+	}
+}
+
 func findCatalogGroupFromPayload(payload map[string]any, providerID string) *CatalogGroup {
 	groups, _ := payload["groups"].([]CatalogGroup)
 	return findCatalogGroup(groups, providerID)
