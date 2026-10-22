@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -308,6 +309,9 @@ func (r *providerChatRuntime) runFirstScreenWarm(ctx context.Context, delay time
 	case <-timer.C:
 	}
 	r.warmFirstScreens(ctx)
+	// Decoding every chat's newest rows left garbage several times the size
+	// of what is kept; hand it back rather than when the scavenger gets to it.
+	debug.FreeOSMemory()
 }
 
 // warmFirstScreens reads, most recently active first, the first screen and

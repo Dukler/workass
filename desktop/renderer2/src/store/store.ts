@@ -4638,6 +4638,11 @@ export class Store {
     // archive. Only the newest selection intent may complete the handoff.
     const previousActiveId = this.state.activeId;
     const durableChatId = target.chatId;
+    // The chat's commands and goal are asked for with its first screen, not
+    // after it: their replies then land before the frame that shows the chat
+    // instead of inside it. Activation finds them asked and asks nothing more.
+    this.maybeFetchCommandCatalog(target);
+    this.maybeFetchChatGoal(target);
     void (async () => {
       // The handoff waits for the first screen (the chat's last exchange),
       // not for the whole recent slice, which keeps arriving on screen.
