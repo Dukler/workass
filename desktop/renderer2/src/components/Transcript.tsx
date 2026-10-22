@@ -9,6 +9,7 @@ import { NoticeLine } from './NoticeLine';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
+import { syncFlowBlocks } from '../flow-window';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
@@ -885,6 +886,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     const doc = docRef.current;
     if (!el || !doc) return;
+    const scrolledFrom = el.scrollTop;
+    commitLayout(doc);
+    // Windows inside messages (galleries) follow a scroll this commit made or
+    // content it moved before the frame paints, not one frame later.
+    syncFlowBlocks(el, Math.abs(el.scrollTop - scrolledFrom) >= 1);
+  });
+  const commitLayout = (doc: HTMLDivElement) => {
     mountedWindow.current = win;
     recordUnitHeights(heights.current, measureUnits(doc));
     if (!virtual) { recordAnchor(); return; }
@@ -905,7 +913,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     if (syncRewindows.current++ === 0) requestAnimationFrame(() => { syncRewindows.current = 0; });
     if (syncRewindows.current <= MAX_SYNC_REWINDOWS) rewindowIfStale();
     loadOlderAhead();
-  });
+  };
 
   // A window shorter than the screen left a band of nothing under the newest
   // row while older messages sat behind "Ver anteriores" (user 2026-10-15).

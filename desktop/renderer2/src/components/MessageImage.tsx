@@ -270,6 +270,12 @@ export function imageFrameStyle(image: MessageImage, surface: ImageSurface, natu
   return { '--iw': width, '--ih': height } as CSSProperties;
 }
 
+// The size a frame that mounts now would reserve (useReservedImage's choice
+// before any load), for laying out frames that are not mounted.
+export function imageFrameSize(image: MessageImage, surface: ImageSurface): readonly [number, number] {
+  return knownNaturalSize(image) ?? pixelSize(image.width, image.height) ?? IMAGE_FRAME_FALLBACK[surface];
+}
+
 // Natural sizes measured on load, so a remounted row (the windowed transcript
 // remounts as the reader scrolls) paints its final frame at once even when the
 // wire carried no size.
