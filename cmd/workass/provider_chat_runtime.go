@@ -58,8 +58,14 @@ type providerChatRuntime struct {
 	liveScans map[string]*closedLiveScan
 	// closedRefs: attachment references of closed actors, read once each.
 	closedRefs map[string]*closedRefSet
-	bootErr    error
-	closed     bool
+	// prewarm opens viewed closed actors in the background, one at a time
+	// (provider_chat_lazy.go).
+	prewarm actorPrewarm
+	// firstScreens keeps closed chats' first screens
+	// (provider_chat_first_screen.go).
+	firstScreens firstScreenCache
+	bootErr      error
+	closed       bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is
@@ -164,6 +170,10 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 		if ttl := configuredActorIdleTTL(); runtime.ledgers != nil && ttl > 0 {
 			runtime.wg.Add(1)
 			go runtime.runIdleActorRetirement(ctx, ttl)
+		}
+		if runtime.ledgers != nil {
+			runtime.wg.Add(1)
+			go runtime.runFirstScreenWarm(ctx, firstScreenWarmDelay)
 		}
 	}
 	return runtime
@@ -427,6 +437,7 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		delete(r.summaries, chatID)
 		delete(r.liveScans, chatID)
 		delete(r.closedRefs, chatID)
+		r.dropFirstScreenLocked(chatID)
 		paused := r.actorsPaused
 		r.mu.Unlock()
 		if !paused {
@@ -3423,6 +3434,9 @@ func (r *providerChatRuntime) Close(ctx context.Context) error {
 		r.cancel()
 		r.wg.Wait()
 	}
+	// A background open in flight ends here (its actor is closed below, or
+	// refused because the runtime is closed).
+	r.prewarm.wg.Wait()
 	if r.manager != nil {
 		r.manager.SetChatEnvObserver(nil)
 		r.manager.SetChatEnvRestorer(nil)

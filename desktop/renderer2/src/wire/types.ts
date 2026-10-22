@@ -756,6 +756,10 @@ export interface WorkassApi {
     tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean; leanTools?: boolean;
     // leanTitles (additive): a title over 4 KB arrives as its head (titleDeferred).
     leanTitles?: boolean;
+    // lastExchange (additive, with tail): of the tail, only the rows from the
+    // user's newest own message on (a chat's first screen); an older daemon
+    // ignores it and answers the whole bounded tail.
+    lastExchange?: boolean;
     toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
   }) => Promise<unknown>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;

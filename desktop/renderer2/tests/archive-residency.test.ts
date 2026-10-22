@@ -387,7 +387,9 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     subject.switchChat(target.id);
     assert.equal(subject.state.activeId, first.id);
     assert.equal(first.messages.length, firstRows.length);
-    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, deferImages: true, leanTools: true, leanTitles: true } }]);
+    // The first screen asks for the last exchange; this daemon predates the
+    // option and answers the whole tail, which paints at once as before.
+    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true } }]);
 
     historyReleased = true;
     releaseHistory(targetRows.slice(-10));
@@ -400,6 +402,152 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     assert.equal(first.messages.length, 60);
   } finally {
     if (!historyReleased) releaseHistory([]);
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('opening a metadata-only chat paints its last exchange, then pages in the rest of the slice', async () => {
+  const firstRows = messages(85);
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  let releasePrefix!: () => void;
+  const prefixGate = new Promise<void>((resolve) => { releasePrefix = resolve; });
+  const archiveCalls: unknown[] = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (tabId: string, options: { tail?: number; lastExchange?: boolean; beforeMessageId?: string; limit?: number }) => {
+        if (tabId !== 'tab-target') return [];
+        archiveCalls.push(options);
+        // A daemon that knows lastExchange: the user's newest message on.
+        if (options.lastExchange) return targetRows.slice(-2);
+        if (options.beforeMessageId) {
+          await prefixGate;
+          const end = targetRows.findIndex((message) => message.id === options.beforeMessageId);
+          return targetRows.slice(Math.max(0, end - (options.limit ?? 0)), end);
+        }
+        return targetRows.slice(-(options.tail ?? 0));
+      },
+    },
+  };
+  try {
+    const subject = ownStore(new StoreCtor());
+    const first = chat('tab-first', firstRows);
+    const target = chat('tab-target', []);
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The handoff happened on the first screen, with the slice still loading.
+    assert.equal(subject.state.activeId, target.id);
+    assert.deepEqual(target.messages.map((message: Msg) => message.id), ['message-90', 'message-91']);
+    assert.equal(target.historyComplete, false);
+    assert.equal(target.messageCount, 92);
+    assert.equal(subject.showsFirstScreenOnly(target.id), true);
+    assert.deepEqual(archiveCalls, [
+      { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true },
+      { beforeMessageId: 'message-90', limit: 8, deferImages: true, leanTools: true, leanTitles: true },
+    ]);
+
+    releasePrefix();
+    await subject.recentHistoryLoads.get(target.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The rest of the slice is exactly the ten rows a whole tail paints.
+    assert.deepEqual(target.messages.map((message: Msg) => message.id), targetRows.slice(-10).map((message) => message.id));
+    assert.equal(target.historyComplete, false);
+    assert.equal(target.messageCount, 92);
+    assert.equal(subject.showsFirstScreenOnly(target.id), false);
+    assert.equal(subject.state.activeId, target.id);
+  } finally {
+    releasePrefix();
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('the rest of an opened chat\'s slice is laid out after its first screen has painted', async () => {
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  const previousFrame = (globalThis as any).requestAnimationFrame;
+  const frames: Array<() => void> = [];
+  (globalThis as any).requestAnimationFrame = (callback: () => void) => { frames.push(callback); return frames.length; };
+  const runFrame = () => { for (const callback of frames.splice(0)) callback(); };
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { lastExchange?: boolean; beforeMessageId?: string; limit?: number }) => {
+        if (options.lastExchange) return targetRows.slice(-2);
+        const end = targetRows.findIndex((message) => message.id === options.beforeMessageId);
+        return targetRows.slice(Math.max(0, end - (options.limit ?? 0)), end);
+      },
+    },
+  };
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    const subject = ownStore(new StoreCtor());
+    const first = chat('tab-first', messages(4));
+    const target = chat('tab-target', []);
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
+    await tick();
+    await tick();
+    // The page came back at once; the first screen still owns this frame.
+    assert.equal(subject.state.activeId, target.id);
+    assert.equal(target.messages.length, 2);
+    assert.equal(subject.showsFirstScreenOnly(target.id), true);
+
+    runFrame(); // the frame that paints the first screen
+    await tick();
+    assert.equal(target.messages.length, 2);
+    runFrame(); // the next one
+    await subject.recentHistoryLoads.get(target.id);
+    assert.deepEqual(target.messages.map((message: Msg) => message.id), targetRows.slice(-10).map((message) => message.id));
+    assert.equal(subject.showsFirstScreenOnly(target.id), false);
+  } finally {
+    if (previousFrame === undefined) delete (globalThis as any).requestAnimationFrame;
+    else (globalThis as any).requestAnimationFrame = previousFrame;
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a chat with rows on screen never asks for only its last exchange', async () => {
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  const archiveCalls: unknown[] = [];
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { tail?: number }) => {
+        archiveCalls.push(options);
+        return targetRows.slice(-(options.tail ?? 0));
+      },
+    },
+  };
+  try {
+    const subject = ownStore(new StoreCtor());
+    const target = chat('tab-target', targetRows.slice(-3));
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [target];
+    subject.state.activeId = target.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    await subject.loadRecentHistory(target.id, 10);
+
+    assert.deepEqual(archiveCalls, [{ tail: 10, deferImages: true, leanTools: true, leanTitles: true }]);
+    assert.equal(target.messages.length, 10);
+    assert.equal(subject.showsFirstScreenOnly(target.id), false);
+  } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
   }

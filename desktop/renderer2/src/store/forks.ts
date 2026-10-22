@@ -27,6 +27,7 @@ import type {
 import { collapseForkRetries } from '../fork-format';
 import { forkSelectionAfterActive, type ForkSelection } from '../fork-sidebar';
 import { store } from './store';
+import { afterNextPaint } from '../after-paint';
 
 export interface ForkChatState { points: ForkPointView[]; runs: ForkRunView[]; }
 export type { ForkSelection };
@@ -242,6 +243,16 @@ class ForkStore {
     const prev = this.byTab.get(tabId);
     this.byTab.set(tabId, next);
     this.syncSelectedTranscript(prev);
+    const empty = (state: ForkChatState | undefined) => !!state && !state.points.length && !state.runs.length;
+    // Nothing changed on screen.
+    if (empty(prev) && empty(next)) return;
+    // The first answer for a chat just opened is almost always "no forks";
+    // only a subsession view still waiting on it shows that, so it is told
+    // after the chat's first frame instead of re-rendering the app inside it.
+    if (!prev && empty(next)) {
+      void afterNextPaint().then(() => this.bump());
+      return;
+    }
     this.bump();
   }
 

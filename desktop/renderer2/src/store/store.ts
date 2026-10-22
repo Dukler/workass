@@ -25,6 +25,7 @@ import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
+import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
@@ -505,6 +506,12 @@ export class Store {
   // read-only archive channel for a tiny recent slice before handoff, so a
   // screenshot-heavy ledger is not expanded merely to paint the viewport.
   private recentHistoryLoads = new Map<string, Promise<void>>();
+  // A chat opened with nothing of it on screen paints its last exchange first
+  // (archive-load lastExchange); the rest of its recent slice follows by
+  // stable cursor. recentFirstRows settles once that first screen is committed
+  // (or the load ends), and firstScreens holds the chats still showing only it.
+  private recentFirstRows = new Map<string, Promise<void>>();
+  private firstScreens = new Set<string>();
   private olderHistoryLoads = new Map<string, Promise<OlderHistoryOutcome>>();
   // Keep a selected resident tail on screen while a metadata-only refresh with
   // a newer actor revision is reconciled. This is renderer residency state,
@@ -1282,12 +1289,20 @@ export class Store {
 
     const durableChatId = resident.chatId;
     const liveEventFence = this.liveTurnEventVersion;
+    // Nothing of this chat is on screen yet: ask for its last exchange first
+    // (the user's newest message and what followed), paint it, then page in
+    // the rest of the slice exactly as a size-bounded tail is paged in. An
+    // older daemon ignores lastExchange and answers the whole bounded tail.
+    const firstScreen = resident.messages.length === 0;
+    let firstScreenPainted: Promise<void> = Promise.resolve();
+    let firstRowsReady = () => {};
+    this.recentFirstRows.set(chatId, new Promise<void>((resolve) => { firstRowsReady = resolve; }));
     const load = (async () => {
       let projected: unknown;
       try {
         const step = await this.guardedStep(
           `recent actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { tail: limit, ...HISTORY_READ_OPTIONS }),
+          () => call('archiveLoad', chatId, { tail: limit, ...(firstScreen ? { lastExchange: true } : {}), ...HISTORY_READ_OPTIONS }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return;
@@ -1305,11 +1320,24 @@ export class Store {
       // bounded response cannot erase a known non-empty actor transcript.
       if (chat.historyComplete || (messages.length === 0 && (chat.messageCount ?? 0) > 0)) return;
       const messageCount = Math.max(chat.messageCount ?? 0, messages.length);
+      if (firstScreen && chat.messages.length === 0 && messages.length < Math.min(limit, messageCount)) {
+        // The first screen paints now; the transcript waits for the rest of
+        // the slice before it loads anything older (showsFirstScreenOnly).
+        // A chat on its way to the screen is published by its activation, in
+        // the same render; the slice's own update publishes it otherwise.
+        this.firstScreens.add(chatId);
+        this.commitRecentHistory(chat, messages, messageCount, false, liveEventFence, this.state.activeId === chatId);
+        firstScreenPainted = afterNextPaint();
+        firstRowsReady();
+      }
       // The actor bounds image-rich replies by expanded bytes as well as row
       // count. A one-row assistant suffix can therefore hide the immediately
       // preceding user image (or steer) even though both are in the newest ten.
       // Fetch the missing contiguous prefix by stable cursor, one bounded page
       // at a time. A single oversized row is still returned by the daemon.
+      // A first screen is painted before the rest is asked for: reading those
+      // rows can keep the daemon's cores busy while the frame is being made.
+      await firstScreenPainted;
       while (messages.length < Math.min(limit, messageCount) && messages[0]?.id) {
         const boundary = messages[0].id;
         const step = await this.guardedStep(
@@ -1325,6 +1353,10 @@ export class Store {
         if (!prefix.length || prefix.some((message) => seen.has(message.id))) break;
         messages = [...prefix.slice(-(Math.min(limit, messageCount) - messages.length)), ...messages];
       }
+      // A first screen reaches the screen before the rest of the slice is laid
+      // out: a page that came back within the same frame would otherwise hold
+      // that frame for a second render.
+      await firstScreenPainted;
       let historyComplete = messages.length >= messageCount;
       // A refresh may have retained a resident tail (or even a fully revealed
       // transcript) while this recent slice was in flight. Replace its
@@ -1347,32 +1379,61 @@ export class Store {
           messages = merged.slice(-residentLimit);
         }
       }
-      const restored = {
-        ...chat,
-        messages,
-        messageCount,
-        historyComplete,
-      };
-      this.preserveHydratedRuntime(chat, restored);
-      this.preserveLiveTurnEvents(
-        [chat],
-        [restored],
-        liveEventFence,
-        ownerMachineId(chat),
-        restored.historyComplete,
-      );
-      chat.messages = restored.messages;
-      chat.messageCount = Math.max(messageCount, restored.messages.length);
-      chat.historyComplete = restored.historyComplete
-        && restored.messages.length === chat.messageCount;
-      if (chat.historyComplete) this.fullHistoriesLoaded.add(chatId);
-      else this.fullHistoriesLoaded.delete(chatId);
-      this.staleRecentHistories.delete(chatId);
-      this.rebuildJobRefs(new Set([chat.id]));
-      this.bumpApp(false);
+      this.firstScreens.delete(chatId);
+      this.commitRecentHistory(chat, messages, messageCount, historyComplete, liveEventFence);
     })();
     this.recentHistoryLoads.set(chatId, load);
-    try { await load; } finally { this.recentHistoryLoads.delete(chatId); }
+    try {
+      await load;
+    } finally {
+      this.recentHistoryLoads.delete(chatId);
+      firstRowsReady();
+      this.recentFirstRows.delete(chatId);
+      // A slice that ended early (a failed page, a replaced chat) still lets
+      // the transcript load older history on its own.
+      if (this.firstScreens.delete(chatId)) this.bumpApp(false);
+    }
+  }
+
+  // Commit a recent slice: the same live-turn and runtime preservation as any
+  // hydration, then (publish) one store update.
+  private commitRecentHistory(chat: Chat, messages: Msg[], messageCount: number, historyComplete: boolean, liveEventFence: number, publish = true) {
+    const restored = {
+      ...chat,
+      messages,
+      messageCount,
+      historyComplete,
+    };
+    this.preserveHydratedRuntime(chat, restored);
+    this.preserveLiveTurnEvents(
+      [chat],
+      [restored],
+      liveEventFence,
+      ownerMachineId(chat),
+      restored.historyComplete,
+    );
+    chat.messages = restored.messages;
+    chat.messageCount = Math.max(messageCount, restored.messages.length);
+    chat.historyComplete = restored.historyComplete
+      && restored.messages.length === chat.messageCount;
+    if (chat.historyComplete) this.fullHistoriesLoaded.add(chat.id);
+    else this.fullHistoriesLoaded.delete(chat.id);
+    this.staleRecentHistories.delete(chat.id);
+    this.rebuildJobRefs(new Set([chat.id]));
+    if (publish) this.bumpApp(false);
+  }
+
+  // The chat shows only the last exchange it was opened with while the rest of
+  // its recent slice is still arriving. Loading older history then would read
+  // a page the slice may already fill the screen without.
+  showsFirstScreenOnly(chatId: string): boolean {
+    return this.firstScreens.has(chatId);
+  }
+
+  // Settles once a recent-history load of the chat has something to paint:
+  // its first screen, or the whole slice. Nothing to wait for: undefined.
+  private recentHistoryFirstRows(chatId: string): Promise<void> | undefined {
+    return this.recentFirstRows.get(chatId);
   }
 
   async loadRecentHistory(chatId: string, limit = CHAT_MESSAGE_TAIL): Promise<boolean> {
@@ -4545,7 +4606,10 @@ export class Store {
     this.bumpApp();
     this.refreshVisibleRecentHistory(chat);
     this.refreshPlanUsage(id);
-    void this.refreshSpawnedWork(chat);
+    // The chat's background-work list can be a megabyte (one chat's is 1.2 MB):
+    // reading and rendering it in the frame that first shows the chat kept that
+    // frame from painting. It is asked for once the chat is on screen.
+    void afterNextPaint().then(() => this.refreshSpawnedWork(chat));
     this.maybeFetchCommandCatalog(chat);
   }
 
@@ -4574,8 +4638,16 @@ export class Store {
     // archive. Only the newest selection intent may complete the handoff.
     const previousActiveId = this.state.activeId;
     const durableChatId = target.chatId;
+    // The chat's commands and goal are asked for with its first screen, not
+    // after it: their replies then land before the frame that shows the chat
+    // instead of inside it. Activation finds them asked and asks nothing more.
+    this.maybeFetchCommandCatalog(target);
+    this.maybeFetchChatGoal(target);
     void (async () => {
-      await this.ensureRecentHistory(id, CHAT_INITIAL_HISTORY);
+      // The handoff waits for the first screen (the chat's last exchange),
+      // not for the whole recent slice, which keeps arriving on screen.
+      const load = this.ensureRecentHistory(id, CHAT_INITIAL_HISTORY);
+      await (this.recentHistoryFirstRows(id) ?? load);
       if (selectionVersion !== this.chatSelectionVersion || this.state.activeId !== previousActiveId) return;
       const restored = this.chat(id);
       if (!restored || restored.chatId !== durableChatId) return;
@@ -4626,7 +4698,9 @@ export class Store {
   applyChatGoal(event: ChatGoalEvent) {
     const chat = event.tabId ? this.chat(event.tabId) : null;
     if (!chat || (event.chatId && chat.chatId && event.chatId !== chat.chatId)) return;
+    const hadGoal = !!chat.goal;
     chat.goal = event.goal ? { ...event.goal, observedAt: event.observedAt ?? Date.now() } : null;
+    if (!hadGoal && !chat.goal) return;
     this.bumpChat(chat);
   }
   private maybeFetchCommandCatalog(chat: Chat) {

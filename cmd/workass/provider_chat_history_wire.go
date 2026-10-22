@@ -84,9 +84,20 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 			}
 			if rawLimit, requested := options["tail"]; requested {
 				limit := intValue(rawLimit)
-				if messages, found, err := providerChats.ProjectRecentArchiveByTabRaw(stringArg(args, 0), limit, read); err != nil {
+				recent := providerChats.ProjectRecentArchiveByTabRaw
+				if options["lastExchange"] == true {
+					// Additive: only the tail's last exchange (the first screen
+					// of a chat the renderer has nothing of). An older daemon
+					// ignores it and answers the whole bounded tail.
+					recent = providerChats.ProjectLastExchangeByTabRaw
+				}
+				if messages, found, err := recent(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
+					// A tail read is how a renderer opens a chat: have the
+					// actor ready for the send that may follow (after this
+					// reply, which finding the chat again must not delay).
+					go providerChats.PrewarmChatByTab(stringArg(args, 0))
 					return messages, nil
 				}
 				return []any{}, nil
