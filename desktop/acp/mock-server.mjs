@@ -357,27 +357,29 @@ async function runPrompt(id, params) {
     // A real workass_render_html call through the Workass tools CLI the daemon
     // hands every provider (WORKASS_TOOLS_COMMAND / WORKASS_TOOL_CONTEXT), shown
     // as the shell row a real agent produces. [mock:hostile] publishes the
-    // hostile page instead of the coverage report.
+    // hostile page instead of the coverage report. The page goes inline, as
+    // the call's JSON arguments on the CLI's stdin: the fixture writes no file,
+    // least of all into the chat's working directory (a page path is read
+    // only from there, so a page file would have to be left among the user's
+    // files).
     const hostile = text.includes('[mock:hostile]');
     const say = (chunk) => notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } });
     say(hostile ? 'Lo publico como página para verlo dentro del sandbox:\n\n' : 'Con los números de la corrida de hoy:\n\n');
     await pause();
-    // Workass reads a page path only inside the chat's working directory.
-    const dir = fs.mkdtempSync(path.join(session.cwd || process.cwd(), '.workass-mock-render-html-'));
-    const pagePath = path.join(dir, hostile ? 'verificacion.html' : 'cobertura.html');
-    const argsPath = path.join(dir, 'args.json');
-    fs.writeFileSync(pagePath, hostile ? PAGE_EVIL : PAGE_COV);
     const operation = `mock-render-${String(session.id).replace(/[^A-Za-z0-9_-]/g, '')}-${session.turn}`;
-    fs.writeFileSync(argsPath, JSON.stringify({ title: hostile ? 'Verificación de cuenta' : 'Cobertura por paquete', path: pagePath, operation_id: operation }));
-    const command = `"$WORKASS_TOOLS_COMMAND" tools call workass_render_html --input ${argsPath}`;
+    const args = { title: hostile ? 'Verificación de cuenta' : 'Cobertura por paquete', html: hostile ? PAGE_EVIL : PAGE_COV, operation_id: operation };
+    const command = `"$WORKASS_TOOLS_COMMAND" tools call workass_render_html`;
     const callId = `${toolCallId}-render`;
     notify(session.id, { sessionUpdate: 'tool_call', toolCallId: callId, title: 'Bash', kind: 'execute', status: 'in_progress', rawInput: { command } });
     const tools = process.env.WORKASS_TOOLS_COMMAND || '';
     const outcome = await new Promise((resolve) => {
       if (!tools) { resolve({ ok: false, text: 'WORKASS_TOOLS_COMMAND is not set' }); return; }
-      execFile(tools, ['tools', 'call', 'workass_render_html', '--input', argsPath], { env: process.env, timeout: 30_000 }, (error, stdout, stderr) => {
+      const child = execFile(tools, ['tools', 'call', 'workass_render_html'], { env: process.env, timeout: 30_000 }, (error, stdout, stderr) => {
         resolve({ ok: !error, text: String(error ? (stderr || error.message) : stdout).trim() });
       });
+      // A CLI that exits before reading its input reports through the callback.
+      child.stdin.on('error', () => {});
+      child.stdin.end(JSON.stringify(args));
     });
     notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: callId, title: 'Bash', kind: 'execute', status: outcome.ok ? 'completed' : 'failed', content: { type: 'text', text: outcome.text } });
     await pause();

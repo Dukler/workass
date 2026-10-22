@@ -506,6 +506,12 @@ func IsConstraint(err error) bool {
 	return Code(err) == sqlite3.SQLITE_CONSTRAINT
 }
 
+// IsFull reports SQLITE_FULL: the disk (or the database's page limit) is
+// full.
+func IsFull(err error) bool {
+	return Code(err) == sqlite3.SQLITE_FULL
+}
+
 func classify(err error) error {
 	if err == nil || errors.Is(err, ErrLocked) {
 		return err

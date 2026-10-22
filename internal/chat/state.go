@@ -993,9 +993,9 @@ func (s State) Clone() State {
 // s instead of being deep-copied. Committed rows are never edited through
 // them: a transition that changes a row's timeline or attachments replaces
 // the slice (upsertSettledSubagentTool copies the row's timeline first), and
-// tests verify every transition leaves the committed rows untouched. Sharing
-// the row data also lets the SQLite checkpoint recognise unchanged rows
-// without comparing their contents.
+// tests verify every transition leaves the committed rows untouched. The
+// SQLite store does not rely on this: its checkpoint compares every row with
+// its own private copy, so even an in-place edit would be saved.
 func (s State) cloneLedgerRows() State {
 	out := s.cloneSharingLedger()
 	out.Ledger = append(make([]LedgerEvent, 0, len(s.Ledger)), s.Ledger...)
@@ -1016,9 +1016,7 @@ func cloneValueMap[M ~map[K]V, K comparable, V any](m M) M {
 // cloneSharingLedger is Clone except that the result shares the ledger's
 // rows with s. It is for a transition that never writes a ledger row: the
 // ledger is the bulk of a long chat, so deep-copying it on every command
-// dominated the command, and a shared array also lets the SQLite store prove
-// the ledger unchanged without comparing every row. Like Clone's copy, a nil
-// ledger becomes an empty one.
+// dominated the command. Like Clone's copy, a nil ledger becomes an empty one.
 func (s State) cloneSharingLedger() State {
 	out := s
 	if out.Ledger == nil {

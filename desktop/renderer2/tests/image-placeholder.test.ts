@@ -74,6 +74,12 @@ test('frame state: pending until the current source loads, failed on a failed re
   assert.equal(reservedImageState(true, '', '', ''), 'failed', 'the read by reference failed');
   assert.equal(reservedImageState(false, 'data:a', '', 'data:a'), 'failed', 'the browser could not decode the bytes');
   assert.equal(reservedImageState(false, 'data:b', '', 'data:a'), 'pending');
+  // A loaded display rendition switching to a larger one (or the full image)
+  // keeps drawing its pixels: the frame never falls back to the placeholder.
+  const full = `/workass/chat-image/tab/${'ab'.repeat(32)}?k=d.k`;
+  assert.equal(reservedImageState(false, full, `${full}&w=320`, ''), 'loaded');
+  assert.equal(reservedImageState(false, `${full}&w=640`, `${full}&w=320`, ''), 'loaded');
+  assert.equal(reservedImageState(false, full.replace('tab/', 'other/'), `${full}&w=320`, ''), 'pending', 'another image waits for its own load');
 });
 
 function frame(html: string, className: string): { state: string; style: string } {
@@ -146,9 +152,9 @@ test('a failed image keeps its frame and says so', () => {
   assert.doesNotMatch(html, /Cargando/);
 });
 
-test('CSS: variant C runs one accent bar on pending frames, never gated on reduced motion', () => {
+test('CSS: variant C runs one accent bar on pending frames near the viewport, never gated on reduced motion', () => {
   const css = readFileSync(fileURLToPath(new URL('../src/styles/app.css', import.meta.url)), 'utf8');
-  const bar = /\.ri\[data-state="pending"\] \.ri-media::after \{([^}]*)\}/.exec(css);
+  const bar = /\.ri\[data-state="pending"\]\[data-near\] \.ri-media::after \{([^}]*)\}/.exec(css);
   assert.ok(bar, 'the pending bar rule');
   assert.match(bar[1], /height: 2px/);
   assert.match(bar[1], /bottom: 0/);
@@ -160,7 +166,7 @@ test('CSS: variant C runs one accent bar on pending frames, never gated on reduc
   // The only accent in the frame is the progress mark.
   const riRules = css.match(/^\.ri[^{]*\{[^}]*\}/gm) ?? [];
   assert.ok(riRules.length > 5);
-  assert.deepEqual(riRules.filter((rule) => rule.includes('var(--acc)')).map((rule) => rule.split('{')[0].trim()), ['.ri[data-state="pending"] .ri-media::after']);
+  assert.deepEqual(riRules.filter((rule) => rule.includes('var(--acc)')).map((rule) => rule.split('{')[0].trim()), ['.ri[data-state="pending"][data-near] .ri-media::after']);
   // Today's caps: attachment 420 x 320, inline 620 high, gallery 620, tool 340.
   assert.match(css, /\.ri-user \{[^}]*min\(420px, 68vw\)[^}]*318px/);
   assert.match(css, /\.ri-inline \{[^}]*620px/);

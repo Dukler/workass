@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"workass/internal/store"
 )
@@ -66,7 +68,10 @@ type ImportResult struct {
 //     FileStore discovery loads it (decode, validate, journal replay). An
 //     actor that does not open fails the import where JSON mode would fail
 //     to start: the store stays importing, the JSON stays authoritative, and
-//     the decision is logged and kept in ImportRefusalFileName.
+//     the decision is logged and kept in ImportRefusalFileName. A failure
+//     that is not the file's (the database busy, the disk full, a read
+//     error) stops the import the same way, names its cause, and writes no
+//     refusal.
 //   - A file whose digest matches its receipt is not imported again. A file
 //     that changed while the store is still importing (the JSON is still
 //     authoritative) is re-imported in place.
@@ -124,6 +129,15 @@ func ImportFileActors(ctx context.Context, db *store.DB, opts ImportOptions) (Im
 		if err != nil {
 			if ctx.Err() != nil {
 				return result, fmt.Errorf("import chat actor %q: %w", name, err)
+			}
+			if !isChatFileRefusal(err) {
+				// Something other than a check of the file failed (the
+				// database, the disk, a read): the import stops just the same
+				// (no receipt for this file, so the store cannot go live), but
+				// nothing blames the file.
+				cause := importFailureCause(err)
+				logf("[store] could not import chat actor %s: %s: %v; the file is not refused, its JSON is left in place and the chat store stays on JSON", rel, cause, err)
+				return result, fmt.Errorf("import chat actor %q: %s: %w (the file itself was not refused: its JSON is left in place and chats stay in it until a later start completes the import)", name, cause, err)
 			}
 			// File discovery refuses to start on this file too. The import
 			// stops here, as discovery does: no receipt in the store for it,
@@ -446,7 +460,7 @@ func streamActorFile(tx *store.Tx, opts ImportOptions, filePath, companionPath s
 	importer := &actorStreamImporter{tx: tx, opts: opts, source: receipt.Source, previous: previous, hadPrevious: hadPrevious}
 	decodeErr := importer.decodeEnvelope(json.NewDecoder(tee))
 	if decodeErr != nil && !errors.Is(decodeErr, errSkipActorFile) {
-		return importOutcome{}, decodeErr
+		return importOutcome{}, refuseChatFile(decodeErr)
 	}
 	// Hash every byte, including anything the decoder never needed.
 	if _, err := io.Copy(io.Discard, tee); err != nil {
@@ -473,11 +487,11 @@ func streamActorFile(tx *store.Tx, opts ImportOptions, filePath, companionPath s
 
 	if companionExists {
 		if err := importer.importJournal(companionPath); err != nil {
-			return importOutcome{}, fmt.Errorf("import provider event journal: %w", err)
+			return importOutcome{}, refuseChatFile(fmt.Errorf("import provider event journal: %w", err))
 		}
 	}
 	if err := openImportedActor(tx, importer.chatID); err != nil {
-		return importOutcome{}, err
+		return importOutcome{}, refuseChatFile(err)
 	}
 	if opts.afterRows != nil {
 		if err := opts.afterRows(importer.chatID, importer.rows); err != nil {
@@ -860,6 +874,56 @@ type ImportRefusal struct {
 	JSON          string `json:"json"`
 	BinaryVersion string `json:"binaryVersion"`
 	RefusedAt     string `json:"refusedAt"`
+}
+
+// chatFileRefusal marks an import error found by checking the chat file: its
+// JSON, its journal, or the actor they open as. Only such an error writes
+// ImportRefusalFileName and asks for the file to be fixed.
+type chatFileRefusal struct{ err error }
+
+func (r *chatFileRefusal) Error() string { return r.err.Error() }
+func (r *chatFileRefusal) Unwrap() error { return r.err }
+
+// refuseChatFile marks err as found by checking the chat file. The steps it
+// wraps also read the file and use the database, so isChatFileRefusal still
+// looks for such a failure underneath.
+func refuseChatFile(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &chatFileRefusal{err: err}
+}
+
+// isChatFileRefusal reports whether err refuses the chat file: marked by
+// refuseChatFile, with no database, disk or read failure underneath.
+func isChatFileRefusal(err error) bool {
+	return importFailureCause(err) == ""
+}
+
+// importFailureCause names what stopped an import when it was not the chat
+// file: the state database (busy, full, failing), a file that could not be
+// read, or an error the import does not recognize. It is "" only for a
+// refusal of the file.
+func importFailureCause(err error) string {
+	var pathErr *fs.PathError
+	var errno syscall.Errno
+	switch {
+	case store.IsBusy(err):
+		return "the state database is busy (another process holds it)"
+	case store.IsFull(err) || errors.Is(err, syscall.ENOSPC):
+		return "the disk is full"
+	case errors.Is(err, store.ErrClosed):
+		return "the state database is closed"
+	case store.Code(err) != 0:
+		return "the state database failed"
+	case errors.As(err, &pathErr):
+		return fmt.Sprintf("could not %s %s", pathErr.Op, pathErr.Path)
+	case errors.As(err, &errno):
+		return "an I/O error"
+	case errors.As(err, new(*chatFileRefusal)):
+		return ""
+	}
+	return "an unexpected error"
 }
 
 // recordImportRefusal writes the refusal receipt for one source file. It is
