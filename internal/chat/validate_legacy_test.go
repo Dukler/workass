@@ -1,0 +1,675 @@
+package chat
+
+// The validators exactly as they were before State.Validate indexed provider
+// activity owners (commit 5ecfd7a2), kept only as the oracle for
+// validate_equivalence_test.go. Each is the original text with its name and
+// its calls into the other originals prefixed with "legacy"; nothing else
+// changed. Do not edit them to follow later validation rules: a rule change
+// belongs in State.Validate and in the equivalence test's expectations.
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"workass/internal/provider"
+)
+
+func legacyValidate(s State) error {
+	if strings.TrimSpace(s.ChatID) == "" {
+		return errors.New("chat state requires chat id")
+	}
+	if s.Lanes == nil || s.Operations == nil || s.QueueMutationReceipts == nil || s.PresentationMutationReceipts == nil || s.RuntimeControlMutationReceipts == nil || s.WorkspaceMutationReceipts == nil || s.LaneSelectionMutationReceipts == nil || s.CancelMutationReceipts == nil || s.AgentWaitObservationReceipts == nil || s.Tools == nil || s.Plans == nil || s.Permissions == nil || s.Background == nil || s.Usage == nil || s.Compactions == nil || s.Transport == nil {
+		return errors.New("chat state maps are not initialized")
+	}
+	if s.Deleted {
+		deletionOperationID := provider.NormalizeOperationID(string(s.DeletionOperationID))
+		if deletionOperationID == "" || deletionOperationID != s.DeletionOperationID {
+			return errors.New("deleted chat tombstone has an invalid deletion operation id")
+		}
+	} else if s.DeletionOperationID != "" {
+		return errors.New("active chat has a deletion operation id")
+	}
+	if (s.CreationOperationID == "") != (strings.TrimSpace(s.CreationDigest) == "") {
+		return errors.New("chat creation receipt is incomplete")
+	}
+	for operationID, receipt := range s.QueueMutationReceipts {
+		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.Revision == 0 || receipt.Revision > s.Presentation.AgentQueueRevision {
+			return errors.New("chat queue mutation receipt is invalid")
+		}
+	}
+	for operationID, receipt := range s.PresentationMutationReceipts {
+		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.Revision > s.Presentation.PresentationRevision {
+			return errors.New("chat presentation mutation receipt is invalid")
+		}
+	}
+	for operationID, receipt := range s.RuntimeControlMutationReceipts {
+		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.Revision > s.Presentation.RuntimeControlRevision {
+			return errors.New("chat runtime-control mutation receipt is invalid")
+		}
+	}
+	for operationID, receipt := range s.WorkspaceMutationReceipts {
+		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || strings.TrimSpace(receipt.CWD) == "" || receipt.Revision > s.Presentation.WorkspaceRevision {
+			return errors.New("chat workspace mutation receipt is invalid")
+		}
+		seenDetachOperations := make(map[provider.OperationID]struct{}, len(receipt.DetachOperationIDs))
+		for _, rawDetachOperationID := range receipt.DetachOperationIDs {
+			detachOperationID := provider.NormalizeOperationID(string(rawDetachOperationID))
+			if detachOperationID == "" || detachOperationID != rawDetachOperationID {
+				return errors.New("chat workspace mutation receipt has an invalid detach operation identity")
+			}
+			if _, duplicate := seenDetachOperations[detachOperationID]; duplicate {
+				return errors.New("chat workspace mutation receipt contains duplicate detach operations")
+			}
+			seenDetachOperations[detachOperationID] = struct{}{}
+			if !workspaceReceiptHasDetachEntry(s, detachOperationID) {
+				return errors.New("chat workspace mutation receipt is missing a durable detach effect")
+			}
+		}
+	}
+	for operationID, receipt := range s.LaneSelectionMutationReceipts {
+		if operationID == "" || strings.TrimSpace(receipt.Digest) == "" || receipt.LaneID == "" || receipt.Revision > s.Revision {
+			return errors.New("chat lane-selection mutation receipt is invalid")
+		}
+		if _, exists := s.Lanes[receipt.LaneID]; !exists {
+			return errors.New("chat lane-selection mutation receipt references an unknown lane")
+		}
+	}
+	for operationID, receipt := range s.CancelMutationReceipts {
+		if operationID == "" || receipt.Cancelled || strings.TrimSpace(receipt.Reason) != "idle" {
+			return errors.New("chat cancel mutation receipt is invalid")
+		}
+		if _, exists := s.Operations[operationID]; !exists {
+			return errors.New("chat cancel mutation receipt is not reserved")
+		}
+	}
+	for operationID, receipt := range s.AgentWaitObservationReceipts {
+		if operationID == "" || !validAgentWaitObservationDigest(receipt.Digest) {
+			return errors.New("chat agent wait observation receipt is invalid")
+		}
+		if _, exists := s.Operations[operationID]; !exists {
+			return errors.New("chat agent wait observation receipt is not reserved")
+		}
+	}
+	if err := s.Presentation.Validate(); err != nil {
+		return err
+	}
+	if err := s.Environment.Validate(); err != nil {
+		return err
+	}
+	if s.Obligation != nil {
+		if err := s.Obligation.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := s.Parent.Validate(s.ChatID); err != nil {
+		return err
+	}
+	if s.NativeForkThrough > s.LedgerHead() || (s.NativeForkThrough > 0 && (s.Parent == nil || !s.Parent.Forked)) {
+		return errors.New("native fork coverage belongs only to a forked subsession's inherited rows")
+	}
+	if s.ContextFloor > s.LedgerHead() {
+		return errors.New("chat context floor is ahead of the semantic ledger")
+	}
+	var sequence uint64
+	for _, event := range s.Ledger {
+		sequence++
+		if event.Sequence != sequence {
+			return fmt.Errorf("ledger sequence %d is not contiguous at %d", event.Sequence, sequence)
+		}
+		if strings.TrimSpace(event.EventID) == "" || strings.TrimSpace(event.MessageID) == "" || event.OperationID == "" {
+			return errors.New("ledger event is missing message or operation identity")
+		}
+		if err := validateTimeline(event.Timeline); err != nil {
+			return fmt.Errorf("ledger event %q timeline: %w", event.EventID, err)
+		}
+		if event.Permission != nil && strings.TrimSpace(event.Permission.RequestID) == "" {
+			return errors.New("ledger permission is missing request identity")
+		}
+		if event.Role != "assistant" && (len(event.Timeline) > 0 || event.Permission != nil || event.TurnTerminal != nil) {
+			return errors.New("non-assistant ledger row owns assistant-only state")
+		}
+		if event.Terminal != nil && event.Role != "assistant" {
+			return errors.New("non-assistant ledger row owns terminal state")
+		}
+		if event.TurnTerminal != nil && strings.TrimSpace(event.TurnRootID) == "" {
+			return errors.New("segmented assistant row is missing its turn root")
+		}
+		if event.SteerState != "" {
+			if event.Role != "user" || strings.TrimSpace(event.TurnRootID) == "" {
+				return errors.New("steering row is missing user or turn-root ownership")
+			}
+			switch event.SteerState {
+			case "sending", "accepted", "applied", "uncertain":
+			default:
+				return errors.New("ledger steering row has an unknown state")
+			}
+		}
+		if event.ContextExcluded || event.Inherited {
+			if event.LaneID != "" {
+				return errors.New("context-excluded or inherited ledger event claims child lane ownership")
+			}
+		} else {
+			if event.LaneID == "" || event.ProviderID == "" {
+				return errors.New("ledger event is missing lane identity")
+			}
+			if _, ok := s.Lanes[event.LaneID]; !ok {
+				return errors.New("ledger event belongs to an unknown lane")
+			}
+		}
+	}
+	for id, lane := range s.Lanes {
+		if id == "" || lane.Identity.ID != id {
+			return errors.New("lane map identity mismatch")
+		}
+		if lane.Identity.ChatID != s.ChatID {
+			return errors.New("lane belongs to another chat")
+		}
+		if err := lane.Identity.Validate(); err != nil {
+			return err
+		}
+		if lane.CoveredThrough > s.LedgerHead() {
+			return errors.New("lane coverage is ahead of the chat ledger")
+		}
+		switch lane.Context.ImportMode {
+		case provider.ContextImportUnsupported, "":
+			if lane.Context.ImportReadback || lane.Context.IdempotentImport {
+				return errors.New("unsupported context import advertises transactional guarantees")
+			}
+		case provider.ContextImportNonSampling:
+			if !lane.Context.ImportReadback || !lane.Context.IdempotentImport || lane.Context.MaxImportEvents <= 0 || lane.Context.MaxImportBytes <= 0 {
+				return errors.New("non-sampling context import lacks readback, idempotency, or bounded limits")
+			}
+		default:
+			return fmt.Errorf("lane context has unknown import mode %q", lane.Context.ImportMode)
+		}
+		var covered uint64
+		for sequence, record := range lane.Coverage {
+			if sequence == 0 || sequence > s.LedgerHead() || record.Sequence != sequence {
+				return errors.New("lane coverage record has an invalid sequence")
+			}
+			if s.Ledger[sequence-1].EventID != record.EventID {
+				return errors.New("lane coverage record does not match the immutable ledger event")
+			}
+			switch record.Status {
+			case CoverageNativeSeen, CoverageImported, CoverageSeeded, CoveragePromptSeen, CoverageUncertain, CoverageExcluded:
+			default:
+				return fmt.Errorf("lane coverage record has unknown status %q", record.Status)
+			}
+		}
+		for sequence := uint64(1); ; sequence++ {
+			if _, ok := lane.Coverage[sequence]; !ok {
+				break
+			}
+			covered = sequence
+		}
+		if lane.CoveredThrough != covered {
+			return errors.New("lane covered-through frontier hides an unresolved gap")
+		}
+		if !lane.Thread.IsZero() {
+			if err := lane.Thread.Validate(lane.Identity.Realm.ProviderID); err != nil {
+				return err
+			}
+		}
+		if lane.Provision != nil {
+			if !lane.Thread.IsZero() {
+				return errors.New("provider lane cannot be provisional and established at once")
+			}
+			if !lane.Creation.DeferredUntilInput {
+				return errors.New("provider lane has a provisional thread without deferred creation capability")
+			}
+			if err := lane.Provision.Validate(lane.Identity.Realm.ProviderID); err != nil {
+				return err
+			}
+			if !lane.Delivery.StableInputIdentity || !lane.Delivery.ConsumptionReceipt {
+				return errors.New("deferred provider lane lacks a stable input consumption receipt")
+			}
+			if lane.Phase != LaneAbsent && lane.Phase != LaneCreating && lane.Phase != LaneBlocked && lane.Phase != LaneBroken {
+				return errors.New("provisional provider lane has an invalid phase")
+			}
+		}
+		if lane.CreateAfterCandidateAbsence {
+			if !lane.Thread.IsZero() || !lane.Creation.DeferredUntilInput {
+				return errors.New("candidate absence may create only on an unestablished deferred lane")
+			}
+			for _, record := range lane.Coverage {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded || record.Status == CoveragePromptSeen || record.Status == CoverageUncertain {
+					return errors.New("lane with provider-native coverage may not create after candidate absence")
+				}
+			}
+		}
+		if lane.InitialSeedPending {
+			for _, record := range lane.Coverage {
+				if record.Status == CoverageNativeSeen || record.Status == CoverageImported || record.Status == CoverageSeeded || record.Status == CoveragePromptSeen || record.Status == CoverageUncertain {
+					return errors.New("lane with consumed provider context still has an initial seed pending")
+				}
+			}
+		}
+		if lane.Phase == LaneCreating && !lane.Thread.IsZero() {
+			return errors.New("established lane cannot re-enter creating phase")
+		}
+	}
+	validateOwner := func(owner ProviderActivityOwner) error { return legacyValidateProviderActivityOwner(s, owner) }
+	for id, value := range s.Tools {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("tool activity is missing its provider id")
+		}
+		if err := validateOwner(value.Owner); err != nil {
+			return err
+		}
+		if value.Owner.OperationID == "" {
+			return errors.New("background activity is missing immutable operation ownership")
+		}
+	}
+	for operationID, value := range s.Plans {
+		if operationID == "" || value.Owner.OperationID != operationID {
+			return errors.New("plan activity operation ownership mismatch")
+		}
+		if err := validateOwner(value.Owner); err != nil {
+			return err
+		}
+	}
+	for id, value := range s.Permissions {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("permission activity is missing its provider id")
+		}
+		if err := validateOwner(value.Owner); err != nil {
+			return err
+		}
+	}
+	for id, value := range s.Background {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("background activity is missing its provider id")
+		}
+		if err := validateOwner(value.Owner); err != nil {
+			return err
+		}
+	}
+	for laneID := range s.Usage {
+		if _, ok := s.Lanes[laneID]; !ok {
+			return errors.New("usage activity belongs to an unknown lane")
+		}
+	}
+	for laneID, value := range s.Compactions {
+		if laneID != value.Owner.LaneID {
+			return errors.New("compaction activity lane ownership mismatch")
+		}
+		if err := validateOwner(value.Owner); err != nil {
+			return err
+		}
+	}
+	for laneID := range s.Transport {
+		if _, ok := s.Lanes[laneID]; !ok {
+			return errors.New("transport health belongs to an unknown lane")
+		}
+	}
+	if s.ActiveLaneID != "" {
+		if _, ok := s.Lanes[s.ActiveLaneID]; !ok {
+			return errors.New("active lane does not exist")
+		}
+	}
+	for index, entry := range s.Queue {
+		if err := validateTurnPresentation(entry.Presentation); err != nil {
+			return fmt.Errorf("queue entry %d: %w", index, err)
+		}
+	}
+	seenStagedQueue := make(map[string]struct{}, len(s.StagedQueue))
+	for _, entry := range s.StagedQueue {
+		if strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Text) == "" && len(entry.Attachments) == 0 {
+			return errors.New("staged queue entry is missing identity or content")
+		}
+		if _, duplicate := seenStagedQueue[entry.ID]; duplicate {
+			return errors.New("staged queue contains duplicate identity")
+		}
+		seenStagedQueue[entry.ID] = struct{}{}
+		switch entry.Source {
+		case "", "agent", "host":
+		default:
+			return errors.New("staged queue entry has invalid source")
+		}
+		switch entry.Delivery {
+		case "", "auto", "queue", "steer":
+		default:
+			return errors.New("staged queue entry has invalid delivery")
+		}
+	}
+	if s.DesiredLaneID != "" {
+		if _, ok := s.Lanes[s.DesiredLaneID]; !ok {
+			return errors.New("desired lane does not exist")
+		}
+	}
+	if s.Foreground != nil {
+		if err := validateTurnPresentation(s.Foreground.Input.Presentation); err != nil {
+			return fmt.Errorf("foreground input: %w", err)
+		}
+		lane, ok := s.Lanes[s.Foreground.LaneID]
+		if !ok {
+			return errors.New("foreground lane does not exist")
+		}
+		validPhase := lane.Phase == LaneRunning && (s.Foreground.Status == ForegroundDispatching || s.Foreground.Status == ForegroundRunning)
+		validPhase = validPhase || lane.Phase == LaneCreating && lane.Provision != nil &&
+			(s.Foreground.Status == ForegroundDispatching || s.Foreground.Status == ForegroundRunning || s.Foreground.Status == ForegroundReconciling)
+		// A persisted-but-not-yet-dispatched input survives a daemon restart. The
+		// exact lane must attach before that Pending outbox entry becomes
+		// executable, so dispatching may temporarily coexist with LaneResuming.
+		validPhase = validPhase || lane.Phase == LaneResuming && s.Foreground.Status == ForegroundDispatching
+		validPhase = validPhase || lane.Phase == LaneReconciling && s.Foreground.Status == ForegroundReconciling
+		validPhase = validPhase || lane.Phase == LaneResuming && s.Foreground.Status == ForegroundReconciling
+		validPhase = validPhase || (lane.Phase == LaneBlocked || lane.Phase == LaneBroken) && s.Foreground.Status == ForegroundUncertain
+		if !validPhase {
+			return fmt.Errorf("foreground turn has incompatible lane phase %q", lane.Phase)
+		}
+		if err := validateTimeline(s.Foreground.Timeline); err != nil {
+			return fmt.Errorf("foreground timeline: %w", err)
+		}
+		if strings.TrimSpace(s.Foreground.RootAssistantMessageID) == "" || strings.TrimSpace(s.Foreground.CurrentAssistantMessageID) == "" {
+			return errors.New("foreground turn is missing assistant segment identity")
+		}
+	}
+	seenSteers := make(map[provider.OperationID]struct{})
+	for pending := s.PendingSteer; pending != nil; pending = pending.Next {
+		if _, duplicate := seenSteers[pending.OperationID]; duplicate {
+			return errors.New("pending steer has duplicate ownership")
+		}
+		seenSteers[pending.OperationID] = struct{}{}
+		if err := validateTurnPresentation(pending.Presentation); err != nil {
+			return fmt.Errorf("pending steer: %w", err)
+		}
+		if s.Foreground == nil || pending.LaneID != s.Foreground.LaneID || pending.Turn != s.Foreground.Turn {
+			return errors.New("pending steer lost its foreground turn owner")
+		}
+		if pending.OperationID == "" || strings.TrimSpace(pending.Text) == "" && len(pending.Attachments) == 0 {
+			return errors.New("pending steer is incomplete")
+		}
+		switch pending.Status {
+		case SteerDispatching, SteerAccepted, SteerUncertain:
+		default:
+			return errors.New("pending steer has an unknown status")
+		}
+	}
+	if s.PendingCancel != nil {
+		if s.Foreground == nil || s.PendingCancel.LaneID != s.Foreground.LaneID || s.PendingCancel.Turn != s.Foreground.Turn || s.PendingCancel.OperationID == "" {
+			return errors.New("pending cancellation lost its foreground turn owner")
+		}
+	}
+	seenEffects := make(map[string]struct{}, len(s.Outbox))
+	deleteEffectSeen := false
+	for _, effect := range s.Outbox {
+		if strings.TrimSpace(effect.ID) == "" || effect.Kind == "" || effect.Status == "" {
+			return errors.New("chat outbox contains an incomplete effect")
+		}
+		if _, duplicate := seenEffects[effect.ID]; duplicate {
+			return errors.New("chat outbox contains duplicate effect id")
+		}
+		seenEffects[effect.ID] = struct{}{}
+		if effect.Kind == EffectDeleteChat {
+			if deleteEffectSeen {
+				return errors.New("chat outbox contains duplicate delete-chat effects")
+			}
+			deleteEffectSeen = true
+			if !s.Deleted ||
+				effect.ID != deleteChatEffectID(s.ChatID) ||
+				effect.OperationID != s.DeletionOperationID ||
+				effect.ChatID != s.ChatID ||
+				effect.TabID != s.Presentation.TabID ||
+				effect.LaneID != "" {
+				return errors.New("delete-chat outbox effect lost its exact tombstone identity")
+			}
+		} else if effect.Kind == EffectCheckpointRestore {
+			if effect.LaneID != "" || effect.OperationID == "" || effect.TurnSequence <= 0 || effect.ObservedAtUnixMS <= 0 ||
+				validateCheckpointRestorePayload(effect.Checkpoint, effect.TurnSequence, effect.CheckpointDigest) != nil {
+				return errors.New("checkpoint-restore outbox effect lost its immutable request")
+			}
+		} else if effect.Kind == EffectDetachLane {
+			lane, ok := s.Lanes[effect.LaneID]
+			if !ok || effect.OperationID == "" || strings.TrimSpace(effect.ConnectionID) == "" || effect.Generation == 0 {
+				return errors.New("lane-detach outbox effect lost its immutable request")
+			}
+			if lane.Identity.ID != effect.LaneID || lane.Identity.ChatID != s.ChatID ||
+				effect.Owner.TabID == "" ||
+				effect.OperationID != DetachOperationID(s.ChatID, effect.LaneID, effect.ConnectionID, effect.Generation) ||
+				effect.ID != detachEffectID(effect.OperationID) {
+				return errors.New("lane-detach outbox effect changed its lane identity")
+			}
+			// A Pending effect must still fence the exact live attachment before the
+			// coordinator is allowed to claim it. A Dispatched effect may instead
+			// observe a changed attachment after a crash; recovery must be able to
+			// convert that unknown-acceptance window to Ambiguous without resending.
+			if effect.Status == OutboxPending {
+				if effect.Owner != lane.Owner || lane.ConnectionGeneration != effect.Generation || lane.Attachment == nil ||
+					strings.TrimSpace(lane.Attachment.ConnectionID) != strings.TrimSpace(effect.ConnectionID) {
+					return errors.New("lane-detach outbox effect changed its exact attachment")
+				}
+			}
+		} else if effect.Kind == EffectExternalMutation {
+			if effect.LaneID != "" || strings.TrimSpace(effect.ChatID) != s.ChatID ||
+				effect.OperationID == "" || strings.TrimSpace(effect.MutationKind) == "" ||
+				strings.TrimSpace(effect.MutationMethod) == "" || strings.TrimSpace(effect.MutationDigest) == "" ||
+				strings.TrimSpace(effect.TabID) == "" {
+				return errors.New("external mutation outbox effect lost its immutable request")
+			}
+		} else {
+			if effect.LaneID == "" {
+				return errors.New("provider outbox effect is missing lane identity")
+			}
+			if _, ok := s.Lanes[effect.LaneID]; !ok {
+				return errors.New("chat outbox effect belongs to an unknown lane")
+			}
+		}
+		switch effect.Kind {
+		case EffectCreateLane, EffectResumeLane, EffectImportContext, EffectStartTurn, EffectReconcileTurn, EffectSteerTurn, EffectCancelTurn, EffectPermission, EffectBackground, EffectCheckpointRestore, EffectDetachLane, EffectExternalMutation, EffectDeleteChat:
+		default:
+			return fmt.Errorf("chat outbox contains unknown effect kind %q", effect.Kind)
+		}
+		switch effect.Status {
+		case OutboxPending, OutboxDispatched, OutboxAccepted, OutboxConsumed, OutboxAmbiguous, OutboxCompleted, OutboxFailed:
+		default:
+			return fmt.Errorf("chat outbox contains unknown status %q", effect.Status)
+		}
+		if effect.Kind == EffectStartTurn && effect.Input == nil {
+			return errors.New("start-turn outbox effect is missing its immutable input")
+		}
+		if effect.Kind == EffectStartTurn && effect.Input != nil {
+			input := *effect.Input
+			if input.DeltaDigest != "" {
+				if input.OperationID != effect.OperationID || input.LaneID != effect.LaneID || input.DeltaThrough > s.LedgerHead() {
+					return errors.New("context delta lost its input owner or ledger range")
+				}
+				if err := validateContextDelta(input, effect.Batch); err != nil {
+					return err
+				}
+			} else if input.DeltaFrom != 0 || input.DeltaThrough != 0 {
+				return errors.New("context delta is missing its digest")
+			}
+		}
+		if effect.Input != nil {
+			if err := validateTurnPresentation(effect.Input.Presentation); err != nil {
+				return fmt.Errorf("%s outbox input: %w", effect.Kind, err)
+			}
+		}
+		if effect.Kind == EffectImportContext && effect.Batch == nil {
+			return errors.New("context-import outbox effect is missing its immutable projection")
+		}
+		if effect.Kind == EffectSteerTurn && effect.Input == nil {
+			return errors.New("steer outbox effect is missing its immutable input")
+		}
+		if effect.Kind == EffectPermission && (strings.TrimSpace(effect.RequestID) == "" || strings.TrimSpace(effect.OptionID) == "") {
+			return errors.New("permission outbox effect is missing its immutable decision")
+		}
+		if effect.Kind == EffectBackground {
+			if effect.Background == nil || effect.Background.OperationID != effect.OperationID {
+				return errors.New("background outbox effect is missing its immutable action")
+			}
+			if err := legacyBackgroundActionValidate(*effect.Background, s); err != nil {
+				return fmt.Errorf("background outbox effect: %w", err)
+			}
+			if len(effect.Result) > 0 && !json.Valid(effect.Result) {
+				return errors.New("background outbox receipt is not valid json")
+			}
+		}
+		if effect.Kind == EffectCheckpointRestore && len(effect.Result) > 0 && !json.Valid(effect.Result) {
+			return errors.New("checkpoint-restore outbox receipt is not valid json")
+		}
+	}
+	if s.Deleted && !deleteEffectSeen {
+		return errors.New("deleted chat tombstone has no durable delete-chat effect")
+	}
+	return nil
+}
+
+func legacyValidateProviderActivityOwner(state State, owner ProviderActivityOwner) error {
+	owner.LaneID = provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	owner.OperationID = provider.NormalizeOperationID(string(owner.OperationID))
+	owner.TurnID = strings.TrimSpace(owner.TurnID)
+	if owner.LaneID == "" {
+		return errors.New("provider activity is missing lane ownership")
+	}
+	lane, ok := state.Lanes[owner.LaneID]
+	if !ok {
+		return errors.New("provider activity belongs to an unknown lane")
+	}
+	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lane.ConnectionGeneration {
+		return errors.New("provider activity has an invalid connection generation")
+	}
+	if owner.OperationID == "" {
+		return errors.New("provider activity is missing operation ownership")
+	}
+	if !legacyProviderActivityOwnerMatches(state, owner) {
+		return errors.New("provider activity does not match an exact current or historical actor turn")
+	}
+	return nil
+}
+
+func legacyProviderActivityOwnerMatches(state State, owner ProviderActivityOwner) bool {
+	laneID := provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	operationID := provider.NormalizeOperationID(string(owner.OperationID))
+	turnID := strings.TrimSpace(owner.TurnID)
+	if laneID == "" || operationID == "" {
+		return false
+	}
+	if _, ok := state.Lanes[laneID]; !ok {
+		return false
+	}
+
+	if foreground := state.Foreground; foreground != nil &&
+		foreground.LaneID == laneID && provider.NormalizeOperationID(string(foreground.OperationID)) == operationID {
+		// A live turn with no native identity is not an ownership proof. It
+		// becomes eligible only after admission supplies the exact native id.
+		return turnID != "" && strings.TrimSpace(foreground.Turn.NativeID) == turnID
+	}
+
+	found := false
+	knownNativeTurn := false
+	matchedNativeTurn := false
+	for _, event := range state.Ledger {
+		if !legacyProviderActivityLedgerOwnsLane(state, laneID, event) ||
+			provider.NormalizeOperationID(string(event.OperationID)) != operationID {
+			continue
+		}
+		found = true
+		eventTurnID := strings.TrimSpace(event.NativeTurnID)
+		if eventTurnID != "" {
+			knownNativeTurn = true
+		}
+		if turnID != "" && eventTurnID == turnID {
+			matchedNativeTurn = true
+		}
+	}
+	if turnID != "" {
+		return matchedNativeTurn
+	}
+	// An empty native turn is valid only for a historical operation for which
+	// the actor has no native turn id at all. It must never wildcard through a
+	// row that does know its native turn.
+	return found && !knownNativeTurn
+}
+
+func legacyProviderActivityLedgerOwnsLane(state State, laneID provider.LaneID, event LedgerEvent) bool {
+	laneID = provider.LaneID(strings.TrimSpace(string(laneID)))
+	if event.ContextExcluded || event.Inherited {
+		return false
+	}
+	if laneID == "" {
+		return event.LaneID != ""
+	}
+	if event.LaneID == laneID {
+		return true
+	}
+	return false
+}
+
+func legacyBackgroundActionValidate(a BackgroundAction, state State) error {
+	a.OperationID = provider.NormalizeOperationID(string(a.OperationID))
+	if a.OperationID == "" || strings.TrimSpace(a.ChatID) == "" || strings.TrimSpace(a.TabID) == "" {
+		return errors.New("background action requires operation, chat, and tab identity")
+	}
+	if strings.TrimSpace(a.ChatID) != state.ChatID || strings.TrimSpace(a.TabID) != strings.TrimSpace(state.Presentation.TabID) {
+		return errors.New("background action does not match the actor attachment")
+	}
+	if err := legacyValidateProviderActivityOwner(state, a.Owner); err != nil {
+		return fmt.Errorf("background action owner: %w", err)
+	}
+	if a.Owner.OperationID == "" {
+		return errors.New("background action owner is missing operation identity")
+	}
+	payloads := 0
+	for _, present := range []bool{a.Spawn != nil, a.Message != nil, a.Retry != nil, a.Cancel != nil, a.Permission != nil, a.Register != nil, a.Settle != nil, a.Stop != nil} {
+		if present {
+			payloads++
+		}
+	}
+	if payloads != 1 {
+		return errors.New("background action requires exactly one typed payload")
+	}
+	correct := map[BackgroundActionKind]bool{
+		BackgroundSpawnAgent:       a.Spawn != nil,
+		BackgroundMessageAgent:     a.Message != nil,
+		BackgroundRetryAgent:       a.Retry != nil,
+		BackgroundCancelAgent:      a.Cancel != nil,
+		BackgroundAgentPermission:  a.Permission != nil,
+		BackgroundRegisterExternal: a.Register != nil,
+		BackgroundSettleExternal:   a.Settle != nil,
+		BackgroundStopWork:         a.Stop != nil,
+	}[a.Kind]
+	if !correct {
+		return fmt.Errorf("background action %q has the wrong typed payload", a.Kind)
+	}
+	if a.Kind == BackgroundSpawnAgent || a.Kind == BackgroundRegisterExternal {
+		if !(legacyValidateProviderActivityOwner(state, a.Owner) == nil) {
+			return errors.New("new background work must be tied to an exact current or historical actor turn")
+		}
+	}
+	target := a.TargetWorkID()
+	if target != "" {
+		existing, ok := state.Background[target]
+		if !ok {
+			return fmt.Errorf("background work %q is not actor-owned", target)
+		}
+		if existing.Owner != a.Owner {
+			return errors.New("background action changed immutable work ownership")
+		}
+	}
+	return nil
+}
+
+func legacyCanonicalBackgroundSnapshot(state State, items []BackgroundState) (map[string]BackgroundState, error) {
+	next := make(map[string]BackgroundState, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item.Event.WorkID)
+		if id == "" {
+			return nil, errors.New("background snapshot contains an item without identity")
+		}
+		if _, duplicate := next[id]; duplicate {
+			return nil, fmt.Errorf("background snapshot duplicates work %q", id)
+		}
+		if err := legacyValidateProviderActivityOwner(state, item.Owner); err != nil {
+			return nil, fmt.Errorf("background work %q: %w", id, err)
+		}
+		if item.Owner.OperationID == "" {
+			return nil, fmt.Errorf("background work %q is missing immutable operation ownership", id)
+		}
+		next[id] = item
+	}
+	return next, nil
+}

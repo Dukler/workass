@@ -156,6 +156,15 @@ func (a BackgroundAction) SameRequest(other BackgroundAction) bool {
 }
 
 func (a BackgroundAction) Validate(state State) error {
+	return a.validateWith(state, func(owner ProviderActivityOwner) error {
+		return validateProviderActivityOwner(state, owner)
+	})
+}
+
+// validateWith is Validate with the owner check supplied by the caller, so
+// State.Validate can answer every outbox action from one owner index.
+// validateOwner must be validateProviderActivityOwner(state, ·).
+func (a BackgroundAction) validateWith(state State, validateOwner func(ProviderActivityOwner) error) error {
 	a.OperationID = provider.NormalizeOperationID(string(a.OperationID))
 	if a.OperationID == "" || strings.TrimSpace(a.ChatID) == "" || strings.TrimSpace(a.TabID) == "" {
 		return errors.New("background action requires operation, chat, and tab identity")
@@ -163,7 +172,7 @@ func (a BackgroundAction) Validate(state State) error {
 	if strings.TrimSpace(a.ChatID) != state.ChatID || strings.TrimSpace(a.TabID) != strings.TrimSpace(state.Presentation.TabID) {
 		return errors.New("background action does not match the actor attachment")
 	}
-	if err := validateProviderActivityOwner(state, a.Owner); err != nil {
+	if err := validateOwner(a.Owner); err != nil {
 		return fmt.Errorf("background action owner: %w", err)
 	}
 	if a.Owner.OperationID == "" {
@@ -191,11 +200,8 @@ func (a BackgroundAction) Validate(state State) error {
 	if !correct {
 		return fmt.Errorf("background action %q has the wrong typed payload", a.Kind)
 	}
-	if a.Kind == BackgroundSpawnAgent || a.Kind == BackgroundRegisterExternal {
-		if !backgroundOwnerExists(state, a.Owner) {
-			return errors.New("new background work must be tied to an exact current or historical actor turn")
-		}
-	}
+	// New work (spawn, register) must be tied to an exact current or historical
+	// actor turn: that is the owner check every action already passed above.
 	target := a.TargetWorkID()
 	if target != "" {
 		existing, ok := state.Background[target]
@@ -207,10 +213,6 @@ func (a BackgroundAction) Validate(state State) error {
 		}
 	}
 	return nil
-}
-
-func backgroundOwnerExists(state State, owner ProviderActivityOwner) bool {
-	return validateProviderActivityOwner(state, owner) == nil
 }
 
 func (a BackgroundAction) TargetWorkID() string {
@@ -369,6 +371,7 @@ func reduceReconcileBackgroundSnapshot(state *State, command ReconcileBackground
 
 func canonicalBackgroundSnapshot(state State, items []BackgroundState) (map[string]BackgroundState, error) {
 	next := make(map[string]BackgroundState, len(items))
+	owners := newProviderActivityOwnerIndex(state)
 	for _, item := range items {
 		id := strings.TrimSpace(item.Event.WorkID)
 		if id == "" {
@@ -377,7 +380,7 @@ func canonicalBackgroundSnapshot(state State, items []BackgroundState) (map[stri
 		if _, duplicate := next[id]; duplicate {
 			return nil, fmt.Errorf("background snapshot duplicates work %q", id)
 		}
-		if err := validateProviderActivityOwner(state, item.Owner); err != nil {
+		if err := owners.validate(item.Owner); err != nil {
 			return nil, fmt.Errorf("background work %q: %w", id, err)
 		}
 		if item.Owner.OperationID == "" {

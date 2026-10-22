@@ -100,7 +100,7 @@ func (r *providerChatRuntime) recordAgentWaitObservation(actor *providerChatActo
 	}
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if !state.Initialized || state.Deleted || strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 		return chat.State{}, errors.New("agent wait chat attachment is stale")
 	}
@@ -124,7 +124,7 @@ func (r *providerChatRuntime) recordAgentWaitObservation(actor *providerChatActo
 	if err := actor.engine.Apply(chat.RecordAgentWaitObservation{OperationID: operationID, TabID: tabID, Digest: digest}); err != nil {
 		return chat.State{}, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	receipt, exists := state.AgentWaitObservationReceipts[operationID]
 	if !exists || receipt.Digest != digest {
 		return chat.State{}, errors.New("agent wait observation failed durable readback")
