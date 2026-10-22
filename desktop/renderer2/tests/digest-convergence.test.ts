@@ -8,7 +8,7 @@
 //   - a daemon with no processes answers null, and that answer was never hashed.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { after, before, test } from 'node:test';
+import { after, afterEach, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import type { Chat, Msg } from '../src/store/types.ts';
@@ -32,7 +32,7 @@ before(async () => {
 
 after(async () => {
   for (const store of fixtureStores) store.clearToastTimers();
-  delete (globalThis as any).window;
+  restoreWindow();
   await vite.close();
 });
 
@@ -84,6 +84,19 @@ function mirrorOf(chats: Chat[]) {
     activeId: chats[0]?.id ?? null, seq: 0,
   };
 }
+
+// The gate runs renderer files in one process (--test-isolation=none), where a
+// top-level after() only runs once every file has finished: restore the global
+// window after each test here, or later files see this fixture's window.
+const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window');
+const previousWindow = (globalThis as any).window;
+function restoreWindow() {
+  if (hadWindow) (globalThis as any).window = previousWindow;
+  else delete (globalThis as any).window;
+}
+
+describe('state digest convergence', () => {
+afterEach(restoreWindow);
 
 test('a chat handed over from another machine still counts as this daemon\'s chat', () => {
   const local = chat('tab-1');
@@ -201,4 +214,5 @@ test('an unchanged digest is answered by its etag, and an older daemon still get
   await older.readStateDigest((globalThis as any).window.api);
   await older.readStateDigest((globalThis as any).window.api);
   assert.deepEqual(old, [[], []], 'a digest without an etag is never read conditionally');
+});
 });
