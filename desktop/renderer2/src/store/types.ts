@@ -41,6 +41,9 @@ export interface ToolEvent {
   // `detail`, which the renderer stamps on hydration with the owning row.
   outputDeferred?: boolean; outputBytes?: number;
   inputDeferred?: boolean; inputBytes?: number;
+  // A title over 4 KB (a whole command or file) arrives as its head too; the
+  // row shows one line of it, and the whole title loads when the row opens.
+  titleDeferred?: boolean; titleBytes?: number;
   detail?: { tabId: string; messageId: string };
 }
 // Quiet in-transcript marker that the daemon auto-compacted the context (D1).
@@ -231,6 +234,8 @@ export interface Chat {
   // running its default after rejecting this saved selection.
   configuredModelId?: string | null;
   currentModeId: string | null;
+  // The actor's saved mode, which a live session's reported mode may differ from.
+  configuredModeId?: string | null;
   // Last explicit effort + permission selection for each provider/model in
   // THIS chat. Switching away and back restores the same setup without leaking
   // another tab's controls or sending an id from the previous provider.

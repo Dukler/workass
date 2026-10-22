@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cachedToolOutput, forgetToolOutputs, loadToolOutput } from '../src/chat/tool-detail.ts';
+import { cachedToolOutput, cachedToolTitle, forgetToolOutputs, loadToolOutput, loadToolTitle } from '../src/chat/tool-detail.ts';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../src/chat/history.ts';
 import type { MirrorMsg } from '../src/store/persistence.ts';
 import type { ToolEvent } from '../src/store/types.ts';
@@ -24,7 +24,7 @@ const deferred = (key: string): ToolEvent => ({
 });
 
 test('every history read asks for image references and lean tool payloads', () => {
-  assert.deepEqual(HISTORY_READ_OPTIONS, { deferImages: true, leanTools: true });
+  assert.deepEqual(HISTORY_READ_OPTIONS, { deferImages: true, leanTools: true, leanTitles: true });
 });
 
 test('hydration stamps each deferred payload with the row that owns it', () => {
@@ -76,4 +76,30 @@ test('a reply that is not a detail chunk leaves the head in place', async () => 
     assert.equal(await loadToolOutput(deferred('call-3')), null, 'a chunk that does not advance is refused');
   });
   assert.equal(await loadToolOutput({ ...deferred('call-4'), outputDeferred: false }), null, 'a whole output is never fetched');
+});
+
+test('a long title arrives as its head and an opened row reads it whole, apart from the output', async () => {
+  forgetToolOutputs();
+  const calls: Array<{ field: string; offset: number }> = [];
+  await withApi({
+    archiveLoad: async (_tabId: string, options: { toolDetail: { field: string; offset: number } }) => {
+      calls.push({ field: options.toolDetail.field, offset: options.toolDetail.offset });
+      return options.toolDetail.field === 'title'
+        ? { text: 'cat <<EOF\nwhole title\nEOF', offset: 0, next: 24, total: 24 }
+        : { text: 'whole output', offset: 0, next: 12, total: 12 };
+    },
+  }, async () => {
+    const tool: ToolEvent = { ...deferred('call-5'), title: 'cat <<EOF\n', titleDeferred: true, titleBytes: 24 };
+    assert.equal(cachedToolTitle(tool), null);
+    assert.equal(await loadToolTitle(tool), 'cat <<EOF\nwhole title\nEOF');
+    assert.equal(cachedToolTitle(tool), 'cat <<EOF\nwhole title\nEOF');
+    assert.equal(await loadToolOutput(tool), 'whole output', 'the output is its own read');
+    assert.equal(await loadToolTitle({ ...tool, titleDeferred: false }), null, 'a whole title is never fetched');
+  });
+  assert.deepEqual(calls, [{ field: 'title', offset: 0 }, { field: 'output', offset: 0 }]);
+  const [message] = actorMessages([{
+    id: 'reply-2', role: 'assistant', content: '', status: 'done', at: null,
+    events: [{ key: 'long', kind: 'tool', title: 'head', titleDeferred: true }],
+  }] as unknown as MirrorMsg[], 'tab-tools');
+  assert.deepEqual((message.events[0] as ToolEvent).detail, { tabId: 'tab-tools', messageId: 'reply-2' });
 });

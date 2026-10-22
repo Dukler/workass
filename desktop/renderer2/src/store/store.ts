@@ -88,6 +88,9 @@ const DIGEST_SYNC_DEBOUNCE = 250;
 // A daemon without providers:catalog re-publishes a drifted catalog only from a
 // detection pass; its background refresh re-measures latency every 5 minutes.
 const CATALOG_DETECT_FALLBACK_MS = 10 * 60 * 1000;
+// A session divergence that one session:get could not resolve is not re-read on
+// every heartbeat; it is re-read when either side changes, or after this long.
+const SESSION_DIGEST_RETRY_MS = 60 * 1000;
 const UPDATE_TERMINAL_TIMEOUT = 11 * 60 * 1000;
 
 type SyncScope = 'session' | 'background' | 'permissions' | 'catalog' | 'settings' | 'processes';
@@ -188,6 +191,12 @@ function runtimeControlsFingerprint(chat: Pick<Chat, 'providerId' | 'currentMode
 
 function actorSelectedModelId(chat: Pick<Chat, 'currentModelId'> & { configuredModelId?: string | null }): string | null {
   return chat.configuredModelId === undefined ? chat.currentModelId : chat.configuredModelId;
+}
+
+// The digest reports the actor's saved mode; a chat with a live session shows
+// the mode that session reports, which a new chat never saved.
+function actorSelectedModeId(chat: Pick<Chat, 'currentModeId'> & { configuredModeId?: string | null }): string | null {
+  return chat.configuredModeId === undefined ? chat.currentModeId : chat.configuredModeId;
 }
 
 function ownerMachineId(chat: Pick<Chat, 'id' | 'machineId'>): string {
@@ -414,7 +423,7 @@ export function titleFromPrompt(text: string, max = 34): string {
 // be measured after the fact).
 // session:get asks for the same references as history pages: a message's own
 // images and large tool payloads load when seen or opened.
-const LEAN_SESSION_READ = { leanTools: true, deferImages: true } as const;
+const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true } as const;
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
@@ -591,6 +600,18 @@ export class Store {
   private catalogDigestKey: string | null = null;
   private catalogSyncedKey: string | null = null;
   private catalogDetectFallbackAt = Number.NEGATIVE_INFINITY;
+  // The (daemon, local) session divergence the latest digest reported, and the
+  // one the last applied session:get left behind (see runScopedSync).
+  private lastDigest: StateDigest | null = null;
+  // The last full digest this daemon sent; its etag makes the next read conditional.
+  private lastFullDigest: StateDigest | null = null;
+  private sessionSyncedKey: string | null = null;
+  private sessionSyncedAt = Number.NEGATIVE_INFINITY;
+  // Chats whose digest row diverged: the background scope refreshes only these.
+  // Ids the last local session:get returned. A chat handed over from another
+  // machine keeps that machine's tag in its stored id, yet it is this daemon's.
+  private localMirrorChatIds = new Set<string>();
+  private syncBackgroundPairs = new Map<string, { tabId: string; chatId: string }>();
   private localSettingsRevision: string | null = null;
   private localProcHash: string | null = null;
   private catalogHashEpoch = 0;
@@ -1185,6 +1206,7 @@ export class Store {
         currentModelId: controls.modelId,
         configuredModelId: c.currentModelId,
         currentModeId: controls.modeId,
+        configuredModeId: c.currentModeId,
         modelControls,
         providerId, providerName: binding.useLiveControls ? c.liveSession?.providerName ?? null : null,
         contextUsageByProvider,
@@ -1610,6 +1632,7 @@ export class Store {
           latest.currentModelId = receipt.currentModelId;
           latest.configuredModelId = receipt.currentModelId;
           latest.currentModeId = receipt.currentModeId;
+          latest.configuredModeId = receipt.currentModeId;
           latest.modelControls = normalizeModelControlMemory(receipt.modelControls);
           this.committedRuntimeControlFingerprints.set(tabId, runtimeControlsFingerprint(latest));
         }
@@ -2010,6 +2033,7 @@ export class Store {
       chat.currentModelId = local.currentModelId;
       chat.configuredModelId = local.configuredModelId;
       chat.currentModeId = local.currentModeId;
+      chat.configuredModeId = local.configuredModeId;
       chat.modelControls = local.modelControls;
       chat._controlRevision = local._controlRevision;
       // Reconciliation supplies the new CAS revision, while the unacknowledged
@@ -2062,6 +2086,7 @@ export class Store {
     const previousGlobalRevision = this.state.globalRevision;
     const pendingQueues = new Map(this.pendingQueueSnapshots);
     const authoritativeChatIDs = new Set(authoritative.chats.map((chat) => chat.id));
+    this.localMirrorChatIds = authoritativeChatIDs;
     const restored = this.fromMirror(authoritative);
     // session:save broadcasts its refresh before the invoke reply. Preserve a
     // drag while that exact global operation is still in flight, and reject a
@@ -2255,8 +2280,18 @@ export class Store {
 
   private async readStateDigest(bridge: NonNullable<typeof window.api>): Promise<unknown> {
     if (typeof bridge.stateDigest !== 'function') throw new Error('no state digest channel');
-    const digest = await bridge.stateDigest();
-    if (!isStateDigest(digest)) throw new Error('invalid state digest response');
+    // A daemon that names its digest's content hash (etag) answers a tiny
+    // {unchanged} while nothing changed. An older daemon or bridge ignores
+    // the argument and sends the full digest, which is used as before.
+    const cached = this.lastFullDigest;
+    const etag = typeof cached?.etag === 'string' && cached.etag ? cached.etag : '';
+    const reply = await (etag ? bridge.stateDigest({ ifNoneMatch: etag }) : bridge.stateDigest());
+    let digest: StateDigest;
+    if (cached && etag && isUnchangedStateDigest(reply, etag)) digest = cached;
+    else if (isStateDigest(reply)) {
+      digest = reply;
+      this.lastFullDigest = reply;
+    } else throw new Error('invalid state digest response');
     this.handleStateDigest(digest);
     return digest;
   }
@@ -2267,27 +2302,31 @@ export class Store {
   }
 
   private digestSyncScopes(digest: StateDigest): Set<SyncScope> {
+    this.lastDigest = digest;
     const scopes = new Set<SyncScope>();
     if (this.sessionHydrationPending) scopes.add('session');
-    if (digest.globalRevision !== this.state.globalRevision) scopes.add('session');
+    const session = this.sessionDivergence(digest);
+    // One session:get per distinct (daemon, local) divergence. Re-reading the
+    // same daemon state into the same local state cannot converge; it only
+    // re-sent the whole mirror (and a spawned-work read per chat) on every
+    // heartbeat. Either side changing re-arms it, and a bounded retry remains.
+    if (session.key && (session.key !== this.sessionSyncedKey
+      || Date.now() - this.sessionSyncedAt >= SESSION_DIGEST_RETRY_MS)) {
+      scopes.add('session');
+      if (session.background.length) {
+        scopes.add('background');
+        for (const pair of session.background) this.syncBackgroundPairs.set(`${pair.tabId}\u0000${pair.chatId}`, pair);
+      }
+    }
     const localByPair = new Map(this.state.chats.map((chat) => [`${chat.id}\u0000${chat.chatId ?? ''}`, chat]));
     for (const remote of digest.chats) {
       const chat = localByPair.get(`${remote.tabId}\u0000${remote.chatId}`);
-      if (!chat || digestChatSessionDiverged(chat, remote)) {
-        scopes.add('session');
-        scopes.add('background');
-      }
       // Daemons through v0.1.221 send null for "none"; reading .length on it threw
       // here and the probe swallowed it, so no digest ever scheduled a sync.
       const remotePermissionIds = Array.isArray(remote.pendingPermissionIds) ? remote.pendingPermissionIds : [];
       if ((!chat && remotePermissionIds.length)
         || (chat && !sameStrings(localPendingPermissionIDs(chat), remotePermissionIds))) scopes.add('permissions');
     }
-    // Only THIS daemon's chats are in its digest. Another machine's chats live in
-    // that machine's mirror and are carried across every restore (carryRemoteChats),
-    // so counting them here made the two sides permanently unequal: every heartbeat
-    // declared the session diverged and re-restored it, wholesale, forever.
-    if (digest.chats.length !== this.state.chats.filter((chat) => !ownerMachineId(chat)).length) scopes.add('session');
     if (hashMapDiverged(this.localCatalogHashes, digest.catalogHash)) {
       // One catalog sync per distinct (daemon, local) catalog state: re-reading
       // the same state cannot converge, it only repeats work every heartbeat.
@@ -2299,6 +2338,36 @@ export class Store {
     if (digest.settingsRevision && this.localSettingsRevision !== digest.settingsRevision) scopes.add('settings');
     if (digest.procHash && this.localProcHash !== digest.procHash) scopes.add('processes');
     return scopes;
+  }
+
+  /**
+   * Where this daemon's digest and the local session disagree. `key` is empty
+   * when they agree, and otherwise identifies the exact pair of states, so an
+   * unchanged disagreement is recognisable on the next heartbeat.
+   */
+  private sessionDivergence(digest: StateDigest): { key: string; background: Array<{ tabId: string; chatId: string }> } {
+    const parts: unknown[] = [];
+    const background: Array<{ tabId: string; chatId: string }> = [];
+    if (digest.globalRevision !== this.state.globalRevision) parts.push(['global', digest.globalRevision, this.state.globalRevision]);
+    const localByPair = new Map(this.state.chats.map((chat) => [`${chat.id}\u0000${chat.chatId ?? ''}`, chat]));
+    const listed = new Set<string>();
+    for (const remote of digest.chats) {
+      listed.add(remote.tabId);
+      const chat = localByPair.get(`${remote.tabId}\u0000${remote.chatId}`);
+      if (chat && !digestChatSessionDiverged(chat, remote)) continue;
+      parts.push([remote, chat ? digestLocalProjection(chat) : null]);
+      background.push({ tabId: remote.tabId, chatId: remote.chatId });
+    }
+    // Only THIS daemon's chats are in its digest. Another machine's chats live in
+    // that machine's mirror and are carried across every restore (carryRemoteChats),
+    // so counting them here made the two sides permanently unequal: every heartbeat
+    // declared the session diverged and re-restored it, wholesale, forever. A chat
+    // this daemon lists or last returned is its own, even when its stored id still
+    // carries another machine's tag (a chat handed over from that machine).
+    const own = this.state.chats.filter((chat) => !ownerMachineId(chat)
+      || listed.has(chat.id) || this.localMirrorChatIds.has(chat.id)).length;
+    if (digest.chats.length !== own) parts.push(['count', digest.chats.length, own]);
+    return { key: parts.length ? JSON.stringify(parts) : '', background };
   }
 
   private scheduleScopedSync(scopes: Iterable<SyncScope>) {
@@ -2321,17 +2390,32 @@ export class Store {
   private async runScopedSync(scopes: ReadonlySet<SyncScope>) {
     if (scopes.has('session')) {
       const liveEventFence = this.liveTurnEventVersion;
+      const digest = this.lastDigest;
       const result = await this.guardedStep('digest session:get', () => callThrow('getSession', LEAN_SESSION_READ));
       if (result.ok && this.restoreSessionSnapshot(result.value, liveEventFence)) {
         this.recoverIdleQueues();
         this.bumpApp(false);
+        // Whatever still disagrees with the digest that asked for this read
+        // is not something another read of the same state can fix.
+        this.sessionSyncedKey = digest ? this.sessionDivergence(digest).key : null;
+        this.sessionSyncedAt = Date.now();
       }
     }
     if (scopes.has('permissions')) {
       await this.guardedStep('digest permissions', () => this.refreshPendingPermissions());
     }
     if (scopes.has('background')) {
-      await this.guardedStep('digest background', async () => { this.refreshAllSpawnedWork(); });
+      const pairs = [...this.syncBackgroundPairs.values()];
+      this.syncBackgroundPairs.clear();
+      await this.guardedStep('digest background', async () => {
+        // Only the chats whose digest row changed: every other chat's
+        // background work is unchanged, and refreshing all of them cost one
+        // spawned-work read per chat (hundreds) on every divergence.
+        for (const pair of pairs) {
+          const chat = this.state.chats.find((candidate) => candidate.id === pair.tabId && candidate.chatId === pair.chatId);
+          if (chat) void this.refreshSpawnedWork(chat);
+        }
+      });
     }
     if (scopes.has('catalog')) {
       await this.guardedStep('digest catalog', () => this.refreshCatalogSnapshot());
@@ -2382,8 +2466,11 @@ export class Store {
   private async refreshProcesses() {
     if (!has('procList')) return;
     const result = await call('procList');
-    if (!result?.processes) return;
-    this.state.processes = result.processes;
+    // A daemon with no processes answers {processes: null} (a nil Go slice) and
+    // hashes that null in its digest. Skipping it left the local hash unset, so
+    // every heartbeat re-read the process list.
+    if (!result || !('processes' in result) || (result.processes !== null && !Array.isArray(result.processes))) return;
+    this.state.processes = result.processes ?? [];
     this.captureProcHash(result.processes);
     this.bump(PROC);
   }
@@ -2404,7 +2491,7 @@ export class Store {
     });
   }
 
-  private captureProcHash(processes: ProcessSummary[]) {
+  private captureProcHash(processes: ProcessSummary[] | null) {
     const epoch = ++this.procHashEpoch;
     void stateDigestHash(processes).then((hash) => {
       if (epoch === this.procHashEpoch && hash) this.localProcHash = hash;
@@ -4768,6 +4855,7 @@ export class Store {
         explicitEffort: selected.effort,
     });
     chat.configuredModelId = chat.currentModelId;
+    chat.configuredModeId = chat.currentModeId;
     chat.controlsSkipped = undefined;
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
@@ -4798,6 +4886,7 @@ export class Store {
       explicitEffort: selected.effort,
     });
     chat.configuredModelId = chat.currentModelId;
+    chat.configuredModeId = chat.currentModeId;
     chat.controlsSkipped = undefined;
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
@@ -4817,6 +4906,7 @@ export class Store {
   async setModeSel(chatId: string, modeId: string) {
     const chat = this.chat(chatId); if (!chat) return;
     chat.currentModeId = modeId;
+    chat.configuredModeId = modeId;
     this.rememberCurrentControls(chat);
     chat._controlRevision = nextModelControlRevision(chat._controlRevision);
     this.bumpChat(chat);
@@ -6581,8 +6671,8 @@ export class Store {
     this.bumpApp(false);
   }
   private onProcChanged(e: ProcChanged) {
-    if (Array.isArray(e?.processes)) {
-      this.state.processes = e.processes;
+    if (Array.isArray(e?.processes) || e?.processes === null) {
+      this.state.processes = e.processes ?? [];
       this.captureProcHash(e.processes);
       this.bump(PROC);
     }
@@ -7001,7 +7091,17 @@ export function digestChatSessionDiverged(chat: Chat, digest: StateDigestChat): 
     || (chat.runtimeControlRevision ?? 0) !== digest.runtimeControlRevision
     || (chat.providerId ?? null) !== (digest.providerId ?? null)
     || actorSelectedModelId(chat) !== (digest.currentModelId ?? null)
-    || chat.currentModeId !== (digest.currentModeId ?? null);
+    || actorSelectedModeId(chat) !== (digest.currentModeId ?? null);
+}
+// The local side of every field digestChatSessionDiverged compares.
+function digestLocalProjection(chat: Chat): unknown[] {
+  const queue = chat.queue ?? [];
+  return [
+    chat.messages.length, chat.messages.at(-1)?.id ?? null, chat.messageCount ?? null, chat.historyComplete ?? null,
+    localRunningJobID(chat), queue.length, queue[0]?.id ?? null, chat.presentationRevision ?? 0,
+    chat.agentQueueRevision ?? 0, chat.runtimeControlRevision ?? 0, chat.providerId ?? null,
+    actorSelectedModelId(chat), actorSelectedModeId(chat),
+  ];
 }
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -7013,6 +7113,11 @@ function hashMapDiverged(local: Record<string, string> | null, remote: Record<st
   if (!local) return remoteKeys.length > 0;
   const localKeys = Object.keys(local).sort();
   return !sameStrings(localKeys, remoteKeys) || remoteKeys.some((key) => local[key] !== remote[key]);
+}
+function isUnchangedStateDigest(value: unknown, etag: string): boolean {
+  return !!value && typeof value === 'object'
+    && (value as { unchanged?: unknown }).unchanged === true
+    && (value as { etag?: unknown }).etag === etag;
 }
 function isStateDigest(value: unknown): value is StateDigest {
   if (!value || typeof value !== 'object') return false;

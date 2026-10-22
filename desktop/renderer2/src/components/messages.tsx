@@ -1,16 +1,19 @@
-import { memo, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
-import { ImagePlaceholder, useReservedImage } from './MessageImage';
+import { ImagePlaceholder, imageFrameSize, useReservedImage } from './MessageImage';
+import { FLOW_OVERSCAN_PX, flowScroller, flowView, setFlowWriteApplier, trackFlowBlock, type FlowBlock } from '../flow-window';
+import { toolImageGridLayout, toolImageRowsInView, toolImageSpacers, type ToolImageRows } from '../tool-image-layout';
 import { isSubagentHeader, type SubagentNode } from '../subagent-layout';
 import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
-import { cachedToolOutput, loadToolOutput } from '../chat/tool-detail';
+import { cachedToolOutput, cachedToolTitle, loadToolOutput, loadToolTitle } from '../chat/tool-detail';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -257,6 +260,14 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
     return () => { current = false; };
   }, [showOut, t, fullOutput]);
   const output = t.outputDeferred ? fullOutput ?? t.output : t.output;
+  // A long title arrived as its head; the open row shows all of it.
+  const [fullTitle, setFullTitle] = useState<string | null>(() => cachedToolTitle(t));
+  useEffect(() => {
+    if (!showOut || !t.titleDeferred || fullTitle !== null) return;
+    let current = true;
+    void loadToolTitle(t).then((text) => { if (current && text !== null) setFullTitle(text); });
+    return () => { current = false; };
+  }, [showOut, t, fullTitle]);
   const st = toolState(t.status);
   // A subagent header rendered inline as a task row: model brand instead of the
   // status glyph, a "Subagente ·" prefix, and a link to its detail in the rail
@@ -319,8 +330,8 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
         <div className="evt-out">
           {dur && <div className="evt-dur">{dur}</div>}
           {/* the provider's own id, so a renamed row never hides WHICH tool ran */}
-          {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{act.raw}</div>}
-          {raw && raw !== detail && <div className="evt-full">{raw}</div>}
+          {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{t.titleDeferred ? (fullTitle ?? act.raw).trim() : act.raw}</div>}
+          {raw && raw !== detail && <div className="evt-full">{t.titleDeferred && fullTitle !== null && !t.command && !t.location ? fullTitle.trim() : raw}</div>}
           {output}
         </div>
       )}
@@ -345,14 +356,84 @@ function ToolImage({ image, tabId, alt }: { image: MessageImage; tabId: string; 
 export function ToolImageGallery({ tools, tabId }: { tools: ToolEvent[]; tabId: string }) {
   const images = tools.flatMap((tool) => (tool.images ?? []).map((image) => ({ image, tool })));
   if (!images.length) return null;
+  return <ToolImageGrid images={images} tabId={tabId} />;
+}
+
+// Every transcript gallery spans the same reading column; the last width one
+// measured lets the next one lay out exactly before it is ever measured.
+let lastToolGridWidth = 0;
+
+// React's synchronous commit for frame-time window changes: rows near the
+// viewport are mounted in the same frame the scroll moved them there.
+setFlowWriteApplier((writes) => flushSync(() => { for (const write of writes) write(); }));
+
+function sameRows(a: ToolImageRows | null, b: ToolImageRows): boolean {
+  return !!a && a.from === b.from && a.to === b.to;
+}
+
+// A tool gallery mounts only the rows near the viewport (flow-window.ts); the
+// rest are spacers of exactly their height (tool-image-layout.ts), so nothing
+// on screen moves as rows come and go.
+function ToolImageGrid({ images, tabId }: { images: Array<{ image: MessageImage; tool: ToolEvent }>; tabId: string }) {
+  const grid = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(lastToolGridWidth);
+  const [rows, setRows] = useState<ToolImageRows | null>(null);
+  const layout = width > 0 ? toolImageGridLayout(width, images.map(({ image }) => imageFrameSize(image, 'tool'))) : null;
+  const latest = useRef({ images, layout, rows, width });
+  latest.current = { images, layout, rows, width };
+  // Read-only placement for one view, given the grid's top; the width is read
+  // again only when layout may have changed.
+  const block = useRef<FlowBlock | null>(null);
+  block.current ??= {
+    element: () => grid.current,
+    place: (top, view, layoutChanged) => {
+      const state = latest.current;
+      const measured = layoutChanged || state.width <= 0 ? grid.current?.clientWidth ?? 0 : state.width;
+      const nextWidth = measured > 0 ? measured : state.width;
+      if (nextWidth <= 0) return null;
+      const plan = nextWidth === state.width && state.layout
+        ? state.layout
+        : toolImageGridLayout(nextWidth, state.images.map(({ image }) => imageFrameSize(image, 'tool')));
+      const nextRows = toolImageRowsInView(plan.rowHeights, top, view.top - FLOW_OVERSCAN_PX, view.bottom + FLOW_OVERSCAN_PX);
+      if (nextWidth === state.width && sameRows(state.rows, nextRows)) return null;
+      return () => {
+        if (nextWidth !== latest.current.width) { lastToolGridWidth = nextWidth; setWidth(nextWidth); }
+        if (!sameRows(latest.current.rows, nextRows)) setRows(nextRows);
+      };
+    },
+  };
+  // Placed before the first paint (and again when the gallery grows while its
+  // turn streams); after that, the scroller's frames place it as it moves.
+  useLayoutEffect(() => {
+    const element = grid.current;
+    const scroller = flowScroller(element);
+    if (!element) return;
+    const view = flowView(scroller);
+    const write = block.current!.place(element.getBoundingClientRect().top, view, true);
+    write?.();
+  }, [images.length]);
+  useLayoutEffect(() => trackFlowBlock(flowScroller(grid.current), block.current!), []);
+  // Without a document (a server render) there is nothing to window against:
+  // every frame renders, as before.
+  const unplaced = typeof document === 'undefined';
+  const shown = layout && rows ? rows : { from: 0, to: 0 };
+  const spacers = layout && !unplaced ? toolImageSpacers(layout, shown) : { before: 0, after: 0 };
+  const columns = layout?.columns ?? 1;
+  const first = unplaced ? 0 : shown.from * columns;
+  const last = unplaced ? images.length : Math.min(images.length, shown.to * columns);
+  // Nothing near the viewport: the grid itself keeps the height, with no items.
+  const empty = !!layout && last <= first;
   return (
-    <div className="tool-images" aria-label="Imágenes devueltas por herramientas">
-      {images.map(({ image, tool }, index) => {
+    <div className="tool-images" ref={grid} aria-label="Imágenes devueltas por herramientas" style={empty ? { height: layout!.height } : undefined}>
+      {!empty && spacers.before > 0 && <div className="tool-images-pad" style={{ height: spacers.before }} aria-hidden="true" />}
+      {images.slice(first, last).map(({ image, tool }, offset) => {
+        const index = first + offset;
         const alt = image.name || `${tool.title || 'Herramienta'} · imagen ${index + 1}`;
         return (
           <ToolImage image={image} tabId={tabId} alt={alt} key={`${tool.key}-${image.mimeType}-${index}`} />
         );
       })}
+      {!empty && spacers.after > 0 && <div className="tool-images-pad" style={{ height: spacers.after }} aria-hidden="true" />}
     </div>
   );
 }

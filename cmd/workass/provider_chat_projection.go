@@ -10,6 +10,7 @@ import (
 
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
+	"workass/internal/wire"
 )
 
 const sessionProjectionMessageTail = 60
@@ -87,6 +88,13 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 // bounded here: limiting only the serialized rows still paid to deep-copy every
 // historical body before a large chat could paint.
 func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[string]any, error) {
+	return r.projectSession(false, opts...)
+}
+
+// projectSession with encodedRows leaves every chat's messages as the row
+// encodings its page budget already produced, for a caller that marshals the
+// root; the reply bytes are identical.
+func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveReadOptions) (map[string]any, error) {
 	if r == nil || r.sessions == nil {
 		return nil, errors.New("provider chat projection is unavailable")
 	}
@@ -155,20 +163,20 @@ func (r *providerChatRuntime) ProjectSession(opts ...archiveReadOptions) (map[st
 		for _, opt := range opts {
 			opt.beforeBudget(anySlice(projected["messages"]))
 		}
-		messages, err := boundedArchiveHistory(anySlice(projected["messages"]), filepath.Dir(r.sessions.path), deferringMessageImages(opts))
+		page, err := finishArchivePage(anySlice(projected["messages"]), filepath.Dir(r.sessions.path), opts, actorHistoryPageBytes)
 		if err != nil {
 			return nil, err
 		}
-		projected["messages"] = messages
-		projected["historyComplete"] = len(messages) == intValue(projected["messageCount"])
-		annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
-		deferArchiveToolImages(messages)
-		for _, opt := range opts {
-			opt.apply(messages)
+		if encodedRows {
+			projected["messages"] = page.rawMessages()
+		} else {
+			projected["messages"] = page.messages
 		}
+		projected["historyComplete"] = len(page.messages) == intValue(projected["messageCount"])
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
+	// Every chat's rows are finished above; this covers the rest of the root.
 	if err := rehydrateExternalSessionImages(root, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, err
 	}
@@ -216,7 +224,7 @@ func sessionHistoryProjection(state chat.State, activeTabID string) actorHistory
 }
 
 func (r *providerChatRuntime) ProjectSessionRaw(opts ...archiveReadOptions) ([]byte, error) {
-	root, err := r.ProjectSession(opts...)
+	root, err := r.projectSession(true, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +249,18 @@ func (r *providerChatRuntime) ProjectRecentArchiveByTab(tabID string, limit int,
 	return r.projectArchiveByTab(tabID, actorHistoryTail, limit, opts...)
 }
 
+// ProjectRecentArchiveByTabRaw is the same tail as its wire reply, encoded once.
+func (r *providerChatRuntime) ProjectRecentArchiveByTabRaw(tabID string, limit int, opts ...archiveReadOptions) (wire.EncodedResult, bool, error) {
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	page, found, err := r.archivePageByTab(tabID, actorHistoryTail, limit, opts...)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return page.raw(), true, nil
+}
+
 // archiveReadOptions are additive archive-load options a newer renderer asks
 // for; an older one omits them and keeps the byte-identical response.
 type archiveReadOptions struct {
@@ -252,13 +272,28 @@ type archiveReadOptions struct {
 	// leanTools sends large committed tool payloads as a bounded head; the
 	// rest is read per row with the toolDetail archive option.
 	leanTools bool
+	// leanTitles does the same for a tool's title. A title can carry a whole
+	// command or file (11 MB titles made one message of a chat 84 MB, 79 MB of
+	// it titles) while its row shows one line. A separate option, because a
+	// renderer that asked only for leanTools reads titles whole.
+	leanTitles bool
+}
+
+// archiveReadOptionsFrom reads the additive read options of session:get and
+// chat:archive-load; an absent option keeps the byte-identical response.
+func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
+	return archiveReadOptions{
+		deferMessageImages: options["deferImages"] == true,
+		leanTools:          options["leanTools"] == true,
+		leanTitles:         options["leanTitles"] == true,
+	}
 }
 
 // beforeBudget runs before the byte budget measures a page, so a lean page
 // carries as many rows as its lean size allows.
 func (o archiveReadOptions) beforeBudget(messages []any) {
-	if o.leanTools {
-		leanArchiveToolPayloads(messages)
+	if o.leanTools || o.leanTitles {
+		leanArchiveToolPayloads(messages, o.leanTools, o.leanTitles)
 	}
 }
 
@@ -268,66 +303,66 @@ func (o archiveReadOptions) apply(messages []any) {
 	}
 }
 
-// deferringMessageImages: whether apply will send message images by
-// reference, so the byte budget must not count their bytes.
-func deferringMessageImages(opts []archiveReadOptions) bool {
-	for _, opt := range opts {
-		if opt.deferMessageImages {
-			return true
-		}
-	}
-	return false
-}
-
 // ProjectArchivePageBeforeByTab returns one bounded canonical ledger page
 // immediately before a stable resident message. It is the ordinary upward
 // history path; explicit full-history reads remain available for search and
 // legacy clients.
 func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) ([]any, bool, error) {
-	if limit < 1 || limit > sessionProjectionMessageTail {
-		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
-	}
-	chatID, found, err := r.chatByTab(tabID)
+	page, found, err := r.archivePageBeforeByTab(tabID, beforeMessageID, limit, opts...)
+	return page.messages, found, err
+}
+
+// ProjectArchivePageBeforeByTabRaw is the same page as its wire reply, encoded once.
+func (r *providerChatRuntime) ProjectArchivePageBeforeByTabRaw(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (wire.EncodedResult, bool, error) {
+	page, found, err := r.archivePageBeforeByTab(tabID, beforeMessageID, limit, opts...)
 	if err != nil || !found {
 		return nil, found, err
 	}
+	return page.raw(), true, nil
+}
+
+func (r *providerChatRuntime) archivePageBeforeByTab(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return archivePage{}, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return archivePage{}, found, err
+	}
 	page, err := r.ledgerPageBefore(chatID, beforeMessageID, limit, opts)
 	if err != nil {
-		return nil, false, err
+		return archivePage{}, false, err
 	}
 	if page.Deleted {
-		return []any{}, true, nil
+		return archivePage{messages: []any{}}, true, nil
 	}
 	messages := make([]any, 0, len(page.Events))
 	for _, event := range page.Events {
 		message, err := projectLedgerMessage(event)
 		if err != nil {
-			return nil, false, err
+			return archivePage{}, false, err
 		}
 		messages = append(messages, message)
 	}
 	for _, opt := range opts {
 		opt.beforeBudget(messages)
 	}
-	messages, err = boundedArchiveHistory(messages, filepath.Dir(r.sessions.path), deferringMessageImages(opts))
+	finished, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, actorHistoryPageBytes)
 	if err != nil {
-		return nil, false, err
+		return archivePage{}, false, err
 	}
-	annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
-	deferArchiveToolImages(messages)
-	for _, opt := range opts {
-		opt.apply(messages)
-	}
-	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
-		return nil, false, err
-	}
-	return messages, true, nil
+	return finished, true, nil
 }
 
 func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHistoryProjection, tailLimit int, opts ...archiveReadOptions) ([]any, bool, error) {
+	page, found, err := r.archivePageByTab(tabID, history, tailLimit, opts...)
+	return page.messages, found, err
+}
+
+func (r *providerChatRuntime) archivePageByTab(tabID string, history actorHistoryProjection, tailLimit int, opts ...archiveReadOptions) (archivePage, bool, error) {
 	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
-		return nil, found, err
+		return archivePage{}, found, err
 	}
 	var (
 		state  chat.State
@@ -344,13 +379,13 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 			state, read = snapshot.State, true
 			window = actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
 		case !errors.Is(err, errClosedActorChanged):
-			return nil, false, err
+			return archivePage{}, false, err
 		}
 	}
 	if !read {
 		matched, err := r.actor(chatID)
 		if err != nil {
-			return nil, false, err
+			return archivePage{}, false, err
 		}
 		if history == actorHistoryFull {
 			state = matched.engine.ReadSnapshot()
@@ -363,31 +398,34 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 	}
 	if state.Deleted {
 		// A tombstone owns this historical tab. Never recreate its transcript.
-		return []any{}, true, nil
+		return archivePage{messages: []any{}}, true, nil
 	}
 	projected := map[string]any{}
 	if err := projectActorChatWithHistoryWindow(projected, state, history, tailLimit, window); err != nil {
-		return nil, false, err
+		return archivePage{}, false, err
 	}
 	messages := anySlice(projected["messages"])
 	for _, opt := range opts {
 		opt.beforeBudget(messages)
 	}
 	if history != actorHistoryFull {
-		messages, err = boundedArchiveHistory(messages, filepath.Dir(r.sessions.path), deferringMessageImages(opts))
+		finished, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, actorHistoryPageBytes)
 		if err != nil {
-			return nil, false, err
+			return archivePage{}, false, err
 		}
+		return finished, true, nil
 	}
+	// The complete ledger is never bounded, so it is never sized either: the
+	// reply encodes it once.
 	annotateSessionImageSizes(messages, filepath.Dir(r.sessions.path))
 	deferArchiveToolImages(messages)
 	for _, opt := range opts {
 		opt.apply(messages)
 	}
 	if err := rehydrateExternalSessionImages(messages, filepath.Dir(r.sessions.path)); err != nil {
-		return nil, false, err
+		return archivePage{}, false, err
 	}
-	return messages, true, nil
+	return archivePage{messages: messages}, true, nil
 }
 
 // deferArchiveMessageImages does for a message's own images what
