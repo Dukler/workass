@@ -516,12 +516,9 @@ func (r *providerChatRuntime) ledgerMessage(chatID, messageID string) (chat.Ledg
 		if summary.Deleted || strings.TrimSpace(messageID) == "" {
 			return chat.LedgerEvent{}, false, nil
 		}
-		event, found, revision, err := r.ledgers.ReadLedgerMessage(chatID, messageID)
-		if err == nil && revision == summary.Revision {
-			return event, found, nil
-		}
-		if _, stillClosed := r.closedSummary(chatID); stillClosed && err != nil {
-			return chat.LedgerEvent{}, false, err
+		event, found, err := r.ledgers.ReadLedgerMessage(chatID, closedView(summary), messageID)
+		if err = r.closedReadError(summary, err); !errors.Is(err, errClosedActorChanged) {
+			return event, found, err
 		}
 	}
 	actor, err := r.actor(chatID)
@@ -539,11 +536,11 @@ func (r *providerChatRuntime) attachmentRefOwnership(chatID, ref string) (chat.A
 			return chat.AttachmentOwnership{Deleted: true}, nil
 		}
 		refs, err := r.closedAttachmentRefs(summary)
-		if err == nil {
+		if err = r.closedReadError(summary, err); err == nil {
 			_, owned := refs[ref]
 			return chat.AttachmentOwnership{Owned: owned}, nil
 		}
-		if _, stillClosed := r.closedSummary(chatID); stillClosed {
+		if !errors.Is(err, errClosedActorChanged) {
 			return chat.AttachmentOwnership{}, err
 		}
 	}

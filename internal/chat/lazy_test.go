@@ -208,7 +208,7 @@ func TestActorSummaryAnswersLikeTheEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := state.Ledger[len(state.Ledger)-1]
-	if stamp := newest[chatID]; stamp.MessageID != last.MessageID || stamp.At != last.At || stamp.HasLedgerTimestamp() {
+	if stamp := newest[chatID]; stamp.Sequence != len(state.Ledger) || stamp.MessageID != last.MessageID || stamp.At != last.At || stamp.HasLedgerTimestamp() {
 		t.Fatalf("newest stamp = %+v, want the undated %s", stamp, last.MessageID)
 	}
 	for name, summary := range map[string]ActorSummary{"discovered": discoveredSummary(t, actors, chatID), "resident": engine.Summary()} {
@@ -246,50 +246,58 @@ func TestClosedLedgerReadsMatchTheEngine(t *testing.T) {
 	if count < 3 {
 		t.Fatalf("script left %d rows", count)
 	}
+	view := LedgerView{Count: count, Revision: state.Revision}
+	stale := LedgerView{Count: count, Revision: state.Revision + 1}
 	for _, limit := range []int{1, 2, count, count + 5} {
 		want, err := engine.ReadMessages(0, limit)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, revision, err := actors.ReadLedgerPage(chatID, 0, "", limit)
-		if err != nil || revision != state.Revision {
-			t.Fatalf("page: revision %d err %v", revision, err)
+		got, err := actors.ReadLedgerPage(chatID, view, 0, "", limit)
+		if err != nil {
+			t.Fatalf("page: %v", err)
 		}
 		want.Deleted = false
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("tail page of %d differs from the engine's", limit)
 		}
 	}
+	if _, err := actors.ReadLedgerPage(chatID, stale, 0, "", 2); !errors.Is(err, ErrLedgerChanged) {
+		t.Fatalf("page at a stale revision: %v", err)
+	}
 	for index, row := range state.Ledger {
 		want, err := engine.ReadLedgerPageBefore(row.MessageID, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, _, err := actors.ReadLedgerPage(chatID, 0, row.MessageID, 2)
+		got, err := actors.ReadLedgerPage(chatID, view, 0, row.MessageID, 2)
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("page before row %d differs: %v", index+1, err)
 		}
-		message, found, revision, err := actors.ReadLedgerMessage(chatID, row.MessageID)
+		message, found, err := actors.ReadLedgerMessage(chatID, view, row.MessageID)
 		engineMessage, engineFound := engine.ReadMessage(row.MessageID)
-		if err != nil || found != engineFound || revision != state.Revision || !reflect.DeepEqual(message, engineMessage) {
+		if err != nil || found != engineFound || !reflect.DeepEqual(message, engineMessage) {
 			t.Fatalf("message %s differs: %v", row.MessageID, err)
 		}
 	}
-	if _, _, err := actors.ReadLedgerPage(chatID, 0, "no-such-message", 2); err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if _, _, err := actors.ReadLedgerMessage(chatID, stale, state.Ledger[0].MessageID); !errors.Is(err, ErrLedgerChanged) {
+		t.Fatalf("message at a stale revision: %v", err)
+	}
+	if _, err := actors.ReadLedgerPage(chatID, view, 0, "no-such-message", 2); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing boundary: %v", err)
 	}
-	if _, _, err := actors.ReadLedgerPage(chatID, uint64(count)+2, "", 2); err == nil || !strings.Contains(err.Error(), "ahead") {
+	if _, err := actors.ReadLedgerPage(chatID, view, uint64(count)+2, "", 2); err == nil || !strings.Contains(err.Error(), "ahead") {
 		t.Fatalf("boundary ahead of the ledger: %v", err)
 	}
 
 	// A backward walk visits the window's rows newest first and stops on
 	// request.
-	window, revision, err := actors.LedgerWindowBefore(chatID, 0, "", count)
-	if err != nil || window != (LedgerWindow{Start: 0, End: count, Count: count}) || revision != state.Revision {
-		t.Fatalf("window = %+v %d %v", window, revision, err)
+	window, err := actors.LedgerWindowBefore(chatID, view, 0, "", count)
+	if err != nil || window != (LedgerWindow{Start: 0, End: count, Count: count}) {
+		t.Fatalf("window = %+v %v", window, err)
 	}
 	var walked []LedgerEvent
-	if err := actors.WalkLedgerBackward(chatID, window, revision, func(event LedgerEvent) (bool, error) {
+	if err := actors.WalkLedgerBackward(chatID, view, window, func(event LedgerEvent) (bool, error) {
 		walked = append(walked, event)
 		return len(walked) < count-1, nil
 	}); err != nil {
@@ -303,15 +311,15 @@ func TestClosedLedgerReadsMatchTheEngine(t *testing.T) {
 	if len(walked) != count-1 {
 		t.Fatalf("walk visited %d rows, want %d", len(walked), count-1)
 	}
-	if err := actors.WalkLedgerBackward(chatID, window, revision+1, func(LedgerEvent) (bool, error) { return true, nil }); !errors.Is(err, errLedgerChangedDuringRead) {
+	if err := actors.WalkLedgerBackward(chatID, stale, window, func(LedgerEvent) (bool, error) { return true, nil }); !errors.Is(err, ErrLedgerChanged) {
 		t.Fatalf("walk at a stale revision: %v", err)
 	}
-	if live, err := actors.ScanLedgerLiveRows(chatID, 0, count, count, revision); err != nil || len(live) != 0 {
+	if live, err := actors.ScanLedgerLiveRows(chatID, view, 0, count); err != nil || len(live) != 0 {
 		t.Fatalf("live rows = %v %v", live, err)
 	}
 
 	// Attachment ownership: a row's own image, a tool's, and a missing one.
-	refs, err := actors.LedgerAttachmentRefs(chatID, revision)
+	refs, err := actors.LedgerAttachmentRefs(chatID, view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +328,7 @@ func TestClosedLedgerReadsMatchTheEngine(t *testing.T) {
 			t.Fatalf("ownership of %s = %v", ref, owned)
 		}
 	}
-	if _, err := actors.LedgerAttachmentRefs(chatID, revision+1); !errors.Is(err, errLedgerChangedDuringRead) {
+	if _, err := actors.LedgerAttachmentRefs(chatID, stale); !errors.Is(err, ErrLedgerChanged) {
 		t.Fatalf("refs at a stale revision: %v", err)
 	}
 	if found, err := actors.LedgerHasNativeTurn(chatID, "native-2"); err != nil || !found {
@@ -340,7 +348,7 @@ func TestLiveRowScanFindsOnlyRowsWithTheirOwnLiveStatus(t *testing.T) {
 	if err := actors.Store("live-rows").Save(state); err != nil {
 		t.Fatal(err)
 	}
-	live, err := actors.ScanLedgerLiveRows("live-rows", 0, 6, 6, state.Revision)
+	live, err := actors.ScanLedgerLiveRows("live-rows", LedgerView{Count: 6, Revision: state.Revision}, 0, 6)
 	if err != nil || !reflect.DeepEqual(live, []int{2}) {
 		t.Fatalf("live rows = %v %v", live, err)
 	}

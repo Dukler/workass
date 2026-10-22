@@ -186,12 +186,22 @@ func TestClosedActorsAnswerEveryReadLikeOpenOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer backend.close()
-	chats := map[string]int{"lazy-active": 23, "lazy-idle": 9, "lazy-empty": 0, "lazy-busy": 5}
+	chats := map[string]int{"lazy-active": 23, "lazy-idle": 9, "lazy-empty": 0, "lazy-busy": 5, "lazy-legacy": 17}
 	for chatID, rows := range chats {
 		var mutate func(*chat.State)
-		if chatID == "lazy-busy" {
+		switch chatID {
+		case "lazy-busy":
 			// Queued input: boot must open it.
 			mutate = queuedInput
+		case "lazy-legacy":
+			// A committed row with its own running status (no current build
+			// writes one) binds the rows after it into one page.
+			// A 9 MiB row stops the newest-first walk above it, so the row
+			// below is found by the scan, not the walk.
+			mutate = func(state *chat.State) {
+				state.Ledger[4].Status = "running"
+				state.Ledger[12].Text = strings.Repeat("y", 9<<20)
+			}
 		}
 		lazyTestChat(t, stateDir, backend, chatID, rows, mutate)
 	}
