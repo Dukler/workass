@@ -13,7 +13,7 @@ import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
-import { cachedToolOutput, loadToolOutput } from '../chat/tool-detail';
+import { cachedToolOutput, cachedToolTitle, loadToolOutput, loadToolTitle } from '../chat/tool-detail';
 
 export { extractSubagents } from '../subagent-layout';
 export type { SubagentNode } from '../subagent-layout';
@@ -260,6 +260,14 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
     return () => { current = false; };
   }, [showOut, t, fullOutput]);
   const output = t.outputDeferred ? fullOutput ?? t.output : t.output;
+  // A long title arrived as its head; the open row shows all of it.
+  const [fullTitle, setFullTitle] = useState<string | null>(() => cachedToolTitle(t));
+  useEffect(() => {
+    if (!showOut || !t.titleDeferred || fullTitle !== null) return;
+    let current = true;
+    void loadToolTitle(t).then((text) => { if (current && text !== null) setFullTitle(text); });
+    return () => { current = false; };
+  }, [showOut, t, fullTitle]);
   const st = toolState(t.status);
   // A subagent header rendered inline as a task row: model brand instead of the
   // status glyph, a "Subagente ·" prefix, and a link to its detail in the rail
@@ -322,8 +330,8 @@ export function ToolDetail({ t, standalone, trail }: { t: ToolEvent; standalone?
         <div className="evt-out">
           {dur && <div className="evt-dur">{dur}</div>}
           {/* the provider's own id, so a renamed row never hides WHICH tool ran */}
-          {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{act.raw}</div>}
-          {raw && raw !== detail && <div className="evt-full">{raw}</div>}
+          {act.raw && act.raw !== raw && act.raw !== act.label && <div className="evt-raw">{t.titleDeferred ? (fullTitle ?? act.raw).trim() : act.raw}</div>}
+          {raw && raw !== detail && <div className="evt-full">{t.titleDeferred && fullTitle !== null && !t.command && !t.location ? fullTitle.trim() : raw}</div>}
           {output}
         </div>
       )}

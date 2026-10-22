@@ -269,13 +269,28 @@ type archiveReadOptions struct {
 	// leanTools sends large committed tool payloads as a bounded head; the
 	// rest is read per row with the toolDetail archive option.
 	leanTools bool
+	// leanTitles does the same for a tool's title. A title can carry a whole
+	// command or file (11 MB titles made one message of a chat 84 MB, 79 MB of
+	// it titles) while its row shows one line. A separate option, because a
+	// renderer that asked only for leanTools reads titles whole.
+	leanTitles bool
+}
+
+// archiveReadOptionsFrom reads the additive read options of session:get and
+// chat:archive-load; an absent option keeps the byte-identical response.
+func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
+	return archiveReadOptions{
+		deferMessageImages: options["deferImages"] == true,
+		leanTools:          options["leanTools"] == true,
+		leanTitles:         options["leanTitles"] == true,
+	}
 }
 
 // beforeBudget runs before the byte budget measures a page, so a lean page
 // carries as many rows as its lean size allows.
 func (o archiveReadOptions) beforeBudget(messages []any) {
-	if o.leanTools {
-		leanArchiveToolPayloads(messages)
+	if o.leanTools || o.leanTitles {
+		leanArchiveToolPayloads(messages, o.leanTools, o.leanTitles)
 	}
 }
 

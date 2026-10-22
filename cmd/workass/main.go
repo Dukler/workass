@@ -1034,7 +1034,7 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if len(args) > 0 {
 			options = mapFromAnyMain(args[0])
 		}
-		read := archiveReadOptions{leanTools: options["leanTools"] == true, deferMessageImages: options["deferImages"] == true}
+		read := archiveReadOptionsFrom(options)
 		raw, err := providerChats.ProjectSessionRaw(read)
 		if err != nil {
 			return nil, err

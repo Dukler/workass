@@ -44,7 +44,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		// byte-identical full response.
 		if len(args) > 1 {
 			options := mapFromAnyMain(args[1])
-			read := archiveReadOptions{deferMessageImages: options["deferImages"] == true, leanTools: options["leanTools"] == true}
+			read := archiveReadOptionsFrom(options)
 			// toolDetail is checked first. A renderer pairs it with tail:1, so
 			// a daemon that predates it answers one bounded row instead of
 			// the complete archive.

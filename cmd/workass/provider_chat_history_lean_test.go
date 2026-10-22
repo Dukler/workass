@@ -216,7 +216,7 @@ func TestLeanHistoryLeavesLiveRowsWhole(t *testing.T) {
 		map[string]any{"id": "done", "status": "done", "events": []any{map[string]any{"kind": "tool", "key": "a", "output": big}}},
 		map[string]any{"id": "live", "status": "running", "events": []any{map[string]any{"kind": "tool", "key": "b", "output": big}}},
 	}
-	leanArchiveToolPayloads(rows)
+	leanArchiveToolPayloads(rows, true, false)
 	if mapFromAnyMain(anySlice(mapFromAnyMain(rows[0])["events"])[0])["outputDeferred"] != true {
 		t.Fatal("committed row was not trimmed")
 	}
