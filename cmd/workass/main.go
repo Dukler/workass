@@ -995,7 +995,21 @@ func registerStateDigestHandler(hub *wire.Hub, providerChats *providerChatRuntim
 		if providerChats == nil {
 			return nil, errors.New("state digest requires the authoritative chat actor runtime")
 		}
-		return providerChats.StateDigest(catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes))
+		digest, err := providerChats.StateDigest(catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes))
+		if err != nil {
+			return nil, err
+		}
+		// Additive conditional read. The digest names its own content hash
+		// (etag); a client that sends it back as {ifNoneMatch} gets a tiny
+		// {unchanged, etag} reply while nothing changed, so an idle heartbeat
+		// no longer re-sends the whole per-chat table every few seconds. A
+		// client that sends no argument gets the full digest, as before.
+		etag := stateDigestHash(digest)
+		if len(args) > 0 && fieldString(mapFromAnyMain(args[0]), "ifNoneMatch") == etag {
+			return map[string]any{"unchanged": true, "etag": etag}, nil
+		}
+		digest["etag"] = etag
+		return digest, nil
 	})
 }
 
