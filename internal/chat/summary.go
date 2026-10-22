@@ -162,6 +162,14 @@ func (s ActorSummary) ProjectionSnapshot(rows []LedgerEvent) ReadProjectionSnaps
 	return snapshot
 }
 
+// View is the summary's Engine.View: read runs with the summary's read
+// projection (presentation, lanes and their attachments, usage; no ledger
+// rows), which is the committed state of the closed actor for every field it
+// carries. read must not modify or keep anything reachable from it.
+func (s ActorSummary) View(read func(State)) {
+	read(s.projection)
+}
+
 // DigestSnapshot is the summary's Engine.DigestSnapshot.
 func (s ActorSummary) DigestSnapshot() DigestSnapshot {
 	view := s.projection.PresentationState()

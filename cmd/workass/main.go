@@ -1394,13 +1394,23 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 	// for late clients — the chat:commands event covers the live ones.
 	// Read-only: the chat's latest provider goal (Codex /goal) for late clients —
 	// the chat:goal event covers the live ones.
+	// A renderer asks both when it shows a chat. A closed chat answers from its
+	// summary and is opened in the background, ready for a send.
 	hub.Register("chat:goal-get", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return providerChats.ChatGoal(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+		goal, err := providerChats.ChatGoal(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+		if err == nil {
+			providerChats.PrewarmChat(fieldString(arg, "chatId"))
+		}
+		return goal, err
 	})
 	hub.Register("chat:commands-get", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return providerChats.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+		commands, err := providerChats.ChatCommands(fieldString(arg, "tabId"), fieldString(arg, "chatId"))
+		if err == nil {
+			providerChats.PrewarmChat(fieldString(arg, "chatId"))
+		}
+		return commands, err
 	})
 	// Read-only: what a Workass update would stop right now, per chat, so the
 	// update button warns before the click. Never closes admission — that is
