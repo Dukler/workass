@@ -490,6 +490,9 @@ func (r *providerChatRuntime) sessionSnapshot(chatID, activeTabID string, tail i
 // viewed meanwhile replaces any other waiting one (the newest view is the
 // one a send follows), so clicking through many chats queues at most one
 // open behind the one in progress.
+// actorPrewarmDelay is how long after a view its background open starts.
+const actorPrewarmDelay = 100 * time.Millisecond
+
 type actorPrewarm struct {
 	running bool
 	next    string
@@ -536,6 +539,9 @@ func (r *providerChatRuntime) PrewarmChat(chatID string) {
 func (r *providerChatRuntime) runPrewarm(chatID string) {
 	defer r.prewarm.wg.Done()
 	for chatID != "" {
+		// The view's first screen and the rest of its slice are being read
+		// and painted now; an open decodes the whole chat on every core.
+		time.Sleep(actorPrewarmDelay)
 		r.mu.Lock()
 		_, closed := r.summaries[chatID]
 		stop := r.closed
