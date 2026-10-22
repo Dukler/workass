@@ -638,21 +638,32 @@ func (r *providerChatRuntime) retireIdleActors(ctx context.Context, ttl time.Dur
 	if r.sessions != nil {
 		activeTabID = strings.TrimSpace(fieldString(r.sessions.GlobalSnapshot(), "activeId"))
 	}
-	retired := 0
+	var retiredIDs []string
 	for chatID, actor := range candidates {
 		if ctx.Err() != nil {
 			break
 		}
 		if r.retireActor(chatID, actor, activeTabID, ttl) {
-			retired++
+			retiredIDs = append(retiredIDs, chatID)
 		}
 	}
+	retired := len(retiredIDs)
 	if retired > 0 {
 		// The ledgers just released are most of the heap; hand them back now
 		// rather than when the scavenger gets to them.
 		debug.FreeOSMemory()
 		open, closed := r.lazyActorCounts()
 		log.Printf("[workass] closed %d idle chat actors (%d open, %d closed)", retired, open, closed)
+		// Opening dropped what was kept of each; a chat closed again is read
+		// ahead again (provider_chat_first_screen.go).
+		for _, chatID := range retiredIDs {
+			if ctx.Err() != nil {
+				break
+			}
+			if summary, closed := r.closedSummary(chatID); closed {
+				r.warmChat(summary)
+			}
+		}
 	}
 	return retired
 }
