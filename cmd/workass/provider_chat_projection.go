@@ -255,13 +255,15 @@ func (r *providerChatRuntime) ProjectRecentArchiveByTabRaw(tabID string, limit i
 }
 
 // ProjectLastExchangeByTab is the read a renderer opens a chat with when it
-// has nothing of it on screen (archive-load {tail, lastExchange}): of the
-// newest limit rows, only those from the user's own newest message on (the
-// rows the transcript's window always reaches back to; a wake-up notice is
-// not the user's message), or all of them when none is. It is that shorter
-// tail, under the same page budget, so the first screen decodes and sends
-// the exchange it shows and not the history above it; the renderer pages
-// the rest in by stable cursor as it does after any bounded tail.
+// has nothing of it on screen (archive-load {tail, lastExchange}): the
+// ordinary bounded tail when its reply is at most lastExchangeWholeTailBytes,
+// and otherwise, of the newest limit rows, only those from the user's own
+// newest message on (the rows the transcript's window always reaches back
+// to; a wake-up notice is not the user's message), or all of them when none
+// is, under the same page budget. A large tail's first screen therefore
+// sends the exchange it shows and not the history above it, and a small one
+// arrives whole; the renderer pages in whatever it still lacks by stable
+// cursor, as it does after any bounded tail.
 func (r *providerChatRuntime) ProjectLastExchangeByTab(tabID string, limit int, opts ...archiveReadOptions) ([]any, bool, error) {
 	if limit < 1 || limit > sessionProjectionMessageTail {
 		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
@@ -344,7 +346,19 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTab(tabID, beforeMessage
 
 // ProjectArchivePageBeforeByTabRaw is the same page as its wire reply, encoded once.
 func (r *providerChatRuntime) ProjectArchivePageBeforeByTabRaw(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (wire.EncodedResult, bool, error) {
-	page, found, err := r.archivePageBeforeByTab(tabID, beforeMessageID, limit, opts...)
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	// The pages that complete a closed chat's first slice may already be in
+	// memory (provider_chat_first_screen.go).
+	if raw, ok := r.cachedSlicePage(chatID, beforeMessageID, limit, opts...); ok {
+		return raw, true, nil
+	}
+	page, found, err := r.archivePageBeforeByChat(chatID, beforeMessageID, limit, opts...)
 	if err != nil || !found {
 		return nil, found, err
 	}
@@ -359,6 +373,12 @@ func (r *providerChatRuntime) archivePageBeforeByTab(tabID, beforeMessageID stri
 	if err != nil || !found {
 		return archivePage{}, found, err
 	}
+	return r.archivePageBeforeByChat(chatID, beforeMessageID, limit, opts...)
+}
+
+// archivePageBeforeByChat is archivePageBeforeByTab of the chat the tab was
+// found to own.
+func (r *providerChatRuntime) archivePageBeforeByChat(chatID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {
 	page, finished, err := r.ledgerPageBefore(chatID, beforeMessageID, limit, opts)
 	if err != nil {
 		return archivePage{}, false, err
@@ -406,6 +426,26 @@ func (r *providerChatRuntime) archivePageByTab(tabID string, history actorHistor
 
 // archivePageByChat is archivePageByTab of the chat the tab was found to own.
 func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHistoryProjection, tailLimit int, lastExchange bool, opts ...archiveReadOptions) (archivePage, bool, error) {
+	if lastExchange && history == actorHistoryTail {
+		// A tail small enough to read and paint at once is the first screen
+		// whole (ProjectLastExchangeByTab). A closed chat's rows do not change
+		// while it is closed, so what that tail came to is remembered: a large
+		// one is never read again just to learn it is large.
+		summary, closed := r.closedSummary(chatID)
+		if !closed || !r.tailKnownLarge(summary, tailLimit, opts) {
+			whole, found, err := r.archivePageByChat(chatID, history, tailLimit, false, opts...)
+			if err != nil || !found {
+				return whole, found, err
+			}
+			small := whole.size() <= lastExchangeWholeTailBytes
+			if closed {
+				r.recordTailSize(summary, tailLimit, opts, small)
+			}
+			if small {
+				return whole, true, nil
+			}
+		}
+	}
 	var (
 		state  chat.State
 		window actorLedgerWindow

@@ -199,10 +199,18 @@ func TestClosedActorsAnswerEveryReadLikeOpenOnes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer backend.close()
-	chats := map[string]int{"lazy-active": 23, "lazy-idle": 9, "lazy-empty": 0, "lazy-busy": 5, "lazy-legacy": 17, "lazy-exchange": 15}
+	chats := map[string]int{"lazy-active": 23, "lazy-idle": 9, "lazy-empty": 0, "lazy-busy": 5, "lazy-legacy": 17, "lazy-exchange": 15, "lazy-bigtail": 12}
 	for chatID, rows := range chats {
 		var mutate func(*chat.State)
 		switch chatID {
+		case "lazy-bigtail":
+			// A tail too large to be the first screen whole (a 3 MiB reply
+			// in row 9) whose newest user row (12) is a wake-up notice: the
+			// last exchange reaches back past it to the user's own row 10.
+			mutate = func(state *chat.State) {
+				state.Ledger[8].Text = strings.Repeat("b", 3<<20)
+				state.Ledger[11].NoticeKind, state.Ledger[11].NoticeTitle, state.Ledger[11].NoticeStatus = "background", "Build", "completed"
+			}
 		case "lazy-exchange":
 			// The last exchange (rows 12-15) holds a 9 MiB row (14) that
 			// stops the newest-first walk and, below it, a row with its own
@@ -275,17 +283,19 @@ func TestClosedActorsAnswerEveryReadLikeOpenOnes(t *testing.T) {
 	if !strings.Contains(string(got.LeanSession), "lazy-active-message-23") {
 		t.Fatal("the selected closed chat carried no tail in session:get")
 	}
-	// The last exchange reaches back to the user's own newest message, past
-	// a notice, within the requested tail.
+	// A small tail is the first screen whole; a large one's first screen is
+	// its last exchange, back to the user's own newest message past a notice,
+	// within the requested tail.
 	for _, check := range []struct {
 		chatID string
 		limit  int
 		want   []int
 	}{
-		{"lazy-active", 10, []int{22, 23}}, {"lazy-active", 1, []int{23}},
-		{"lazy-idle", 10, []int{6, 7, 8, 9}}, {"lazy-idle", 3, []int{7, 8, 9}},
-		{"lazy-legacy", 10, []int{16, 17}}, {"lazy-empty", 10, nil},
+		{"lazy-active", 10, []int{14, 15, 16, 17, 18, 19, 20, 21, 22, 23}}, {"lazy-active", 1, []int{23}},
+		{"lazy-idle", 10, []int{1, 2, 3, 4, 5, 6, 7, 8, 9}}, {"lazy-idle", 3, []int{7, 8, 9}},
+		{"lazy-legacy", 10, []int{14, 15, 16, 17}}, {"lazy-empty", 10, nil},
 		{"lazy-exchange", 10, []int{13, 14, 15}}, {"lazy-exchange", 2, []int{15}},
+		{"lazy-bigtail", 10, []int{10, 11, 12}}, {"lazy-bigtail", 3, []int{10, 11, 12}},
 	} {
 		messages, found, err := lazy.ProjectLastExchangeByTab("tab-"+check.chatID, check.limit, archiveReadOptions{leanTools: true, deferMessageImages: true})
 		if err != nil || !found {
