@@ -201,6 +201,15 @@ func (r RawResult) MarshalJSON() ([]byte, error) {
 	return r, nil
 }
 
+// EncodedResult is a pre-serialized result that encoding/json produced in
+// this process. It is framed exactly like RawResult, without the validating
+// scan: on a history page that scan cost a third as much as the encoding.
+type EncodedResult []byte
+
+func (r EncodedResult) MarshalJSON() ([]byte, error) {
+	return r, nil
+}
+
 // Options configures optional P3 pairing/controller behavior for a hub.
 type Options struct {
 	Context               context.Context
@@ -1270,9 +1279,14 @@ func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 	}
 	var frame []byte
 	replyBytes := 0
+	validateRaw := true
+	if encoded, ok := result.(EncodedResult); ok {
+		result = RawResult(encoded)
+		validateRaw = false
+	}
 	if rawResult, ok := result.(RawResult); ok && errText == nil {
 		var rawErr error
-		frame, replyBytes, rawErr = encodeRawResultReplyFrame(msg.ID, rawResult)
+		frame, replyBytes, rawErr = encodeRawReplyFrame(msg.ID, rawResult, validateRaw)
 		if rawErr != nil {
 			s := rawErr.Error()
 			reply, _ := json.Marshal(replyFrame{T: "reply", ID: msg.ID, Result: nil, Error: &s})
@@ -1355,7 +1369,11 @@ func (h *Hub) announceCurrentController(source *client, acted lease.Device) {
 }
 
 func encodeRawResultReplyFrame(id any, raw RawResult) ([]byte, int, error) {
-	if !json.Valid(raw) {
+	return encodeRawReplyFrame(id, raw, true)
+}
+
+func encodeRawReplyFrame(id any, raw RawResult, validate bool) ([]byte, int, error) {
+	if validate && !json.Valid(raw) {
 		return nil, 0, errors.New("wire raw result is not valid JSON")
 	}
 	idJSON, err := json.Marshal(id)

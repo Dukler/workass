@@ -19,13 +19,23 @@ const (
 	leanToolPayloadThreshold = 4 << 10
 	leanToolPayloadHead      = 1 << 10
 	toolDetailChunkBytes     = 1 << 20
+	// The tool whose call the renderer finds in a title to show the page it
+	// published (desktop/renderer2/src/markdown/html-render.ts).
+	htmlRenderToolName = "workass_render_html"
 )
 
 // leanArchiveToolPayloads trims committed rows only. A running or pending row
 // is the live foreground owner: its tools are still changing on the event
 // stream and are never addressable by a committed message id. A subagent
 // header keeps its summary, which the rail prints without an open gesture.
-func leanArchiveToolPayloads(messages []any) {
+func leanArchiveToolPayloads(messages []any, payloads, titles bool) {
+	fields := make([]string, 0, 3)
+	if payloads {
+		fields = append(fields, "output", "input")
+	}
+	if titles {
+		fields = append(fields, "title")
+	}
 	for _, raw := range messages {
 		message := mapFromAnyMain(raw)
 		switch fieldString(message, "status") {
@@ -37,9 +47,14 @@ func leanArchiveToolPayloads(messages []any) {
 			if fieldString(event, "kind") != "tool" || event["subagentHeader"] == true {
 				continue
 			}
-			for _, field := range [...]string{"output", "input"} {
+			for _, field := range fields {
 				value, ok := event[field].(string)
 				if !ok || len(value) <= leanToolPayloadThreshold {
+					continue
+				}
+				// The renderer finds a page the agent published by the call in
+				// the command or title, wherever it sits in a long one.
+				if field == "title" && strings.Contains(value, htmlRenderToolName) {
 					continue
 				}
 				event[field] = leanToolHead(value)
@@ -83,7 +98,7 @@ func parseToolDetailRequest(raw any) (toolDetailRequest, error) {
 	if request.messageID == "" || request.key == "" {
 		return toolDetailRequest{}, errors.New("tool detail requires a message id and tool key")
 	}
-	if request.field != "output" && request.field != "input" {
+	if request.field != "output" && request.field != "input" && request.field != "title" {
 		return toolDetailRequest{}, fmt.Errorf("unknown tool detail field %q", request.field)
 	}
 	if request.offset < 0 {
@@ -114,8 +129,11 @@ func (r *providerChatRuntime) ProjectToolDetailByTab(tabID string, request toolD
 			continue
 		}
 		value := entry.Tool.Output
-		if request.field == "input" {
+		switch request.field {
+		case "input":
 			value = entry.Tool.Input
+		case "title":
+			value = entry.Tool.Title
 		}
 		if request.offset > len(value) {
 			return nil, false, errors.New("tool detail offset is past the payload")

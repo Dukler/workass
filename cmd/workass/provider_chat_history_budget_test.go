@@ -217,7 +217,7 @@ func TestNavigationReadDefersMessageImagesOnlyWhenAsked(t *testing.T) {
 	hub := wire.NewHub()
 	registerArchiveHandlers(hub, nil, runtime)
 	firstImage := func(reply any) map[string]any {
-		return mapFromAnyMain(anySlice(mapFromAnyMain(anySlice(reply)[0])["images"])[0])
+		return mapFromAnyMain(anySlice(mapFromAnyMain(anySlice(decodedWireReply(t, reply))[0])["images"])[0])
 	}
 
 	inline, err := hub.Invoke("chat:archive-load", []any{"message-image-tab", map[string]any{"tail": 10}})
@@ -236,4 +236,24 @@ func TestNavigationReadDefersMessageImagesOnlyWhenAsked(t *testing.T) {
 	if err != nil || fieldString(mapFromAnyMain(anySlice(loaded)[0]), "data") != data {
 		t.Fatalf("a message image could not be read by reference: err=%v", err)
 	}
+}
+
+// decodedWireReply reads a handler result the way a client does: a raw
+// (pre-encoded) reply is decoded, anything else is already a value.
+func decodedWireReply(t *testing.T, reply any) any {
+	t.Helper()
+	var raw []byte
+	switch encoded := reply.(type) {
+	case wire.RawResult:
+		raw = encoded
+	case wire.EncodedResult:
+		raw = encoded
+	default:
+		return reply
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode raw wire reply: %v", err)
+	}
+	return value
 }

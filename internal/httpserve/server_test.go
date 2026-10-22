@@ -247,7 +247,7 @@ func TestLanBridgeServed(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "window.api") ||
 		!strings.Contains(string(body), "appMeta: () => invoke('app:meta')") ||
-		!strings.Contains(string(body), "stateDigest: () => invoke('state:digest')") {
+		!strings.Contains(string(body), "stateDigest: (o) => o ? invoke('state:digest', o) : invoke('state:digest')") {
 		t.Fatalf("unexpected bridge body: %.120s", body)
 	}
 	if !strings.Contains(string(body), "appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer'") ||

@@ -5,7 +5,7 @@ const STATUSES = new Set<Msg['status']>(['pending', 'running', 'done', 'failed',
 
 // Every history read asks for references instead of payloads: images load when
 // seen, large tool payloads when their row opens. Older daemons ignore both.
-export const HISTORY_READ_OPTIONS = { deferImages: true, leanTools: true } as const;
+export const HISTORY_READ_OPTIONS = { deferImages: true, leanTools: true, leanTitles: true } as const;
 
 // Actor projections already carry canonical chronology and stable message ids.
 // Hydration is therefore a validation + shape conversion, never a merge,
@@ -54,7 +54,7 @@ export function actorMessages(records: readonly MirrorMsg[], tabId?: string): Ms
 function stampToolDetail(events: TimelineEvent[], tabId: string | undefined, messageId: string): TimelineEvent[] {
   if (!tabId) return events;
   for (const event of events) {
-    if (event.kind === 'tool' && (event.outputDeferred || event.inputDeferred)) event.detail = { tabId, messageId };
+    if (event.kind === 'tool' && (event.outputDeferred || event.inputDeferred || event.titleDeferred)) event.detail = { tabId, messageId };
   }
   return events;
 }

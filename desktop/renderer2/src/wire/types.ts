@@ -679,6 +679,14 @@ export interface StateDigest {
   catalogHash: Record<string, string>;
   settingsRevision: string;
   procHash: string;
+  // Additive: the digest's content hash. Sent back as {ifNoneMatch}, a daemon
+  // that knows it answers { unchanged: true, etag } while nothing changed.
+  etag?: string;
+}
+
+export interface StateDigestUnchanged {
+  unchanged: true;
+  etag: string;
 }
 
 // The subset of window.api this renderer consumes. Every method is optional so
@@ -693,7 +701,7 @@ export interface WorkassApi {
   appMeta?: () => Promise<{ rootDir: string; workspaceDir: string; version: string; profile?: 'prod' | 'dev' | 'test' } & Record<string, unknown>>;
   // Additive, body-free reconciliation digest. Liveness uses appMeta so an
   // actor busy resuming a provider cannot masquerade as a daemon disconnect.
-  stateDigest?: () => Promise<StateDigest>;
+  stateDigest?: (options?: { ifNoneMatch: string }) => Promise<StateDigest | StateDigestUnchanged>;
   getSettings?: () => Promise<unknown>;
   // Controller-gated write of the app-settings blob (settings:set). REPLACES the
   // stored blob, so callers round-trip getSettings and touch only their slice.
@@ -704,7 +712,7 @@ export interface WorkassApi {
   getConfig?: () => Promise<DaemonConfig>;
   // leanTools: large committed tool payloads arrive as a bounded head plus
   // outputDeferred/outputBytes; an older daemon or bridge ignores it.
-  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean }) => Promise<unknown>;
+  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
@@ -746,7 +754,9 @@ export interface WorkassApi {
   // total }); tail:1 rides along so an older daemon answers one bounded row.
   archiveLoad?: (tabId: string, options?: {
     tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean; leanTools?: boolean;
-    toolDetail?: { messageId: string; key: string; field?: 'output' | 'input'; offset: number };
+    // leanTitles (additive): a title over 4 KB arrives as its head (titleDeferred).
+    leanTitles?: boolean;
+    toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
   }) => Promise<unknown>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;

@@ -9,6 +9,7 @@ import { NoticeLine } from './NoticeLine';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
+import { syncFlowBlocks } from '../flow-window';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
@@ -525,6 +526,34 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // could override while an image above the reader arrived (+491 px).
   const anchorNode = useRef<{ node: Element; contentTop: number } | null>(null);
   const anchorContentTop = useRef<number | null>(null);
+  // The exact element is found by a hit test, which on a long message cost
+  // milliseconds each and ran on every scroll event, commit and resize. It now
+  // runs at most once per frame, and not at all while the element it found
+  // still holds the viewport's top edge. Between picks, the held element
+  // keeps its own baseline (holdAnchor moves it with every correction).
+  const nodePick = useRef<number | null>(null);
+  const pickAnchorNode = () => {
+    nodePick.current = null;
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    if (!el || !doc || restoring.current || stick.current) return;
+    const viewport = el.getBoundingClientRect();
+    const line = viewport.top + 1;
+    const held = anchorNode.current;
+    if (held && held.node.isConnected && doc.contains(held.node)) {
+      const box = held.node.getBoundingClientRect();
+      if (box.top <= line && box.bottom > line && box.height <= viewport.height) {
+        held.contentTop = box.top - viewport.top + el.scrollTop;
+        return;
+      }
+    }
+    const hit = typeof document.elementFromPoint === 'function'
+      ? document.elementFromPoint(viewport.left + viewport.width / 2, line)
+      : null;
+    anchorNode.current = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
+      ? { node: hit, contentTop: hit.getBoundingClientRect().top - viewport.top + el.scrollTop }
+      : null;
+  };
   const recordAnchor = () => {
     const el = scrollRef.current;
     const doc = docRef.current;
@@ -537,15 +566,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       anchor.current = next;
       anchorContentTop.current = next.offset + el.scrollTop;
     }
-    const hit = typeof document.elementFromPoint === 'function'
-      ? document.elementFromPoint(viewport.left + viewport.width / 2, viewport.top + 1)
-      : null;
-    anchorNode.current = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
-      ? { node: hit, contentTop: hit.getBoundingClientRect().top - viewport.top + el.scrollTop }
-      : null;
+    if (!anchorNode.current) { pickAnchorNode(); return; }
+    if (nodePick.current === null && typeof requestAnimationFrame === 'function') nodePick.current = requestAnimationFrame(pickAnchorNode);
   };
+  useEffect(() => () => { if (nodePick.current !== null) cancelAnimationFrame(nodePick.current); }, []);
   const dropAnchor = () => {
     anchorNode.current = null;
+    if (nodePick.current !== null) { cancelAnimationFrame(nodePick.current); nodePick.current = null; }
     anchorContentTop.current = null;
     // Following the bottom (a send, the new-messages pill) supersedes it.
     restoring.current = null;
@@ -599,6 +626,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const exact = anchorNode.current;
     if (exact && exact.node.isConnected && doc.contains(exact.node)) {
       delta = exact.node.getBoundingClientRect().top - viewportTop + el.scrollTop - exact.contentTop;
+      // The element moved by delta in the content; that is its new baseline.
+      exact.contentTop += delta;
     } else if (anchorContentTop.current !== null) {
       const node = [...doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')]
         .find((candidate) => candidate.dataset.chatFindMessage === held.key);
@@ -718,6 +747,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     stick.current = false;
     if (match.top < viewport.top + 24 || match.bottom > viewport.bottom - 24) {
       setScrollTop(el, el.scrollTop + match.top - viewport.top - Math.min(120, el.clientHeight * 0.25));
+      // The match's neighbourhood is mounted in the frame that shows it.
+      syncFlowBlocks(el, false);
     }
   }, []);
 
@@ -885,6 +916,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     const doc = docRef.current;
     if (!el || !doc) return;
+    const scrolledFrom = el.scrollTop;
+    commitLayout(doc);
+    // Windows inside messages (galleries) follow a scroll this commit made or
+    // content it moved before the frame paints, not one frame later.
+    syncFlowBlocks(el, Math.abs(el.scrollTop - scrolledFrom) >= 1);
+  });
+  const commitLayout = (doc: HTMLDivElement) => {
     mountedWindow.current = win;
     recordUnitHeights(heights.current, measureUnits(doc));
     if (!virtual) { recordAnchor(); return; }
@@ -905,7 +943,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     if (syncRewindows.current++ === 0) requestAnimationFrame(() => { syncRewindows.current = 0; });
     if (syncRewindows.current <= MAX_SYNC_REWINDOWS) rewindowIfStale();
     loadOlderAhead();
-  });
+  };
 
   // A window shorter than the screen left a band of nothing under the newest
   // row while older messages sat behind "Ver anteriores" (user 2026-10-15).

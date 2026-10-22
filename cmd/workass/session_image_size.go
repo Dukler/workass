@@ -20,7 +20,9 @@ import (
 
 // sessionImageSizeCacheEntries bounds the process cache of header reads. Keys
 // are content digests, so an entry never goes stale; failures are cached too.
-const sessionImageSizeCacheEntries = 4096
+// One chat can hold tens of thousands of screenshots, and a cache smaller
+// than one chat's page walk evicts every entry before it is read again.
+const sessionImageSizeCacheEntries = 32768
 
 type sessionImageSize struct {
 	width, height int
@@ -74,12 +76,17 @@ func sessionImageDataSize(name, data string) (int, int) {
 // sidecar. A missing or unreadable file is not cached: it may be materialized
 // later. An undecodable header is cached as "no size".
 func sessionImageRefSize(ref, stateDir string) (int, int) {
+	// The cache is keyed by content digest, so a hit needs no file system call:
+	// a projection of a screenshot-heavy chat otherwise stats every image on
+	// every session:get and history page.
+	if name, ok := validSessionImageRef(ref); ok {
+		if size, ok := sessionImageSizes.lookup(name); ok {
+			return size.width, size.height
+		}
+	}
 	name, path, _, err := externalSessionImageInfo(ref, stateDir)
 	if err != nil {
 		return 0, 0
-	}
-	if size, ok := sessionImageSizes.lookup(name); ok {
-		return size.width, size.height
 	}
 	file, err := os.Open(path)
 	if err != nil {

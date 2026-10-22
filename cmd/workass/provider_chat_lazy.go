@@ -274,10 +274,10 @@ func (r *providerChatRuntime) closedLedgerPage(summary chat.ActorSummary, before
 
 // closedHistoryRows returns the rows a bounded history read of a closed
 // actor keeps: of the window ReadLedgerPage(before, limit) would return, the
-// newest rows whose projections fit the reply byte budget under the reader's
-// options, oldest first. It is the selection boundedArchiveHistory makes over
-// the projected window (the newest row always, then each older row while it
-// fits), computed while reading rows newest first, so only the kept rows and
+// newest rows whose finished encodings fit the reply byte budget under the
+// reader's options, oldest first. It is the selection finishArchivePage makes
+// over the projected window (the newest row always, then each older row while
+// it fits, sized by finishArchiveRow), computed while reading rows newest first, so only the kept rows and
 // the first that does not fit are decoded. A row with its own pending or
 // running status binds the rows after it together, so the rows the walk did
 // not decode are checked for one (once per closed actor, closedLiveScan), and
@@ -289,9 +289,8 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 		return nil, r.closedReadError(summary, err)
 	}
 	stateDir := filepath.Dir(r.sessions.path)
-	deferring := deferringMessageImages(opts)
-	imageSizes := make(map[string]int64)
-	used := int64(2) // JSON array brackets, as actorHistorySuffixWithin counts them.
+	resolved := make(map[string]string)
+	used := int64(2) // JSON array brackets, as finishArchivePage counts them.
 	var kept []chat.LedgerEvent
 	decodedFrom, live := window.End+1, false
 	err = r.ledgers.WalkLedgerBackward(summary.ChatID, view, window, func(event chat.LedgerEvent) (bool, error) {
@@ -308,10 +307,11 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 		for _, opt := range opts {
 			opt.beforeBudget(messages)
 		}
-		size, err := archiveReplyBytes(messages[0], stateDir, imageSizes, deferring)
+		data, err := finishArchiveRow(messages, stateDir, opts, resolved)
 		if err != nil {
 			return false, err
 		}
+		size := int64(len(data))
 		if len(kept) > 0 && used+size+1 > actorHistoryPageBytes {
 			return false, nil
 		}
