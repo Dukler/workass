@@ -50,7 +50,7 @@ func (c *chatControlCoordinator) deliverScheduledMessage(ctx context.Context, e 
 		}
 		return scheduledSendError(nil, err)
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if state.Deleted || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(e.TabID) {
 		return scheduledSendError(scheduledmessage.ErrChatGone, errors.New("chat was deleted or moved"))
 	}

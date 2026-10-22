@@ -34,19 +34,39 @@ import (
 // validation and journal replay happen when the actor is opened.
 func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 	type rawHead struct {
-		chatID       string
-		version      int
-		stateJSON    []byte
-		ledgerLen    int
-		journalBytes int64
-		ledgerGen    int64
+		chatID    string
+		version   int
+		stateJSON []byte
+		ledgerLen int
+		ledgerGen int64
+	}
+	// Journal rows per chat, from the journal's own key: chats.journal_bytes
+	// is not kept current (an append no longer rewrites the head row).
+	journals := make(map[string]int)
+	if err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		rows, err := tx.Query(`SELECT chat_id, count(*) FROM chat_events GROUP BY chat_id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var chatID string
+			var count int
+			if err := rows.Scan(&chatID, &count); err != nil {
+				return err
+			}
+			journals[chatID] = count
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
 	}
 	after, more := "", true
 	for more {
 		var raws []rawHead
 		err := a.db.Read(context.Background(), func(tx *store.Tx) error {
 			raws, more = raws[:0], false
-			rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len, journal_bytes, ledger_gen FROM chats WHERE chat_id > ? ORDER BY chat_id`, after)
+			rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len, ledger_gen FROM chats WHERE chat_id > ? ORDER BY chat_id`, after)
 			if err != nil {
 				return err
 			}
@@ -58,7 +78,7 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 					break
 				}
 				var raw rawHead
-				if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen, &raw.journalBytes, &raw.ledgerGen); err != nil {
+				if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen, &raw.ledgerGen); err != nil {
 					return err
 				}
 				copied += len(raw.stateJSON)
@@ -121,7 +141,7 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 					return err
 				}
 			}
-			if err := visit(ActorHead{State: state, LedgerLength: raw.ledgerLen, JournalBytes: raw.journalBytes, LedgerGen: raw.ledgerGen}); err != nil {
+			if err := visit(ActorHead{State: state, LedgerLength: raw.ledgerLen, JournalRecords: journals[raw.chatID], LedgerGen: raw.ledgerGen}); err != nil {
 				return err
 			}
 		}

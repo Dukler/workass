@@ -73,7 +73,7 @@ func actorSessionInventory(runtime *providerChatRuntime) map[string]any {
 			}
 			continue
 		}
-		state := actor.engine.Snapshot()
+		state := actor.engine.ReadSnapshot()
 		if state.Deleted || !state.Initialized {
 			continue
 		}

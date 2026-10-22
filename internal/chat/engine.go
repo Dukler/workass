@@ -14,8 +14,14 @@ import (
 // commands. External effects become executable exclusively through ClaimNext,
 // after their Pending -> Dispatched transition is durably stored.
 type Engine struct {
-	mu                  sync.Mutex
-	state               State
+	mu    sync.Mutex
+	state State
+	// validated: state is exactly a state State.Validate accepted, because it
+	// was installed from a validated transition and committed state is never
+	// changed in place. The next transition then skips revalidating it. A
+	// journaled provider event validates only what it changed, so it clears
+	// this.
+	validated           bool
 	store               StateStore
 	cancelRouting       atomic.Pointer[cancelRoutingSnapshot]
 	pendingSteerSettled chan struct{}
@@ -71,24 +77,30 @@ func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
 		// first use is the same transition. A store whose checkpoint is not
 		// the opened state (journal records replayed onto it, rows from before
 		// incremental checkpoints) still checkpoints it, at the same revision.
-		if checkpointer, isCheckpointer := store.(loadCheckpointer); isCheckpointer && checkpointer.needsCheckpointAfterLoad() {
+		checkpointer, isCheckpointer := store.(loadCheckpointer)
+		if isCheckpointer && checkpointer.needsCheckpointAfterLoad() {
 			if err := store.Save(state); err != nil {
 				return nil, err
 			}
 		}
 		engine := &Engine{store: store}
 		engine.installCommittedState(state)
+		// The SQLite load validated this exact state (no journal replayed onto
+		// it), or Save just did; a file journal may have been replayed after
+		// the load's validation, so the first command validates it.
+		engine.validated = isCheckpointer
 		return engine, nil
 	}
 	next, _, err := Reduce(state, RecoverOutbox{})
 	if err != nil {
 		return nil, err
 	}
-	if err := store.Save(next); err != nil {
+	engine := &Engine{store: store}
+	if err := engine.saveReduced(next); err != nil {
 		return nil, err
 	}
-	engine := &Engine{store: store}
 	engine.installCommittedState(next)
+	engine.validated = true
 	return engine, nil
 }
 
@@ -187,23 +199,40 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 			return nil
 		}
 	}
+	if update, ok := command.(UpdateEnvironment); ok && prepare == nil && !e.state.Deleted && environmentUpdateUnchanged(e.state, update) {
+		// Re-observing the same Entorno (every provider session bind, and
+		// turns that change no file) would only advance an unread counter.
+		return nil
+	}
+	if prepare == nil && !e.state.Deleted && externalMutationReplayUnchanged(e.state, command) {
+		// Re-recording a journaled external mutation, or a receipt it already
+		// holds, is accepted and changes nothing but the revision. Opening a
+		// chat re-hosts its visualizations and a browser retry re-records its
+		// operation; neither may rewrite the whole actor.
+		return nil
+	}
 	providerStore, hasProviderStore := e.store.(providerEventStateStore)
 	providerEvent, isProviderEvent := command.(ProviderEventReceived)
 	useProviderEventJournal := prepare == nil && hasProviderStore && isProviderEvent && journalableProviderEvent(providerEvent.Event.Kind)
 	var (
 		next State
 		err  error
+		undo = func() {}
 	)
 	if useProviderEventJournal {
-		next, err = reduceJournaledProviderEvent(e.state, providerEvent)
+		// The journaled reducer shares unchanged structure with the committed
+		// state; stop vouching for it before running.
+		e.validated = false
+		next, undo, err = reduceJournaledProviderEventSharingTools(e.state, providerEvent)
 	} else {
-		next, _, err = Reduce(e.state, command)
+		next, _, err = reduce(e.state, command, e.validated)
 	}
 	if err != nil {
 		return err
 	}
 	if prepare != nil {
 		if err := prepare(); err != nil {
+			undo()
 			return err
 		}
 	}
@@ -214,14 +243,30 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		} else if prepare == nil {
 			persistErr = e.persistCommand(next, command)
 		} else {
-			persistErr = e.store.Save(next)
+			persistErr = e.saveReduced(next)
 		}
 		if persistErr != nil {
+			undo()
 			return persistErr
 		}
 	}
 	e.installCommittedState(next)
+	e.validated = !useProviderEventJournal
 	return nil
+}
+
+// saveReduced checkpoints a state reduce has just validated. Both stores
+// validate on Save to refuse any caller's invalid state; for the engine's own
+// transition that is the same pure check run an instant earlier on the same
+// value. Other stores (wrappers in tests) keep their Save.
+func (e *Engine) saveReduced(next State) error {
+	switch store := e.store.(type) {
+	case *SQLStore:
+		return store.saveValidated(next)
+	case FileStore:
+		return store.saveValidated(next)
+	}
+	return e.store.Save(next)
 }
 
 // ClaimNext persists the Pending -> Dispatched transition before returning an
@@ -237,7 +282,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 		if entry.Status != OutboxPending || !outboxEntryExecutable(e.state, entry) {
 			continue
 		}
-		next, effects, err := Reduce(e.state, ClaimEffect{EffectID: entry.ID})
+		next, effects, err := reduce(e.state, ClaimEffect{EffectID: entry.ID}, e.validated)
 		if err != nil {
 			return nil, false, err
 		}
@@ -250,6 +295,7 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 			}
 		}
 		e.installCommittedState(next)
+		e.validated = true
 		return effects[0], true, nil
 	}
 	return nil, false, nil
@@ -272,7 +318,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 		if entry.ID != effectID || entry.Status != OutboxPending || !outboxEntryDirectClaimable(e.state, entry) {
 			continue
 		}
-		next, effects, err := Reduce(e.state, ClaimEffect{EffectID: effectID})
+		next, effects, err := reduce(e.state, ClaimEffect{EffectID: effectID}, e.validated)
 		if err != nil {
 			return nil, false, err
 		}
@@ -285,6 +331,7 @@ func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 			}
 		}
 		e.installCommittedState(next)
+		e.validated = true
 		return effects[0], true, nil
 	}
 	return nil, false, nil
@@ -366,6 +413,30 @@ func (e *Engine) Snapshot() State {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.state.Clone()
+}
+
+// ReadSnapshot is Snapshot for a reader: every field is an isolated copy
+// except the ledger rows, which are shared with the committed state instead of
+// deep-copied (the bulk of a long chat; see State.cloneSharingLedger).
+// Committed rows are never modified in place, so the rows can be read at any
+// time, but the caller must treat them, and everything they reference, as
+// read-only.
+func (e *Engine) ReadSnapshot() State {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state.cloneSharingLedger()
+}
+
+// View runs read under the engine lock with the committed state itself, not
+// a copy: Snapshot deep-copies the whole history, which on a long chat costs
+// more than most reads that need a handful of fields. read may copy values
+// out. It must not modify or keep anything reachable from the state (its
+// maps, slices and pointers are the live committed state) and must not call
+// back into this engine.
+func (e *Engine) View(read func(State)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	read(e.state)
 }
 
 // HasCancellableJob locates Stop's owner without copying transcript history or

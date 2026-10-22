@@ -54,7 +54,7 @@ func (r *providerChatRuntime) closeExactAttachment(ctx context.Context, actor *p
 		return false
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	laneID, generation, ok := currentActorAttachmentForClose(state, live, sessionID)
 	if !ok {
 		if durableDetachRetryForNewerAttachment(state, live, sessionID) {
@@ -82,7 +82,7 @@ func (r *providerChatRuntime) closeExactAttachment(ctx context.Context, actor *p
 	// lane and generation again, and only then reaches provider Lane.Detach
 	// (Manager.CloseSession for the ACP lane). It never drains another effect.
 	_, executeErr := actor.coordinator.ExecuteDetach(ctx, operationID)
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	if durableDetachReceiptForTarget(state, laneID, sessionID, generation) {
 		return true
 	}
@@ -217,7 +217,7 @@ func (r *providerChatRuntime) findCloseJournal(sessionID string) (*providerChatA
 				continue
 			}
 		}
-		state := actor.engine.Snapshot()
+		state := actor.engine.ReadSnapshot()
 		candidate := false
 		for _, lane := range state.Lanes {
 			if lane.Attachment != nil && strings.TrimSpace(lane.Attachment.ConnectionID) == strings.TrimSpace(sessionID) {

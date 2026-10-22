@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"workass/internal/provider"
@@ -474,23 +476,133 @@ func (s State) ResolveProviderActivityOwner(laneID provider.LaneID, operationID 
 }
 
 func validateProviderActivityOwner(state State, owner ProviderActivityOwner) error {
+	return validateProviderActivityOwnerWith(state.Lanes, owner, func(owner ProviderActivityOwner) bool {
+		return providerActivityOwnerMatches(state, owner)
+	})
+}
+
+// providerActivityOwnerIndex validates many provider activity owners against
+// one State. providerActivityOwnerMatches scans the whole ledger for every
+// owner; a long chat holds tens of thousands of tool owners and thousands of
+// rows, so State.Validate spent seconds in that nested scan while holding the
+// actor. The index reads the ledger once and answers each owner with a map
+// lookup. It decides exactly what providerActivityOwnerMatches decides.
+type providerActivityOwnerIndex struct {
+	state  State
+	built  bool
+	ledger map[providerActivityLedgerKey]*providerActivityLedgerTurns
+	// checked holds each distinct owner's answer: a long chat's tool calls
+	// share a few hundred owners (one per turn) among tens of thousands.
+	checked map[ProviderActivityOwner]error
+}
+
+type providerActivityLedgerKey struct {
+	laneID      provider.LaneID
+	operationID provider.OperationID
+}
+
+// providerActivityLedgerTurns is what the ledger rows of one (lane, operation)
+// say about native turns: whether any of them knows its native turn id, and
+// which ids they know. A key is present only when at least one row exists.
+type providerActivityLedgerTurns struct {
+	knownNativeTurn bool
+	nativeTurnIDs   []string
+}
+
+func newProviderActivityOwnerIndex(state State) *providerActivityOwnerIndex {
+	return &providerActivityOwnerIndex{state: state}
+}
+
+func (index *providerActivityOwnerIndex) build() {
+	if index.built {
+		return
+	}
+	index.built = true
+	index.ledger = make(map[providerActivityLedgerKey]*providerActivityLedgerTurns)
+	for _, event := range index.state.Ledger {
+		// providerActivityLedgerOwnsLane for the non-empty, trimmed lane every
+		// lookup uses: excluded and inherited rows own no lane, and a row owns
+		// exactly the lane it names (an empty name can never match).
+		if event.ContextExcluded || event.Inherited || event.LaneID == "" {
+			continue
+		}
+		key := providerActivityLedgerKey{event.LaneID, provider.NormalizeOperationID(string(event.OperationID))}
+		turns := index.ledger[key]
+		if turns == nil {
+			turns = &providerActivityLedgerTurns{}
+			index.ledger[key] = turns
+		}
+		if eventTurnID := strings.TrimSpace(event.NativeTurnID); eventTurnID != "" {
+			turns.knownNativeTurn = true
+			if !slices.Contains(turns.nativeTurnIDs, eventTurnID) {
+				turns.nativeTurnIDs = append(turns.nativeTurnIDs, eventTurnID)
+			}
+		}
+	}
+}
+
+// matches is providerActivityOwnerMatches(index.state, owner).
+func (index *providerActivityOwnerIndex) matches(owner ProviderActivityOwner) bool {
+	state := &index.state
+	laneID := provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	operationID := provider.NormalizeOperationID(string(owner.OperationID))
+	turnID := strings.TrimSpace(owner.TurnID)
+	if laneID == "" || operationID == "" {
+		return false
+	}
+	if _, ok := state.Lanes[laneID]; !ok {
+		return false
+	}
+	if foreground := state.Foreground; foreground != nil &&
+		foreground.LaneID == laneID && provider.NormalizeOperationID(string(foreground.OperationID)) == operationID {
+		return turnID != "" && strings.TrimSpace(foreground.Turn.NativeID) == turnID
+	}
+	index.build()
+	turns := index.ledger[providerActivityLedgerKey{laneID, operationID}]
+	if turns == nil {
+		return false
+	}
+	if turnID != "" {
+		return slices.Contains(turns.nativeTurnIDs, turnID)
+	}
+	return !turns.knownNativeTurn
+}
+
+// validate is validateProviderActivityOwner(index.state, owner).
+func (index *providerActivityOwnerIndex) validate(owner ProviderActivityOwner) error {
+	if err, ok := index.checked[owner]; ok {
+		return err
+	}
+	err := validateProviderActivityOwnerWith(index.state.Lanes, owner, index.matches)
+	if index.checked == nil {
+		index.checked = make(map[ProviderActivityOwner]error)
+	}
+	index.checked[owner] = err
+	return err
+}
+
+// validateProviderActivityOwnerWith is validateProviderActivityOwner for the
+// state whose lanes are given; matches must be providerActivityOwnerMatches of
+// that same state.
+func validateProviderActivityOwnerWith(lanes map[provider.LaneID]LaneState, owner ProviderActivityOwner, matches func(ProviderActivityOwner) bool) error {
 	owner.LaneID = provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
 	owner.OperationID = provider.NormalizeOperationID(string(owner.OperationID))
 	owner.TurnID = strings.TrimSpace(owner.TurnID)
 	if owner.LaneID == "" {
 		return errors.New("provider activity is missing lane ownership")
 	}
-	lane, ok := state.Lanes[owner.LaneID]
-	if !ok {
+	// Read one field rather than copy the lane: a LaneState is large and this
+	// runs for every tool entry of the chat.
+	if _, ok := lanes[owner.LaneID]; !ok {
 		return errors.New("provider activity belongs to an unknown lane")
 	}
-	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lane.ConnectionGeneration {
+	if owner.ConnectionGeneration == 0 || owner.ConnectionGeneration > lanes[owner.LaneID].ConnectionGeneration {
 		return errors.New("provider activity has an invalid connection generation")
 	}
 	if owner.OperationID == "" {
 		return errors.New("provider activity is missing operation ownership")
 	}
-	if !providerActivityOwnerMatches(state, owner) {
+	if !matches(owner) {
 		return errors.New("provider activity does not match an exact current or historical actor turn")
 	}
 	return nil
@@ -734,6 +846,26 @@ type OutboxEntry struct {
 	LastError                   provider.ErrorKind
 }
 
+// Clone copies the entry so it shares nothing with the actor.
+func (entry OutboxEntry) Clone() OutboxEntry {
+	if entry.Input != nil {
+		input := *entry.Input
+		input.Attachments = append([]provider.Attachment(nil), entry.Input.Attachments...)
+		entry.Input = &input
+	}
+	if entry.Batch != nil {
+		batch := cloneContextBatch(*entry.Batch)
+		entry.Batch = &batch
+	}
+	if entry.Background != nil {
+		action := entry.Background.Clone()
+		entry.Background = &action
+	}
+	entry.Checkpoint = append(json.RawMessage(nil), entry.Checkpoint...)
+	entry.Result = append(json.RawMessage(nil), entry.Result...)
+	return entry
+}
+
 // PresentationState keeps a direct idle send in the transcript during native
 // attachment. The internal dispatch queue is not the user's follow-up queue.
 // This shallow view never changes the actor or schedules provider work.
@@ -850,61 +982,66 @@ func NewState(chatID string) (State, error) {
 }
 
 func (s State) Clone() State {
+	out := s.cloneSharingLedger()
+	out.Ledger = cloneLedgerEvents(s.Ledger)
+	return out
+}
+
+// cloneLedgerRows is Clone for a transition that may write the ledger: the
+// rows are copied into a new array, so the transition can rewrite a row's own
+// fields and append rows, but each row's slices and pointers stay shared with
+// s instead of being deep-copied. Committed rows are never edited through
+// them: a transition that changes a row's timeline or attachments replaces
+// the slice (upsertSettledSubagentTool copies the row's timeline first), and
+// tests verify every transition leaves the committed rows untouched. The
+// SQLite store does not rely on this: its checkpoint compares every row with
+// its own private copy, so even an in-place edit would be saved.
+func (s State) cloneLedgerRows() State {
+	out := s.cloneSharingLedger()
+	out.Ledger = append(make([]LedgerEvent, 0, len(s.Ledger)), s.Ledger...)
+	return out
+}
+
+// cloneValueMap copies a map whose values hold no references. maps.Clone
+// copies the table wholesale, several times faster than re-inserting each
+// entry (the tool-owner map of a long chat has 60k); like the loops it
+// replaced, a nil map becomes an empty one.
+func cloneValueMap[M ~map[K]V, K comparable, V any](m M) M {
+	if m == nil {
+		return make(M)
+	}
+	return maps.Clone(m)
+}
+
+// cloneSharingLedger is Clone except that the result shares the ledger's
+// rows with s. It is for a transition that never writes a ledger row: the
+// ledger is the bulk of a long chat, so deep-copying it on every command
+// dominated the command. Like Clone's copy, a nil ledger becomes an empty one.
+func (s State) cloneSharingLedger() State {
 	out := s
+	if out.Ledger == nil {
+		out.Ledger = make([]LedgerEvent, 0)
+	}
 	out.Presentation = s.Presentation.Clone()
 	out.Environment = s.Environment.Clone()
 	out.Obligation = s.Obligation.Clone()
 	out.Parent = s.Parent.Clone()
-	out.Ledger = cloneLedgerEvents(s.Ledger)
 	out.Queue = cloneQueue(s.Queue)
 	out.StagedQueue = cloneStagedQueue(s.StagedQueue)
-	out.QueueMutationReceipts = make(map[provider.OperationID]QueueMutationReceipt, len(s.QueueMutationReceipts))
-	for operationID, receipt := range s.QueueMutationReceipts {
-		out.QueueMutationReceipts[operationID] = receipt
-	}
-	out.PresentationMutationReceipts = make(map[provider.OperationID]PresentationMutationReceipt, len(s.PresentationMutationReceipts))
-	for operationID, receipt := range s.PresentationMutationReceipts {
-		out.PresentationMutationReceipts[operationID] = receipt
-	}
-	out.RuntimeControlMutationReceipts = make(map[provider.OperationID]RuntimeControlMutationReceipt, len(s.RuntimeControlMutationReceipts))
-	for operationID, receipt := range s.RuntimeControlMutationReceipts {
-		out.RuntimeControlMutationReceipts[operationID] = receipt
-	}
+	out.QueueMutationReceipts = cloneValueMap(s.QueueMutationReceipts)
+	out.PresentationMutationReceipts = cloneValueMap(s.PresentationMutationReceipts)
+	out.RuntimeControlMutationReceipts = cloneValueMap(s.RuntimeControlMutationReceipts)
 	out.WorkspaceMutationReceipts = make(map[provider.OperationID]WorkspaceMutationReceipt, len(s.WorkspaceMutationReceipts))
 	for operationID, receipt := range s.WorkspaceMutationReceipts {
 		receipt.DetachOperationIDs = append([]provider.OperationID(nil), receipt.DetachOperationIDs...)
 		out.WorkspaceMutationReceipts[operationID] = receipt
 	}
-	out.LaneSelectionMutationReceipts = make(map[provider.OperationID]LaneSelectionMutationReceipt, len(s.LaneSelectionMutationReceipts))
-	for operationID, receipt := range s.LaneSelectionMutationReceipts {
-		out.LaneSelectionMutationReceipts[operationID] = receipt
-	}
-	out.CancelMutationReceipts = make(map[provider.OperationID]CancelMutationReceipt, len(s.CancelMutationReceipts))
-	for operationID, receipt := range s.CancelMutationReceipts {
-		out.CancelMutationReceipts[operationID] = receipt
-	}
-	out.AgentWaitObservationReceipts = make(map[provider.OperationID]AgentWaitObservationReceipt, len(s.AgentWaitObservationReceipts))
-	for operationID, receipt := range s.AgentWaitObservationReceipts {
-		out.AgentWaitObservationReceipts[operationID] = receipt
-	}
+	out.LaneSelectionMutationReceipts = cloneValueMap(s.LaneSelectionMutationReceipts)
+	out.CancelMutationReceipts = cloneValueMap(s.CancelMutationReceipts)
+	out.AgentWaitObservationReceipts = cloneValueMap(s.AgentWaitObservationReceipts)
 	out.Outbox = make([]OutboxEntry, len(s.Outbox))
 	for i, entry := range s.Outbox {
-		if entry.Input != nil {
-			input := *entry.Input
-			input.Attachments = append([]provider.Attachment(nil), entry.Input.Attachments...)
-			entry.Input = &input
-		}
-		if entry.Batch != nil {
-			batch := cloneContextBatch(*entry.Batch)
-			entry.Batch = &batch
-		}
-		if entry.Background != nil {
-			action := entry.Background.Clone()
-			entry.Background = &action
-		}
-		entry.Checkpoint = append(json.RawMessage(nil), entry.Checkpoint...)
-		entry.Result = append(json.RawMessage(nil), entry.Result...)
-		out.Outbox[i] = entry
+		out.Outbox[i] = entry.Clone()
 	}
 	out.Lanes = make(map[provider.LaneID]LaneState, len(s.Lanes))
 	for id, lane := range s.Lanes {
@@ -917,24 +1054,15 @@ func (s State) Clone() State {
 			pending.Batch = cloneContextBatch(lane.PendingImport.Batch)
 			lane.PendingImport = &pending
 		}
-		lane.Coverage = make(map[uint64]CoverageRecord, len(lane.Coverage))
-		for sequence, record := range s.Lanes[id].Coverage {
-			lane.Coverage[sequence] = record
-		}
+		lane.Coverage = cloneValueMap(lane.Coverage)
 		if lane.Attachment != nil {
 			attachment := lane.Attachment.Clone()
 			lane.Attachment = &attachment
 		}
 		out.Lanes[id] = lane
 	}
-	out.Operations = make(map[provider.OperationID]struct{}, len(s.Operations))
-	for operationID := range s.Operations {
-		out.Operations[operationID] = struct{}{}
-	}
-	out.Tools = make(map[string]ToolState, len(s.Tools))
-	for id, value := range s.Tools {
-		out.Tools[id] = value
-	}
+	out.Operations = cloneValueMap(s.Operations)
+	out.Tools = cloneValueMap(s.Tools)
 	out.Plans = make(map[provider.OperationID]PlanState, len(s.Plans))
 	for id, value := range s.Plans {
 		value.Event.Entries = append([]provider.PlanEntry(nil), value.Event.Entries...)
@@ -954,18 +1082,9 @@ func (s State) Clone() State {
 		}
 		out.Background[id] = value
 	}
-	out.Usage = make(map[provider.LaneID]provider.UsageEvent, len(s.Usage))
-	for id, value := range s.Usage {
-		out.Usage[id] = value
-	}
-	out.Compactions = make(map[provider.LaneID]CompactionState, len(s.Compactions))
-	for id, value := range s.Compactions {
-		out.Compactions[id] = value
-	}
-	out.Transport = make(map[provider.LaneID]provider.TransportHealthEvent, len(s.Transport))
-	for id, value := range s.Transport {
-		out.Transport[id] = value
-	}
+	out.Usage = cloneValueMap(s.Usage)
+	out.Compactions = cloneValueMap(s.Compactions)
+	out.Transport = cloneValueMap(s.Transport)
 	if s.Foreground != nil {
 		foreground := *s.Foreground
 		foreground.Input.Attachments = append([]provider.Attachment(nil), s.Foreground.Input.Attachments...)
@@ -1409,7 +1528,8 @@ func (s State) Validate() error {
 			return errors.New("established lane cannot re-enter creating phase")
 		}
 	}
-	validateOwner := func(owner ProviderActivityOwner) error { return validateProviderActivityOwner(s, owner) }
+	owners := newProviderActivityOwnerIndex(s)
+	validateOwner := owners.validate
 	for id, value := range s.Tools {
 		if strings.TrimSpace(id) == "" {
 			return errors.New("tool activity is missing its provider id")
@@ -1660,7 +1780,7 @@ func (s State) Validate() error {
 			if effect.Background == nil || effect.Background.OperationID != effect.OperationID {
 				return errors.New("background outbox effect is missing its immutable action")
 			}
-			if err := effect.Background.Validate(s); err != nil {
+			if err := effect.Background.validateWith(s, owners.validate); err != nil {
 				return fmt.Errorf("background outbox effect: %w", err)
 			}
 			if len(effect.Result) > 0 && !json.Valid(effect.Result) {

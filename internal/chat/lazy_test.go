@@ -161,8 +161,8 @@ func discoveredSummary(t *testing.T, actors *SQLActors, chatID string) ActorSumm
 		if head.State.ChatID != chatID {
 			return nil
 		}
-		if head.JournalBytes != 0 || head.LedgerGen == 0 {
-			t.Fatalf("head is not a plain checkpoint: journal %d gen %d", head.JournalBytes, head.LedgerGen)
+		if head.JournalRecords != 0 || head.LedgerGen == 0 {
+			t.Fatalf("head is not a plain checkpoint: journal %d gen %d", head.JournalRecords, head.LedgerGen)
 		}
 		stamps, err := actors.ReadLedgerStamps(chatID, head.LedgerLength, SessionActivityWindow)
 		if err != nil {

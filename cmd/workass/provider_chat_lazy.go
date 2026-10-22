@@ -164,7 +164,7 @@ func (r *providerChatRuntime) headMustOpen(head chat.ActorHead) string {
 	if ok, reason := chat.Quiescent(head.State); !ok {
 		return reason
 	}
-	if head.JournalBytes != 0 {
+	if head.JournalRecords != 0 {
 		return "journal"
 	}
 	if head.LedgerLength > 0 && head.LedgerGen == 0 {

@@ -135,7 +135,7 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 	}
 
 	actor.mu.Lock()
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	if _, exists := state.Operations[action.OperationID]; exists {
 		matched := false
 		for _, entry := range state.Outbox {
@@ -158,7 +158,7 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 	if err := actor.coordinator.Drain(ctx); err != nil {
 		return nil, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	for _, entry := range state.Outbox {
 		if entry.Kind != chat.EffectBackground || entry.OperationID != action.OperationID {
 			continue
@@ -199,7 +199,7 @@ func (r *providerChatRuntime) applySpawnedWorkSnapshot(tabID, chatID string, ite
 	if err != nil {
 		return acp.SpawnedWorkActorProjection{}, err
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if strings.TrimSpace(state.Presentation.TabID) != tabID {
 		return acp.SpawnedWorkActorProjection{}, errors.New("background snapshot belongs to another tab attachment")
 	}
@@ -218,7 +218,7 @@ func (r *providerChatRuntime) applySpawnedWorkSnapshot(tabID, chatID string, ite
 			LiveEvidence: evidence.Live, HarnessQuiet: evidence.HarnessQuiet,
 		})
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	actor.mu.Unlock()
 	if err != nil {
 		return acp.SpawnedWorkActorProjection{}, err
