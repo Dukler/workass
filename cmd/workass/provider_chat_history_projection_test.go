@@ -213,7 +213,7 @@ func TestArchiveWirePagesBeforeStableActorMessageWithoutChangingLegacyFullRead(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	page := anySlice(rawPage)
+	page := anySlice(decodedWireReply(t, rawPage))
 	if len(page) != 40 || fieldString(mapFromAnyMain(page[0]), "id") != "message-020" || fieldString(mapFromAnyMain(page[39]), "id") != "message-059" {
 		t.Fatalf("paged archive range = %#v", page)
 	}
