@@ -662,10 +662,15 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     retry.timer = window.setTimeout(() => { retry.timer = null; setWindowTick((tick) => tick + 1); }, retry.delay);
   };
   useEffect(() => () => { if (olderRetry.current.timer !== null) window.clearTimeout(olderRetry.current.timer); }, []);
+  // A chat opened with nothing on screen paints its last exchange while the
+  // rest of its recent slice is still arriving (store.showsFirstScreenOnly).
+  // Older history is read only after that slice, exactly as when the slice
+  // painted at once; the store update that completes it renders this again.
+  const sliceArriving = (): boolean => !!chat && store.showsFirstScreenOnly(chat.id);
   const loadOlderAhead = () => {
     const el = scrollRef.current;
     if (!el || !virtual || stick.current || restoring.current || hidden <= 0 || historyLoadingNow.current || olderStalledAt.current === total) return;
-    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX || olderRetryPending()) return;
+    if (mountedWindow.current.from > 0 || el.scrollTop > TRANSCRIPT_LOAD_AHEAD_PX || olderRetryPending() || sliceArriving()) return;
     const before = total;
     // Only "nothing older" stops it; a read that failed is tried again.
     void revealOlder().then((outcome) => { if (outcome === 'empty') olderStalledAt.current = before; });
@@ -956,7 +961,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const doc = docRef.current;
     const el = scrollRef.current;
     if (!doc || !el || !chat || selectedFindMatch || doc.offsetHeight >= el.clientHeight) return;
-    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current || olderRetryPending()) return;
+    if (hidden <= 0 || historyLoadingNow.current || chat.historyComplete || autoFillStalled.current || olderRetryPending() || sliceArriving()) return;
     const chatID = chat.id;
     const before = chat.messages.length;
     void revealOlder().then((outcome) => {
@@ -975,7 +980,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       messages: visibleMessages, restore: pending, historyComplete: !!chat.historyComplete,
       loading: historyLoadingNow.current, stalled: restoreStalled.current,
     });
-    if (step !== 'load' || olderRetryPending()) return;
+    if (step !== 'load' || olderRetryPending() || sliceArriving()) return;
     void revealOlder(CHAT_MESSAGE_TAIL).then((outcome) => {
       if (restoring.current !== pending) return;
       // Only "nothing older" proves the row gone; a failed read is retried.
