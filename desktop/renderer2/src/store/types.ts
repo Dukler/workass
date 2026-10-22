@@ -231,6 +231,8 @@ export interface Chat {
   // running its default after rejecting this saved selection.
   configuredModelId?: string | null;
   currentModeId: string | null;
+  // The actor's saved mode, which a live session's reported mode may differ from.
+  configuredModeId?: string | null;
   // Last explicit effort + permission selection for each provider/model in
   // THIS chat. Switching away and back restores the same setup without leaking
   // another tab's controls or sending an id from the previous provider.
