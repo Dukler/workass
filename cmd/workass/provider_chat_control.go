@@ -405,11 +405,37 @@ func (r *providerChatRuntime) exactActorFence(tabID, chatID string) (*providerCh
 	return actor, nil
 }
 
+// exactActorOrSummary is exactActorFence for a read that needs only what a
+// closed actor's summary carries (its identity and read projection): a closed
+// actor answers from the summary, with the same ownership checks, and is not
+// opened. Either the actor or the summary is returned.
+func (r *providerChatRuntime) exactActorOrSummary(tabID, chatID string) (*providerChatActor, *chat.ActorSummary, error) {
+	if r == nil {
+		return nil, nil, errors.New("provider chat runtime is unavailable")
+	}
+	if summary, closed := r.closedSummary(chatID); closed {
+		tabID = strings.TrimSpace(tabID)
+		if tabID == "" || strings.TrimSpace(chatID) == "" {
+			return nil, nil, errors.New("exact tab and chat ids are required")
+		}
+		if summary.Deleted {
+			return nil, nil, errors.New("chat was deleted")
+		}
+		if strings.TrimSpace(summary.TabID) != tabID {
+			return nil, nil, errors.New("tab id does not own the requested chat")
+		}
+		return nil, &summary, nil
+	}
+	actor, err := r.exactActorFence(tabID, chatID)
+	return actor, nil, err
+}
+
 // ChatGoal reads the chat's latest provider goal (Codex /goal) once the tab is
 // proven to own the chat. The goal is live provider state, kept per chat by
 // the manager; connected clients already have it from the chat:goal event.
+// The proof needs only the chat's identity, so a closed actor stays closed.
 func (r *providerChatRuntime) ChatGoal(tabID, chatID string) (map[string]any, error) {
-	if _, err := r.exactActorFence(tabID, chatID); err != nil {
+	if _, _, err := r.exactActorOrSummary(tabID, chatID); err != nil {
 		return nil, err
 	}
 	if r.manager == nil {
@@ -420,14 +446,21 @@ func (r *providerChatRuntime) ChatGoal(tabID, chatID string) (map[string]any, er
 
 // ChatCommands reads the provider capability snapshot from the durable actor.
 // The manager's command cache is executor materialization only and is never a
-// late-client or restart authority after cutover.
+// late-client or restart authority after cutover. A closed actor's summary
+// carries its lanes and their attachments as committed, so it answers without
+// opening the actor (opening a large one took a second, and the ordered lane
+// held this read's neighbours behind it).
 func (r *providerChatRuntime) ChatCommands(tabID, chatID string) (map[string]any, error) {
-	actor, err := r.exactActorFence(tabID, chatID)
+	actor, summary, err := r.exactActorOrSummary(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
+	view := func(read func(chat.State)) { actor.engine.View(read) }
+	if summary != nil {
+		view = summary.View
+	}
 	var snapshot *providercontract.LaneAttachmentSnapshot
-	actor.engine.View(func(state chat.State) {
+	view(func(state chat.State) {
 		laneID := state.ActiveLaneID
 		if laneID == "" {
 			laneID = state.DesiredLaneID

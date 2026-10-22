@@ -46,6 +46,15 @@ func (p archivePage) raw() wire.EncodedResult {
 	return append(out, ']')
 }
 
+// size is the length of the page's reply, raw() without building it.
+func (p archivePage) size() int {
+	size := 2 + max(0, len(p.encoded)-1)
+	for _, row := range p.encoded {
+		size += len(row)
+	}
+	return size
+}
+
 // rawMessages are the row encodings for a larger reply that embeds this page.
 func (p archivePage) rawMessages() []any {
 	rows := make([]any, len(p.encoded))

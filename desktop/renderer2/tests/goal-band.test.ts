@@ -67,6 +67,23 @@ test('a chat:goal becomes the composer goal band and follows its status', () => 
   assert.doesNotMatch(render(chat), /goalband/);
 });
 
+// Opening a chat asks for its goal; "none" for a chat that had none changes
+// nothing on screen, so it must not re-render the app inside the chat's first
+// frame. A goal arriving, or going away, still does.
+test('no goal for a chat without one updates nothing on screen', () => {
+  const chat = goalChat();
+  appStore.state.chats = [chat];
+  const store = appStore as typeof appStore & { version(topic: string): number };
+  const before = store.version('app');
+  appStore.applyChatGoal({ tabId: 'goal-tab', chatId: 'goal-chat', goal: null });
+  assert.equal(chat.goal, null);
+  assert.equal(store.version('app'), before);
+  appStore.applyChatGoal({ tabId: 'goal-tab', chatId: 'goal-chat', goal: { objective: 'x', status: 'active', tokensUsed: 0, tokenBudget: null, timeUsedSeconds: 0 } });
+  assert.equal(store.version('app'), before + 1);
+  appStore.applyChatGoal({ tabId: 'goal-tab', chatId: 'goal-chat', goal: null });
+  assert.equal(store.version('app'), before + 2);
+});
+
 test('a goal for another chat id is ignored', () => {
   const chat = goalChat();
   appStore.state.chats = [chat];

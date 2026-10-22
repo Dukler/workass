@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -99,9 +100,10 @@ func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 	if current == len(migrations) {
 		return current, nil
 	}
+	backup := ""
 	if current > 0 && backupDir != "" {
-		name := fmt.Sprintf("state-v%d-%s.db", current, time.Now().UTC().Format("20060102T150405.000000000Z"))
-		if err := db.Backup(filepath.Join(backupDir, name)); err != nil {
+		backup = fmt.Sprintf("state-v%d-%s.db", current, time.Now().UTC().Format("20060102T150405.000000000Z"))
+		if err := db.Backup(filepath.Join(backupDir, backup)); err != nil {
 			return 0, fmt.Errorf("back up state database before migration: %w", err)
 		}
 	}
@@ -135,7 +137,52 @@ func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 		}
 		current = migration.Version
 	}
+	if backup != "" {
+		// Every migration committed: the backup just written is the state
+		// before them, and older ones are superseded by it.
+		db.prunedBackups = pruneMigrationBackups(backupDir, backup)
+	}
 	return current, nil
+}
+
+// migrationBackupName matches the backups migrate writes (state-v<N>-<UTC
+// stamp>.db) and what an interrupted write of one leaves (.partial).
+var migrationBackupName = regexp.MustCompile(`^state-v[0-9]+-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z\.db(\.partial)?$`)
+
+// pruneBackupHook, when set (tests), runs before each backup is removed.
+var pruneBackupHook func(name string)
+
+// pruneMigrationBackups removes every migration backup in dir except keep,
+// the one written before the migrations that just committed, and returns
+// the names it removed. Each backup is a whole copy of the database (a
+// gigabyte on a long-lived install), so keeping every one filled the disk.
+//
+// It runs only once migrations have committed, in the process that holds the
+// database's exclusive lock: no other migration can be writing a backup, a
+// migration that failed returned before this point with its backup in place,
+// and keep is complete (written and synced, then renamed into place). A crash
+// part way leaves some older backups for the next successful migration to
+// remove; it can never remove keep. Only files named like a backup are
+// touched.
+func pruneMigrationBackups(dir, keep string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == keep || !entry.Type().IsRegular() || !migrationBackupName.MatchString(name) {
+			continue
+		}
+		if pruneBackupHook != nil {
+			pruneBackupHook(name)
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err == nil {
+			removed = append(removed, name)
+		}
+	}
+	return removed
 }
 
 func verifyHistory(db *DB, migrations []Migration, current int) error {
