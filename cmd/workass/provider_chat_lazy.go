@@ -488,7 +488,8 @@ func (r *providerChatRuntime) sessionSnapshot(chatID, activeTabID string, tail i
 // a 300 MB chat that open took a second, which a send right after viewing
 // the chat paid on top of its own work. One open runs at a time; a chat
 // viewed meanwhile replaces any other waiting one (the newest view is the
-// one a send follows), so clicking through many chats loads at most two.
+// one a send follows), so clicking through many chats queues at most one
+// open behind the one in progress.
 type actorPrewarm struct {
 	running bool
 	next    string
@@ -544,7 +545,12 @@ func (r *providerChatRuntime) runPrewarm(chatID string) {
 			// a command or read arriving meanwhile waits for, or reads
 			// around, this same load.
 			if _, err := r.actor(chatID); err != nil {
-				log.Printf("[workass] open viewed chat %s in the background: %v", chatID, err)
+				r.mu.Lock()
+				closing := r.closed
+				r.mu.Unlock()
+				if !closing {
+					log.Printf("[workass] open viewed chat %s in the background: %v", chatID, err)
+				}
 			}
 		}
 		r.mu.Lock()

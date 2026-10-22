@@ -1630,12 +1630,6 @@ func projectActorUsage(target map[string]any, state chat.State) error {
 	return nil
 }
 
-// projectNotice is the quiet transcript line for a Workass wake-up notice:
-// what finished, how, and its result folded (mock
-// desktop/docs/mocks/subsessions/completion-notice.html, approved 2026-10-16).
-// Rows from earlier builds carry no notice fields but have the deterministic
-// subagent-completion operation id; their legacy text names the agent and
-// outcome, so history draws them the same quiet way.
 // ownUserMessage reports whether the row projects as the user's own message:
 // a user row that is not a wake-up notice. It is the row the transcript's
 // window always reaches back to (transcriptWindowStart in the renderer).
@@ -1658,6 +1652,12 @@ func lastExchangeStart(messages []any) int {
 	return 0
 }
 
+// projectNotice is the quiet transcript line for a Workass wake-up notice:
+// what finished, how, and its result folded (mock
+// desktop/docs/mocks/subsessions/completion-notice.html, approved 2026-10-16).
+// Rows from earlier builds carry no notice fields but have the deterministic
+// subagent-completion operation id; their legacy text names the agent and
+// outcome, so history draws them the same quiet way.
 func projectNotice(event chat.LedgerEvent) map[string]any {
 	if event.Role != "user" {
 		return nil
