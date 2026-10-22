@@ -84,7 +84,14 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 			}
 			if rawLimit, requested := options["tail"]; requested {
 				limit := intValue(rawLimit)
-				if messages, found, err := providerChats.ProjectRecentArchiveByTabRaw(stringArg(args, 0), limit, read); err != nil {
+				recent := providerChats.ProjectRecentArchiveByTabRaw
+				if options["lastExchange"] == true {
+					// Additive: only the tail's last exchange (the first screen
+					// of a chat the renderer has nothing of). An older daemon
+					// ignores it and answers the whole bounded tail.
+					recent = providerChats.ProjectLastExchangeByTabRaw
+				}
+				if messages, found, err := recent(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
 					return messages, nil

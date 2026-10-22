@@ -476,6 +476,53 @@ func (a *SQLActors) ScanLedgerLiveRows(chatID string, view LedgerView, lo, hi in
 	return live, nil
 }
 
+// NewestLedgerRowOfRole returns the sequence of the newest row in (from,
+// view.Count] whose role column is role and that match accepts, or 0. Only
+// rows of that role are read (the role column sits before the body, so the
+// others' bodies stay on disk): copied in one read transaction, then decoded
+// newest first until one matches.
+func (a *SQLActors) NewestLedgerRowOfRole(chatID string, view LedgerView, from int, role string, match func(LedgerEvent) bool) (int, error) {
+	chatID = strings.TrimSpace(chatID)
+	from = max(0, from)
+	if from >= view.Count {
+		return 0, nil
+	}
+	var raws []sqlRawRow
+	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		raws = raws[:0]
+		if err := checkSQLRevision(tx, chatID, view); err != nil {
+			return err
+		}
+		rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? AND role = ? ORDER BY seq DESC`, chatID, from, view.Count, role)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var raw sqlRawRow
+			if err := rows.Scan(&raw.seq, &raw.eventJSON); err != nil {
+				return err
+			}
+			raws = append(raws, raw)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+	for index := range raws {
+		var event LedgerEvent
+		if err := json.Unmarshal(raws[index].eventJSON, &event); err != nil {
+			return 0, fmt.Errorf("decode chat ledger row %d: %w", raws[index].seq, err)
+		}
+		raws[index].eventJSON = nil
+		if match(event) {
+			return int(raws[index].seq), nil
+		}
+	}
+	return 0, nil
+}
+
 // ReadLedgerMessage is Engine.ReadMessage for a chat that is not resident.
 func (a *SQLActors) ReadLedgerMessage(chatID string, view LedgerView, messageID string) (LedgerEvent, bool, error) {
 	chatID, messageID = strings.TrimSpace(chatID), strings.TrimSpace(messageID)
