@@ -33,6 +33,26 @@ func TestActorEnvironmentProjectionSurvivesRuntimeRestartAndRejectsWrongTab(t *t
 	if err != nil || len(got.Repos) != 1 || got.Repos[0].Files[0].Adds != 2 {
 		t.Fatalf("actor environment = %#v, err=%v", got, err)
 	}
+	// The same observation again (a session bind, a turn that changed no file)
+	// is accepted and published without rewriting the actor.
+	envActor, err := runtime.actor("env-actor-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := envActor.engine.Snapshot().Revision
+	published := 0
+	runtime.publish = func(channel string, _ any) {
+		if channel == "chat:env" {
+			published++
+		}
+	}
+	if err := runtime.observeChatEnv(payload); err != nil {
+		t.Fatalf("identical environment observation: %v", err)
+	}
+	if got := envActor.engine.Snapshot().Revision; got != revision || published != 1 {
+		t.Fatalf("identical observation: revision %d -> %d, published %d", revision, got, published)
+	}
+	runtime.publish = nil
 	if _, err := runtime.ChatEnvGet("wrong-tab", "env-actor-chat"); err == nil {
 		t.Fatal("wrong tab read bypassed actor ownership")
 	}

@@ -233,6 +233,19 @@ type SQLStore struct {
 
 	mu    sync.Mutex
 	cache *sqlLedgerCache
+	// journal is this handle's account of the chat's journal records after
+	// its checkpoint (see appendJournalRecord); nil when unknown.
+	journal *sqlJournalAccount
+}
+
+// sqlJournalAccount is the size the journal budget charges for the journal
+// rows this handle last saw: the magic header once there is a row, plus each
+// record's file frame, exactly what the import and every append put in
+// chats.journal_bytes. last is the newest row's revision (0 for none), the
+// fence that proves no other writer added or removed rows since.
+type sqlJournalAccount struct {
+	bytes int64
+	last  uint64
 }
 
 // sqlLedgerCache is this handle's private, exact copy of the ledger rows it
@@ -268,6 +281,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.journal = nil
 	loaded, found, err := loadSQLActorInChunks(s.actors.db, s.chatID)
 	if err != nil || !found {
 		s.cache = nil
@@ -586,6 +600,11 @@ func (s *SQLStore) Save(state State) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}
+	return s.saveValidated(state)
+}
+
+// saveValidated is Save for a state the caller has just validated.
+func (s *SQLStore) saveValidated(state State) error {
 	if strings.TrimSpace(state.ChatID) != s.chatID || s.chatID == "" {
 		return errors.New("chat state store belongs to another chat")
 	}
@@ -651,9 +670,11 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		// The table may or may not hold the rows this commit tried to write:
 		// forget the cache so the next checkpoint rewrites every row.
 		s.cache = nil
+		s.journal = nil
 		return err
 	}
 	s.cache = plan.nextCache(cache, state.Ledger)
+	s.journal = &sqlJournalAccount{}
 	return nil
 }
 
@@ -960,12 +981,23 @@ const sqlStreamedTailRows = 8
 // appendJournalRecord commits one record after the checkpoint, charging the
 // journal the same framed size the file journal would so both stores
 // checkpoint at the same cadence.
+//
+// The journal's size is kept by this handle rather than read from and
+// written back to chats.journal_bytes: SQLite rewrites a whole row to update
+// one column, and the chats row carries the actor head, megabytes on a long
+// chat, so every streamed token rewrote the head. The column keeps the value
+// the last checkpoint or import wrote. The account is fenced by the newest
+// journal revision and recomputed from the rows whenever it is unknown or
+// another writer moved them.
 func (s *SQLStore) appendJournalRecord(record providerEventJournalRecord, payload []byte, urgent bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	appended := false
+	var account sqlJournalAccount
 	err := s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
 		appended = false
-		var journalBytes int64
-		err := tx.QueryRow(`SELECT journal_bytes FROM chats WHERE chat_id = ?`, s.chatID).Scan(&journalBytes)
+		var exists int
+		err := tx.QueryRow(`SELECT 1 FROM chats WHERE chat_id = ?`, s.chatID).Scan(&exists)
 		if errors.Is(err, sql.ErrNoRows) {
 			// No checkpoint to journal against: the caller checkpoints instead.
 			return nil
@@ -973,7 +1005,23 @@ func (s *SQLStore) appendJournalRecord(record providerEventJournalRecord, payloa
 		if err != nil {
 			return err
 		}
-		size, fits := providerEventJournalAppendFits(journalBytes, providerEventJournalFrameLen(payload), urgent)
+		var last sql.NullInt64
+		if err := tx.QueryRow(`SELECT max(revision) FROM chat_events WHERE chat_id = ?`, s.chatID).Scan(&last); err != nil {
+			return err
+		}
+		if s.journal != nil && s.journal.last == uint64(last.Int64) {
+			account = *s.journal
+		} else {
+			var rows, recordBytes int64
+			if err := tx.QueryRow(`SELECT count(*), coalesce(sum(length(CAST(record AS BLOB))), 0) FROM chat_events WHERE chat_id = ?`, s.chatID).Scan(&rows, &recordBytes); err != nil {
+				return err
+			}
+			account = sqlJournalAccount{last: uint64(last.Int64)}
+			if rows > 0 {
+				account.bytes = int64(len(providerEventJournalMagic)) + recordBytes + rows*int64(providerEventJournalFrameLen(nil))
+			}
+		}
+		size, fits := providerEventJournalAppendFits(account.bytes, providerEventJournalFrameLen(payload), urgent)
 		if !fits {
 			return nil
 		}
@@ -981,12 +1029,16 @@ func (s *SQLStore) appendJournalRecord(record providerEventJournalRecord, payloa
 			s.chatID, int64(record.Revision), int64(record.BaseRevision), sqlText(payload)); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE chats SET journal_bytes = ? WHERE chat_id = ?`, size, s.chatID); err != nil {
-			return err
-		}
+		account = sqlJournalAccount{bytes: size, last: record.Revision}
 		appended = true
 		return nil
 	})
+	switch {
+	case err != nil:
+		s.journal = nil
+	case appended:
+		s.journal = &account
+	}
 	return appended, err
 }
 
