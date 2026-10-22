@@ -747,6 +747,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     stick.current = false;
     if (match.top < viewport.top + 24 || match.bottom > viewport.bottom - 24) {
       setScrollTop(el, el.scrollTop + match.top - viewport.top - Math.min(120, el.clientHeight * 0.25));
+      // The match's neighbourhood is mounted in the frame that shows it.
+      syncFlowBlocks(el, false);
     }
   }, []);
 
