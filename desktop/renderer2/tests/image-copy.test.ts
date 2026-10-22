@@ -83,6 +83,13 @@ test('external image open sends bounded raster bytes to the native shell bridge'
     assert.equal(calls.length, 1);
     assert.equal(calls[0].mimeType, 'image/png');
     assert.deepEqual([...new Uint8Array(calls[0].bytes)], [0x89, 0x50, 0x4e, 0x47]);
+    // A transcript frame drawing a display rendition opens the full image.
+    const fetched: string[] = [];
+    const fetchPNG = Object.getOwnPropertyDescriptor(globalThis, 'fetch')!.value as (url: string) => Promise<unknown>;
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, value: async (url: string) => { fetched.push(url); return fetchPNG(url); } });
+    const rendition = { currentSrc: '/workass/chat-image/t/d?k=x&w=320', src: '', alt: 'Shot', dataset: { fullSrc: '/workass/chat-image/t/d?k=x' } } as unknown as HTMLImageElement;
+    assert.equal(await openImageElementExternally(rendition), true);
+    assert.deepEqual(fetched, ['/workass/chat-image/t/d?k=x']);
   } finally {
     if (priorWindow) Object.defineProperty(globalThis, 'window', priorWindow);
     else Reflect.deleteProperty(globalThis, 'window');

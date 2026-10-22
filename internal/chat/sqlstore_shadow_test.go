@@ -9,11 +9,11 @@ import (
 	"workass/internal/store"
 )
 
-// A checkpoint recognises unchanged rows by their memory, against a shallow
-// copy of the rows it stored. When the actor's rows moved past the stored ones
-// before the first checkpoint (a journal record that edits a row, as an
-// imported file journal can carry), that copy must describe the stored rows,
-// or the edited row would look unchanged and never be written.
+// A checkpoint compares the actor's rows with the store's copy of what is
+// persisted. When the rows moved past the stored ones before the first
+// checkpoint (a journal record that edits a row, as an imported file journal
+// can carry), that copy must describe the stored rows, taken before the
+// replay, or the edited row would look unchanged and never be written.
 func TestCheckpointWritesARowAJournalReplayEdited(t *testing.T) {
 	f := newProviderTurnFixture(t)
 	actors := openTestActors(t)

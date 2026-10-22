@@ -136,6 +136,8 @@ export class MachineSocket {
   private state: MachineLinkState = 'idle';
 	private reconnectTimer: unknown = null;
   private activeConnectionGroup = '';
+  /** The approved device's read-only chat-image capability (lan:access-state imageKey). */
+  private chatImageKey = '';
 
   private readonly opts: MachineSocketOptions;
 
@@ -149,6 +151,13 @@ export class MachineSocket {
   get linkState(): MachineLinkState { return this.state; }
   get instanceId(): string { return this.lastInstanceId; }
   get connectionGroup(): string { return this.activeConnectionGroup; }
+  /** '' until approved, and from a daemon that predates chat images by URL. */
+  get imageKey(): string { return this.ready ? this.chatImageKey : ''; }
+  /** The daemon's HTTP(S) origin, the one this socket dials. */
+  get httpOrigin(): string {
+    const match = /^(wss?):\/\/([^/?#]+)/i.exec(this.opts.url);
+    return match ? `${match[1].toLowerCase() === 'wss' ? 'https' : 'http'}://${match[2]}` : '';
+  }
 
   connect(credentials?: MachineCredentials, automaticReconnect = false): void {
 	if (credentials) this.credentials = { ...credentials };
@@ -317,6 +326,7 @@ export class MachineSocket {
       if (typeof state.deviceId === 'string' && state.deviceId) next.deviceId = state.deviceId;
       if (typeof state.name === 'string' && state.name) next.deviceName = state.name;
 		if (this.opts.certFingerprint) next.certFingerprint = this.opts.certFingerprint;
+      this.chatImageKey = typeof state.imageKey === 'string' ? state.imageKey.trim() : '';
       this.commitCredentials(next);
       this.ready = true;
       this.setState('ready');
@@ -326,6 +336,7 @@ export class MachineSocket {
     }
 
     this.ready = false;
+    this.chatImageKey = '';
     if (state.state === 'waiting') {
       this.setState('open', { reason: 'waiting' });
       // Parked, and we hold the key that makes waiting unnecessary.

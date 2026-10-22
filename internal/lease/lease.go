@@ -230,6 +230,24 @@ func (m *Manager) Devices() []Device {
 	return append([]Device(nil), m.devices...)
 }
 
+// Device returns one approved device by id. Unlike AuthenticateToken it never
+// stamps lastSeen or writes devices.json, so a hot read path (every chat image
+// a renderer fetches) can ask "is this device still approved?" for free.
+func (m *Manager) Device(deviceID string) (Device, bool) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return Device{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, device := range m.devices {
+		if device.ID == deviceID {
+			return device, true
+		}
+	}
+	return Device{}, false
+}
+
 // RevokeDevice removes an approved device token from the allow list.
 func (m *Manager) RevokeDevice(deviceID string) bool {
 	deviceID = strings.TrimSpace(deviceID)
