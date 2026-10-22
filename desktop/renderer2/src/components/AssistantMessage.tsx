@@ -18,6 +18,7 @@ import { MessageImageButton, loadImageSrc } from './MessageImage';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
 import { revealedText, settleMountFades } from '../stream-reveal';
+import { FLOW_OVERSCAN_PX, flowScroller, flowView, trackFlowBlock, type FlowBlock } from '../flow-window';
 import { markdownImageReferences, normalizeMarkdownTarget, type InlineMediaResolver } from '../markdown/inline';
 
 function renderedImageReferences(blocks: SignedBlock[]): Array<{ label: string; target: string }> {
@@ -564,6 +565,84 @@ function workSpanMs(tools: ToolEvent[]): number | null {
   return span >= 1000 ? span : null;
 }
 
+// A settled turn's list opens inside the transcript, where one turn of a
+// screenshot chat held 16,033 calls. Past this many rows only the rows near
+// the viewport mount (flow-window.ts); spacers keep the rest's height, from
+// the rows measured so far and the first row's height for the others.
+const WORKED_WINDOW_MIN_ROWS = 200;
+const WORKED_INITIAL_ROWS = 80;
+const WORKED_ROW_ESTIMATE = 22;
+
+function sameSpan(a: { from: number; to: number }, b: { from: number; to: number }): boolean {
+  return a.from === b.from && a.to === b.to;
+}
+
+function WindowedWorkList({ items }: { items: WorkItem[] }) {
+  const list = useRef<HTMLDivElement>(null);
+  const head = useRef<HTMLDivElement>(null);
+  const heights = useRef(new Map<string, number>());
+  const estimate = useRef(0);
+  const [span, setSpan] = useState(() => ({ from: 0, to: Math.min(items.length, WORKED_INITIAL_ROWS) }));
+  const latest = useRef({ items, span });
+  latest.current = { items, span };
+  const sizeOf = (key: string) => heights.current.get(key) ?? (estimate.current || WORKED_ROW_ESTIMATE);
+  const block = useRef<FlowBlock | null>(null);
+  block.current ??= {
+    element: () => head.current,
+    place: (top, view) => {
+      const { items: rows, span: shown } = latest.current;
+      const low = view.top - FLOW_OVERSCAN_PX;
+      const high = view.bottom + FLOW_OVERSCAN_PX;
+      let from = rows.length;
+      let to = rows.length;
+      let y = top;
+      for (let index = 0; index < rows.length; index++) {
+        const bottom = y + sizeOf(rows[index].key);
+        if (from === rows.length && bottom >= low) from = index;
+        if (y > high) { to = index; break; }
+        y = bottom;
+      }
+      if (from > to) from = to;
+      const next = { from, to };
+      if (sameSpan(shown, next)) return null;
+      return () => { if (!sameSpan(latest.current.span, next)) setSpan(next); };
+    },
+  };
+  // Measure what is mounted (top to next top, so margins count once), then
+  // place the list for the current view before the frame paints.
+  useLayoutEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const rows = Array.from(element.children).filter((child) => !child.classList.contains('worklist-pad'));
+    const tops = rows.map((row) => row.getBoundingClientRect());
+    for (let index = 0; index < rows.length; index++) {
+      const key = latest.current.items[latest.current.span.from + index]?.key;
+      if (!key) continue;
+      const height = index + 1 < rows.length ? tops[index + 1].top - tops[index].top : tops[index].height;
+      if (height > 0) heights.current.set(key, height);
+      if (!estimate.current && height > 0) estimate.current = height;
+    }
+    const anchor = head.current;
+    if (!anchor) return;
+    const write = block.current!.place(anchor.getBoundingClientRect().top, flowView(flowScroller(anchor)), true);
+    write?.();
+  });
+  useLayoutEffect(() => trackFlowBlock(flowScroller(list.current), block.current!), []);
+  let before = 0;
+  for (let index = 0; index < span.from; index++) before += sizeOf(items[index].key);
+  let after = 0;
+  for (let index = span.to; index < items.length; index++) after += sizeOf(items[index].key);
+  return (
+    <div className="worklist" ref={list}>
+      <div className="worklist-pad" ref={head} style={{ height: before }} aria-hidden="true" />
+      {items.slice(span.from, span.to).map((item) => item.kind === 'thinking'
+        ? <ThoughtRow key={item.key} ev={item} />
+        : <ToolDetail key={item.key} t={item} standalone trail={<WorkingTrail t={item} now={0} live={false} />} />)}
+      {after > 0 && <div className="worklist-pad" style={{ height: after }} aria-hidden="true" />}
+    </div>
+  );
+}
+
 // A settled turn's Working line: the same head without the animation, closed
 // by default, opening the same list.
 function WorkedRow({ items }: { items: WorkItem[] }) {
@@ -580,7 +659,9 @@ function WorkedRow({ items }: { items: WorkItem[] }) {
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
         <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
       </button>
-      {open && <WorkList items={items} now={Date.now()} live={false} />}
+      {open && (items.length > WORKED_WINDOW_MIN_ROWS && typeof document !== 'undefined'
+        ? <WindowedWorkList items={items} />
+        : <WorkList items={items} now={Date.now()} live={false} />)}
     </div>
   );
 }
