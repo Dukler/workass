@@ -15,9 +15,13 @@ const inflight = new Map<string, Promise<string | null>>();
 
 type DetailReply = { text: string; offset: number; next: number; total: number };
 
-function detailKey(tool: Pick<ToolEvent, 'key' | 'detail'>): string | null {
+type DetailField = 'output' | 'title';
+
+function detailKey(tool: Pick<ToolEvent, 'key' | 'detail'>, field: DetailField = 'output'): string | null {
   const owner = tool.detail;
-  return owner?.tabId && owner.messageId && tool.key ? `${owner.tabId}\u0000${owner.messageId}\u0000${tool.key}` : null;
+  if (!owner?.tabId || !owner.messageId || !tool.key) return null;
+  // Outputs keep their original key; a title is cached beside its output.
+  return `${owner.tabId}\u0000${owner.messageId}\u0000${tool.key}${field === 'output' ? '' : `\u0000${field}`}`;
 }
 
 function remember(key: string, text: string): void {
@@ -52,8 +56,26 @@ export function cachedToolOutput(tool: Pick<ToolEvent, 'key' | 'detail' | 'outpu
 
 /** Reads a deferred output in full; null when it cannot be read. */
 export function loadToolOutput(tool: Pick<ToolEvent, 'key' | 'detail' | 'outputDeferred'>): Promise<string | null> {
-  const key = detailKey(tool);
-  if (!tool.outputDeferred || !key || !tool.detail) return Promise.resolve(null);
+  return loadToolField(tool, 'output', !!tool.outputDeferred);
+}
+
+/** The whole title if it was already read, else null. */
+export function cachedToolTitle(tool: Pick<ToolEvent, 'key' | 'detail' | 'titleDeferred'>): string | null {
+  if (!tool.titleDeferred) return null;
+  const key = detailKey(tool, 'title');
+  const text = key ? cache.get(key) : undefined;
+  if (key && text !== undefined) remember(key, text);
+  return text ?? null;
+}
+
+/** Reads a deferred title in full; null when it cannot be read. */
+export function loadToolTitle(tool: Pick<ToolEvent, 'key' | 'detail' | 'titleDeferred'>): Promise<string | null> {
+  return loadToolField(tool, 'title', !!tool.titleDeferred);
+}
+
+function loadToolField(tool: Pick<ToolEvent, 'key' | 'detail'>, field: DetailField, deferred: boolean): Promise<string | null> {
+  const key = detailKey(tool, field);
+  if (!deferred || !key || !tool.detail) return Promise.resolve(null);
   const cached = cache.get(key);
   if (cached !== undefined) return Promise.resolve(cached);
   const pending = inflight.get(key);
@@ -63,7 +85,7 @@ export function loadToolOutput(tool: Pick<ToolEvent, 'key' | 'detail' | 'outputD
     const parts: string[] = [];
     let offset = 0;
     for (;;) {
-      const reply = await call('archiveLoad', tabId, { tail: 1, toolDetail: { messageId, key: tool.key, field: 'output', offset } });
+      const reply = await call('archiveLoad', tabId, { tail: 1, toolDetail: { messageId, key: tool.key, field, offset } });
       if (!isDetailReply(reply, offset)) return null;
       parts.push(reply.text);
       if (reply.next >= reply.total) break;

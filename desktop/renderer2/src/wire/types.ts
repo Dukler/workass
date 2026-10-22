@@ -712,7 +712,7 @@ export interface WorkassApi {
   getConfig?: () => Promise<DaemonConfig>;
   // leanTools: large committed tool payloads arrive as a bounded head plus
   // outputDeferred/outputBytes; an older daemon or bridge ignores it.
-  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean }) => Promise<unknown>;
+  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
@@ -754,7 +754,9 @@ export interface WorkassApi {
   // total }); tail:1 rides along so an older daemon answers one bounded row.
   archiveLoad?: (tabId: string, options?: {
     tail?: number; beforeMessageId?: string; limit?: number; imageRef?: string; deferImages?: boolean; leanTools?: boolean;
-    toolDetail?: { messageId: string; key: string; field?: 'output' | 'input'; offset: number };
+    // leanTitles (additive): a title over 4 KB arrives as its head (titleDeferred).
+    leanTitles?: boolean;
+    toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
   }) => Promise<unknown>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;

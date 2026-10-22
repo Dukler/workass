@@ -423,7 +423,7 @@ export function titleFromPrompt(text: string, max = 34): string {
 // be measured after the fact).
 // session:get asks for the same references as history pages: a message's own
 // images and large tool payloads load when seen or opened.
-const LEAN_SESSION_READ = { leanTools: true, deferImages: true } as const;
+const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true } as const;
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
