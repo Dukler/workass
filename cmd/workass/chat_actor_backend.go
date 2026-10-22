@@ -179,6 +179,9 @@ func openChatActorBackend(stateDir string, enabled bool, binaryVersion string, l
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dbPath, err)
 	}
+	if pruned := db.PrunedBackups(); len(pruned) > 0 {
+		logf("[store] removed %d older migration backups; the newest stays in %s", len(pruned), filepath.Join(stateDir, "backups"))
+	}
 	options := chat.ImportOptions{
 		StateDir: stateDir,
 		ExpectedFileName: func(chatID string) string {
