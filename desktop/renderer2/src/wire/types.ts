@@ -679,6 +679,14 @@ export interface StateDigest {
   catalogHash: Record<string, string>;
   settingsRevision: string;
   procHash: string;
+  // Additive: the digest's content hash. Sent back as {ifNoneMatch}, a daemon
+  // that knows it answers { unchanged: true, etag } while nothing changed.
+  etag?: string;
+}
+
+export interface StateDigestUnchanged {
+  unchanged: true;
+  etag: string;
 }
 
 // The subset of window.api this renderer consumes. Every method is optional so
@@ -693,7 +701,7 @@ export interface WorkassApi {
   appMeta?: () => Promise<{ rootDir: string; workspaceDir: string; version: string; profile?: 'prod' | 'dev' | 'test' } & Record<string, unknown>>;
   // Additive, body-free reconciliation digest. Liveness uses appMeta so an
   // actor busy resuming a provider cannot masquerade as a daemon disconnect.
-  stateDigest?: () => Promise<StateDigest>;
+  stateDigest?: (options?: { ifNoneMatch: string }) => Promise<StateDigest | StateDigestUnchanged>;
   getSettings?: () => Promise<unknown>;
   // Controller-gated write of the app-settings blob (settings:set). REPLACES the
   // stored blob, so callers round-trip getSettings and touch only their slice.
