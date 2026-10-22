@@ -517,6 +517,9 @@ type actorStreamImporter struct {
 	skipReason string
 	rows       int
 	revision   uint64
+	// tools is the state's Tools value, written as chat_tools rows rather
+	// than kept in the head (sqltools.go).
+	tools json.RawMessage
 }
 
 // decodeEnvelope walks {"v":N,"state":{...}} with the same key matching and
@@ -642,6 +645,11 @@ func (im *actorStreamImporter) decodeState(dec *json.Decoder) error {
 		if err := dec.Decode(&raw); err != nil {
 			return fmt.Errorf("decode chat state field %q: %w", key, err)
 		}
+		if strings.EqualFold(key, "Tools") {
+			// Matched as json.Unmarshal matches it; the last one wins.
+			im.tools = raw
+			continue
+		}
 		if fields > 0 {
 			head.WriteByte(',')
 		}
@@ -679,7 +687,33 @@ func (im *actorStreamImporter) decodeState(dec *json.Decoder) error {
 	// folded in below before the receipt commits).
 	_, err = im.tx.Exec(`UPDATE chats SET revision = ?, state_json = ?, ledger_len = ?, ledger_gen = 1 WHERE chat_id = ?`,
 		int64(state.Revision), sqlText(head.Bytes()), im.rows, im.chatID)
-	return err
+	if err != nil {
+		return err
+	}
+	return im.writeTools()
+}
+
+// writeTools stores the state's tool owners as chat_tools rows, each the
+// owner exactly as the file holds it.
+func (im *actorStreamImporter) writeTools() error {
+	if len(im.tools) == 0 || string(bytes.TrimSpace(im.tools)) == "null" {
+		return nil
+	}
+	var owners map[string]json.RawMessage
+	if err := json.Unmarshal(im.tools, &owners); err != nil {
+		return fmt.Errorf("decode chat state field %q: %w", "Tools", err)
+	}
+	im.tools = nil
+	for id, owner := range owners {
+		var probe ToolState
+		if err := json.Unmarshal(owner, &probe); err != nil {
+			return fmt.Errorf("decode chat tool owner %q: %w", id, err)
+		}
+		if _, err := im.tx.Exec(`INSERT INTO chat_tools(chat_id, tool_id, owner_json) VALUES (?, ?, ?)`, im.chatID, id, sqlText(owner)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func appendHeadField(head *bytes.Buffer, fields *int, key, raw string) {

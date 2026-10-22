@@ -220,6 +220,8 @@ type sqlLedgerCache struct {
 	rows   []LedgerEvent
 	head   unsafe.Pointer
 	length int
+	// tools is the exact copy of the chat_tools rows (sqltools.go).
+	tools map[string]ToolState
 }
 
 var (
@@ -239,7 +241,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 		s.cache = nil
 		return State{}, false, err
 	}
-	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows}
+	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows, tools: loaded.tools}
 	s.journalRecords = loaded.journalRecords
 	return loaded.state, true, nil
 }
@@ -253,6 +255,8 @@ type sqlLoadedActor struct {
 	ledgerGen int64
 	// journalRecords is how many journal records were replayed onto the head.
 	journalRecords int
+	// tools is a copy of the stored chat_tools rows, before journal replay.
+	tools map[string]ToolState
 }
 
 // sqlActorHeadRow is a chats row as stored. Its checkpoint fields identify
@@ -329,7 +333,9 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 		chunk   []sqlRawRow
 		journal [][]byte
 		// rows decodes while later chunks are read (sqlread.go).
-		rows *sqlRowDecoder
+		rows     *sqlRowDecoder
+		toolRows []sqlToolRow
+		tools    map[string]ToolState
 	)
 	defer func() { rows.stop() }()
 	for first, done := true, false; !done; first = false {
@@ -345,6 +351,9 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 				head = current
 				if !ok {
 					return nil
+				}
+				if toolRows, err = readSQLTools(tx, chatID); err != nil {
+					return err
 				}
 			} else if !ok || !current.sameCheckpoint(head) {
 				return errSQLActorCheckpointedDuringLoad
@@ -373,6 +382,10 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 				return sqlLoadedActor{}, false, err
 			}
 			head.stateJSON = nil
+			if tools, err = withSQLTools(&state, toolRows); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+			toolRows = nil
 			if head.ledgerLen > 0 {
 				rows = newSQLRowDecoder(head.ledgerLen)
 			}
@@ -392,7 +405,9 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			return sqlLoadedActor{}, false, err
 		}
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
+	loaded, found, err := finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
+	loaded.tools = tools
+	return loaded, found, err
 }
 
 // readSQLActorHead reads one chats row as stored.
@@ -543,6 +558,14 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 		return sqlLoadedActor{}, false, err
 	}
 	head.stateJSON = nil
+	toolRows, err := readSQLTools(tx, chatID)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
+	tools, err := withSQLTools(&state, toolRows)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
 	var ledger []LedgerEvent
 	if head.ledgerLen > 0 {
 		// Chunks here only bound the raw bytes held next to the decoded rows.
@@ -561,7 +584,9 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 	if err != nil {
 		return sqlLoadedActor{}, false, err
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, false)
+	loaded, found, err := finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, false)
+	loaded.tools = tools
+	return loaded, found, err
 }
 
 // Save is a checkpoint: the head, the ledger rows that differ from the ones
@@ -600,6 +625,14 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	if err := plan.encode(state.Ledger); err != nil {
 		return err
 	}
+	var storedTools map[string]ToolState
+	if !plan.full {
+		storedTools = cache.tools
+	}
+	tools, err := planSQLTools(storedTools, state.Tools, plan.full)
+	if err != nil {
+		return err
+	}
 	for {
 		err = s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
 			var storedGen int64
@@ -618,6 +651,9 @@ func (s *SQLStore) checkpointLocked(state State) error {
 			if err := plan.apply(tx, s.chatID, state.Ledger); err != nil {
 				return err
 			}
+			if err := tools.apply(tx, s.chatID); err != nil {
+				return err
+			}
 			_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, s.chatID)
 			return err
 		})
@@ -630,6 +666,9 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		if err = plan.encode(state.Ledger); err != nil {
 			break
 		}
+		if tools, err = planSQLTools(nil, state.Tools, true); err != nil {
+			break
+		}
 	}
 	if err != nil {
 		// The table may or may not hold the rows this commit tried to write:
@@ -637,7 +676,12 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		s.cache = nil
 		return err
 	}
+	var previousTools map[string]ToolState
+	if cache != nil {
+		previousTools = cache.tools
+	}
 	s.cache = plan.nextCache(cache, state.Ledger)
+	s.cache.tools = tools.nextToolsCache(previousTools, state.Tools)
 	s.journalRecords = 0
 	return nil
 }
@@ -836,6 +880,8 @@ func encodeSQLHead(state State) ([]byte, error) {
 	if len(state.Ledger) > 0 {
 		head.Ledger = nil
 	}
+	// Tool owners are chat_tools rows (sqltools.go).
+	head.Tools = nil
 	return json.Marshal(head)
 }
 
@@ -859,6 +905,9 @@ func writeSQLFullCheckpoint(tx *store.Tx, chatID string, state State) error {
 		return err
 	}
 	if err := plan.apply(tx, chatID, state.Ledger); err != nil {
+		return err
+	}
+	if err := writeSQLTools(tx, chatID, state.Tools); err != nil {
 		return err
 	}
 	_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, chatID)

@@ -105,6 +105,22 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 			if raw.ledgerLen > 0 {
 				state.Ledger = nil
 			}
+			if !state.Initialized {
+				// Only an uninitialized head's acceptance depends on its tool
+				// owners (chat_tools); an accepted head is summarized without
+				// them, and opening the actor reads them.
+				var rows []sqlToolRow
+				if err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+					var err error
+					rows, err = readSQLTools(tx, raw.chatID)
+					return err
+				}); err != nil {
+					return err
+				}
+				if _, err := withSQLTools(&state, rows); err != nil {
+					return err
+				}
+			}
 			if err := visit(ActorHead{State: state, LedgerLength: raw.ledgerLen, JournalBytes: raw.journalBytes, LedgerGen: raw.ledgerGen}); err != nil {
 				return err
 			}
