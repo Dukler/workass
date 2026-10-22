@@ -279,7 +279,12 @@ func (r *providerChatRuntime) recentArchiveRaw(tabID string, limit int, lastExch
 	if limit < 1 || limit > sessionProjectionMessageTail {
 		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
 	}
-	page, found, err := r.archivePageByTab(tabID, actorHistoryTail, limit, lastExchange, opts...)
+	if lastExchange {
+		// A closed chat's first screen may already be in memory
+		// (provider_chat_first_screen.go).
+		return r.lastExchangeRaw(tabID, limit, opts...)
+	}
+	page, found, err := r.archivePageByTab(tabID, actorHistoryTail, limit, false, opts...)
 	if err != nil || !found {
 		return nil, found, err
 	}
@@ -396,6 +401,11 @@ func (r *providerChatRuntime) archivePageByTab(tabID string, history actorHistor
 	if err != nil || !found {
 		return archivePage{}, found, err
 	}
+	return r.archivePageByChat(chatID, history, tailLimit, lastExchange, opts...)
+}
+
+// archivePageByChat is archivePageByTab of the chat the tab was found to own.
+func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHistoryProjection, tailLimit int, lastExchange bool, opts ...archiveReadOptions) (archivePage, bool, error) {
 	var (
 		state  chat.State
 		window actorLedgerWindow

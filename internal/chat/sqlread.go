@@ -523,6 +523,20 @@ func (a *SQLActors) NewestLedgerRowOfRole(chatID string, view LedgerView, from i
 	return 0, nil
 }
 
+// LedgerBytes is the stored size of rows (from, view.Count]: octet_length
+// reads it from each row's header, so no row body is read.
+func (a *SQLActors) LedgerBytes(chatID string, view LedgerView, from int) (int64, error) {
+	chatID = strings.TrimSpace(chatID)
+	var total sql.NullInt64
+	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		if err := checkSQLRevision(tx, chatID, view); err != nil {
+			return err
+		}
+		return tx.QueryRow(`SELECT sum(octet_length(event_json)) FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ?`, chatID, max(0, from), view.Count).Scan(&total)
+	})
+	return total.Int64, err
+}
+
 // ReadLedgerMessage is Engine.ReadMessage for a chat that is not resident.
 func (a *SQLActors) ReadLedgerMessage(chatID string, view LedgerView, messageID string) (LedgerEvent, bool, error) {
 	chatID, messageID = strings.TrimSpace(chatID), strings.TrimSpace(messageID)
