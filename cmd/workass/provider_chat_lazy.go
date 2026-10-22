@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"workass/internal/chat"
@@ -480,6 +481,80 @@ func (r *providerChatRuntime) sessionSnapshot(chatID, activeTabID string, tail i
 		}
 	}
 	return actor.engine.ReadSessionProjectionSnapshot(activeTabID, tail), nil
+}
+
+// actorPrewarm opens the closed actors a renderer views, in the background.
+// Reads of a closed chat never need it open, but its first command does: on
+// a 300 MB chat that open took a second, which a send right after viewing
+// the chat paid on top of its own work. One open runs at a time; a chat
+// viewed meanwhile replaces any other waiting one (the newest view is the
+// one a send follows), so clicking through many chats loads at most two.
+type actorPrewarm struct {
+	running bool
+	next    string
+	wg      sync.WaitGroup
+}
+
+// PrewarmChatByTab opens the tab's chat in the background if it is closed:
+// a renderer is showing it (see actorPrewarm). It returns at once and never
+// holds the runtime lock while an actor loads.
+func (r *providerChatRuntime) PrewarmChatByTab(tabID string) {
+	if r == nil || r.ledgers == nil {
+		return
+	}
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return
+	}
+	r.PrewarmChat(chatID)
+}
+
+// PrewarmChat is PrewarmChatByTab for a chat id.
+func (r *providerChatRuntime) PrewarmChat(chatID string) {
+	if r == nil || r.ledgers == nil {
+		return
+	}
+	chatID = strings.TrimSpace(chatID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.bootErr != nil {
+		return
+	}
+	if _, closed := r.summaries[chatID]; !closed {
+		return
+	}
+	if r.prewarm.running {
+		r.prewarm.next = chatID
+		return
+	}
+	r.prewarm.running = true
+	r.prewarm.wg.Add(1)
+	go r.runPrewarm(chatID)
+}
+
+func (r *providerChatRuntime) runPrewarm(chatID string) {
+	defer r.prewarm.wg.Done()
+	for chatID != "" {
+		r.mu.Lock()
+		_, closed := r.summaries[chatID]
+		stop := r.closed
+		r.mu.Unlock()
+		if closed && !stop {
+			// openActor holds only this chat's opening slot while it loads;
+			// a command or read arriving meanwhile waits for, or reads
+			// around, this same load.
+			if _, err := r.actor(chatID); err != nil {
+				log.Printf("[workass] open viewed chat %s in the background: %v", chatID, err)
+			}
+		}
+		r.mu.Lock()
+		chatID, r.prewarm.next = r.prewarm.next, ""
+		if chatID == "" || r.closed {
+			chatID = ""
+			r.prewarm.running = false
+		}
+		r.mu.Unlock()
+	}
 }
 
 // resumeOpenedActor is ResumeActors for one actor opened after startup: the

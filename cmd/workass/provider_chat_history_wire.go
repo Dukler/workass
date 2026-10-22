@@ -94,6 +94,9 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				if messages, found, err := recent(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
+					// A tail read is how a renderer opens a chat: have the
+					// actor ready for the send that may follow.
+					providerChats.PrewarmChatByTab(stringArg(args, 0))
 					return messages, nil
 				}
 				return []any{}, nil
