@@ -56,6 +56,9 @@ func backupNames(t *testing.T, dir string) []string {
 	}
 	var names []string
 	for _, entry := range entries {
+		if entry.Name() == upgradeBaseFile {
+			continue // asserted by readUpgradeBase where it matters
+		}
 		names = append(names, entry.Name())
 	}
 	sort.Strings(names)
@@ -124,6 +127,9 @@ func TestFailedMigrationKeepsEveryBackup(t *testing.T) {
 		}
 	}
 	assertBackupOf(t, filepath.Join(backups, made[0]), 1)
+	if base, ok := readUpgradeBase(backups); !ok || base != 1 {
+		t.Fatalf("upgrade base after a failed migration = %d, %v; want 1", base, ok)
+	}
 	// A later successful migration supersedes them all with its own backup.
 	db, err := Open(Options{Path: path, Migrations: backupV2, BackupDir: backups, BusyTimeout: 100 * time.Millisecond})
 	if err != nil {
@@ -257,4 +263,83 @@ func sortedCopy(values []string) []string {
 	out := append([]string(nil), values...)
 	sort.Strings(out)
 	return out
+}
+
+// An upgrade that commits some of its migrations and is then interrupted
+// resumes from a later version. Its backup of that later version cannot be
+// opened by the build the user upgraded from, so the successful run keeps the
+// backup of the version the upgrade started from as well, and the next
+// upgrade supersedes both.
+func TestResumedUpgradeKeepsTheBackupOfItsStartingVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+	backups := filepath.Join(dir, "backups")
+	db := openTest(t, path, backupV1)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// v1 -> v3 where gamma fails: beta (v2) commits, the upgrade stops.
+	brokenV3 := append(append([]Migration(nil), backupV2...), Migration{Version: 3, Name: "gamma", SQL: "CREATE TABLE gamma(z); INSERT INTO missing VALUES (1);"})
+	if _, err := Open(Options{Path: path, Migrations: brokenV3, BackupDir: backups, BusyTimeout: 100 * time.Millisecond}); err == nil {
+		t.Fatal("the broken upgrade succeeded")
+	}
+	first := written(backupNames(t, backups))
+	if len(first) != 1 || !strings.HasPrefix(first[0], "state-v1-") {
+		t.Fatalf("backups after the interrupted upgrade: %v", backupNames(t, backups))
+	}
+	if base, ok := readUpgradeBase(backups); !ok || base != 1 {
+		t.Fatalf("upgrade base after the interrupted upgrade = %d, %v; want 1", base, ok)
+	}
+	// The resumed upgrade starts at v2 and completes.
+	db, err := Open(Options{Path: path, Migrations: backupV3, BackupDir: backups, BusyTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.SchemaVersion() != 3 {
+		t.Fatalf("schema %d after the resumed upgrade", db.SchemaVersion())
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	kept := written(backupNames(t, backups))
+	if len(kept) != 2 || kept[0] != first[0] || !strings.HasPrefix(kept[1], "state-v2-") {
+		t.Fatalf("backups after the resumed upgrade: %v, want %s and a v2 backup", backupNames(t, backups), first[0])
+	}
+	assertBackupOf(t, filepath.Join(backups, kept[0]), 1)
+	assertBackupOf(t, filepath.Join(backups, kept[1]), 2)
+	if _, ok := readUpgradeBase(backups); ok {
+		t.Fatal("the upgrade base outlived the completed upgrade")
+	}
+	// The next upgrade starts fresh at v3 and supersedes both.
+	backupV4 := append(append([]Migration(nil), backupV3...), Migration{Version: 4, Name: "delta", SQL: "CREATE TABLE delta(w INTEGER)"})
+	db, err = Open(Options{Path: path, Migrations: backupV4, BackupDir: backups, BusyTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	last := written(backupNames(t, backups))
+	if len(last) != 1 || !strings.HasPrefix(last[0], "state-v3-") {
+		t.Fatalf("backups after the next upgrade: %v, want only a v3 backup", backupNames(t, backups))
+	}
+}
+
+// A killed backup write can leave SQLite's rollback journal beside the
+// .partial copy; a successful migration removes it with the other leftovers.
+func TestSuccessfulMigrationRemovesAnInterruptedBackupJournal(t *testing.T) {
+	path, backups := backupFixture(t)
+	journal := "state-v1-20260903T100000.000000000Z.db.partial-journal"
+	if err := os.WriteFile(filepath.Join(backups, journal), []byte("journal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(Options{Path: path, Migrations: backupV2, BackupDir: backups, BusyTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := os.Stat(filepath.Join(backups, journal)); !os.IsNotExist(err) {
+		t.Fatalf("the interrupted backup's journal survived: %v", backupNames(t, backups))
+	}
+	if names := backupNames(t, backups); len(written(names)) != 1 {
+		t.Fatalf("backups after the migration: %v", names)
+	}
 }

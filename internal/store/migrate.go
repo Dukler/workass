@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -101,7 +102,16 @@ func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 		return current, nil
 	}
 	backup := ""
+	base := current
 	if current > 0 && backupDir != "" {
+		// An upgrade interrupted after some of its migrations committed
+		// resumes from a later version; its marker still names the version it
+		// started from, whose backup is the only one an older build can open.
+		if marked, ok := readUpgradeBase(backupDir); ok && marked < current {
+			base = marked
+		} else if err := writeUpgradeBase(backupDir, current); err != nil {
+			return 0, fmt.Errorf("record the version this upgrade starts from: %w", err)
+		}
 		backup = fmt.Sprintf("state-v%d-%s.db", current, time.Now().UTC().Format("20060102T150405.000000000Z"))
 		if err := db.Backup(filepath.Join(backupDir, backup)); err != nil {
 			return 0, fmt.Errorf("back up state database before migration: %w", err)
@@ -139,23 +149,61 @@ func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 	}
 	if backup != "" {
 		// Every migration committed: the backup just written is the state
-		// before them, and older ones are superseded by it.
-		db.prunedBackups = pruneMigrationBackups(backupDir, backup)
+		// before them, and the newest backup of the version the upgrade
+		// started from is the state before an interrupted earlier run of it.
+		// Older ones are superseded by those two. The marker goes first: the
+		// upgrade is complete, and a crash part way through the prune must
+		// not make the next upgrade keep this one's starting backup.
+		_ = os.Remove(filepath.Join(backupDir, upgradeBaseFile))
+		db.prunedBackups = pruneMigrationBackups(backupDir, backup, base)
 	}
 	return current, nil
 }
 
 // migrationBackupName matches the backups migrate writes (state-v<N>-<UTC
-// stamp>.db) and what an interrupted write of one leaves (.partial).
-var migrationBackupName = regexp.MustCompile(`^state-v[0-9]+-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z\.db(\.partial)?$`)
+// stamp>.db) and what an interrupted write of one leaves (.partial, and the
+// rollback journal SQLite keeps beside it while writing it). The first group
+// is the schema version; the second is set on an incomplete write.
+var migrationBackupName = regexp.MustCompile(`^state-v([0-9]+)-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z\.db(\.partial(?:-journal|-wal|-shm)?)?$`)
+
+// upgradeBaseFile records, beside the backups, the schema version an upgrade
+// started from. It is written before the first backup of an upgrade and
+// removed once every migration has committed, so a run that finds it is
+// resuming an interrupted upgrade.
+const upgradeBaseFile = "upgrade-base"
+
+func readUpgradeBase(dir string) (int, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, upgradeBaseFile))
+	if err != nil {
+		return 0, false
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || version < 1 {
+		return 0, false
+	}
+	return version, true
+}
+
+func writeUpgradeBase(dir string, version int) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	partial := filepath.Join(dir, upgradeBaseFile+".partial")
+	if err := os.WriteFile(partial, []byte(strconv.Itoa(version)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(partial, filepath.Join(dir, upgradeBaseFile))
+}
 
 // pruneBackupHook, when set (tests), runs before each backup is removed.
 var pruneBackupHook func(name string)
 
 // pruneMigrationBackups removes every migration backup in dir except keep,
-// the one written before the migrations that just committed, and returns
-// the names it removed. Each backup is a whole copy of the database (a
-// gigabyte on a long-lived install), so keeping every one filled the disk.
+// the one written before the migrations that just committed, and the newest
+// complete backup of version base, the version the upgrade started from when
+// an interrupted run of it committed some migrations before this one. It
+// returns the names it removed. Each backup is a whole copy of the database
+// (a gigabyte on a long-lived install), so keeping every one filled the disk.
 //
 // It runs only once migrations have committed, in the process that holds the
 // database's exclusive lock: no other migration can be writing a backup, a
@@ -164,15 +212,26 @@ var pruneBackupHook func(name string)
 // part way leaves some older backups for the next successful migration to
 // remove; it can never remove keep. Only files named like a backup are
 // touched.
-func pruneMigrationBackups(dir, keep string) []string {
+func pruneMigrationBackups(dir, keep string, base int) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
+	// The stamp sorts names in time order within one version.
+	baseBackup := ""
+	for _, entry := range entries {
+		match := migrationBackupName.FindStringSubmatch(entry.Name())
+		if match == nil || match[2] != "" || !entry.Type().IsRegular() {
+			continue
+		}
+		if version, err := strconv.Atoi(match[1]); err == nil && version == base && entry.Name() > baseBackup {
+			baseBackup = entry.Name()
+		}
+	}
 	var removed []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == keep || !entry.Type().IsRegular() || !migrationBackupName.MatchString(name) {
+		if name == keep || name == baseBackup || !entry.Type().IsRegular() || !migrationBackupName.MatchString(name) {
 			continue
 		}
 		if pruneBackupHook != nil {
