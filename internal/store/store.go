@@ -96,6 +96,8 @@ type DB struct {
 	path          string
 	binaryVersion string
 	version       int
+	// prunedBackups: older migration backups this open removed.
+	prunedBackups []string
 
 	closeOnce sync.Once
 	closeErr  error
@@ -441,7 +443,9 @@ func (db *DB) QuickCheck() error {
 }
 
 // Backup writes a consistent single-file snapshot (no WAL) to dst with
-// VACUUM INTO. dst must not exist.
+// VACUUM INTO. dst must not exist. The snapshot is written beside dst as
+// dst.partial, synced, and only then renamed to dst, so a file named dst is
+// always a whole backup: an interrupted write leaves only the .partial.
 func (db *DB) Backup(dst string) error {
 	dst = strings.TrimSpace(dst)
 	if dst == "" {
@@ -458,10 +462,57 @@ func (db *DB) Backup(dst string) error {
 	if db.closed {
 		return ErrClosed
 	}
-	if _, err := db.sql.Exec("VACUUM INTO ?", dst); err != nil {
+	partial := dst + ".partial"
+	// VACUUM INTO refuses a target that exists; one with this exact name can
+	// only be an earlier interrupted write of the same backup.
+	if err := os.Remove(partial); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := db.sql.Exec("VACUUM INTO ?", partial); err != nil {
+		_ = os.Remove(partial)
 		return classify(err)
 	}
-	return os.Chmod(dst, 0o600)
+	if err := syncFile(partial); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
+	if err := os.Chmod(partial, 0o600); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
+	if err := os.Rename(partial, dst); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
+	syncDir(filepath.Dir(dst))
+	return nil
+}
+
+// PrunedBackups names the older migration backups this open removed after
+// its migrations committed (pruneMigrationBackups).
+func (db *DB) PrunedBackups() []string {
+	return append([]string(nil), db.prunedBackups...)
+}
+
+func syncFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// syncDir makes a rename in dir durable where the platform allows it (a
+// directory cannot be synced on Windows; the rename is still atomic).
+func syncDir(dir string) {
+	if handle, err := os.Open(dir); err == nil {
+		_ = handle.Sync()
+		_ = handle.Close()
+	}
 }
 
 // Close checkpoints the WAL into the main file, truncates it and closes the
