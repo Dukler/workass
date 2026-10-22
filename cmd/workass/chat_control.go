@@ -76,7 +76,7 @@ func (c *chatControlCoordinator) authorize(ownerKey, parentChatID, parentTabID s
 	}
 	// The durable actor pair is the identity fence. Manager capabilities are
 	// disposable execution state and must not be consulted for a stale pair.
-	if _, _, err := c.providerChats.exactActor(parentTabID, parentChatID); err != nil {
+	if _, err := c.providerChats.exactActorFence(parentTabID, parentChatID); err != nil {
 		return err
 	}
 	if !c.manager.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
@@ -135,7 +135,7 @@ func (c *chatControlCoordinator) validateMutationTarget(tabID, chatID string, op
 	if c == nil || c.providerChats == nil {
 		return errors.New("Workass chat actor is unavailable")
 	}
-	if _, _, err := c.providerChats.exactActor(tabID, chatID); err != nil {
+	if _, err := c.providerChats.exactActorFence(tabID, chatID); err != nil {
 		return err
 	}
 	return nil
@@ -195,12 +195,12 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 	if operationID == "" {
 		return "", acp.JobCancelResult{}, true, errors.New("chat.cancel requires a stable operation_id")
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return "", acp.JobCancelResult{}, false, err
 	}
 	actor.mu.Lock()
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if receipt, ok := state.CancelMutationReceipts[operationID]; ok {
 		// A terminal actor receipt wins over current foreground state. This is the
 		// idempotency fence for an idle cancel that was acknowledged before a
@@ -231,7 +231,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 		if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 			return jobID, acp.JobCancelResult{}, true, err
 		}
-		state = actor.engine.Snapshot()
+		state = actor.engine.ReadSnapshot()
 		receipt, ok := cancelReceiptForOperation(state, operationID)
 		if !ok {
 			return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel receipt disappeared from actor state")
@@ -252,7 +252,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 			actor.mu.Unlock()
 			return "", acp.JobCancelResult{}, true, err
 		}
-		state = actor.engine.Snapshot()
+		state = actor.engine.ReadSnapshot()
 		idleReceipt, ok := state.CancelMutationReceipts[operationID]
 		if !ok {
 			actor.mu.Unlock()
@@ -274,7 +274,7 @@ func (r *providerChatRuntime) cancelChatTurn(ctx context.Context, tabID, chatID 
 	if _, err := actor.coordinator.ExecuteCancel(ctx, operationID); err != nil {
 		return jobID, acp.JobCancelResult{}, true, err
 	}
-	state = actor.engine.Snapshot()
+	state = actor.engine.ReadSnapshot()
 	receipt, ok := cancelReceiptForOperation(state, operationID)
 	if !ok {
 		return jobID, acp.JobCancelResult{}, true, errors.New("chat cancel did not produce an actor receipt")
@@ -628,7 +628,7 @@ func (c *chatControlCoordinator) committedDeleteReceipt(params map[string]any) (
 	if err != nil {
 		return nil, false
 	}
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	if !state.Deleted || state.DeletionOperationID != providercontract.NormalizeOperationID(string(operationID)) ||
 		strings.TrimSpace(state.Presentation.TabID) != tabID {
 		return nil, false

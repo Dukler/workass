@@ -39,7 +39,7 @@ func (r *providerChatRuntime) executeBrowserMutationWithAdmission(
 	dispatch func() (browserControlReply, error),
 	readback func() (browserControlReply, error),
 ) (browserControlReply, error) {
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return browserControlReply{}, err
 	}
@@ -164,12 +164,11 @@ func inspectBrowserMutation(
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
 
-	state := actor.engine.Snapshot()
-	if !state.Initialized || state.Deleted || strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) ||
-		strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
+	view := readBrowserMutationView(actor.engine)
+	if !view.fences(tabID, chatID) {
 		return chat.OutboxEntry{}, false, errors.New("browser mutation actor fence is stale")
 	}
-	entry, exists := externalBrowserMutationEntry(state, operationID)
+	entry, exists := view.entry(operationID)
 	if !exists {
 		return chat.OutboxEntry{}, false, nil
 	}
@@ -194,9 +193,7 @@ func prepareBrowserMutation(
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
 
-	state := actor.engine.Snapshot()
-	if !state.Initialized || state.Deleted || strings.TrimSpace(state.ChatID) != strings.TrimSpace(chatID) ||
-		strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
+	if !readBrowserMutationView(actor.engine).fences(tabID, chatID) {
 		return chat.OutboxEntry{}, false, errors.New("browser mutation actor fence is stale")
 	}
 	if err := actor.engine.Apply(chat.RecordExternalMutation{
@@ -205,7 +202,7 @@ func prepareBrowserMutation(
 		return chat.OutboxEntry{}, false, err
 	}
 
-	entry, ok := externalBrowserMutationEntry(actor.engine.Snapshot(), operationID)
+	entry, ok := readBrowserMutationView(actor.engine).entry(operationID)
 	if !ok {
 		return chat.OutboxEntry{}, false, errors.New("browser mutation journal entry was not committed")
 	}
@@ -232,13 +229,57 @@ func prepareBrowserMutation(
 }
 
 func externalBrowserMutationEntry(state chat.State, operationID providercontract.OperationID) (chat.OutboxEntry, bool) {
+	return externalMutationEntryIn(state.Outbox, operationID)
+}
+
+func externalMutationEntryIn(outbox []chat.OutboxEntry, operationID providercontract.OperationID) (chat.OutboxEntry, bool) {
 	operationID = providercontract.NormalizeOperationID(string(operationID))
-	for _, entry := range state.Outbox {
+	for _, entry := range outbox {
 		if entry.Kind == chat.EffectExternalMutation && entry.OperationID == operationID {
 			return entry, true
 		}
 	}
 	return chat.OutboxEntry{}, false
+}
+
+// browserMutationView is what an external mutation reads from its actor: the
+// ownership fence and the journaled external mutations. Reading it copies
+// those entries and none of the chat's history; a Snapshot per read was a
+// whole-transcript copy for every visualization on a chat open.
+type browserMutationView struct {
+	chatID       string
+	tabID        string
+	initialized  bool
+	deleted      bool
+	workspaceCWD string
+	external     []chat.OutboxEntry
+}
+
+func readBrowserMutationView(engine *chat.Engine) browserMutationView {
+	var view browserMutationView
+	engine.View(func(state chat.State) {
+		view = browserMutationView{
+			chatID: state.ChatID, tabID: state.Presentation.TabID,
+			initialized: state.Initialized, deleted: state.Deleted,
+			workspaceCWD: visualizationWorkspaceCWD(state),
+		}
+		for _, entry := range state.Outbox {
+			if entry.Kind == chat.EffectExternalMutation {
+				view.external = append(view.external, entry.Clone())
+			}
+		}
+	})
+	return view
+}
+
+// fences reports whether the view is the active actor tabID's chat chatID.
+func (v browserMutationView) fences(tabID, chatID string) bool {
+	return v.initialized && !v.deleted && strings.TrimSpace(v.chatID) == strings.TrimSpace(chatID) &&
+		strings.TrimSpace(v.tabID) == strings.TrimSpace(tabID)
+}
+
+func (v browserMutationView) entry(operationID providercontract.OperationID) (chat.OutboxEntry, bool) {
+	return externalMutationEntryIn(v.external, operationID)
 }
 
 func validateBrowserMutationReceipt(reply browserControlReply, operationID providercontract.OperationID, digest string) error {

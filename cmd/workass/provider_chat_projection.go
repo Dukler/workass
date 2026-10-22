@@ -353,7 +353,7 @@ func (r *providerChatRuntime) projectArchiveByTab(tabID string, history actorHis
 			return nil, false, err
 		}
 		if history == actorHistoryFull {
-			state = matched.engine.Snapshot()
+			state = matched.engine.ReadSnapshot()
 			window = actorLedgerWindow{count: len(state.Ledger)}
 		} else {
 			snapshot := matched.engine.ReadProjectionSnapshot(max(1, tailLimit))

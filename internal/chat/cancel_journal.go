@@ -125,5 +125,5 @@ func (e *Engine) persistCommand(next State, command Command) error {
 	if store, ok := e.store.(cancelCommandStateStore); ok && cancellationCommand(e.state, command) {
 		return store.commitCancelCommand(e.state.Revision, next, command)
 	}
-	return e.store.Save(next)
+	return e.saveReduced(next)
 }

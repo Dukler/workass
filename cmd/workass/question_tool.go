@@ -252,7 +252,7 @@ func (r *providerChatRuntime) executeAgentQuestion(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	actor, _, err := r.exactActor(tabID, chatID)
+	actor, err := r.exactActorFence(tabID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (r *providerChatRuntime) executeAgentQuestion(
 	// A dispatched retry is read-only. The actor's permission answer may have
 	// committed just before the daemon or caller connection disappeared; recover
 	// that exact answer if present, otherwise close the operation as cancelled.
-	state := actor.engine.Snapshot()
+	state := actor.engine.ReadSnapshot()
 	answer, recovered := workassQuestionAnswerForOperation(state, request.OperationID)
 	if !recovered {
 		answer = &providercontract.QuestionAnswer{Status: "cancelled", Reason: "operation_interrupted"}

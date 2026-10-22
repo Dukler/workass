@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -539,8 +540,19 @@ type RecoverOutbox struct{}
 func (RecoverOutbox) chatCommand() {}
 
 func Reduce(current State, command Command) (State, []Effect, error) {
-	if err := current.Validate(); err != nil {
-		return current, nil, fmt.Errorf("invalid current chat state: %w", err)
+	return reduce(current, command, false)
+}
+
+// reduce is Reduce. currentValidated says current is exactly a state that
+// State.Validate has already accepted (the engine's committed state, which it
+// installs only from a validated transition); validating it again cannot
+// change the outcome and on a long chat costs tens of milliseconds per
+// command, so it is skipped.
+func reduce(current State, command Command, currentValidated bool) (State, []Effect, error) {
+	if !currentValidated {
+		if err := current.Validate(); err != nil {
+			return current, nil, fmt.Errorf("invalid current chat state: %w", err)
+		}
 	}
 	if current.Deleted {
 		switch command.(type) {
@@ -549,7 +561,15 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 			return current, nil, errors.New("chat was durably deleted")
 		}
 	}
-	next := current.Clone()
+	var next State
+	if checkLedgerSharing != nil {
+		defer checkLedgerSharing(command, exactLedgerCopy(current.Ledger), current.Ledger, &next)
+	}
+	if commandLeavesLedger(command) {
+		next = current.cloneSharingLedger()
+	} else {
+		next = current.cloneLedgerRows()
+	}
 	var (
 		effects []Effect
 		err     error
@@ -683,6 +703,30 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 	return next, effects, nil
 }
 
+// checkLedgerSharing is a test hook: when set, every transition reports the
+// committed rows as they were before it, the committed rows themselves, and
+// its result, so tests can prove a transition never edits committed rows.
+var checkLedgerSharing func(command Command, before, current []LedgerEvent, next *State)
+
+// commandLeavesLedger reports whether command's reducer, and everything it
+// calls, only ever reads the ledger: it neither writes a row in place nor
+// appends one. Such a transition may share the committed ledger rows instead
+// of deep-copying them (see State.cloneSharingLedger). A command belongs here
+// only after its whole call tree has been checked; the set covers the
+// commands a chat runs on open, switch, queueing, steering, settings and
+// external mutations. TestLedgerLeavingCommandsLeaveTheLedger enforces it.
+func commandLeavesLedger(command Command) bool {
+	switch command.(type) {
+	case UpdatePresentation, SavePresentation, UpdateEnvironment, ChangeWorkspace,
+		ReplaceStagedQueue, PromoteStagedQueue, UpdateRuntimeControls, SaveRuntimeControls,
+		AttachTab, Submit, Steer, ResolvePermission, PermissionDecided,
+		RecordCancelReceipt, RecordAgentWaitObservation,
+		RecordExternalMutation, ExternalMutationReceipt, ClaimEffect:
+		return true
+	}
+	return false
+}
+
 // reduceJournaledProviderEvent is the bounded in-memory companion to the
 // append-only provider event journal. Engine state is valid when installed;
 // these event kinds are effect-free and validate their typed payload, exact
@@ -691,13 +735,50 @@ func Reduce(current State, command Command) (State, []Effect, error) {
 // publishing partial state without cloning or revalidating the entire ledger
 // for every streamed token.
 func reduceJournaledProviderEvent(current State, command ProviderEventReceived) (State, error) {
+	return reduceJournaledProviderEventWith(current, command, false)
+}
+
+// reduceJournaledProviderEventSharingTools is reduceJournaledProviderEvent for
+// the engine, which holds its lock across the whole commit. A tool update
+// writes exactly one tool-owner entry, so it writes that entry into the
+// committed map in place instead of copying a map that holds every tool call
+// the chat ever made (60k on a long chat, several milliseconds per update).
+// undo puts the entry back exactly; the engine calls it when the commit fails.
+// When the reduction itself fails the entry is already back.
+func reduceJournaledProviderEventSharingTools(current State, command ProviderEventReceived) (State, func(), error) {
+	event := command.Event
+	if event.Kind != provider.EventToolUpdate || event.Tool == nil || current.Tools == nil {
+		next, err := reduceJournaledProviderEvent(current, command)
+		return next, func() {}, err
+	}
+	id := strings.TrimSpace(event.Tool.ToolCallID)
+	previous, existed := current.Tools[id]
+	undo := func() {
+		if existed {
+			current.Tools[id] = previous
+		} else {
+			delete(current.Tools, id)
+		}
+	}
+	next, err := reduceJournaledProviderEventWith(current, command, true)
+	if err != nil {
+		undo()
+		return current, nil, err
+	}
+	return next, undo, nil
+}
+
+// reduceJournaledProviderEventWith is reduceJournaledProviderEvent; with
+// shareTools a tool update writes the committed Tools map in place (see
+// reduceJournaledProviderEventSharingTools).
+func reduceJournaledProviderEventWith(current State, command ProviderEventReceived, shareTools bool) (State, error) {
 	if !journalableProviderEvent(command.Event.Kind) {
 		return current, errors.New("provider event is not eligible for the durable stream journal")
 	}
 	if current.Deleted {
 		return current, errors.New("chat was durably deleted")
 	}
-	next := cloneJournaledProviderEventState(current, command.Event.Kind)
+	next := cloneJournaledProviderEventState(current, command.Event.Kind, shareTools)
 	effects, err := reduceProviderEvent(&next, command)
 	if err != nil {
 		return current, err
@@ -762,12 +843,9 @@ func validateJournaledProviderEventMutation(state State, event provider.Event) e
 	return nil
 }
 
-func cloneJournaledProviderEventState(current State, kind provider.EventKind) State {
+func cloneJournaledProviderEventState(current State, kind provider.EventKind, shareTools bool) State {
 	next := current
-	next.Lanes = make(map[provider.LaneID]LaneState, len(current.Lanes))
-	for laneID, lane := range current.Lanes {
-		next.Lanes[laneID] = lane
-	}
+	next.Lanes = cloneValueMap(current.Lanes)
 
 	cloneForeground := func(cloneEvents bool) {
 		if current.Foreground == nil {
@@ -779,18 +857,8 @@ func cloneJournaledProviderEventState(current State, kind provider.EventKind) St
 		}
 		next.Foreground = &foreground
 	}
-	copyTools := func() {
-		next.Tools = make(map[string]ToolState, len(current.Tools))
-		for id, value := range current.Tools {
-			next.Tools[id] = value
-		}
-	}
-	copyPlans := func() {
-		next.Plans = make(map[provider.OperationID]PlanState, len(current.Plans))
-		for operationID, value := range current.Plans {
-			next.Plans[operationID] = value
-		}
-	}
+	copyTools := func() { next.Tools = cloneValueMap(current.Tools) }
+	copyPlans := func() { next.Plans = cloneValueMap(current.Plans) }
 
 	switch kind {
 	case provider.EventAssistantChunk, provider.EventAssistantMedia:
@@ -799,26 +867,19 @@ func cloneJournaledProviderEventState(current State, kind provider.EventKind) St
 		cloneForeground(true)
 	case provider.EventToolUpdate:
 		cloneForeground(true)
-		copyTools()
+		if !shareTools {
+			copyTools()
+		}
 	case provider.EventPlanUpdate:
 		cloneForeground(true)
 		copyPlans()
 	case provider.EventUsageUpdated:
-		next.Usage = make(map[provider.LaneID]provider.UsageEvent, len(current.Usage))
-		for laneID, value := range current.Usage {
-			next.Usage[laneID] = value
-		}
+		next.Usage = cloneValueMap(current.Usage)
 	case provider.EventCompactionStarted, provider.EventCompactionCheckpoint:
 		cloneForeground(true)
-		next.Compactions = make(map[provider.LaneID]CompactionState, len(current.Compactions))
-		for laneID, value := range current.Compactions {
-			next.Compactions[laneID] = value
-		}
+		next.Compactions = cloneValueMap(current.Compactions)
 	case provider.EventBackgroundWork:
-		next.Background = make(map[string]BackgroundState, len(current.Background))
-		for id, value := range current.Background {
-			next.Background[id] = value
-		}
+		next.Background = cloneValueMap(current.Background)
 	}
 	return next
 }
@@ -1191,6 +1252,22 @@ func sameOperationIDSequence(left, right []provider.OperationID) bool {
 		}
 	}
 	return true
+}
+
+// environmentUpdateUnchanged reports whether the reducer accepts command and
+// leaves the Entorno projection exactly as it is apart from its revision,
+// which nothing reads. It runs the reducer on a copy of the projection.
+func environmentUpdateUnchanged(state State, command UpdateEnvironment) bool {
+	probe := State{
+		Initialized: state.Initialized, Deleted: state.Deleted,
+		Presentation: PresentationState{TabID: state.Presentation.TabID},
+		Environment:  state.Environment.Clone(),
+	}
+	if err := reduceUpdateEnvironment(&probe, command); err != nil {
+		return false
+	}
+	probe.Environment.Revision = state.Environment.Revision
+	return reflect.DeepEqual(probe.Environment, state.Environment)
 }
 
 func reduceUpdateEnvironment(state *State, command UpdateEnvironment) error {
@@ -4070,6 +4147,43 @@ func reduceDetachLaneFailed(state *State, command DetachLaneFailed) error {
 	return nil
 }
 
+// externalMutationReplayUnchanged reports whether command is a
+// RecordExternalMutation or ExternalMutationReceipt that the reducer accepts
+// for an already-journaled operation while leaving that operation exactly as
+// it is: the transition would change only the actor revision. It runs the
+// reducer itself on a copy of the one outbox entry the command can touch, so
+// it decides exactly what the reducer decides. The caller owns the deleted
+// check (Reduce refuses both commands on a deleted chat).
+func externalMutationReplayUnchanged(state State, command Command) bool {
+	switch command := command.(type) {
+	case RecordExternalMutation:
+		existing := externalMutationEntryForOperation(state, command.OperationID)
+		if existing == nil {
+			return false
+		}
+		// With the operation journaled the reducer only compares; it reserves
+		// nothing and emits nothing.
+		probe := State{
+			ChatID: state.ChatID, Initialized: state.Initialized, Deleted: state.Deleted,
+			Presentation: PresentationState{TabID: state.Presentation.TabID},
+			Outbox:       []OutboxEntry{*existing},
+		}
+		effects, err := reduceRecordExternalMutation(&probe, command)
+		return err == nil && len(effects) == 0
+	case ExternalMutationReceipt:
+		existing := externalMutationEntryForOperation(state, command.OperationID)
+		if existing == nil {
+			return false
+		}
+		probe := State{ChatID: state.ChatID, Outbox: []OutboxEntry{*existing}}
+		if err := reduceExternalMutationReceipt(&probe, command); err != nil {
+			return false
+		}
+		return reflect.DeepEqual(probe.Outbox[0], *existing)
+	}
+	return false
+}
+
 func externalMutationEntryForOperation(state State, operationID provider.OperationID) *OutboxEntry {
 	operationID = provider.NormalizeOperationID(string(operationID))
 	for index := range state.Outbox {
@@ -4731,12 +4845,20 @@ func appendForegroundResultSpan(foreground *ForegroundTurn, start, end int) {
 	}
 	at := foregroundUTF16Offset(foreground)
 	if last := len(foreground.Timeline) - 1; last >= 0 {
-		entry := &foreground.Timeline[last]
-		if entry.Result != nil && entry.At == at && entry.Result.End == start {
-			entry.Result.End = end
+		if entry := foreground.Timeline[last]; entry.Result != nil && entry.At == at && entry.Result.End == start {
+			// A streamed chunk's transition shares the committed timeline: its
+			// array and the span behind the pointer. Extend a copy of both, so a
+			// commit that fails leaves the committed span exactly as it was.
+			span := *entry.Result
+			span.End = end
+			timeline := append(make([]TimelineEntry, 0, len(foreground.Timeline)), foreground.Timeline...)
+			timeline[last].Result = &span
+			foreground.Timeline = timeline
 			return
 		}
 	}
+	// Appending never writes an element the committed timeline holds: at most
+	// a slot past its length, which the commit either publishes or abandons.
 	foreground.Timeline = append(foreground.Timeline, TimelineEntry{
 		Key: fmt.Sprintf("timeline:result:%s:%d", foreground.CurrentAssistantMessageID, start),
 		At:  at, Kind: provider.EventAssistantChunk, Result: &AssistantResultSpan{Start: start, End: end},

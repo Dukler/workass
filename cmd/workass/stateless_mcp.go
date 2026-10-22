@@ -73,7 +73,7 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	child := chatID == tabID && strings.HasPrefix(chatID, subagentTabPrefix) && strings.TrimPrefix(chatID, subagentTabPrefix) != ""
 	if !child {
-		if _, _, err := h.providerChats.exactActor(tabID, chatID); err != nil {
+		if _, err := h.providerChats.exactActorFence(tabID, chatID); err != nil {
 			fail(401, "unauthorized")
 			return
 		}
@@ -305,12 +305,12 @@ func (h *workassToolHandler) callTool(r *http.Request, call browserMCPCallParams
 		params := prepared.Params
 		params["chatId"] = chatID
 		if !prepared.Mutating {
-			actor, _, err := h.providerChats.exactActor(tabID, chatID)
+			actor, err := h.providerChats.exactActorFence(tabID, chatID)
 			if err != nil {
 				return browserMCPErrorResult("browser chat attachment is stale"), nil
 			}
 			actor.mu.Lock()
-			state := actor.engine.Snapshot()
+			state := actor.engine.ReadSnapshot()
 			actor.mu.Unlock()
 			if state.Deleted || !state.Initialized || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(tabID) {
 				return browserMCPErrorResult("browser chat attachment is stale"), nil
