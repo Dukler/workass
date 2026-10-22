@@ -57,9 +57,20 @@ func actorSessionInventory(runtime *providerChatRuntime) map[string]any {
 	chatCount, messageCount, eventCount, imageCount, messageBytes := 0, 0, 0, 0, 0
 	heaviestEvents := -1
 	heaviest := map[string]any{}
+	closedChats := 0
 	for _, chatID := range chatIDs {
-		actor, err := runtime.actor(chatID)
+		actor, summary, err := runtime.residentOrClosed(chatID)
 		if err != nil {
+			continue
+		}
+		if summary != nil {
+			// A closed actor is counted without opening it: its messages, but
+			// not the events and images inside them.
+			if !summary.Deleted && summary.Initialized {
+				chatCount++
+				closedChats++
+				messageCount += summary.LedgerCount
+			}
 			continue
 		}
 		state := actor.engine.ReadSnapshot()
@@ -81,6 +92,7 @@ func actorSessionInventory(runtime *providerChatRuntime) map[string]any {
 		}
 	}
 	out["chats"], out["messages"], out["events"] = chatCount, messageCount, eventCount
+	out["closedChats"] = closedChats
 	out["messageImages"], out["messageBytes"] = imageCount, messageBytes
 	// Actor attachments are immutable content-addressed references. Their
 	// payload bytes are not embedded in the actor state, so there are no inline

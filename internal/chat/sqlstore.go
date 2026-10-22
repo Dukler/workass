@@ -53,62 +53,24 @@ func (a *SQLActors) Store(chatID string) *SQLStore {
 
 // ActorHead is what boot discovery needs from one actor without decoding its
 // history: the State with no Ledger, and how many ledger rows it has.
+// JournalRecords and LedgerGen are the store's checkpoint facts (SQLite
+// only): a head with journal records, or rows from before incremental
+// checkpoints, is not yet the committed actor.
 type ActorHead struct {
-	State        State
-	LedgerLength int
+	State          State
+	LedgerLength   int
+	JournalRecords int
+	LedgerGen      int64
 }
 
-// Discover lists every actor's head, ordered by ChatID. It decodes only
-// state_json (never messages), so boot no longer reads every transcript; full
-// validation and journal replay happen when the actor is opened. The heads
-// are copied out in one read and decoded after it.
+// Discover lists every actor's head, ordered by ChatID (DiscoverEach).
 func (a *SQLActors) Discover() ([]ActorHead, error) {
-	type rawHead struct {
-		chatID    string
-		version   int
-		stateJSON []byte
-		ledgerLen int
-	}
-	var raws []rawHead
-	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
-		raws = raws[:0]
-		rows, err := tx.Query(`SELECT chat_id, envelope_version, state_json, ledger_len FROM chats ORDER BY chat_id`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw rawHead
-			if err := rows.Scan(&raw.chatID, &raw.version, &raw.stateJSON, &raw.ledgerLen); err != nil {
-				return err
-			}
-			raws = append(raws, raw)
-		}
-		return rows.Err()
+	var heads []ActorHead
+	err := a.DiscoverEach(func(head ActorHead) error {
+		heads = append(heads, head)
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	heads := make([]ActorHead, 0, len(raws))
-	for index := range raws {
-		raw := &raws[index]
-		if raw.version != currentStateEnvelopeVersion {
-			return nil, fmt.Errorf("chat actor %q: unsupported chat state version %d", raw.chatID, raw.version)
-		}
-		var state State
-		if err := json.Unmarshal(raw.stateJSON, &state); err != nil {
-			return nil, fmt.Errorf("decode chat actor %q: %w", raw.chatID, err)
-		}
-		raw.stateJSON = nil
-		if strings.TrimSpace(state.ChatID) != raw.chatID {
-			return nil, fmt.Errorf("chat actor %q holds state for another chat", raw.chatID)
-		}
-		if raw.ledgerLen > 0 {
-			state.Ledger = nil
-		}
-		heads = append(heads, ActorHead{State: state, LedgerLength: raw.ledgerLen})
-	}
-	return heads, nil
+	return heads, err
 }
 
 // ErrLedgerNotCheckpointed: the chat's rows were written by a build that
@@ -233,6 +195,10 @@ type SQLStore struct {
 
 	mu    sync.Mutex
 	cache *sqlLedgerCache
+	// journalRecords counts the chat_events rows after the checkpoint this
+	// handle last read or wrote (sqlread.go: they keep the head and, for an
+	// old row edited in place, the rows behind the actor).
+	journalRecords int
 	// journal is this handle's account of the chat's journal records after
 	// its checkpoint (see appendJournalRecord); nil when unknown.
 	journal *sqlJournalAccount
@@ -267,6 +233,8 @@ type sqlLedgerCache struct {
 	rows   []LedgerEvent
 	head   unsafe.Pointer
 	length int
+	// tools is the exact copy of the chat_tools rows (sqltools.go).
+	tools map[string]ToolState
 }
 
 var (
@@ -287,7 +255,8 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 		s.cache = nil
 		return State{}, false, err
 	}
-	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows}
+	s.cache = &sqlLedgerCache{gen: loaded.ledgerGen, rows: loaded.rows, tools: loaded.tools}
+	s.journalRecords = loaded.journalRecords
 	return loaded.state, true, nil
 }
 
@@ -298,6 +267,10 @@ type sqlLoadedActor struct {
 	// when the caller did not ask for it.
 	rows      []LedgerEvent
 	ledgerGen int64
+	// journalRecords is how many journal records were replayed onto the head.
+	journalRecords int
+	// tools is a copy of the stored chat_tools rows, before journal replay.
+	tools map[string]ToolState
 }
 
 // sqlActorHeadRow is a chats row as stored. Its checkpoint fields identify
@@ -373,7 +346,12 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 		ledger  []LedgerEvent
 		chunk   []sqlRawRow
 		journal [][]byte
+		// rows decodes while later chunks are read (sqlread.go).
+		rows     *sqlRowDecoder
+		toolRows []sqlToolRow
+		tools    map[string]ToolState
 	)
+	defer func() { rows.stop() }()
 	for first, done := true, false; !done; first = false {
 		found := false
 		err := db.Read(context.Background(), func(tx *store.Tx) error {
@@ -388,12 +366,19 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 				if !ok {
 					return nil
 				}
+				if toolRows, err = readSQLTools(tx, chatID); err != nil {
+					return err
+				}
 			} else if !ok || !current.sameCheckpoint(head) {
 				return errSQLActorCheckpointedDuringLoad
 			}
 			done = true
 			if head.ledgerLen > 0 {
-				chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(len(ledger)), sqlLoadChunkBytes, chunk)
+				read := 0
+				if rows != nil {
+					read = rows.read
+				}
+				chunk, done, err = readSQLLedgerChunk(tx, chatID, int64(read), sqlLoadChunkBytes, chunk)
 				if err != nil {
 					return err
 				}
@@ -411,18 +396,32 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 				return sqlLoadedActor{}, false, err
 			}
 			head.stateJSON = nil
+			if tools, err = withSQLTools(&state, toolRows); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
+			toolRows = nil
 			if head.ledgerLen > 0 {
-				ledger = make([]LedgerEvent, 0, head.ledgerLen)
+				rows = newSQLRowDecoder(head.ledgerLen)
 			}
 		}
-		if ledger, err = appendSQLLedgerRows(ledger, chunk); err != nil {
-			return sqlLoadedActor{}, false, err
+		if rows != nil {
+			if err := rows.submit(chunk); err != nil {
+				return sqlLoadedActor{}, false, err
+			}
 		}
 		if !done && sqlLoadBetweenChunks != nil {
-			sqlLoadBetweenChunks(chatID, len(ledger))
+			sqlLoadBetweenChunks(chatID, rows.read)
 		}
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
+	if rows != nil {
+		var err error
+		if ledger, err = rows.finish(); err != nil {
+			return sqlLoadedActor{}, false, err
+		}
+	}
+	loaded, found, err := finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
+	loaded.tools = tools
+	return loaded, found, err
 }
 
 // readSQLActorHead reads one chats row as stored.
@@ -550,7 +549,7 @@ func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal []
 	if err != nil {
 		return sqlLoadedActor{}, false, fmt.Errorf("replay provider event journal: %w", err)
 	}
-	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen}, true, nil
+	return sqlLoadedActor{state: state, rows: rows, ledgerGen: ledgerGen, journalRecords: len(journal)}, true, nil
 }
 
 // loadSQLActor reads the checkpoint, its ledger rows and journal, and returns
@@ -573,6 +572,14 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 		return sqlLoadedActor{}, false, err
 	}
 	head.stateJSON = nil
+	toolRows, err := readSQLTools(tx, chatID)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
+	tools, err := withSQLTools(&state, toolRows)
+	if err != nil {
+		return sqlLoadedActor{}, false, err
+	}
 	var ledger []LedgerEvent
 	if head.ledgerLen > 0 {
 		// Chunks here only bound the raw bytes held next to the decoded rows.
@@ -591,7 +598,9 @@ func loadSQLActorRows(tx *store.Tx, chatID string) (sqlLoadedActor, bool, error)
 	if err != nil {
 		return sqlLoadedActor{}, false, err
 	}
-	return finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, false)
+	loaded, found, err := finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, false)
+	loaded.tools = tools
+	return loaded, found, err
 }
 
 // Save is a checkpoint: the head, the ledger rows that differ from the ones
@@ -635,6 +644,14 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	if err := plan.encode(state.Ledger); err != nil {
 		return err
 	}
+	var storedTools map[string]ToolState
+	if !plan.full {
+		storedTools = cache.tools
+	}
+	tools, err := planSQLTools(storedTools, state.Tools, plan.full)
+	if err != nil {
+		return err
+	}
 	for {
 		err = s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
 			var storedGen int64
@@ -653,6 +670,9 @@ func (s *SQLStore) checkpointLocked(state State) error {
 			if err := plan.apply(tx, s.chatID, state.Ledger); err != nil {
 				return err
 			}
+			if err := tools.apply(tx, s.chatID); err != nil {
+				return err
+			}
 			_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, s.chatID)
 			return err
 		})
@@ -665,6 +685,9 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		if err = plan.encode(state.Ledger); err != nil {
 			break
 		}
+		if tools, err = planSQLTools(nil, state.Tools, true); err != nil {
+			break
+		}
 	}
 	if err != nil {
 		// The table may or may not hold the rows this commit tried to write:
@@ -673,7 +696,13 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		s.journal = nil
 		return err
 	}
+	var previousTools map[string]ToolState
+	if cache != nil {
+		previousTools = cache.tools
+	}
 	s.cache = plan.nextCache(cache, state.Ledger)
+	s.cache.tools = tools.nextToolsCache(previousTools, state.Tools)
+	s.journalRecords = 0
 	s.journal = &sqlJournalAccount{}
 	return nil
 }
@@ -872,6 +901,8 @@ func encodeSQLHead(state State) ([]byte, error) {
 	if len(state.Ledger) > 0 {
 		head.Ledger = nil
 	}
+	// Tool owners are chat_tools rows (sqltools.go).
+	head.Tools = nil
 	return json.Marshal(head)
 }
 
@@ -895,6 +926,9 @@ func writeSQLFullCheckpoint(tx *store.Tx, chatID string, state State) error {
 		return err
 	}
 	if err := plan.apply(tx, chatID, state.Ledger); err != nil {
+		return err
+	}
+	if err := writeSQLTools(tx, chatID, state.Tools); err != nil {
 		return err
 	}
 	_, err = tx.Exec(`DELETE FROM chat_events WHERE chat_id = ?`, chatID)
@@ -1038,6 +1072,9 @@ func (s *SQLStore) appendJournalRecord(record providerEventJournalRecord, payloa
 		s.journal = nil
 	case appended:
 		s.journal = &account
+	}
+	if appended && err == nil {
+		s.journalRecords++
 	}
 	return appended, err
 }
