@@ -120,6 +120,7 @@ func TestLeanHistoryDefersLargeToolPayloadsAndServesThemBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	full = decodedWireReply(t, full)
 	legacy, _, err := runtime.ProjectRecentArchiveByTab("lean-history-tab", 10, archiveReadOptions{deferMessageImages: true})
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +138,7 @@ func TestLeanHistoryDefersLargeToolPayloadsAndServesThemBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lean = decodedWireReply(t, lean)
 	leanJSON, _ := json.Marshal(lean)
 	if len(leanJSON)*20 > len(fullJSON) {
 		t.Fatalf("lean read is not lean: %d bytes vs %d", len(leanJSON), len(fullJSON))

@@ -1039,7 +1039,7 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if err != nil {
 			return nil, err
 		}
-		return wire.RawResult(raw), nil
+		return wire.EncodedResult(raw), nil
 	})
 	hub.Register("session:save", func(args []any) (any, error) {
 		var snapshot any = map[string]any{}

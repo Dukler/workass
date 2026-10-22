@@ -73,7 +73,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				return []any{}, nil
 			}
 			if _, requested := options["beforeMessageId"]; requested {
-				if messages, found, err := providerChats.ProjectArchivePageBeforeByTab(
+				if messages, found, err := providerChats.ProjectArchivePageBeforeByTabRaw(
 					stringArg(args, 0), fieldString(options, "beforeMessageId"), intValue(options["limit"]), read,
 				); err != nil {
 					return nil, err
@@ -84,7 +84,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 			}
 			if rawLimit, requested := options["tail"]; requested {
 				limit := intValue(rawLimit)
-				if messages, found, err := providerChats.ProjectRecentArchiveByTab(stringArg(args, 0), limit, read); err != nil {
+				if messages, found, err := providerChats.ProjectRecentArchiveByTabRaw(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
 					return messages, nil

@@ -248,6 +248,7 @@ func TestArchiveImagesKeepPixelSizeAfterDeferral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recent = decodedWireReply(t, recent)
 	check("recent", anySlice(recent))
 	page, found, err := runtime.ProjectArchivePageBeforeByTab("sized-image-tab", "assistant-later", 10, archiveReadOptions{deferMessageImages: true})
 	if err != nil || !found {
@@ -273,6 +274,7 @@ func TestArchiveImagesKeepPixelSizeAfterDeferral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	inline = decodedWireReply(t, inline)
 	for _, raw := range anySlice(inline) {
 		row := mapFromAnyMain(raw)
 		if fieldString(row, "id") != "user-ask" {
