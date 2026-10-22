@@ -425,6 +425,19 @@ export function titleFromPrompt(text: string, max = 34): string {
 // images and large tool payloads load when seen or opened.
 const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true } as const;
 
+// Settles once what is rendered now has been painted: after the frame that
+// paints it and the next one, then the task queue. A hidden window paints no
+// frames, so it settles after 100 ms whatever happens.
+function afterNextPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolve(); } };
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(settle, 0)));
+    setTimeout(settle, 100);
+  });
+}
+
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
   requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1293,6 +1306,7 @@ export class Store {
     // the rest of the slice exactly as a size-bounded tail is paged in. An
     // older daemon ignores lastExchange and answers the whole bounded tail.
     const firstScreen = resident.messages.length === 0;
+    let firstScreenPainted: Promise<void> = Promise.resolve();
     let firstRowsReady = () => {};
     this.recentFirstRows.set(chatId, new Promise<void>((resolve) => { firstRowsReady = resolve; }));
     const load = (async () => {
@@ -1321,10 +1335,13 @@ export class Store {
       if (firstScreen && chat.messages.length === 0 && messages.length < Math.min(limit, messageCount)) {
         // The first screen paints now; the transcript waits for the rest of
         // the slice before it loads anything older (showsFirstScreenOnly).
+        // A chat on its way to the screen is published by its activation, in
+        // the same render; the slice's own update publishes it otherwise.
         this.firstScreens.add(chatId);
-        this.commitRecentHistory(chat, messages, messageCount, false, liveEventFence);
+        this.commitRecentHistory(chat, messages, messageCount, false, liveEventFence, this.state.activeId === chatId);
+        firstScreenPainted = afterNextPaint();
+        firstRowsReady();
       }
-      firstRowsReady();
       // The actor bounds image-rich replies by expanded bytes as well as row
       // count. A one-row assistant suffix can therefore hide the immediately
       // preceding user image (or steer) even though both are in the newest ten.
@@ -1345,6 +1362,10 @@ export class Store {
         if (!prefix.length || prefix.some((message) => seen.has(message.id))) break;
         messages = [...prefix.slice(-(Math.min(limit, messageCount) - messages.length)), ...messages];
       }
+      // A first screen reaches the screen before the rest of the slice is laid
+      // out: a page that came back within the same frame would otherwise hold
+      // that frame for a second render.
+      await firstScreenPainted;
       let historyComplete = messages.length >= messageCount;
       // A refresh may have retained a resident tail (or even a fully revealed
       // transcript) while this recent slice was in flight. Replace its
@@ -1383,9 +1404,9 @@ export class Store {
     }
   }
 
-  // Publish a recent slice: the same live-turn and runtime preservation as any
-  // hydration, then one store update.
-  private commitRecentHistory(chat: Chat, messages: Msg[], messageCount: number, historyComplete: boolean, liveEventFence: number) {
+  // Commit a recent slice: the same live-turn and runtime preservation as any
+  // hydration, then (publish) one store update.
+  private commitRecentHistory(chat: Chat, messages: Msg[], messageCount: number, historyComplete: boolean, liveEventFence: number, publish = true) {
     const restored = {
       ...chat,
       messages,
@@ -1408,7 +1429,7 @@ export class Store {
     else this.fullHistoriesLoaded.delete(chat.id);
     this.staleRecentHistories.delete(chat.id);
     this.rebuildJobRefs(new Set([chat.id]));
-    this.bumpApp(false);
+    if (publish) this.bumpApp(false);
   }
 
   // The chat shows only the last exchange it was opened with while the rest of
