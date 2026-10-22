@@ -4845,12 +4845,20 @@ func appendForegroundResultSpan(foreground *ForegroundTurn, start, end int) {
 	}
 	at := foregroundUTF16Offset(foreground)
 	if last := len(foreground.Timeline) - 1; last >= 0 {
-		entry := &foreground.Timeline[last]
-		if entry.Result != nil && entry.At == at && entry.Result.End == start {
-			entry.Result.End = end
+		if entry := foreground.Timeline[last]; entry.Result != nil && entry.At == at && entry.Result.End == start {
+			// A streamed chunk's transition shares the committed timeline: its
+			// array and the span behind the pointer. Extend a copy of both, so a
+			// commit that fails leaves the committed span exactly as it was.
+			span := *entry.Result
+			span.End = end
+			timeline := append(make([]TimelineEntry, 0, len(foreground.Timeline)), foreground.Timeline...)
+			timeline[last].Result = &span
+			foreground.Timeline = timeline
 			return
 		}
 	}
+	// Appending never writes an element the committed timeline holds: at most
+	// a slot past its length, which the commit either publishes or abandons.
 	foreground.Timeline = append(foreground.Timeline, TimelineEntry{
 		Key: fmt.Sprintf("timeline:result:%s:%d", foreground.CurrentAssistantMessageID, start),
 		At:  at, Kind: provider.EventAssistantChunk, Result: &AssistantResultSpan{Start: start, End: end},
