@@ -134,6 +134,40 @@ test('an older daemon that rejects fork:list reads as no forks, with no toast, l
   assert.equal(appStore.state.toasts.length, toastsBefore);
 });
 
+// Opening a chat fetches its forks; the answer is almost always "none". That
+// first empty answer still reaches a subsession view waiting on it, but after
+// the chat's first frame, and the same empty answer again tells no one.
+test('a chat with no forks is told once, after its first frame, and never again', async () => {
+  const bridge = fakeBridge(() => ({ ok: true, forkPoints: [], runs: [] }));
+  setMachineRouter(bridge.api);
+  const forks = await freshForks();
+  const previousFrame = (globalThis as any).requestAnimationFrame;
+  const frames: Array<() => void> = [];
+  (globalThis as any).requestAnimationFrame = (callback: () => void) => { frames.push(callback); return frames.length; };
+  // The store's own start-up (its summary read) is not what is measured.
+  forks.start();
+  await wait(5);
+  let told = 0;
+  const unsubscribe = forks.subscribe(() => { told += 1; });
+  try {
+    forks.ensure(ref);
+    await wait(5);
+    assert.deepEqual(forks.chat('tab-1'), { points: [], runs: [] });
+    assert.equal(told, 0, 'not inside the first frame');
+    for (const callback of frames.splice(0)) callback();
+    for (const callback of frames.splice(0)) callback();
+    await wait(5);
+    assert.equal(told, 1, 'told after it');
+    (forks as unknown as { refresh(ref: { tabId: string; chatId: string }): Promise<void> }).refresh(ref);
+    await wait(5);
+    assert.equal(told, 1, 'an unchanged empty answer tells no one');
+  } finally {
+    unsubscribe();
+    if (previousFrame === undefined) delete (globalThis as any).requestAnimationFrame;
+    else (globalThis as any).requestAnimationFrame = previousFrame;
+  }
+});
+
 // ── fetch + fork:changed ────────────────────────────────────────────────────
 
 test('fork:changed refetches the chat, debounced, through one coarse subscription', async () => {

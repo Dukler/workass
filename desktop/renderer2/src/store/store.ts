@@ -25,6 +25,7 @@ import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
+import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
 import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
@@ -424,19 +425,6 @@ export function titleFromPrompt(text: string, max = 34): string {
 // session:get asks for the same references as history pages: a message's own
 // images and large tool payloads load when seen or opened.
 const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true } as const;
-
-// Settles once what is rendered now has been painted: after the frame that
-// paints it and the next one, then the task queue. A hidden window paints no
-// frames, so it settles after 100 ms whatever happens.
-function afterNextPaint(): Promise<void> {
-  if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let settled = false;
-    const settle = () => { if (!settled) { settled = true; resolve(); } };
-    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(settle, 0)));
-    setTimeout(settle, 100);
-  });
-}
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
@@ -1347,6 +1335,9 @@ export class Store {
       // preceding user image (or steer) even though both are in the newest ten.
       // Fetch the missing contiguous prefix by stable cursor, one bounded page
       // at a time. A single oversized row is still returned by the daemon.
+      // A first screen is painted before the rest is asked for: reading those
+      // rows can keep the daemon's cores busy while the frame is being made.
+      await firstScreenPainted;
       while (messages.length < Math.min(limit, messageCount) && messages[0]?.id) {
         const boundary = messages[0].id;
         const step = await this.guardedStep(
@@ -4615,7 +4606,10 @@ export class Store {
     this.bumpApp();
     this.refreshVisibleRecentHistory(chat);
     this.refreshPlanUsage(id);
-    void this.refreshSpawnedWork(chat);
+    // The chat's background-work list can be a megabyte (one chat's is 1.2 MB):
+    // reading and rendering it in the frame that first shows the chat kept that
+    // frame from painting. It is asked for once the chat is on screen.
+    void afterNextPaint().then(() => this.refreshSpawnedWork(chat));
     this.maybeFetchCommandCatalog(chat);
   }
 
@@ -4699,7 +4693,9 @@ export class Store {
   applyChatGoal(event: ChatGoalEvent) {
     const chat = event.tabId ? this.chat(event.tabId) : null;
     if (!chat || (event.chatId && chat.chatId && event.chatId !== chat.chatId)) return;
+    const hadGoal = !!chat.goal;
     chat.goal = event.goal ? { ...event.goal, observedAt: event.observedAt ?? Date.now() } : null;
+    if (!hadGoal && !chat.goal) return;
     this.bumpChat(chat);
   }
   private maybeFetchCommandCatalog(chat: Chat) {
