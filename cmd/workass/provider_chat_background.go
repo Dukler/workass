@@ -269,19 +269,30 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 		return err
 	}
 	for _, chatID := range ids {
+		if _, closed := r.closedSummary(chatID); closed {
+			// Left closed at boot: no running background work, and the manager
+			// tracks none for it, so the reconciliation would change nothing.
+			continue
+		}
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return err
 		}
-		state := actor.engine.ReadSnapshot()
+		state := actor.engine.IdentitySnapshot()
 		if state.Deleted {
 			continue
 		}
-		tabID := strings.TrimSpace(state.Presentation.TabID)
+		tabID := strings.TrimSpace(state.TabID)
 		if tabID == "" {
 			return fmt.Errorf("background reconciliation chat %q has no tab attachment", chatID)
 		}
 		items := r.manager.ListSpawnedWork(tabID, chatID)
+		if len(items) == 0 && !backgroundReconciliationPending(actor.engine.ReadActivitySnapshot()) {
+			// Nothing tracked, nothing running, no open obligation: the
+			// snapshot would change nothing but the actor's revision, and the
+			// empty projection nothing in the manager's cache.
+			continue
+		}
 		projection, err := r.applySpawnedWorkSnapshot(tabID, chatID, items)
 		if err != nil {
 			return fmt.Errorf("reconcile background work for chat %q: %w", chatID, err)
@@ -291,6 +302,19 @@ func (r *providerChatRuntime) syncSpawnedWorkSnapshots() error {
 		}
 	}
 	return nil
+}
+
+// backgroundReconciliationPending: the actor has background work still
+// running (which an empty authoritative snapshot orphans) or an open
+// obligation (which the snapshot's obligation pass may park or stall).
+func backgroundReconciliationPending(activity chat.ActivitySnapshot) bool {
+	for _, item := range activity.Background {
+		if status := strings.TrimSpace(item.Event.Status); status == "" || strings.EqualFold(status, "running") {
+			return true
+		}
+	}
+	obligation := activity.Obligation
+	return obligation != nil && (obligation.State == "working" || obligation.State == "parked")
 }
 
 func exactBackgroundOwner(state chat.State, item acp.SpawnedWorkItem) (chat.ProviderActivityOwner, bool) {
@@ -375,11 +399,16 @@ func (r *providerChatRuntime) exactActivitySnapshot(tabID, chatID string) (chat.
 	if tabID == "" || chatID == "" {
 		return chat.ActivitySnapshot{}, errors.New("exact tab and chat ids are required")
 	}
-	actor, err := r.actor(chatID)
+	actor, summary, err := r.residentOrClosed(chatID)
 	if err != nil {
 		return chat.ActivitySnapshot{}, err
 	}
-	snapshot := actor.engine.ReadActivitySnapshot()
+	var snapshot chat.ActivitySnapshot
+	if summary != nil {
+		snapshot = summary.ActivitySnapshot()
+	} else {
+		snapshot = actor.engine.ReadActivitySnapshot()
+	}
 	if snapshot.Deleted {
 		return chat.ActivitySnapshot{}, errors.New("chat was deleted")
 	}

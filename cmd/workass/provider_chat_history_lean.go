@@ -98,11 +98,14 @@ func parseToolDetailRequest(raw any) (toolDetailRequest, error) {
 // exact stored payload. No reply approaches the frame limit, whatever the
 // payload's size.
 func (r *providerChatRuntime) ProjectToolDetailByTab(tabID string, request toolDetailRequest) (map[string]any, bool, error) {
-	actor, found, err := r.actorByTab(tabID)
+	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	event, found := actor.engine.ReadMessage(request.messageID)
+	event, found, err := r.ledgerMessage(chatID, request.messageID)
+	if err != nil {
+		return nil, false, err
+	}
 	if !found {
 		return nil, false, nil
 	}

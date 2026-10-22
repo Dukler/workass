@@ -264,7 +264,14 @@ func TestPhase1aDatabaseUpgradesAndHealsOnFirstOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, err := encodeSQLHead(checkpoint)
+	// The head as phase 1a wrote it: the State without its ledger, tool
+	// owners included (migration 0005 moves them to chat_tools).
+	legacyHead := checkpoint
+	legacyHead.Ledger = nil
+	if len(legacyHead.Tools) == 0 {
+		t.Fatal("fixture has no tool owners for the upgrade to move")
+	}
+	head, err := json.Marshal(legacyHead)
 	if err != nil {
 		t.Fatal(err)
 	}

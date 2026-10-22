@@ -704,6 +704,25 @@ func (c *Coordinator) Wake() {
 	}
 }
 
+// Idle reports that the coordinator owns no provider lane attachment, holds
+// no reply-admission fence and is not draining effects: closing it would
+// detach nothing and interrupt nothing.
+func (c *Coordinator) Idle() bool {
+	if c == nil {
+		return true
+	}
+	if !c.drainMu.TryLock() {
+		return false
+	}
+	defer c.drainMu.Unlock()
+	c.claimMu.Lock()
+	holds := c.replyAdmissionHolds
+	c.claimMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return holds == 0 && len(c.lanes) == 0
+}
+
 func (c *Coordinator) Close(ctx context.Context) error {
 	if c == nil {
 		return nil

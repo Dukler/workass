@@ -2,7 +2,6 @@ package chat
 
 import (
 	"errors"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +25,15 @@ type Engine struct {
 	store               StateStore
 	cancelRouting       atomic.Pointer[cancelRoutingSnapshot]
 	pendingSteerSettled chan struct{}
+	// retired: Retire took this actor out of memory. Its state stays
+	// readable for a caller that still holds it, but it commits nothing: the
+	// store is the authority until the actor is opened again.
+	retired bool
 }
+
+// ErrActorRetired is returned by a commit on an engine that Retire took out of
+// memory. The caller opens the actor again and retries.
+var ErrActorRetired = errors.New("chat actor was closed to free memory; open it again")
 
 // PendingSteerSettled returns a signal for the current steer receipt boundary.
 // A nil channel means the actor can admit a new steer now. Callers recheck the
@@ -64,6 +71,26 @@ func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
 			return nil, err
 		}
 	}
+	if ok && recoveryIsNoop(state) {
+		// Restart recovery has nothing to settle: opening the actor commits
+		// nothing and leaves its revision alone, so opening it at boot or on
+		// first use is the same transition. A store whose checkpoint is not
+		// the opened state (journal records replayed onto it, rows from before
+		// incremental checkpoints) still checkpoints it, at the same revision.
+		checkpointer, isCheckpointer := store.(loadCheckpointer)
+		if isCheckpointer && checkpointer.needsCheckpointAfterLoad() {
+			if err := store.Save(state); err != nil {
+				return nil, err
+			}
+		}
+		engine := &Engine{store: store}
+		engine.installCommittedState(state)
+		// The SQLite load validated this exact state (no journal replayed onto
+		// it), or Save just did; a file journal may have been replayed after
+		// the load's validation, so the first command validates it.
+		engine.validated = isCheckpointer
+		return engine, nil
+	}
 	next, _, err := Reduce(state, RecoverOutbox{})
 	if err != nil {
 		return nil, err
@@ -75,6 +102,50 @@ func NewDurableEngine(chatID string, store StateStore) (*Engine, error) {
 	engine.installCommittedState(next)
 	engine.validated = true
 	return engine, nil
+}
+
+// loadCheckpointer is a store that can tell, right after Load, that its
+// persisted checkpoint is not the loaded state (journal records were replayed
+// onto it, or its rows predate the current checkpoint format).
+type loadCheckpointer interface {
+	needsCheckpointAfterLoad() bool
+}
+
+// retireCheckpointer is a store that folds journal records into a checkpoint
+// before its actor leaves memory, so the next open reads one checkpoint.
+type retireCheckpointer interface {
+	checkpointForRetire(State) error
+}
+
+// Retire takes a quiescent actor out of memory. Under the engine lock, so no
+// commit can interleave, it checks Quiescent and asks ready whether the state
+// may be left closed; if so it folds any journal into a checkpoint, stops
+// accepting commits (ErrActorRetired), and returns the summary every read
+// surface uses until the actor is opened again. ready sees the state
+// read-only.
+func (e *Engine) Retire(ready func(*State) bool) (ActorSummary, bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.retired {
+		return ActorSummary{}, false, ErrActorRetired
+	}
+	if ok, _ := Quiescent(e.state); !ok || (ready != nil && !ready(&e.state)) {
+		return ActorSummary{}, false, nil
+	}
+	if checkpointer, isCheckpointer := e.store.(retireCheckpointer); isCheckpointer {
+		if err := checkpointer.checkpointForRetire(e.state); err != nil {
+			return ActorSummary{}, false, err
+		}
+	}
+	e.retired = true
+	return summarizeResident(&e.state), true, nil
+}
+
+// Summary is the resident actor's ActorSummary.
+func (e *Engine) Summary() ActorSummary {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return summarizeResident(&e.state)
 }
 
 type storeError struct{ message string }
@@ -93,6 +164,9 @@ func (e *Engine) Apply(command Command) error {
 func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.retired {
+		return ErrActorRetired
+	}
 	if admission, ok := command.(TurnAdmitted); ok && prepare == nil && !e.state.Deleted {
 		// StartTurn commits admission before publishing provider output, then
 		// returns the same receipt to the coordinator. That second observation
@@ -201,6 +275,9 @@ func (e *Engine) saveReduced(next State) error {
 func (e *Engine) ClaimNext() (Effect, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.retired {
+		return nil, false, nil
+	}
 	for _, entry := range e.state.Outbox {
 		if entry.Status != OutboxPending || !outboxEntryExecutable(e.state, entry) {
 			continue
@@ -232,6 +309,9 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 func (e *Engine) ClaimEffect(effectID string) (Effect, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.retired {
+		return nil, false, nil
+	}
 	effectID = strings.TrimSpace(effectID)
 	for index := range e.state.Outbox {
 		entry := e.state.Outbox[index]
@@ -466,38 +546,7 @@ type ActivityLaneSnapshot struct {
 func (e *Engine) ReadActivitySnapshot() ActivitySnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	snapshot := ActivitySnapshot{
-		ChatID: e.state.ChatID, TabID: e.state.Presentation.TabID, Deleted: e.state.Deleted,
-		Obligation: e.state.Obligation.Clone(),
-	}
-	if len(e.state.Background) > 0 {
-		snapshot.Background = make(map[string]BackgroundState, len(e.state.Background))
-		for id, value := range e.state.Background {
-			if value.Event.PID != nil {
-				pid := *value.Event.PID
-				value.Event.PID = &pid
-			}
-			if value.Event.ExitCode != nil {
-				code := *value.Event.ExitCode
-				value.Event.ExitCode = &code
-			}
-			snapshot.Background[id] = value
-		}
-	}
-	if len(e.state.Permissions) > 0 {
-		snapshot.Permissions = make(map[string]PermissionState, len(e.state.Permissions))
-		for id, value := range e.state.Permissions {
-			value.Event = *clonePermission(&value.Event)
-			snapshot.Permissions[id] = value
-		}
-	}
-	if len(e.state.Lanes) > 0 {
-		snapshot.Lanes = make(map[provider.LaneID]ActivityLaneSnapshot, len(e.state.Lanes))
-		for id, lane := range e.state.Lanes {
-			snapshot.Lanes[id] = ActivityLaneSnapshot{ProviderID: lane.Identity.Realm.ProviderID, SessionID: lane.Thread.HeadID}
-		}
-	}
-	return snapshot
+	return activitySnapshotOf(&e.state)
 }
 
 // LedgerPageSnapshot is one immutable page immediately before a stable message
@@ -557,81 +606,9 @@ func (e *Engine) DigestSnapshot() DigestSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	view := e.state.PresentationState()
-	state := &view
-	digest := DigestSnapshot{
-		Initialized:            state.Initialized,
-		Deleted:                state.Deleted,
-		ChatID:                 state.ChatID,
-		TabID:                  state.Presentation.TabID,
-		ActorRevision:          state.Revision,
-		PresentationRevision:   state.Presentation.PresentationRevision,
-		AgentQueueRevision:     state.Presentation.AgentQueueRevision,
-		RuntimeControlRevision: state.Presentation.RuntimeControlRevision,
-		ProviderID:             string(state.Presentation.ProviderID),
-		CurrentModelID:         state.Presentation.CurrentModelID,
-		CurrentModeID:          state.Presentation.CurrentModeID,
-		QueueLen:               len(state.StagedQueue) + len(state.Queue),
+	lastMessageID := ""
+	if count := len(view.Ledger); count > 0 {
+		lastMessageID = view.Ledger[count-1].MessageID
 	}
-	if len(state.StagedQueue) > 0 {
-		digest.QueueHeadID = state.StagedQueue[0].ID
-	} else if len(state.Queue) > 0 {
-		digest.QueueHeadID = strings.TrimSpace(state.Queue[0].Presentation.QueueID)
-		if digest.QueueHeadID == "" {
-			digest.QueueHeadID = string(state.Queue[0].OperationID)
-		}
-	}
-
-	if foreground := state.Foreground; foreground == nil {
-		// The actor ledger owns one stable visible message per event. An idle
-		// digest therefore needs only its slice header and final identity; no
-		// body scan or history-sized id map is necessary every five seconds.
-		digest.MessageCount = len(state.Ledger)
-		if digest.MessageCount > 0 {
-			digest.LastMessageID = state.Ledger[digest.MessageCount-1].MessageID
-		}
-	} else {
-		// A live foreground can contribute up to four not-yet-ledger rows. Keep
-		// the existing stable-id merge for that short-lived state so renderer
-		// counts remain exact across consumption and steering boundaries.
-		seen := make(map[string]struct{}, len(state.Ledger)+4)
-		addMessage := func(id string) {
-			if _, exists := seen[id]; exists {
-				return
-			}
-			seen[id] = struct{}{}
-			digest.MessageCount++
-			digest.LastMessageID = id
-		}
-		for _, event := range state.Ledger {
-			addMessage(event.MessageID)
-		}
-		digest.RunningJobID = foreground.Turn.NativeID
-		if !foreground.UserConsumed {
-			userID := strings.TrimSpace(foreground.Input.Presentation.UserMessageID)
-			if userID == "" {
-				userID = "message:" + string(foreground.OperationID) + ":user"
-			}
-			addMessage(userID)
-		}
-		addMessage(strings.TrimSpace(foreground.CurrentAssistantMessageID))
-		for pending := state.PendingSteer; pending != nil; pending = pending.Next {
-			userID := strings.TrimSpace(pending.Presentation.UserMessageID)
-			if userID == "" {
-				userID = "message:" + string(pending.OperationID) + ":user"
-			}
-			addMessage(userID)
-			continuationID := strings.TrimSpace(pending.Presentation.AssistantMessageID)
-			if continuationID == "" {
-				continuationID = foreground.RootAssistantMessageID + "~after~" + string(pending.OperationID)
-			}
-			addMessage(continuationID)
-		}
-	}
-	for id, permission := range state.Permissions {
-		if !strings.EqualFold(strings.TrimSpace(permission.Event.Status), "resolved") {
-			digest.PendingPermissionIDs = append(digest.PendingPermissionIDs, id)
-		}
-	}
-	sort.Strings(digest.PendingPermissionIDs)
-	return digest
+	return digestSnapshotOf(&view, len(view.Ledger), lastMessageID)
 }

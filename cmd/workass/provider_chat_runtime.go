@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workass/internal/acp"
@@ -42,8 +43,23 @@ type providerChatRuntime struct {
 	closeMu sync.Mutex
 	actors  map[string]*providerChatActor
 	known   map[string]struct{}
-	bootErr error
-	closed  bool
+	// summaries holds every known actor that is not open (provider_chat_lazy.go);
+	// ledgers reads their rows. Both stay empty/nil when every actor is open.
+	summaries map[string]chat.ActorSummary
+	ledgers   *chat.SQLActors
+	// opening has one entry per actor being constructed, closed when the
+	// construction ends: a second caller waits for it instead of opening the
+	// actor twice, and no caller holds mu while a large actor loads.
+	opening map[string]chan struct{}
+	// envRestored: actors whose Entorno reference this run already restored.
+	envRestored map[string]struct{}
+	// liveScans: what history reads have learned about closed actors' pending
+	// or running rows.
+	liveScans map[string]*closedLiveScan
+	// closedRefs: attachment references of closed actors, read once each.
+	closedRefs map[string]*closedRefSet
+	bootErr    error
+	closed     bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is
@@ -58,6 +74,9 @@ type providerChatActor struct {
 	externalMutationMu sync.Mutex
 	engine             *chat.Engine
 	coordinator        *chat.Coordinator
+	// lastUsed is the unix-nano time of the last lookup that returned this
+	// actor; an actor untouched for the idle TTL may be closed.
+	lastUsed atomic.Int64
 }
 
 // providerChatStartAdmission is the durable boundary between a frozen
@@ -103,6 +122,8 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 	runtime := &providerChatRuntime{
 		manager: manager, sessions: sessions, stateDir: stateDir, backend: backend,
 		actors: make(map[string]*providerChatActor), known: make(map[string]struct{}), actorsPaused: actorsPaused,
+		summaries: make(map[string]chat.ActorSummary), opening: make(map[string]chan struct{}),
+		envRestored: make(map[string]struct{}), liveScans: make(map[string]*closedLiveScan), closedRefs: make(map[string]*closedRefSet),
 	}
 	if len(publishers) > 0 {
 		runtime.publish = publishers[0]
@@ -111,21 +132,7 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 		runtime.bootErr = errors.New("provider chat runtime requires manager, durable state, and state directory")
 		return runtime
 	}
-	heads, bootErr := backend.discover()
-	runtime.bootErr = bootErr
-	if runtime.bootErr == nil {
-		for _, head := range heads {
-			// The store may contain an empty envelope from a chat:create attempt
-			// that never committed InitializeChat. It has no
-			// accepted chat identity, so discovery must not turn it into a runtime
-			// chat. Any nonempty pre-initialization state still fails closed through
-			// actor construction.
-			if unacceptedEmptyActorHead(head.State, head.LedgerLength) {
-				continue
-			}
-			runtime.known[head.State.ChatID] = struct{}{}
-		}
-	}
+	runtime.bootErr = runtime.discoverActors(backend)
 	manager.SetProviderAttachmentResolver(sessions.ResolveProviderAttachment)
 	manager.SetProviderAttachmentPersister(sessions.PersistProviderAttachments)
 	// Actor-managed Entorno snapshots must be committed by the chat actor before
@@ -154,6 +161,10 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 		runtime.cancel = cancel
 		runtime.wg.Add(1)
 		go runtime.runObligationReconciliation(ctx)
+		if ttl := configuredActorIdleTTL(); runtime.ledgers != nil && ttl > 0 {
+			runtime.wg.Add(1)
+			go runtime.runIdleActorRetirement(ctx, ttl)
+		}
 	}
 	return runtime
 }
@@ -256,6 +267,11 @@ func (r *providerChatRuntime) actorForFork(chatID string, command chat.Initializ
 		r.mu.Unlock()
 		return nil, fmt.Errorf("discover provider chat actors: %w", r.bootErr)
 	}
+	if wait, busy := r.opening[chatID]; busy {
+		r.mu.Unlock()
+		<-wait
+		return r.actorForFork(chatID, command)
+	}
 	actor, loaded := r.actors[chatID]
 	_, known := r.known[chatID]
 	if loaded || known {
@@ -267,9 +283,9 @@ func (r *providerChatRuntime) actorForFork(chatID string, command chat.Initializ
 				return nil, err
 			}
 		}
-		state := actor.engine.ReadSnapshot()
+		state := actor.engine.CreationReceipt()
 		operationID := providercontract.NormalizeOperationID(string(command.OperationID))
-		if !state.Initialized || state.Deleted || state.CreationOperationID != operationID || state.CreationDigest != strings.TrimSpace(command.Digest) {
+		if !state.Initialized || state.Deleted || state.OperationID != operationID || state.Digest != strings.TrimSpace(command.Digest) {
 			return nil, errors.New("fork child chat already exists with a different creation receipt")
 		}
 		return actor, nil
@@ -298,6 +314,7 @@ func (r *providerChatRuntime) actorForFork(chatID string, command chat.Initializ
 		return nil, err
 	}
 	actor = &providerChatActor{engine: engine, coordinator: coordinator}
+	actor.touch()
 	r.actors[chatID] = actor
 	r.known[chatID] = struct{}{}
 	r.mu.Unlock()
@@ -336,8 +353,8 @@ func (r *providerChatRuntime) existingForkActor(chatID string, operationID provi
 			return nil, true, err
 		}
 	}
-	state := actor.engine.ReadSnapshot()
-	if !state.Initialized || state.Deleted || state.CreationOperationID != operationID || state.CreationDigest != digest {
+	state := actor.engine.CreationReceipt()
+	if !state.Initialized || state.Deleted || state.OperationID != operationID || state.Digest != digest {
 		return nil, true, errors.New("fork child chat already exists with a different creation receipt")
 	}
 	return actor, true, nil
@@ -351,35 +368,83 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 	if chatID == "" {
 		return nil, errors.New("provider chat runtime requires an immutable chat id")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return nil, errors.New("provider chat runtime is closed")
-	}
-	if r.bootErr != nil {
-		return nil, fmt.Errorf("discover provider chat actors: %w", r.bootErr)
-	}
-	if actor := r.actors[chatID]; actor != nil {
-		// Ordinary actor lookups are the hot path for heartbeat projections and
-		// streamed provider events. The actor is already authoritative here; only
-		// a repeated create needs to inspect its immutable creation receipt.
-		if initialize == nil {
+	for {
+		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			return nil, errors.New("provider chat runtime is closed")
+		}
+		if r.bootErr != nil {
+			err := fmt.Errorf("discover provider chat actors: %w", r.bootErr)
+			r.mu.Unlock()
+			return nil, err
+		}
+		if actor := r.actors[chatID]; actor != nil {
+			actor.touch()
+			r.mu.Unlock()
+			// Ordinary actor lookups are the hot path for heartbeat projections and
+			// streamed provider events. The actor is already authoritative here; only
+			// a repeated create needs to inspect its immutable creation receipt.
+			if initialize == nil {
+				return actor, nil
+			}
+			state := actor.engine.IdentitySnapshot()
+			if state.Deleted {
+				return nil, errors.New("chat was durably deleted")
+			}
+			creation := actor.engine.CreationReceipt()
+			if creation.OperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || creation.Digest != strings.TrimSpace(initialize.Digest) {
+				return nil, errors.New("chat creation operation conflicts with the existing actor")
+			}
 			return actor, nil
 		}
-		state := actor.engine.ReadSnapshot()
-		if state.Deleted {
-			return nil, errors.New("chat was durably deleted")
+		if wait, busy := r.opening[chatID]; busy {
+			r.mu.Unlock()
+			<-wait
+			continue
 		}
-		if state.CreationOperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || state.CreationDigest != strings.TrimSpace(initialize.Digest) {
-			return nil, errors.New("chat creation operation conflicts with the existing actor")
+		wait := make(chan struct{})
+		r.opening[chatID] = wait
+		r.mu.Unlock()
+		// A large actor takes seconds to load; nothing else waits for it.
+		actor, err := r.constructActor(chatID, initialize)
+		r.mu.Lock()
+		delete(r.opening, chatID)
+		close(wait)
+		if err == nil && r.closed {
+			err = errors.New("provider chat runtime is closed")
+		}
+		if err != nil {
+			r.mu.Unlock()
+			if actor != nil {
+				_ = actor.coordinator.Close(context.Background())
+			}
+			return nil, err
+		}
+		actor.touch()
+		r.actors[chatID] = actor
+		r.known[chatID] = struct{}{}
+		delete(r.summaries, chatID)
+		delete(r.liveScans, chatID)
+		delete(r.closedRefs, chatID)
+		paused := r.actorsPaused
+		r.mu.Unlock()
+		if !paused {
+			r.resumeOpenedActor(actor)
 		}
 		return actor, nil
 	}
+}
+
+// constructActor loads (or, with initialize, creates) one actor and its
+// coordinator. The caller holds the actor's opening slot, not r.mu.
+func (r *providerChatRuntime) constructActor(chatID string, initialize *chat.InitializeChat) (*providerChatActor, error) {
 	engine, err := chat.NewDurableEngine(chatID, r.actorStore(chatID))
 	if err != nil {
 		return nil, fmt.Errorf("open provider chat actor: %w", err)
 	}
-	state := engine.ReadSnapshot()
+	// The creation receipt, not a clone of the whole actor.
+	state := engine.CreationReceipt()
 	if state.Deleted && initialize != nil {
 		return nil, errors.New("chat was durably deleted")
 	}
@@ -389,7 +454,7 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		command.Presentation = initialize.Presentation.Clone()
 		err = engine.Apply(command)
 	case state.Initialized && initialize != nil:
-		if state.CreationOperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || state.CreationDigest != strings.TrimSpace(initialize.Digest) {
+		if state.OperationID != providercontract.NormalizeOperationID(string(initialize.OperationID)) || state.Digest != strings.TrimSpace(initialize.Digest) {
 			err = errors.New("chat creation operation conflicts with the durable actor")
 		}
 	case !state.Initialized:
@@ -406,13 +471,7 @@ func (r *providerChatRuntime) openActor(chatID string, initialize *chat.Initiali
 		_ = coordinator.Close(context.Background())
 		return nil, err
 	}
-	actor := &providerChatActor{engine: engine, coordinator: coordinator}
-	r.actors[chatID] = actor
-	r.known[chatID] = struct{}{}
-	if !r.actorsPaused {
-		coordinator.Wake()
-	}
-	return actor, nil
+	return &providerChatActor{engine: engine, coordinator: coordinator}, nil
 }
 
 func (r *providerChatRuntime) wakeCoordinatorIfStarted(coordinator *chat.Coordinator) {
@@ -521,11 +580,16 @@ func (r *providerChatRuntime) ResumeActors() error {
 		return err
 	}
 	for _, chatID := range ids {
+		if _, closed := r.closedSummary(chatID); closed {
+			// Quiescent: nothing to resume until it is opened, which restores
+			// its environment then (resumeOpenedActor).
+			continue
+		}
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return err
 		}
-		state := actor.engine.ReadSnapshot()
+		state := actor.engine.IdentitySnapshot()
 		if state.Deleted {
 			// Tombstones still need their coordinator resumed so a pending
 			// native-cleanup effect can finish, but deleted actors no longer
@@ -533,8 +597,10 @@ func (r *providerChatRuntime) ResumeActors() error {
 			actor.coordinator.Wake()
 			continue
 		}
-		if err := r.restoreActorEnvironment(actor); err != nil {
-			return err
+		if r.claimEnvironmentRestore(chatID) {
+			if err := r.restoreActorEnvironment(actor); err != nil {
+				return err
+			}
 		}
 		actor.coordinator.Wake()
 	}
@@ -2659,6 +2725,9 @@ func (r *providerChatRuntime) actorForSteerSession(sessionID, requestedTabID, re
 	var matchLane providercontract.LaneID
 	var matchGeneration uint64
 	for _, chatID := range ids {
+		if summary, closed := r.closedSummary(chatID); closed && !summary.NamesConnection(sessionID) {
+			continue
+		}
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return nil, chat.State{}, "", 0, err
@@ -3069,6 +3138,15 @@ func (r *providerChatRuntime) Cancel(ctx context.Context, jobID string) (acp.Job
 			}
 		}
 	}
+	// A finished turn of a closed actor, located by its native turn id in the
+	// rows.
+	if r.ledgers != nil {
+		for _, chatID := range r.closedChatIDs() {
+			if found, err := r.ledgers.LedgerHasNativeTurn(chatID, jobID); err == nil && found {
+				return acp.JobCancelResult{Cancelled: false, Reason: "idle"}, true, nil
+			}
+		}
+	}
 	return acp.JobCancelResult{Cancelled: false, Reason: "unknown"}, true, nil
 }
 
@@ -3138,6 +3216,17 @@ func (r *providerChatRuntime) ResolvePermission(ctx context.Context, requestID, 
 	if requestID == "" || optionID == "" {
 		return false, true, nil
 	}
+	// A closed actor that holds this (resolved) request answers as it would
+	// open: open it.
+	for _, chatID := range r.closedChatIDs() {
+		if summary, closed := r.closedSummary(chatID); closed {
+			if _, holds := summary.ActivitySnapshot().Permissions[requestID]; holds {
+				if _, err := r.actor(chatID); err != nil {
+					return false, true, err
+				}
+			}
+		}
+	}
 	for _, actor := range r.actorSnapshot() {
 		actor.mu.Lock()
 		state := actor.engine.ReadSnapshot()
@@ -3201,11 +3290,16 @@ func (r *providerChatRuntime) PendingPermissions() ([]any, error) {
 	}
 	out := make([]any, 0)
 	for _, chatID := range ids {
-		actor, err := r.actor(chatID)
+		actor, summary, err := r.residentOrClosed(chatID)
 		if err != nil {
 			return nil, err
 		}
-		state := actor.engine.ReadActivitySnapshot()
+		var state chat.ActivitySnapshot
+		if summary != nil {
+			state = summary.ActivitySnapshot()
+		} else {
+			state = actor.engine.ReadActivitySnapshot()
+		}
 		if state.Deleted {
 			continue
 		}
@@ -3284,6 +3378,10 @@ func (r *providerChatRuntime) reconcileObligations(daemonBoot bool) error {
 	}
 	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, chatID := range ids {
+		if _, closed := r.closedSummary(chatID); closed {
+			// A closed actor has no working or parked obligation (Quiescent).
+			continue
+		}
 		actor, err := r.actor(chatID)
 		if err != nil {
 			return err
