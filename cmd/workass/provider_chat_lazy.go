@@ -95,7 +95,7 @@ func (r *providerChatRuntime) discoverActors(backend chatActorBackend) error {
 	}
 	r.ledgers = ledgers
 	closed, reasons := 0, map[string]int{}
-	var newestStamps map[string]chat.LedgerStamp
+	var newestStamps map[string]chat.NewestLedgerStamp
 	if ledgers != nil {
 		var err error
 		if newestStamps, err = ledgers.ReadNewestStamps(); err != nil {
@@ -122,8 +122,8 @@ func (r *providerChatRuntime) discoverActors(backend chatActorBackend) error {
 			return nil
 		}
 		var stamps []chat.LedgerStamp
-		if newest, ok := newestStamps[chatID]; ok && newest.HasLedgerTimestamp() {
-			stamps = []chat.LedgerStamp{newest}
+		if newest, ok := newestStamps[chatID]; ok && newest.Sequence == head.LedgerLength && newest.HasLedgerTimestamp() {
+			stamps = []chat.LedgerStamp{newest.LedgerStamp}
 		} else if head.LedgerLength > 0 {
 			// The newest row has no timestamp: read back for one.
 			var err error
@@ -246,20 +246,30 @@ func (r *providerChatRuntime) chatByTab(tabID string) (string, bool, error) {
 // read was in progress; the caller reads the now open actor instead.
 var errClosedActorChanged = errors.New("closed chat actor changed during the read")
 
+// closedView is the ledger a closed actor's rows must still be.
+func closedView(summary chat.ActorSummary) chat.LedgerView {
+	return chat.LedgerView{Count: summary.LedgerCount, Revision: summary.Revision}
+}
+
+// closedReadError turns a failed closed read into errClosedActorChanged when
+// the actor changed underneath it (it was opened and committed, or is open
+// now), so the caller reads the open actor instead.
+func (r *providerChatRuntime) closedReadError(summary chat.ActorSummary, err error) error {
+	if err == nil {
+		return nil
+	}
+	current, stillClosed := r.closedSummary(summary.ChatID)
+	if errors.Is(err, chat.ErrLedgerChanged) || !stillClosed || current.Revision != summary.Revision {
+		return errClosedActorChanged
+	}
+	return err
+}
+
 // closedLedgerPage reads a page of a closed actor's rows (see
-// chat.SQLActors.ReadLedgerPage), checked against its summary's revision.
+// chat.SQLActors.ReadLedgerPage).
 func (r *providerChatRuntime) closedLedgerPage(summary chat.ActorSummary, beforeSequence uint64, beforeMessageID string, limit int) (chat.LedgerPageSnapshot, error) {
-	page, revision, err := r.ledgers.ReadLedgerPage(summary.ChatID, beforeSequence, beforeMessageID, limit)
-	if err != nil {
-		if _, stillClosed := r.closedSummary(summary.ChatID); !stillClosed {
-			return chat.LedgerPageSnapshot{}, errClosedActorChanged
-		}
-		return chat.LedgerPageSnapshot{}, err
-	}
-	if revision != summary.Revision || page.LedgerCount != summary.LedgerCount {
-		return chat.LedgerPageSnapshot{}, errClosedActorChanged
-	}
-	return page, nil
+	page, err := r.ledgers.ReadLedgerPage(summary.ChatID, closedView(summary), beforeSequence, beforeMessageID, limit)
+	return page, r.closedReadError(summary, err)
 }
 
 // closedHistoryRows returns the rows a bounded history read of a closed
@@ -268,56 +278,62 @@ func (r *providerChatRuntime) closedLedgerPage(summary chat.ActorSummary, before
 // options, oldest first. It is the selection boundedArchiveHistory makes over
 // the projected window (the newest row always, then each older row while it
 // fits), computed while reading rows newest first, so only the kept rows and
-// the first that does not fit are decoded. A window holding a pending or
-// running row (which binds the rows after it together) is read whole.
+// the first that does not fit are decoded. A row with its own pending or
+// running status binds the rows after it together, so the rows the walk did
+// not decode are checked for one (once per closed actor, closedLiveScan), and
+// a window holding one is read whole.
 func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, beforeMessageID string, limit int, opts []archiveReadOptions) ([]chat.LedgerEvent, error) {
-	window, revision, err := r.ledgers.LedgerWindowBefore(summary.ChatID, 0, beforeMessageID, limit)
-	if err == nil && (revision != summary.Revision || window.Count != summary.LedgerCount) {
-		err = errClosedActorChanged
-	}
-	var live bool
-	if err == nil {
-		live, err = r.closedWindowHasLiveRow(summary, window, revision)
-	}
-	if err == nil && live {
-		page, err := r.closedLedgerPage(summary, 0, beforeMessageID, limit)
-		if err != nil {
-			return nil, err
-		}
-		return page.Events, nil
+	view := closedView(summary)
+	window, err := r.ledgers.LedgerWindowBefore(summary.ChatID, view, 0, beforeMessageID, limit)
+	if err != nil {
+		return nil, r.closedReadError(summary, err)
 	}
 	stateDir := filepath.Dir(r.sessions.path)
 	deferring := deferringMessageImages(opts)
 	imageSizes := make(map[string]int64)
 	used := int64(2) // JSON array brackets, as actorHistorySuffixWithin counts them.
 	var kept []chat.LedgerEvent
-	if err == nil {
-		err = r.ledgers.WalkLedgerBackward(summary.ChatID, window, revision, func(event chat.LedgerEvent) (bool, error) {
-			message, err := projectLedgerMessage(event)
-			if err != nil {
-				return false, err
-			}
-			messages := []any{message}
-			for _, opt := range opts {
-				opt.beforeBudget(messages)
-			}
-			size, err := archiveReplyBytes(messages[0], stateDir, imageSizes, deferring)
-			if err != nil {
-				return false, err
-			}
-			if len(kept) > 0 && used+size+1 > actorHistoryPageBytes {
-				return false, nil
-			}
-			used += size + 1
-			kept = append(kept, event)
-			return true, nil
-		})
-	}
-	if err != nil {
-		if _, stillClosed := r.closedSummary(summary.ChatID); !stillClosed || errors.Is(err, errClosedActorChanged) {
-			return nil, errClosedActorChanged
+	decodedFrom, live := window.End+1, false
+	err = r.ledgers.WalkLedgerBackward(summary.ChatID, view, window, func(event chat.LedgerEvent) (bool, error) {
+		decodedFrom--
+		if event.Status == "pending" || event.Status == "running" {
+			live = true
+			return false, nil
 		}
-		return nil, err
+		message, err := projectLedgerMessage(event)
+		if err != nil {
+			return false, err
+		}
+		messages := []any{message}
+		for _, opt := range opts {
+			opt.beforeBudget(messages)
+		}
+		size, err := archiveReplyBytes(messages[0], stateDir, imageSizes, deferring)
+		if err != nil {
+			return false, err
+		}
+		if len(kept) > 0 && used+size+1 > actorHistoryPageBytes {
+			return false, nil
+		}
+		used += size + 1
+		kept = append(kept, event)
+		return true, nil
+	})
+	if err != nil {
+		return nil, r.closedReadError(summary, err)
+	}
+	if !live && decodedFrom-1 > window.Start {
+		// Rows (Start, decodedFrom) were not decoded.
+		if live, err = r.closedRowsHaveLiveRow(summary, window, decodedFrom); err != nil {
+			return nil, r.closedReadError(summary, err)
+		}
+	}
+	if live {
+		page, err := r.closedLedgerPage(summary, 0, beforeMessageID, limit)
+		if err != nil {
+			return nil, err
+		}
+		return page.Events, nil
 	}
 	for left, right := 0, len(kept)-1; left < right; left, right = left+1, right-1 {
 		kept[left], kept[right] = kept[right], kept[left]
@@ -325,49 +341,56 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 	return kept, nil
 }
 
-// closedLiveScan is what is known about a closed actor's pending or running
-// rows: every row after scannedFrom has been scanned, and live lists those
-// found. It belongs to one actor revision.
+// closedLiveScan is what history reads have learned about a closed actor's
+// rows with their own pending or running status: every row after
+// scannedFrom has been checked, and live lists those found. It belongs to
+// one actor revision.
 type closedLiveScan struct {
 	revision    uint64
 	scannedFrom int
 	live        []int
 }
 
-// closedWindowHasLiveRow reports whether a row in the window has its own
-// pending or running status. Rows are scanned once per closed actor, as
-// history reads first reach them; a summary taken from a resident actor
-// already knows.
-func (r *providerChatRuntime) closedWindowHasLiveRow(summary chat.ActorSummary, window chat.LedgerWindow, revision uint64) (bool, error) {
+// closedRowsHaveLiveRow reports whether a row in (window.Start, decodedFrom)
+// has its own pending or running status; rows from decodedFrom to the window
+// end were decoded and checked by the caller. Each row of a closed actor is
+// scanned at most once (scrolling up continues the checked region), and a
+// summary taken from a resident actor already knows.
+func (r *providerChatRuntime) closedRowsHaveLiveRow(summary chat.ActorSummary, window chat.LedgerWindow, decodedFrom int) (bool, error) {
+	unchecked := chat.LedgerWindow{Start: window.Start, End: decodedFrom - 1, Count: window.Count}
 	if known, ok := summary.LiveRows(); ok {
-		return liveRowInWindow(known, window), nil
+		return liveRowInWindow(known, unchecked), nil
 	}
 	r.mu.Lock()
 	scan := r.liveScans[summary.ChatID]
-	if scan == nil || scan.revision != revision {
-		scan = &closedLiveScan{revision: revision, scannedFrom: window.Count}
+	if scan == nil || scan.revision != summary.Revision {
+		scan = &closedLiveScan{revision: summary.Revision, scannedFrom: window.Count}
 		r.liveScans[summary.ChatID] = scan
 	}
+	if window.End >= scan.scannedFrom {
+		// The decoded rows continue the checked region down to decodedFrom.
+		scan.scannedFrom = min(scan.scannedFrom, decodedFrom-1)
+	}
 	from := scan.scannedFrom
+	known := liveRowInWindow(scan.live, unchecked)
 	r.mu.Unlock()
-	if window.Start < from {
-		found, err := r.ledgers.ScanLedgerLiveRows(summary.ChatID, window.Start, from, window.Count, revision)
-		if err != nil {
-			return false, err
-		}
-		r.mu.Lock()
-		if r.liveScans[summary.ChatID] == scan && scan.scannedFrom == from {
-			scan.live = append(scan.live, found...)
-			scan.scannedFrom = window.Start
-		}
-		r.mu.Unlock()
-		if liveRowInWindow(found, window) {
-			return true, nil
-		}
+	if known {
+		return true, nil
+	}
+	if unchecked.Start >= from {
+		return false, nil
+	}
+	found, err := r.ledgers.ScanLedgerLiveRows(summary.ChatID, closedView(summary), unchecked.Start, min(from, unchecked.End))
+	if err != nil {
+		return false, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return liveRowInWindow(scan.live, window), nil
+	if r.liveScans[summary.ChatID] == scan && scan.scannedFrom == from && min(from, unchecked.End) == from {
+		scan.live = append(scan.live, found...)
+		scan.scannedFrom = unchecked.Start
+	}
+	r.mu.Unlock()
+	return liveRowInWindow(found, unchecked), nil
 }
 
 func liveRowInWindow(live []int, window chat.LedgerWindow) bool {
@@ -572,7 +595,7 @@ func (r *providerChatRuntime) closedAttachmentRefs(summary chat.ActorSummary) (m
 	if cached != nil && cached.revision == summary.Revision {
 		return cached.refs, nil
 	}
-	refs, err := r.ledgers.LedgerAttachmentRefs(summary.ChatID, summary.Revision)
+	refs, err := r.ledgers.LedgerAttachmentRefs(summary.ChatID, closedView(summary))
 	if err != nil {
 		return nil, err
 	}

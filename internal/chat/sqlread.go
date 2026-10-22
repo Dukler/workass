@@ -116,42 +116,62 @@ func (a *SQLActors) DiscoverEach(visit func(ActorHead) error) error {
 // sqlDiscoverChunkBytes bounds the head JSON one discovery read copies.
 const sqlDiscoverChunkBytes = 16 << 20
 
+// NewestLedgerStamp is the stamp of a chat's newest row and its sequence.
+type NewestLedgerStamp struct {
+	Sequence int
+	LedgerStamp
+}
+
 // ReadNewestStamps returns the stamp of every chat's newest ledger row, in
 // one read: what SummarizeHead needs for almost every chat (the rest, whose
-// newest row has no timestamp, read further back with ReadLedgerStamps).
-func (a *SQLActors) ReadNewestStamps() (map[string]LedgerStamp, error) {
+// newest row has no timestamp, read further back with ReadLedgerStamps). The
+// newest sequences come from the messages key alone; reading chats.ledger_len
+// would walk every head's overflow pages.
+func (a *SQLActors) ReadNewestStamps() (map[string]NewestLedgerStamp, error) {
 	type rawStamp struct {
 		chatID    string
+		seq       int
 		eventJSON []byte
 	}
 	var raws []rawStamp
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
 		raws = raws[:0]
-		rows, err := tx.Query(`SELECT messages.chat_id, messages.event_json FROM chats JOIN messages ON messages.chat_id = chats.chat_id AND messages.seq = chats.ledger_len`)
+		rows, err := tx.Query(`SELECT chat_id, max(seq) FROM messages GROUP BY chat_id`)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 		for rows.Next() {
 			var raw rawStamp
-			if err := rows.Scan(&raw.chatID, &raw.eventJSON); err != nil {
+			if err := rows.Scan(&raw.chatID, &raw.seq); err != nil {
+				rows.Close()
 				return err
 			}
 			raws = append(raws, raw)
 		}
-		return rows.Err()
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for index := range raws {
+			if err := tx.QueryRow(`SELECT event_json FROM messages WHERE chat_id = ? AND seq = ?`, raws[index].chatID, raws[index].seq).Scan(&raws[index].eventJSON); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	stamps := make(map[string]LedgerStamp, len(raws))
+	stamps := make(map[string]NewestLedgerStamp, len(raws))
 	for index := range raws {
 		var stamp LedgerStamp
 		if err := json.Unmarshal(raws[index].eventJSON, &stamp); err != nil {
 			return nil, fmt.Errorf("decode chat %q newest ledger row: %w", raws[index].chatID, err)
 		}
 		raws[index].eventJSON = nil
-		stamps[raws[index].chatID] = stamp
+		stamps[raws[index].chatID] = NewestLedgerStamp{Sequence: raws[index].seq, LedgerStamp: stamp}
 	}
 	return stamps, nil
 }
@@ -166,30 +186,39 @@ func (s LedgerStamp) HasLedgerTimestamp() bool {
 // errSQLChatUnknown: the chat has no checkpoint row.
 var errSQLChatUnknown = errors.New("chat actor has no stored checkpoint")
 
-// sqlLedgerHead is the part of a chats row a ledger read checks.
-type sqlLedgerHead struct {
-	ledgerLen int
-	revision  uint64
+// LedgerView is the committed ledger a closed actor's reads expect: its row
+// count and its revision (journal included), from the actor's summary. A
+// closed actor's rows are its committed ledger and change only when it is
+// opened and commits, which moves the revision, so every read checks the
+// revision alone. That reads chats.revision, which precedes state_json in
+// the row: a head can be tens of megabytes of overflow pages, and reading
+// ledger_len or ledger_gen (after it) walked them on every chunk.
+type LedgerView struct {
+	Count    int
+	Revision uint64
 }
 
-func readSQLLedgerHead(tx *store.Tx, chatID string) (sqlLedgerHead, error) {
-	var head sqlLedgerHead
-	var ledgerGen, journalRevision int64
-	err := tx.QueryRow(`SELECT ledger_len, ledger_gen, revision, coalesce((SELECT max(revision) FROM chat_events WHERE chat_events.chat_id = chats.chat_id), 0) FROM chats WHERE chat_id = ?`, chatID).
-		Scan(&head.ledgerLen, &ledgerGen, &head.revision, &journalRevision)
+// ErrLedgerChanged: the actor committed since the reader's view of it.
+var ErrLedgerChanged = errors.New("chat ledger changed since it was summarized")
+
+// errLedgerChangedDuringRead is ErrLedgerChanged by its older name.
+var errLedgerChangedDuringRead = ErrLedgerChanged
+
+// checkSQLRevision fails unless the actor is still at view.Revision.
+func checkSQLRevision(tx *store.Tx, chatID string, view LedgerView) error {
+	var revision, journal int64
+	err := tx.QueryRow(`SELECT revision, coalesce((SELECT max(revision) FROM chat_events WHERE chat_events.chat_id = chats.chat_id), 0) FROM chats WHERE chat_id = ?`, chatID).
+		Scan(&revision, &journal)
 	if errors.Is(err, sql.ErrNoRows) {
-		return head, errSQLChatUnknown
+		return errSQLChatUnknown
 	}
 	if err != nil {
-		return head, err
+		return err
 	}
-	if uint64(journalRevision) > head.revision {
-		head.revision = uint64(journalRevision)
+	if current := max(revision, journal); current < 0 || uint64(current) != view.Revision {
+		return ErrLedgerChanged
 	}
-	if ledgerGen == 0 {
-		return head, ErrLedgerNotCheckpointed
-	}
-	return head, nil
+	return nil
 }
 
 // sqlMessageSequence is the sequence of the newest row with this message id
@@ -202,52 +231,76 @@ func sqlMessageSequence(tx *store.Tx, chatID, messageID string) (int64, error) {
 	return seq.Int64, nil
 }
 
-// ReadLedgerPage is Engine.ReadMessages (beforeMessageID empty) or
-// Engine.ReadLedgerPageBefore (beforeMessageID set) for a chat that is not
-// resident, with the actor revision the rows belong to. Deleted is never set:
-// the caller knows the tombstone from the actor's summary.
-func (a *SQLActors) ReadLedgerPage(chatID string, beforeSequence uint64, beforeMessageID string, limit int) (LedgerPageSnapshot, uint64, error) {
+// LedgerWindow is the row range a page read covers: rows (Start, End],
+// 1-based, of a ledger of Count rows.
+type LedgerWindow struct {
+	Start, End, Count int
+}
+
+// sqlWindowBefore resolves, inside tx, the window Engine.ReadMessages
+// (beforeMessageID empty) or Engine.ReadLedgerPageBefore would read.
+func sqlWindowBefore(tx *store.Tx, chatID string, view LedgerView, beforeSequence uint64, beforeMessageID string, limit int) (LedgerWindow, error) {
+	if err := checkSQLRevision(tx, chatID, view); err != nil {
+		return LedgerWindow{}, err
+	}
+	before := beforeSequence
+	if beforeMessageID != "" {
+		seq, err := sqlMessageSequence(tx, chatID, beforeMessageID)
+		if err != nil {
+			return LedgerWindow{}, err
+		}
+		if seq == 0 {
+			return LedgerWindow{}, errors.New("ledger page boundary does not exist")
+		}
+		before = uint64(seq)
+	}
+	window := LedgerWindow{Count: view.Count, End: view.Count}
+	if before > 0 {
+		if before > uint64(view.Count)+1 {
+			return LedgerWindow{}, errors.New("ledger page boundary is ahead of the ledger")
+		}
+		window.End = int(before - 1)
+	}
+	window.Start = max(0, window.End-limit)
+	return window, nil
+}
+
+// LedgerWindowBefore resolves the window ReadLedgerPage would read, without
+// reading a row.
+func (a *SQLActors) LedgerWindowBefore(chatID string, view LedgerView, beforeSequence uint64, beforeMessageID string, limit int) (LedgerWindow, error) {
 	chatID, beforeMessageID = strings.TrimSpace(chatID), strings.TrimSpace(beforeMessageID)
 	if limit < 1 {
-		return LedgerPageSnapshot{}, 0, errors.New("ledger page limit must be positive")
+		return LedgerWindow{}, errors.New("ledger page limit must be positive")
+	}
+	var window LedgerWindow
+	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		var err error
+		window, err = sqlWindowBefore(tx, chatID, view, beforeSequence, beforeMessageID, limit)
+		return err
+	})
+	return window, err
+}
+
+// ReadLedgerPage is Engine.ReadMessages (beforeMessageID empty) or
+// Engine.ReadLedgerPageBefore (beforeMessageID set) for a chat that is not
+// resident, as one read. Deleted is never set: the caller knows the tombstone
+// from the actor's summary.
+func (a *SQLActors) ReadLedgerPage(chatID string, view LedgerView, beforeSequence uint64, beforeMessageID string, limit int) (LedgerPageSnapshot, error) {
+	chatID, beforeMessageID = strings.TrimSpace(chatID), strings.TrimSpace(beforeMessageID)
+	if limit < 1 {
+		return LedgerPageSnapshot{}, errors.New("ledger page limit must be positive")
 	}
 	var (
-		page     LedgerPageSnapshot
-		revision uint64
-		raws     []sqlRawRow
+		window LedgerWindow
+		raws   []sqlRawRow
 	)
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
-		page, raws = LedgerPageSnapshot{}, raws[:0]
-		head, err := readSQLLedgerHead(tx, chatID)
-		if err != nil {
+		raws = raws[:0]
+		var err error
+		if window, err = sqlWindowBefore(tx, chatID, view, beforeSequence, beforeMessageID, limit); err != nil || window.End == window.Start {
 			return err
 		}
-		revision = head.revision
-		before := beforeSequence
-		if beforeMessageID != "" {
-			seq, err := sqlMessageSequence(tx, chatID, beforeMessageID)
-			if err != nil {
-				return err
-			}
-			if seq == 0 {
-				return errors.New("ledger page boundary does not exist")
-			}
-			before = uint64(seq)
-		}
-		count := head.ledgerLen
-		end := count
-		if before > 0 {
-			if before > uint64(count)+1 {
-				return errors.New("ledger page boundary is ahead of the ledger")
-			}
-			end = int(before - 1)
-		}
-		start := max(0, end-limit)
-		page = LedgerPageSnapshot{Start: start, End: end, LedgerCount: count}
-		if end == start {
-			return nil
-		}
-		rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq`, chatID, start, end)
+		rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq`, chatID, window.Start, window.End)
 		if err != nil {
 			return err
 		}
@@ -262,76 +315,27 @@ func (a *SQLActors) ReadLedgerPage(chatID string, beforeSequence uint64, beforeM
 		return rows.Err()
 	})
 	if err != nil {
-		return LedgerPageSnapshot{}, 0, err
+		return LedgerPageSnapshot{}, err
 	}
 	// Decoding happens after the read, so it never holds the connection
 	// every chat shares.
 	events := make([]LedgerEvent, 0, len(raws))
 	for index := range raws {
 		raw := &raws[index]
-		if raw.seq != int64(page.Start+index+1) {
-			return LedgerPageSnapshot{}, 0, fmt.Errorf("chat ledger row %d is missing", page.Start+index+1)
+		if raw.seq != int64(window.Start+index+1) {
+			return LedgerPageSnapshot{}, fmt.Errorf("chat ledger row %d is missing", window.Start+index+1)
 		}
 		var event LedgerEvent
 		if err := json.Unmarshal(raw.eventJSON, &event); err != nil {
-			return LedgerPageSnapshot{}, 0, fmt.Errorf("decode chat ledger row %d: %w", raw.seq, err)
+			return LedgerPageSnapshot{}, fmt.Errorf("decode chat ledger row %d: %w", raw.seq, err)
 		}
 		raw.eventJSON = nil
 		events = append(events, event)
 	}
-	if len(events) != page.End-page.Start {
-		return LedgerPageSnapshot{}, 0, fmt.Errorf("chat ledger has %d of rows %d..%d", len(events), page.Start+1, page.End)
+	if len(events) != window.End-window.Start {
+		return LedgerPageSnapshot{}, fmt.Errorf("chat ledger has %d of rows %d..%d", len(events), window.Start+1, window.End)
 	}
-	page.Events = cloneLedgerEvents(events)
-	return page, revision, nil
-}
-
-// LedgerWindow is the row range a page read covers: rows (Start, End],
-// 1-based, of a ledger of Count rows.
-type LedgerWindow struct {
-	Start, End, Count int
-}
-
-// LedgerWindowBefore resolves the window ReadLedgerPage(beforeSequence,
-// beforeMessageID, limit) reads, with the actor revision, without reading a
-// row.
-func (a *SQLActors) LedgerWindowBefore(chatID string, beforeSequence uint64, beforeMessageID string, limit int) (LedgerWindow, uint64, error) {
-	chatID, beforeMessageID = strings.TrimSpace(chatID), strings.TrimSpace(beforeMessageID)
-	if limit < 1 {
-		return LedgerWindow{}, 0, errors.New("ledger page limit must be positive")
-	}
-	var (
-		window   LedgerWindow
-		revision uint64
-	)
-	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
-		head, err := readSQLLedgerHead(tx, chatID)
-		if err != nil {
-			return err
-		}
-		revision = head.revision
-		before := beforeSequence
-		if beforeMessageID != "" {
-			seq, err := sqlMessageSequence(tx, chatID, beforeMessageID)
-			if err != nil {
-				return err
-			}
-			if seq == 0 {
-				return errors.New("ledger page boundary does not exist")
-			}
-			before = uint64(seq)
-		}
-		window = LedgerWindow{Count: head.ledgerLen, End: head.ledgerLen}
-		if before > 0 {
-			if before > uint64(head.ledgerLen)+1 {
-				return errors.New("ledger page boundary is ahead of the ledger")
-			}
-			window.End = int(before - 1)
-		}
-		window.Start = max(0, window.End-limit)
-		return nil
-	})
-	return window, revision, err
+	return LedgerPageSnapshot{Events: cloneLedgerEvents(events), Start: window.Start, End: window.End, LedgerCount: view.Count}, nil
 }
 
 // sqlLedgerChunkRows is how many rows one read transaction of a row walk
@@ -340,17 +344,13 @@ func (a *SQLActors) LedgerWindowBefore(chatID string, beforeSequence uint64, bef
 const sqlLedgerChunkRows = 4
 
 // readSQLLedgerChunkDesc copies rows (lo, hi] newest first, after checking
-// that the actor is still at revision with count rows.
-func (a *SQLActors) readSQLLedgerChunkDesc(chatID string, lo, hi, count int, revision uint64) ([]sqlRawRow, error) {
+// that the actor is still at the view's revision.
+func (a *SQLActors) readSQLLedgerChunkDesc(chatID string, view LedgerView, lo, hi int) ([]sqlRawRow, error) {
 	var raws []sqlRawRow
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
 		raws = raws[:0]
-		head, err := readSQLLedgerHead(tx, chatID)
-		if err != nil {
+		if err := checkSQLRevision(tx, chatID, view); err != nil {
 			return err
-		}
-		if head.revision != revision || head.ledgerLen != count {
-			return errLedgerChangedDuringRead
 		}
 		rows, err := tx.Query(`SELECT seq, event_json FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq DESC`, chatID, lo, hi)
 		if err != nil {
@@ -384,12 +384,12 @@ func (a *SQLActors) readSQLLedgerChunkDesc(chatID string, lo, hi, count int, rev
 // transaction, until visit returns false. A history page keeps only the
 // newest rows that fit its byte budget, so a reader that stops there decodes
 // the rows it keeps plus one, not the whole window. A commit to the actor
-// between two chunks ends the walk with an error.
-func (a *SQLActors) WalkLedgerBackward(chatID string, window LedgerWindow, revision uint64, visit func(LedgerEvent) (bool, error)) error {
+// ends the walk with ErrLedgerChanged.
+func (a *SQLActors) WalkLedgerBackward(chatID string, view LedgerView, window LedgerWindow, visit func(LedgerEvent) (bool, error)) error {
 	chatID = strings.TrimSpace(chatID)
 	for hi := window.End; hi > window.Start; hi -= sqlLedgerChunkRows {
 		lo := max(window.Start, hi-sqlLedgerChunkRows)
-		raws, err := a.readSQLLedgerChunkDesc(chatID, lo, hi, window.Count, revision)
+		raws, err := a.readSQLLedgerChunkDesc(chatID, view, lo, hi)
 		if err != nil {
 			return err
 		}
@@ -414,12 +414,12 @@ func (a *SQLActors) WalkLedgerBackward(chatID string, window LedgerWindow, revis
 // stops at the byte budget must know where they are. The reducer never
 // commits one; only the few rows whose JSON contains such a status anywhere
 // (a tool event's, say) are decoded to tell.
-func (a *SQLActors) ScanLedgerLiveRows(chatID string, lo, hi, count int, revision uint64) ([]int, error) {
+func (a *SQLActors) ScanLedgerLiveRows(chatID string, view LedgerView, lo, hi int) ([]int, error) {
 	chatID = strings.TrimSpace(chatID)
 	var live []int
 	for top := hi; top > lo; top -= sqlLedgerChunkRows {
 		bottom := max(lo, top-sqlLedgerChunkRows)
-		raws, err := a.readSQLLedgerChunkDesc(chatID, bottom, top, count, revision)
+		raws, err := a.readSQLLedgerChunkDesc(chatID, view, bottom, top)
 		if err != nil {
 			return nil, err
 		}
@@ -440,27 +440,18 @@ func (a *SQLActors) ScanLedgerLiveRows(chatID string, lo, hi, count int, revisio
 	return live, nil
 }
 
-// errLedgerChangedDuringRead: the actor committed between two chunks of a
-// backward read.
-var errLedgerChangedDuringRead = errors.New("chat ledger changed during the read")
-
 // ReadLedgerMessage is Engine.ReadMessage for a chat that is not resident.
-func (a *SQLActors) ReadLedgerMessage(chatID, messageID string) (LedgerEvent, bool, uint64, error) {
+func (a *SQLActors) ReadLedgerMessage(chatID string, view LedgerView, messageID string) (LedgerEvent, bool, error) {
 	chatID, messageID = strings.TrimSpace(chatID), strings.TrimSpace(messageID)
 	if messageID == "" {
-		return LedgerEvent{}, false, 0, nil
+		return LedgerEvent{}, false, nil
 	}
-	var (
-		raw      []byte
-		revision uint64
-	)
+	var raw []byte
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
 		raw = nil
-		head, err := readSQLLedgerHead(tx, chatID)
-		if err != nil {
+		if err := checkSQLRevision(tx, chatID, view); err != nil {
 			return err
 		}
-		revision = head.revision
 		seq, err := sqlMessageSequence(tx, chatID, messageID)
 		if err != nil || seq == 0 {
 			return err
@@ -468,13 +459,13 @@ func (a *SQLActors) ReadLedgerMessage(chatID, messageID string) (LedgerEvent, bo
 		return tx.QueryRow(`SELECT event_json FROM messages WHERE chat_id = ? AND seq = ?`, chatID, seq).Scan(&raw)
 	})
 	if err != nil || raw == nil {
-		return LedgerEvent{}, false, revision, err
+		return LedgerEvent{}, false, err
 	}
 	var event LedgerEvent
 	if err := json.Unmarshal(raw, &event); err != nil {
-		return LedgerEvent{}, false, 0, fmt.Errorf("decode chat ledger row: %w", err)
+		return LedgerEvent{}, false, fmt.Errorf("decode chat ledger row: %w", err)
 	}
-	return cloneLedgerEvents([]LedgerEvent{event})[0], true, revision, nil
+	return cloneLedgerEvents([]LedgerEvent{event})[0], true, nil
 }
 
 // ReadLedgerStamps returns the identity and timestamp of a chat's trailing
@@ -704,7 +695,7 @@ func (d *sqlRowDecoder) stop() {
 // tool attachments in its timeline. It reads the rows once, in chunks checked
 // against revision, decoding only those fields; a caller keeps the set to
 // answer image reads of a closed chat without scanning its rows per image.
-func (a *SQLActors) LedgerAttachmentRefs(chatID string, revision uint64) (map[string]struct{}, error) {
+func (a *SQLActors) LedgerAttachmentRefs(chatID string, view LedgerView) (map[string]struct{}, error) {
 	chatID = strings.TrimSpace(chatID)
 	type refs struct {
 		Attachments []struct{ Ref string }
@@ -717,13 +708,10 @@ func (a *SQLActors) LedgerAttachmentRefs(chatID string, revision uint64) (map[st
 	for done := false; !done; {
 		var chunk []sqlRawRow
 		err := a.db.Read(context.Background(), func(tx *store.Tx) error {
-			head, err := readSQLLedgerHead(tx, chatID)
-			if err != nil {
+			if err := checkSQLRevision(tx, chatID, view); err != nil {
 				return err
 			}
-			if head.revision != revision {
-				return errLedgerChangedDuringRead
-			}
+			var err error
 			chunk, done, err = readSQLLedgerChunk(tx, chatID, after, sqlLoadChunkBytes, nil)
 			return err
 		})
@@ -756,6 +744,9 @@ func (a *SQLActors) LedgerAttachmentRefs(chatID string, revision uint64) (map[st
 				}
 			}
 		}
+	}
+	if after != int64(view.Count) {
+		return nil, fmt.Errorf("chat ledger has %d rows, its summary %d", after, view.Count)
 	}
 	delete(owned, "")
 	return owned, nil
