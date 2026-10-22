@@ -282,16 +282,22 @@ func (r *providerChatRuntime) closedLedgerPage(summary chat.ActorSummary, before
 // running status binds the rows after it together, so the rows the walk did
 // not decode are checked for one (once per closed actor, closedLiveScan), and
 // a window holding one is read whole.
-func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, beforeMessageID string, limit int, opts []archiveReadOptions) ([]chat.LedgerEvent, error) {
+//
+// Unless the window was read whole, page is those rows finished for the wire:
+// exactly what finishArchivePage makes of them, since the walk sized each row
+// by finishing it. A reply can send it as it is instead of projecting,
+// finishing and encoding the same rows a second time.
+func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, beforeMessageID string, limit int, opts []archiveReadOptions) ([]chat.LedgerEvent, *archivePage, error) {
 	view := closedView(summary)
 	window, err := r.ledgers.LedgerWindowBefore(summary.ChatID, view, 0, beforeMessageID, limit)
 	if err != nil {
-		return nil, r.closedReadError(summary, err)
+		return nil, nil, r.closedReadError(summary, err)
 	}
 	stateDir := filepath.Dir(r.sessions.path)
 	resolved := make(map[string]string)
 	used := int64(2) // JSON array brackets, as finishArchivePage counts them.
 	var kept []chat.LedgerEvent
+	keptMessages, keptEncoded := []any{}, [][]byte{}
 	decodedFrom, live := window.End+1, false
 	err = r.ledgers.WalkLedgerBackward(summary.ChatID, view, window, func(event chat.LedgerEvent) (bool, error) {
 		decodedFrom--
@@ -317,28 +323,32 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 		}
 		used += size + 1
 		kept = append(kept, event)
+		keptMessages = append(keptMessages, messages[0])
+		keptEncoded = append(keptEncoded, data)
 		return true, nil
 	})
 	if err != nil {
-		return nil, r.closedReadError(summary, err)
+		return nil, nil, r.closedReadError(summary, err)
 	}
 	if !live && decodedFrom-1 > window.Start {
 		// Rows (Start, decodedFrom) were not decoded.
 		if live, err = r.closedRowsHaveLiveRow(summary, window, decodedFrom); err != nil {
-			return nil, r.closedReadError(summary, err)
+			return nil, nil, r.closedReadError(summary, err)
 		}
 	}
 	if live {
 		page, err := r.closedLedgerPage(summary, 0, beforeMessageID, limit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return page.Events, nil
+		return page.Events, nil, nil
 	}
 	for left, right := 0, len(kept)-1; left < right; left, right = left+1, right-1 {
 		kept[left], kept[right] = kept[right], kept[left]
+		keptMessages[left], keptMessages[right] = keptMessages[right], keptMessages[left]
+		keptEncoded[left], keptEncoded[right] = keptEncoded[right], keptEncoded[left]
 	}
-	return kept, nil
+	return kept, &archivePage{messages: keptMessages, encoded: keptEncoded}, nil
 }
 
 // closedLiveScan is what history reads have learned about a closed actor's
@@ -405,16 +415,39 @@ func liveRowInWindow(live []int, window chat.LedgerWindow) bool {
 // closedProjectionSnapshot is ReadProjectionSnapshot(tail) of a closed actor,
 // carrying only the tail rows a bounded read under opts keeps.
 func (r *providerChatRuntime) closedProjectionSnapshot(summary chat.ActorSummary, tail int, opts []archiveReadOptions) (chat.ReadProjectionSnapshot, error) {
+	snapshot, _, err := r.closedProjectionPage(summary, tail, opts)
+	return snapshot, err
+}
+
+// closedProjectionPage is closedProjectionSnapshot and, when closedHistoryRows
+// finished them, its rows as the tail reply sends them.
+func (r *providerChatRuntime) closedProjectionPage(summary chat.ActorSummary, tail int, opts []archiveReadOptions) (chat.ReadProjectionSnapshot, *archivePage, error) {
 	if tail <= 0 || summary.LedgerCount == 0 {
 		snapshot := summary.ProjectionSnapshot(nil)
 		snapshot.LastActivityAt = 0
-		return snapshot, nil
+		return snapshot, nil, nil
 	}
-	rows, err := r.closedHistoryRows(summary, "", tail, opts)
+	rows, page, err := r.closedHistoryRows(summary, "", tail, opts)
 	if err != nil {
-		return chat.ReadProjectionSnapshot{}, err
+		return chat.ReadProjectionSnapshot{}, nil, err
 	}
-	return summary.ProjectionSnapshot(rows), nil
+	return summary.ProjectionSnapshot(rows), page, nil
+}
+
+// closedLastExchangeTail is how many of a closed actor's newest rows
+// ProjectLastExchangeByTab keeps of a tail of limit: back to the user's own
+// newest message among them, found by the rows' role column so that no other
+// row is read, or all limit rows when none is the user's.
+func (r *providerChatRuntime) closedLastExchangeTail(summary chat.ActorSummary, limit int) (int, error) {
+	from := summary.LedgerCount - limit
+	sequence, err := r.ledgers.NewestLedgerRowOfRole(summary.ChatID, closedView(summary), from, "user", ownUserMessage)
+	if err = r.closedReadError(summary, err); err != nil {
+		return 0, err
+	}
+	if sequence == 0 {
+		return limit, nil
+	}
+	return summary.LedgerCount - sequence + 1, nil
 }
 
 // closedSessionSnapshot is ReadSessionProjectionSnapshot of a closed actor:
