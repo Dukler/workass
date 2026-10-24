@@ -919,12 +919,36 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    dim the brand icon in the rail (rail rows reuse the .srow class). */
 .mico svg { width: 15px; height: 15px; display: block; opacity: 1; }
 
-.permcard { border: 1px solid var(--line); background: var(--card); border-radius: 10px; margin: 10px 0; padding: 6px 10px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.permcard .ptext { font-size: 12.5px; }
-.permcard .ptext code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; }
-.permcard .ptext small { display: inline; color: var(--muted); font-size: 11.5px; margin-left: 6px; }
+/* Permission card, approved mock B (2026-10-24): title, a plain-language why,
+   the command on demand, and that the agent is paused. Amber marks only a
+   Claude Code safety check (icon tile + paused dot); everything else stays
+   neutral, and green is kept for the chosen answer. */
+.permcard { border: 1px solid var(--line2); background: var(--card); border-radius: 12px; margin: 10px 0; padding: 11px 12px 10px; display: flex; flex-direction: column; gap: 9px; }
+.permcard .phead { display: flex; align-items: flex-start; gap: 10px; }
+.permcard .picon { flex: none; width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; background: var(--field); color: var(--muted); }
+.permcard .picon svg { width: 14px; height: 14px; }
+.permcard.safety .picon { background: color-mix(in srgb, var(--amber) 14%, transparent); color: var(--amber); }
+.permcard .pbody { min-width: 0; flex: 1; padding-top: 2px; }
+.permcard .ptitle { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.35; }
+.permcard .pwho { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.permcard .pwho b { color: var(--ink2); font-weight: 500; }
+.permcard .pwhy { font-size: 12.5px; color: var(--ink2); line-height: 1.5; margin-top: 3px; }
+.permcard .preason { font-size: 11.5px; color: var(--muted); line-height: 1.45; margin-top: 4px; overflow-wrap: anywhere; }
+.permcard .pwhy code { font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--ink); overflow-wrap: anywhere; }
+.permcard .ppreview { margin-left: 34px; display: flex; align-items: center; gap: 8px; min-width: 0; text-align: left; background: var(--field); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; color: var(--ink2); font: inherit; cursor: pointer; }
+.permcard .ppreview:hover { border-color: var(--line2); }
+.permcard .ppreview code { font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.permcard .ppreview span { flex: none; font-size: 11px; color: var(--muted); }
+.permcard .psubject { margin: 0 0 0 34px; max-height: 240px; overflow: auto; background: var(--field); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; font: 11.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.permcard .pfoot { margin-left: 34px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.permcard .btn.chosen { border-color: var(--acc); color: var(--acc); }
+.permcard .plink { background: none; border: 0; padding: 2px 4px; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--line2); }
+.permcard .plink:hover { color: var(--ink2); }
 .permcard .sp { flex: 1; }
-.permcard .btns { display: flex; gap: 6px; }
+.permcard .pwait { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+.permcard .pwait i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.permcard.safety .pwait i { background: var(--amber); }
+.permcard.resolved { opacity: .75; }
 
 /* ============ question dock ============
    An agent QUESTION docked in the composer's place. One grouped answer stack:

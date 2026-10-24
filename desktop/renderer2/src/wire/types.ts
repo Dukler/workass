@@ -2,6 +2,7 @@
 // The daemon injects /lan-bridge.js which defines window.api before app scripts run.
 
 import type { ModelControlMemory } from '../model-controls';
+import type { PermissionContext } from '../permission-explain';
 
 // `efforts` is an optional, ordered list of reasoning-effort stops the model
 // supports (e.g. ["low","medium","high","xhigh","max","ultra"]). Providers
@@ -318,6 +319,8 @@ export interface PermissionRequest {
   // its choices, and `options` above carries one entry per choice. Optional, so
   // a daemon that predates it simply renders the plain permission card.
   question?: PermissionQuestion | null;
+  // Additive: what is being approved and why the provider asked.
+  context?: PermissionContext | null;
 }
 export interface PermissionQuestion {
   question: string;

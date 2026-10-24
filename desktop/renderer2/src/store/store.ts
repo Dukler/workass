@@ -6825,7 +6825,7 @@ export class Store {
         : null;
     }
     if (!msg) return;
-    msg.permission = { id: req.id, title: req.title || 'una acción', kind: req.kind, options: req.options, question: req.question ?? null };
+    msg.permission = { id: req.id, title: req.title || 'una acción', kind: req.kind, options: req.options, question: req.question ?? null, context: req.context ?? null };
     this.bump('msg:' + msg.id);
     // R7: a permission prompt needs the user's attention — surface it if the tab
     // is unfocused so they don't leave the turn blocked.

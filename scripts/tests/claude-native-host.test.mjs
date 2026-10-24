@@ -587,6 +587,34 @@ test('official Claude SDK host lets a permission outlive the plumbing timeout', 
   assert.equal(promptResult.result.stopReason, 'end_turn', JSON.stringify(promptResult));
 });
 
+// A safety check is the one ask a "Permitir todo" chat still shows. The card
+// needs Claude Code's reason, the tool and the asking subagent, and the model
+// must learn that a person said no, and why it was asked (user 2026-10-24).
+test('official Claude SDK host forwards why Claude Code asks and tells the model who refused', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: 'exercise safety check' }],
+  } });
+  const permission = await peer.waitFor((message) => message.method === 'session/request_permission');
+  const reason = 'Dangerous rm operation on possibly-empty variable path: $V/*.png in `rm -f $V/*.png`';
+  assert.deepEqual(permission.params.toolCall._meta.workass, { toolName: 'Bash', reason, agentId: 'agent-fixture-7' });
+  assert.equal(permission.params.toolCall.rawInput.command, 'V=$(pwd)/out; rm -f $V/*.png');
+
+  peer.send({ jsonrpc: '2.0', id: permission.id, result: { outcome: { outcome: 'selected', optionId: 'reject_once' } } });
+  const outcome = await peer.waitFor((message) => message.method === 'session/update'
+    && String(message.params.update.content?.text || '').startsWith('safety outcome:'));
+  assert.equal(outcome.params.update.content.text,
+    `safety outcome: deny The user rejected this tool call in Workass. Claude Code had asked for approval because: ${reason}`);
+});
+
 // A direction given in the first seconds of a turn used to kill it: the steer's
 // priority "now" aborts Claude Code's query, and with nothing committed yet the
 // conversation ends on our own message, which Claude Code reports as a failed

@@ -2327,6 +2327,8 @@ func (m *Manager) requestPermission(req permissionRequest) string {
 	question := permissionQuestion(req.ToolCall["rawInput"])
 	if question != nil {
 		payload["question"] = question
+	} else if context := permissionContext(req.ToolCall); context != nil {
+		payload["context"] = context
 	}
 	var workassQuestion *providercontract.PermissionQuestion
 	if req.WorkassQuestion != nil {
@@ -2531,6 +2533,38 @@ func clipPermissionText(s string, max int) string {
 		return s
 	}
 	return strings.TrimSpace(string(runes[:max])) + "…"
+}
+
+// permissionContext is what a card needs to say what is being approved and
+// why: the tool, the command or path it touches, and the provider's reason for
+// asking (a Claude Code safety check can ask even in a chat that allows
+// everything, and "Quiere ejecutar Bash" explained none of it — user
+// 2026-10-24). Additive on the wire; every field is bounded and redacted
+// because the command line is model-written and lands on a card.
+func permissionContext(toolCall map[string]any) map[string]any {
+	meta := mapFromAny(mapFromAny(toolCall["_meta"])["workass"])
+	input := mapFromAny(toolCall["rawInput"])
+	text := func(value any, max int) string {
+		return clipPermissionText(strings.TrimSpace(asString(value)), max)
+	}
+	out := map[string]any{}
+	add := func(key, value string) {
+		if value != "" {
+			out[key] = value
+		}
+	}
+	add("tool", text(meta["toolName"], 80))
+	add("reason", text(meta["reason"], 600))
+	add("blockedPath", text(meta["blockedPath"], 400))
+	add("agentId", text(meta["agentId"], 120))
+	add("command", text(input["command"], 2000))
+	add("path", text(firstNonEmpty(asString(input["file_path"]), asString(input["notebook_path"]), asString(input["path"])), 400))
+	add("url", text(input["url"], 400))
+	add("description", text(firstNonEmpty(asString(input["description"]), asString(toolCall["description"])), 300))
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func permissionOptions(options []any) []any {

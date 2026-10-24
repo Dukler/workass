@@ -586,6 +586,28 @@ class FixtureQuery {
         this.emit(this.result('success'));
         continue;
       }
+      // A Claude Code safety check from a subagent: the reason arrives with
+      // terminal escapes, and the model's view of the outcome is echoed back.
+      if (text.includes('exercise safety check')) {
+        const result = await this.options.canUseTool('Bash', { command: 'V=$(pwd)/out; rm -f $V/*.png', description: 'Clear old renders' }, {
+          signal: new AbortController().signal,
+          toolUseID: 'tool-fixture-safety',
+          requestId: 'permission-fixture-safety',
+          displayName: 'Bash',
+          description: 'Clear old renders',
+          decisionReason: '\x1b[1mDangerous rm operation on possibly-empty variable path: $V/*.png\x1b[0m in `rm -f $V/*.png`',
+          agentID: 'agent-fixture-7',
+        });
+        this.emit({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: `safety outcome: ${result.behavior} ${result.message || ''}` } },
+          parent_tool_use_id: null,
+          uuid: randomUUID(),
+          session_id: this.sessionId,
+        });
+        this.emit(this.result('success'));
+        continue;
+      }
       if (text.includes('exercise permission')) {
         const result = await this.options.canUseTool('Bash', { command: 'printf fixture' }, {
           signal: new AbortController().signal,

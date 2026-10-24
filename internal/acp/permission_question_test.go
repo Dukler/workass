@@ -331,3 +331,54 @@ func TestPermissionQuestionRejectsUnanswerableInput(t *testing.T) {
 		}
 	}
 }
+
+// A Claude Code safety check asks even in a chat that allows everything. The
+// card can only explain it with the reason, the tool and what it touches, all
+// bounded and redacted before they leave the daemon (user 2026-10-24).
+func TestPermissionRequestCarriesWhyItAsksBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
+	events := newEventCollector()
+	manager := NewManager(Options{Broadcast: events.Broadcast, PermissionTimeout: time.Second})
+	t.Cleanup(func() { manager.Reset() })
+
+	reason := "Dangerous rm operation on possibly-empty variable path: $V/*.png in `rm -f $V/*.png`"
+	go manager.requestPermission(permissionRequest{
+		JobID: "visible-job", SessionID: "sess-context",
+		ToolCall: map[string]any{
+			"title": "Bash", "kind": "execute",
+			"rawInput": map[string]any{
+				"command":     "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123' x; V=$(pwd)/v; rm -f $V/*.png " + strings.Repeat("a", 3000),
+				"description": "Clear old renders",
+			},
+			"_meta": map[string]any{"workass": map[string]any{"toolName": "Bash", "reason": reason, "agentId": "agent-7"}},
+		},
+		Options: []any{map[string]any{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}},
+	})
+
+	payload := events.waitFor(t, time.Second, func(event collectedEvent) bool {
+		return event.channel == "chat:permission-request" &&
+			asString(mapFromAny(event.payload)["sessionId"]) == "sess-context"
+	}).payload.(map[string]any)
+	context := mapFromAny(payload["context"])
+	if asString(context["tool"]) != "Bash" || asString(context["reason"]) != reason || asString(context["agentId"]) != "agent-7" {
+		t.Fatalf("context = %+v", context)
+	}
+	if asString(context["description"]) != "Clear old renders" {
+		t.Fatalf("description = %q", context["description"])
+	}
+	command := asString(context["command"])
+	if strings.Contains(command, "abcdefghijklmnopqrstuvwxyz0123") {
+		t.Fatalf("command kept a bearer token: %q", command)
+	}
+	if runes := len([]rune(command)); runes > 2001 {
+		t.Fatalf("command not clipped: %d runes", runes)
+	}
+}
+
+// A question keeps its own payload; it never grows a permission context.
+func TestQuestionHasNoPermissionContext(t *testing.T) {
+	t.Parallel()
+	if context := permissionContext(map[string]any{"title": "x"}); context != nil {
+		t.Fatalf("empty tool call produced a context: %+v", context)
+	}
+}

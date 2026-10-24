@@ -1486,6 +1486,21 @@ func projectPermission(permission *providercontract.PermissionEvent) map[string]
 		}
 		out["question"] = question
 	}
+	if context := permission.Context; context != nil {
+		projected := map[string]any{}
+		for key, value := range map[string]string{
+			"tool": context.Tool, "reason": context.Reason, "blockedPath": context.BlockedPath,
+			"agentId": context.AgentID, "command": context.Command, "path": context.Path,
+			"url": context.URL, "description": context.Description,
+		} {
+			if value != "" {
+				projected[key] = value
+			}
+		}
+		if len(projected) > 0 {
+			out["context"] = projected
+		}
+	}
 	return out
 }
 

@@ -134,6 +134,21 @@ type PermissionEvent struct {
 	OptionDetails    []PermissionOption
 	Question         *PermissionQuestion
 	ResolvedOptionID string
+	// Context says what is being approved and why the provider asked. Absent
+	// for questions and for providers that send none.
+	Context *PermissionContext `json:",omitempty"`
+}
+
+// PermissionContext is bounded and redacted by the daemon before it is stored.
+type PermissionContext struct {
+	Tool        string `json:",omitempty"`
+	Reason      string `json:",omitempty"`
+	BlockedPath string `json:",omitempty"`
+	AgentID     string `json:",omitempty"`
+	Command     string `json:",omitempty"`
+	Path        string `json:",omitempty"`
+	URL         string `json:",omitempty"`
+	Description string `json:",omitempty"`
 }
 
 type PermissionOption struct {
