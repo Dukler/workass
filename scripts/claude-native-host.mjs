@@ -92,6 +92,19 @@ function clipTurnField(value) {
   return String(value).slice(0, 200);
 }
 
+// Permission reasons and paths are shown on a card and quoted back to the
+// model: no terminal escapes, no control characters, one bounded line.
+function plainPermissionText(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 600);
+}
+
 function boundedTurnList(name, items, project) {
   const kept = items.slice(0, maxTurnListEntries).map(project);
   return { [name]: kept, [`${name}Truncated`]: Math.max(0, items.length - kept.length) };
@@ -812,6 +825,18 @@ class ClaudeSession {
       };
     }
     const title = String(options.title || options.displayName || toolName || 'Claude Code action');
+    // Why Claude Code is asking. Without it the card read "Quiere ejecutar
+    // Bash" even in a chat that allows everything, where the only asks left are
+    // Claude Code's own safety checks, and nobody could tell what to approve
+    // (user 2026-10-24). The CLI documents the text as possibly carrying ANSI
+    // escapes; the daemon bounds and redacts it before anyone sees it.
+    const reason = plainPermissionText(options.decisionReason);
+    const workass = {
+      toolName: String(toolName || ''),
+      ...(reason ? { reason } : {}),
+      ...(options.blockedPath ? { blockedPath: plainPermissionText(options.blockedPath) } : {}),
+      ...(options.agentID ? { agentId: String(options.agentID) } : {}),
+    };
     const result = await peerRequest('session/request_permission', {
       sessionId: this.sessionId,
       toolCall: {
@@ -820,6 +845,7 @@ class ClaudeSession {
         kind: toolKind(toolName),
         rawInput: input,
         ...(options.description ? { description: String(options.description) } : {}),
+        _meta: { workass },
       },
       options: [
         { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
@@ -830,8 +856,15 @@ class ClaudeSession {
       ],
     }, 0);
     const outcome = result?.outcome || {};
+    // The model reads only this text. A bare "denied" left it unable to tell a
+    // person's refusal from a policy or a timeout, so it says who decided and,
+    // for a safety check, what the check objected to.
     if (outcome.outcome !== 'selected') {
-      return { behavior: 'deny', message: 'Permission was cancelled', toolUseID: options.toolUseID };
+      return {
+        behavior: 'deny',
+        message: 'The permission request was cancelled before anyone answered it (the turn was stopped or the session closed).',
+        toolUseID: options.toolUseID,
+      };
     }
     if (outcome.optionId === 'allow_once' || outcome.optionId === 'allow_always') {
       return {
@@ -843,7 +876,13 @@ class ClaudeSession {
           : {}),
       };
     }
-    return { behavior: 'deny', message: 'Permission was denied', toolUseID: options.toolUseID };
+    return {
+      behavior: 'deny',
+      message: reason
+        ? `The user rejected this tool call in Workass. Claude Code had asked for approval because: ${reason}`
+        : 'The user rejected this tool call in Workass.',
+      toolUseID: options.toolUseID,
+    };
   }
 
   async enqueuePrompt(blocks, clientUserMessageId = '', humanAuthored = false) {

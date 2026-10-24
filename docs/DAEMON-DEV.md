@@ -354,6 +354,7 @@ event/reply/proc RSS counts are printed.
 - Assistant and thought chunks are coalesced before broadcast.
 - `job:cancel` sends `session/cancel` for app-chat jobs and resolves outstanding permission requests.
 - `chat:permission-request` and `chat:permission-decide` implement the ACP permission round-trip. No default deadline: a card waits for the user and is settled by a decision, a cancelled turn, or a closed session. `Options.PermissionTimeout` is opt-in and never expires a question.
+- A permission request (never a question) may carry an additive `context` object: `tool`, `reason` (the provider's own words for why it asks; for Claude, the SDK's `decisionReason`), `blockedPath`, `agentId` (the asking subagent), `command`, `path`, `url`, `description`. Every field is optional and is bounded and redacted by the daemon. The Claude host sends the first four in `toolCall._meta.workass`, and the daemon reads the rest from `rawInput`.
 - `app-chat:set-model` and `app-chat:set-mode` call mock `session/set_config_option`.
 - `app-chat:close-session` closes the ACP session, and `app-chat:reset` closes all mock ACP bridges.
 - Access approval, persisted device tokens, the single-controller runtime lease, takeover broadcast, and

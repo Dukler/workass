@@ -503,6 +503,31 @@ async function runPrompt(id, params) {
   await pause();
 
   let permissionText = '';
+  // The shape the Claude host sends for a Claude Code safety check: the
+  // reason and tool in toolCall._meta.workass, the command in rawInput.
+  if (text.includes('[mock:safety-permission]')) {
+    const result = await requestClient('session/request_permission', {
+      sessionId: session.id,
+      toolCall: {
+        title: 'Bash', kind: 'execute',
+        rawInput: {
+          command: 'cd /Users/dukler/Workspace/lagspace; D=artifacts/depthcut/depthvision-failure-denominator-20261024-r1\nPY=tmp/venv/bin/python; V=$D/verify; rm -f $V/*.png\n$PY verify_native.py out.png 2 5 6 >/dev/null 2>&1 &\nwait; ls $V',
+          description: 'Render verify sheets',
+        },
+        _meta: { workass: {
+          toolName: 'Bash',
+          reason: 'Dangerous rm operation on possibly-empty variable path: $V/*.png in `rm -f $V/*.png` (rewrite it as "${V:?}"/*.png or use a literal path)',
+        } },
+      },
+      options: [
+        { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'reject_once', name: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const outcome = result?.outcome?.outcome || 'cancelled';
+    permissionText = outcome === 'selected' ? ` Permission outcome: selected ${result?.outcome?.optionId || ''}.` : ' Permission outcome: cancelled.';
+    await pause();
+  }
   if (text.includes('[mock:permission]')) {
     const result = await requestClient('session/request_permission', {
       sessionId: session.id,

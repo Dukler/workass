@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { font-size: 13px; line-height: 1.45; padding: 4px 2px 12px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); margin: 22px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  .note { color: var(--muted-foreground); font-size: 12px; margin: 0 0 6px; }
+  code { font: 11.5px var(--font-mono); background: var(--code-background); color: var(--code-foreground); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+
+  .tool { color: var(--muted-foreground); font-size: 12px; display: flex; gap: 6px; align-items: center; margin: 2px 0; }
+  .tool b { color: var(--foreground); font-weight: 500; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-foreground); }
+
+  .old { border: 1px solid var(--border); background: var(--card); border-radius: 10px; margin: 8px 0; padding: 6px 10px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 12.5px; }
+  .old small { color: var(--muted-foreground); font-size: 11.5px; margin-left: 6px; }
+  .sp { flex: 1; }
+
+  .pc { border: 1px solid var(--border); background: var(--card); color: var(--card-foreground); border-radius: 10px; margin: 8px 0; padding: 10px 12px; }
+  .head { display: flex; align-items: flex-start; gap: 9px; }
+  .ic { flex: none; width: 16px; height: 16px; margin-top: 1px; color: var(--warning); }
+  .ic.plain { color: var(--muted-foreground); }
+  .title { font-weight: 600; }
+  .why { font-size: 12.5px; margin-top: 2px; }
+  .who { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
+  .cmd { margin: 9px 0 0 25px; background: var(--code-background); color: var(--code-foreground); border: 1px solid var(--border); border-radius: 7px; padding: 7px 0; font: 11.5px/1.55 var(--font-mono); overflow: hidden; }
+  .cmd div { padding: 0 10px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .cmd .hit { box-shadow: inset 2px 0 0 var(--warning); font-weight: 600; }
+  .cmd .more { color: var(--muted-foreground); font-family: var(--font-sans); }
+  .foot { display: flex; align-items: center; gap: 8px; margin: 9px 0 0 25px; flex-wrap: wrap; }
+  .wait { font-size: 11.5px; color: var(--muted-foreground); }
+  .btn { border: 1px solid var(--border); background: transparent; color: var(--foreground); border-radius: 7px; padding: 2.5px 10px; font: inherit; font-size: 12px; }
+  .btn.pri { background: var(--secondary); color: var(--secondary-foreground); }
+  .link { font-size: 12px; color: var(--muted-foreground); text-decoration: underline; text-underline-offset: 2px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="shield" viewBox="0 0 16 16"><path d="M8 1.8 13.2 4v3.6c0 3.2-2.2 5.6-5.2 6.6-3-1-5.2-3.4-5.2-6.6V4z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.2v3.4M8 10.6v.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+  <symbol id="shield-plain" viewBox="0 0 16 16"><path d="M8 1.8 13.2 4v3.6c0 3.2-2.2 5.6-5.2 6.6-3-1-5.2-3.4-5.2-6.6V4z" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+</svg>
+
+<h2>Hoy</h2>
+<div class="tool"><span class="dot"></span><b>Bash</b> Render verify sheets</div>
+<div class="old">
+  <span>Quiere ejecutar <code>Bash</code><small>Corre en tu máquina con el modo de permisos actual.</small></span>
+  <span class="sp"></span>
+  <button class="btn pri">Permitir una vez</button><button class="btn">Rechazar</button>
+</div>
+
+<h2>A: completa</h2>
+<p class="note">Dice qué frenó Claude Code y por qué, muestra el comando con la línea riesgosa marcada y avisa que el agente está en pausa.</p>
+<div class="tool"><span class="dot"></span><b>Bash</b> Render verify sheets</div>
+<div class="pc">
+  <div class="head">
+    <svg class="ic"><use href="#shield"/></svg>
+    <div>
+      <div class="title">Claude Code pide tu confirmación para borrar archivos</div>
+      <div class="why">El comando corre <code>rm</code> sobre <code>$V/*.png</code> y Claude Code no puede saber de antemano qué archivos son. Por seguridad lo frena aunque el chat esté en Acceso total.</div>
+    </div>
+  </div>
+  <div class="cmd">
+    <div>cd /Users/dukler/Workspace/lagspace; D=artifacts/depthcut/…-r1</div>
+    <div>python3 - &lt;&lt;'EOF'  … (edita verify_native.py) … EOF</div>
+    <div class="hit">PY=tmp/…/venv/bin/python; V=$D/verify; rm -f $V/*.png</div>
+    <div>$PY verify_native.py out.png 2 5 6 … &gt;/dev/null 2&gt;&amp;1 &amp;</div>
+    <div class="more">Ver las 4 líneas restantes</div>
+  </div>
+  <div class="foot">
+    <button class="btn pri">Permitir una vez</button><button class="btn">Rechazar</button>
+    <span class="wait">El agente está en pausa hasta que respondas.</span>
+  </div>
+</div>
+
+<h2>B: compacta</h2>
+<p class="note">Una línea de motivo; el comando se abre con un clic.</p>
+<div class="tool"><span class="dot"></span><b>Bash</b> Render verify sheets</div>
+<div class="pc">
+  <div class="head">
+    <svg class="ic"><use href="#shield"/></svg>
+    <div>
+      <div class="title">Claude Code pide tu confirmación para borrar archivos</div>
+      <div class="why"><code>rm -f $V/*.png</code>: no puede verificar qué borra, así que lo frena aunque el chat esté en Acceso total.</div>
+    </div>
+  </div>
+  <div class="foot">
+    <button class="btn pri">Permitir una vez</button><button class="btn">Rechazar</button>
+    <span class="link">Ver comando</span>
+    <span class="sp"></span>
+    <span class="wait">Agente en pausa</span>
+  </div>
+</div>
+
+<h2>B, cuando lo pide un subagente</h2>
+<div class="pc">
+  <div class="head">
+    <svg class="ic"><use href="#shield"/></svg>
+    <div>
+      <div class="title">Claude Code pide tu confirmación para borrar archivos</div>
+      <div class="who">Lo pide el subagente «Explore: label audit»</div>
+      <div class="why"><code>rm -rf "$OUT"</code>: no puede verificar qué borra, así que lo frena aunque el chat esté en Acceso total.</div>
+    </div>
+  </div>
+  <div class="foot">
+    <button class="btn pri">Permitir una vez</button><button class="btn">Rechazar</button>
+    <span class="link">Ver comando</span>
+    <span class="sp"></span>
+    <span class="wait">Subagente en pausa</span>
+  </div>
+</div>
+
+<h2>B, en un chat en modo Preguntar (sin chequeo de seguridad)</h2>
+<div class="pc">
+  <div class="head">
+    <svg class="ic plain"><use href="#shield-plain"/></svg>
+    <div>
+      <div class="title">Quiere ejecutar un comando</div>
+      <div class="why"><code>npm run build</code>: este chat pide confirmación antes de cada comando.</div>
+    </div>
+  </div>
+  <div class="foot">
+    <button class="btn pri">Permitir una vez</button><button class="btn">Rechazar</button>
+    <span class="link">Ver comando</span>
+    <span class="sp"></span>
+    <span class="wait">Agente en pausa</span>
+  </div>
+</div>
+</body>
+</html>

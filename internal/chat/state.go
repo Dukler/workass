@@ -1214,6 +1214,10 @@ func clonePermission(permission *provider.PermissionEvent) *provider.PermissionE
 	out := *permission
 	out.Options = append([]string(nil), permission.Options...)
 	out.OptionDetails = append([]provider.PermissionOption(nil), permission.OptionDetails...)
+	if permission.Context != nil {
+		context := *permission.Context
+		out.Context = &context
+	}
 	if permission.Question != nil {
 		question := *permission.Question
 		question.Options = append([]provider.PermissionQuestionOption(nil), permission.Question.Options...)

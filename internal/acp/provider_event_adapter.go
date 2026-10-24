@@ -689,6 +689,14 @@ func (m *Manager) observeProviderLanePermission(channel string, payload map[stri
 		}
 		question = &parsed
 	}
+	var context *providercontract.PermissionContext
+	if raw := mapFromAny(payload["context"]); len(raw) > 0 {
+		context = &providercontract.PermissionContext{
+			Tool: asString(raw["tool"]), Reason: asString(raw["reason"]), BlockedPath: asString(raw["blockedPath"]),
+			AgentID: asString(raw["agentId"]), Command: asString(raw["command"]), Path: asString(raw["path"]),
+			URL: asString(raw["url"]), Description: asString(raw["description"]),
+		}
+	}
 	status := "pending"
 	if channel == "chat:permission-resolved" {
 		status = "resolved"
@@ -699,7 +707,7 @@ func (m *Manager) observeProviderLanePermission(channel string, payload map[stri
 		Permission: &providercontract.PermissionEvent{
 			RequestID: asString(payload["id"]), Title: asString(payload["title"]), Kind: asString(payload["kind"]),
 			Status: status, Options: options, OptionDetails: details, Question: question,
-			ResolvedOptionID: asString(payload["optionId"]),
+			ResolvedOptionID: asString(payload["optionId"]), Context: context,
 		},
 	})
 }

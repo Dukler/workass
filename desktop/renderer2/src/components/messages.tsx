@@ -12,6 +12,7 @@ import { steerStatusLabel } from '../steering';
 import { displayDetail, splitTail } from '../tool-display';
 import { toolPresentation } from '../tool-names';
 import { permissionChoices } from '../permissions';
+import { commandPreview, explainPermission, type WhyPart } from '../permission-explain';
 import { encodeWorkassQuestionAnswer, limitWorkassQuestionText } from '../question-answer';
 import { cachedToolOutput, cachedToolTitle, loadToolOutput, loadToolTitle } from '../chat/tool-detail';
 
@@ -720,29 +721,68 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
   // allowed/rejected. Falls back to the permission card if the daemon predates
   // the question field.
   if (perm.question) return renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText });
+  return <PermissionCard perm={perm} tabId={tabId} decide={decide} />;
+}
+
+// Approved mock B (2026-10-24): what is being approved, why, in words a person
+// can act on, and that the agent is stopped until they answer. The command
+// opens on demand; the reason never does — it is the point of the card.
+function PermissionCard({ perm, tabId, decide }: { perm: PermissionState; tabId: string; decide: (optionId: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const chat = store.chat(tabId);
+  const explained = explainPermission({ title: perm.title, kind: perm.kind, context: perm.context, modeId: chat?.currentModeId });
+  const agentId = perm.context?.agentId;
+  const agentLabel = agentId
+    ? store.spawnedWork(chat ?? null).find((work) => work.taskId === agentId || work.id === agentId)?.label
+    : undefined;
+  const subject = explained.subject;
+  const preview = subject?.kind === 'command' ? commandPreview(subject.text, explained.focus) : null;
+  const subjectLabel = subject?.kind === 'command' ? 'comando' : subject?.kind === 'url' ? 'dirección' : 'archivo';
   return (
-    <div className="permcard">
-      <div className="wicon"><IcShield /></div>
-      <div className="ptext">
-        Quiere ejecutar <code>{perm.title}</code>
-        <small>Corre en tu máquina con el modo de permisos actual.</small>
+    <div className={`permcard${explained.tone === 'safety' ? ' safety' : ''}${perm.resolved ? ' resolved' : ''}`}>
+      <div className="phead">
+        <span className="picon" aria-hidden><IcShield /></span>
+        <div className="pbody">
+          <div className="ptitle">{explained.title}</div>
+          {agentId && <div className="pwho">Lo pide {agentLabel ? <>el subagente <b>{agentLabel}</b></> : 'un subagente'}</div>}
+          <div className="pwhy">{renderWhy(explained.why)}</div>
+          {explained.providerReason && <div className="preason">Claude Code: “{explained.providerReason}”</div>}
+        </div>
       </div>
-      <span className="sp" />
-      <div className="btns">
+      {subject && open && (
+        <pre className="psubject">{subject.text}</pre>
+      )}
+      {subject && !open && preview && (
+        <button type="button" className="ppreview" onClick={() => setOpen(true)} title="Ver el comando completo">
+          <code>{preview.line}</code>
+          {preview.more > 0 && <span>+{preview.more} {preview.more === 1 ? 'línea' : 'líneas'}</span>}
+        </button>
+      )}
+      <div className="pfoot">
         {permissionChoices(perm.options).map((o) => {
           const isAllow = /allow/i.test(o.kind) || /allow/i.test(o.name || '');
           const chosen = perm.resolved === o.optionId;
           return (
             <button
               key={o.optionId}
-              className={`btn ${isAllow ? 'pri' : ''}`}
+              className={`btn ${isAllow ? 'pri' : ''}${chosen ? ' chosen' : ''}`}
               disabled={!!perm.resolved}
-              style={chosen ? { borderColor: 'var(--acc)', color: 'var(--acc)' } : undefined}
               onClick={() => decide(o.optionId)}
             >{o.label}</button>
           );
         })}
+        {subject && (subject.kind !== 'command' || open || !preview) && (
+          <button type="button" className="plink" onClick={() => setOpen(!open)}>
+            {open ? `Ocultar ${subjectLabel}` : `Ver ${subjectLabel}`}
+          </button>
+        )}
+        <span className="sp" />
+        {!perm.resolved && <span className="pwait"><i aria-hidden />{agentId ? 'Subagente en pausa' : 'Agente en pausa'}</span>}
       </div>
     </div>
   );
+}
+
+function renderWhy(parts: WhyPart[]): ReactNode {
+  return parts.map((part, index) => (typeof part === 'string' ? part : <code key={index}>{part.code}</code>));
 }

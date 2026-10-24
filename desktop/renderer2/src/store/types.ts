@@ -1,3 +1,4 @@
+import type { PermissionContext } from '../permission-explain';
 import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, ChatGoal, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import type { ConnStatus } from '../wire/connection';
@@ -61,6 +62,9 @@ export interface PermissionState {
   // Set when this is a question from the agent, not a permission: the card
   // renders the question and its choices instead of "Quiere ejecutar <tool>".
   question?: PermissionQuestion | null;
+  // What is being approved and why the provider asked (daemon 2026-10-24).
+  // Absent from older daemons; the card then explains from title and mode.
+  context?: PermissionContext | null;
 }
 
 // An image that was accepted as part of a user turn. Unlike DraftImage this is
