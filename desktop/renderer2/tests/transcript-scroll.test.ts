@@ -6,6 +6,7 @@ import {
   TRANSCRIPT_BACKGROUND_PIN_DELAY_MS,
   transcriptIsAtBottom,
   transcriptPinnedAfterScroll,
+  transcriptReaderLeftUnannounced,
 } from '../src/transcript-scroll.ts';
 
 test('only a new ordinary user row changes the transcript follow identity', () => {
@@ -59,6 +60,21 @@ test('image anchoring during an upward wheel intent cannot re-pin even at bottom
 
 test('a coalesced programmatic scroll inside the input window cannot re-pin', () => {
   assert.equal(transcriptPinnedAfterScroll(false, true, nearBottom, 0), false);
+});
+
+test('a scroll nobody wrote that leaves the bottom upward is the reader (wheel over an HTML frame)', () => {
+  assert.equal(transcriptReaderLeftUnannounced(true, farFromBottom, -730), true);
+});
+
+test('an unwritten move that stays at the bottom or goes down keeps following', () => {
+  // A shrink clamps a followed reader to the new bottom; the spring only descends.
+  assert.equal(transcriptReaderLeftUnannounced(true, nearBottom, -40), false);
+  assert.equal(transcriptReaderLeftUnannounced(true, farFromBottom, 120), false);
+  assert.equal(transcriptReaderLeftUnannounced(true, farFromBottom, 0), false);
+});
+
+test('a reader who already left is not re-decided by an unwritten move', () => {
+  assert.equal(transcriptReaderLeftUnannounced(false, farFromBottom, -730), false);
 });
 
 test('the transcript bottom threshold preserves the existing 80px contract', () => {

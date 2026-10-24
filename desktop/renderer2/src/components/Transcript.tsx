@@ -8,7 +8,7 @@ import { UserPill } from './messages';
 import { NoticeLine } from './NoticeLine';
 import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
-import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll } from '../transcript-scroll';
+import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll, transcriptReaderLeftUnannounced } from '../transcript-scroll';
 import { syncFlowBlocks } from '../flow-window';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
@@ -823,8 +823,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     // Layout passes while a remembered position is on its way back move
     // nothing the reader sees (the rows are hidden); they record nothing.
     if (restoring.current) { lastScrollTop.current = el.scrollTop; return; }
-    const userInitiated = performance.now() <= userScrollUntil.current;
-    const delta = userScrollDelta.current || el.scrollTop - lastScrollTop.current;
+    const intentSeen = performance.now() <= userScrollUntil.current;
+    const unwritten = el.scrollTop - lastScrollTop.current;
+    const userInitiated = intentSeen || transcriptReaderLeftUnannounced(stick.current, el, unwritten);
+    const delta = (intentSeen && userScrollDelta.current) || unwritten;
     lastScrollTop.current = el.scrollTop;
     const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el, delta);
     const wasPinned = stick.current;
