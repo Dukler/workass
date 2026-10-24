@@ -53,6 +53,21 @@ export function transcriptPinnedAfterScroll(
   return scrollDelta < 0 ? false : transcriptIsAtBottom(metrics);
 }
 
+// A wheel over an embedded page (an HTML render's sandboxed frame) scrolls the
+// transcript without ever reaching its wheel listener, so no intent is
+// recorded and the next pin pulled the reader straight back down (user
+// 2026-10-24). Code never takes a followed reader up and away from the bottom:
+// every write records where it left the scroll, the spring only closes on the
+// bottom, a shrink clamps to it, and the browser's own anchoring is off. A move
+// nobody wrote that ends above the bottom is therefore the reader's.
+export function transcriptReaderLeftUnannounced(
+  pinned: boolean,
+  metrics: TranscriptScrollMetrics,
+  unwrittenDelta: number,
+): boolean {
+  return pinned && unwrittenDelta < 0 && !transcriptIsAtBottom(metrics);
+}
+
 export const TRANSCRIPT_BACKGROUND_PIN_DELAY_MS = 100;
 
 type TranscriptPinSchedulerOptions = {
