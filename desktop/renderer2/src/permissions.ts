@@ -26,7 +26,7 @@ export function clearPermissionsOutsideSnapshot(chats: Chat[], pendingIds: Reado
 }
 
 export const PERM_LABEL: Readonly<Record<string, string>> = {
-  allow_once: 'Permitir una vez',
+  allow_once: 'Permitir',
   allow_always: 'Permitir siempre',
   allow: 'Permitir',
   reject_once: 'Rechazar',
@@ -50,7 +50,7 @@ export function normalizedPermissionLabel(value: string): string {
 }
 
 // Generic English option names say no more than their kind; they take the
-// localized kind label so a card never mixes "Reject" with "Permitir una vez".
+// localized kind label so a card never mixes "Reject" with "Permitir".
 // Specific names ("Yes, and don't ask again for git") are kept.
 const GENERIC_OPTION_NAMES = new Set([
   'allow', 'allow once', 'always allow', 'allow always', 'yes',

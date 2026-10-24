@@ -35,16 +35,16 @@ test('permission choices preserve provider-native names when coarse kinds collid
   assert.deepEqual(choices.map(({ optionId, label }) => ({ optionId, label })), [
     { optionId: 'once-read', label: 'Read the file' },
     { optionId: 'once-write', label: 'Write the file' },
-    { optionId: 'canonical', label: 'Permitir una vez' },
+    { optionId: 'canonical', label: 'Permitir' },
   ]);
 });
 
-// 2026-10-11 QA L3: {name:"Reject", kind:"reject_once"} stayed English next to "Permitir una vez".
+// 2026-10-11 QA L3: {name:"Reject", kind:"reject_once"} stayed English next to "Permitir".
 test('generic English option names take the localized kind label', () => {
   const choices = permissionChoices([
     { optionId: 'a', name: 'Allow once', kind: 'allow_once' },
     { optionId: 'r', name: 'Reject', kind: 'reject_once' },
     { optionId: 's', name: "Yes, and don't ask again for git", kind: 'allow_always' },
   ]);
-  assert.deepEqual(choices.map((choice) => choice.label), ['Permitir una vez', 'Rechazar', "Yes, and don't ask again for git"]);
+  assert.deepEqual(choices.map((choice) => choice.label), ['Permitir', 'Rechazar', "Yes, and don't ask again for git"]);
 });
