@@ -61,7 +61,7 @@ func TestPermissionRequestForwardsTheAgentsQuestion(t *testing.T) {
 		t.Fatalf("first choice description = %q", got)
 	}
 	// The answers must survive as their own option kind: labelling them
-	// allow/reject is what let the renderer overwrite them with "Permitir una vez".
+	// allow/reject is what let the renderer overwrite them with "Permitir".
 	first := mapFromAny(anySlice(payload["options"])[0])
 	if asString(first["kind"]) != "answer" || asString(first["name"]) != "El nodo de build" {
 		t.Fatalf("first option = %+v", first)

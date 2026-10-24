@@ -754,7 +754,7 @@ class ClaudeSession {
           },
         },
         // 'answer' is deliberately NOT an allow/reject kind: the renderer labels
-        // known permission kinds ("Permitir una vez") and would otherwise
+        // known permission kinds ("Permitir") and would otherwise
         // overwrite the choice text. Cancel keeps reject_once so the daemon's
         // timeout fallback still lands on "no answer".
         options: [
