@@ -20,30 +20,26 @@ func TestPhaseCWireSaturationPreservesTerminalAndFrozenEventEnvelope(t *testing.
 		}
 	}
 
+	// Saturation never holds the provider stream: both events go to the
+	// client's backlog, behind everything already queued.
 	done := make(chan struct{})
 	go func() {
 		hub.Broadcast("job:event", map[string]any{"kind": "chunk", "seq": 1})
 		hub.Broadcast("job:event", map[string]any{"kind": "terminal", "seq": 2, "status": "done"})
 		close(done)
 	}()
-	if !waitForBroadcastLock(t, &hub.broadcastMu) {
-		client.close()
-		waitForClosed(t, done, "saturated provider publication")
-		t.Fatal("saturated provider publication did not enter the admission boundary")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("saturated provider publication waited on the client")
 	}
+	waitForOutboundFrames(t, client, outboundQueueFrameLimit+2)
 
 	for index := 0; index < outboundQueueFrameLimit; index++ {
 		_ = takeQueuedFrame(client)
 	}
-	waitForOutboundFrames(t, client, 1)
 	chunk := takeQueuedFrame(client)
-	waitForOutboundFrames(t, client, 1)
 	terminal := takeQueuedFrame(client)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("terminal provider publication remained blocked after queue drain")
-	}
 
 	for _, test := range []struct {
 		name  string
@@ -85,22 +81,19 @@ func TestPhaseCWireDisconnectReconnectRehydratesBeforeLiveEvents(t *testing.T) {
 		}
 	}
 
-	blocked := make(chan struct{})
+	// The saturated renderer takes the event into its backlog; publication
+	// never waits on it, before or after it disconnects.
+	published := make(chan struct{})
 	go func() {
 		hub.Broadcast("job:event", map[string]any{"kind": "chunk", "seq": 1})
-		close(blocked)
+		close(published)
 	}()
-	if !waitForBroadcastLock(t, &hub.broadcastMu) {
-		old.close()
-		waitForClosed(t, blocked, "disconnected renderer publication")
-		t.Fatal("disconnected renderer publication did not reach backpressure")
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("provider publication waited on a saturated renderer")
 	}
 	old.close()
-	select {
-	case <-blocked:
-	case <-time.After(time.Second):
-		t.Fatal("provider publication did not recover after renderer disconnect")
-	}
 
 	newServer, newPeer := net.Pipe()
 	reconnected := addDirectClientWithoutWriter(t, hub, newServer)
