@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 // RFC 7692 permessage-deflate. Compression is a transport detail beneath the
@@ -314,20 +313,19 @@ func releaseDeflateBuffer(buf *bytes.Buffer) {
 }
 
 // writeFrame writes one queued frame, compressing it for a client that
-// negotiated permessage-deflate. The deadline is set after compression so the
-// CPU time does not eat the peer's budget, and it still follows the
-// uncompressed size, like every other queue limit.
+// negotiated permessage-deflate. Compression finishes before the first write
+// deadline is armed, so CPU time never counts as a stalled peer; the
+// compressed frame is what goes out in progress-checked chunks, and what a
+// large-frame announcement measures.
 func (c *client) writeFrame(frame []byte) error {
 	if c.deflate {
 		if buf, compressed, ok := deflateTextFrame(frame); ok {
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeoutForPayload(len(frame))))
-			err := writeAll(c.conn, compressed)
+			err := c.writeAnnounced(compressed)
 			releaseDeflateBuffer(buf)
 			return err
 		}
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeoutForPayload(len(frame))))
-	return writeAll(c.conn, frame)
+	return c.writeAnnounced(frame)
 }
 
 // inflateSource feeds a compressed message and its RFC 7692 tail to the

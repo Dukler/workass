@@ -143,16 +143,6 @@ const outboundFrameByteLimit = 256 << 20
 // (iPhone hydration drops, 2026-07-27 21:52 and 22:56).
 func outboundFrameIsBulk(n int) bool { return n > outboundQueueByteLimit }
 
-// The write deadline scales with payload: a phone on wifi needs tens of
-// seconds to drink a 19 MiB snapshot, and the old flat 5s deadline executed
-// it mid-hydration. A stalled peer still dies at the floor rate.
-const writeDeadlineBase = 5 * time.Second
-const writeDeadlineFloorBytesPerSec = 512 << 10
-
-func writeTimeoutForPayload(n int) time.Duration {
-	return writeDeadlineBase + time.Duration(n)*time.Second/writeDeadlineFloorBytesPerSec
-}
-
 var errOutboundQueueFull = errors.New("outbound websocket queue full")
 var errOutboundFrameTooLarge = errors.New("outbound websocket frame too large")
 var errClientClosed = errors.New("websocket client closed")
@@ -271,17 +261,32 @@ type Hub struct {
 	// inboundLimit overrides inboundMessageByteLimit when positive, so tests
 	// can prove the limit without allocating 256 MiB.
 	inboundLimit int
+	// Flow-control timers, the per-socket memory limit and the large-frame
+	// announcement size, captured from the package defaults by NewHub.
+	writeStall    time.Duration
+	pingEvery     time.Duration
+	pongWait      time.Duration
+	memoryLimit   int
+	announceBytes int
 }
 
 type client struct {
-	conn          net.Conn
-	enqueueMu     sync.Mutex
+	conn net.Conn
+	// outMu guards the outbound channel's admission and every byte count
+	// below, plus the backlog; see outbound.go.
 	outMu         sync.Mutex
 	outbound      chan outboundFrame
-	outboundSpace chan struct{}
 	outboundBytes int
 	// Bytes of the queued bulk frame, if any; see outboundFrameIsBulk.
 	outboundBulkBytes int
+	// Frames the channel's limits cannot take yet, in admission order.
+	backlog      []outboundFrame
+	backlogBytes int
+	// Bytes of every queued frame except replies, channel and backlog
+	// together. memoryLimit bounds it.
+	eventBytes        int
+	memoryLimit       int
+	logf              func(format string, args ...any)
 	done              chan struct{}
 	closeOnce         sync.Once
 	stateMu           sync.RWMutex
@@ -310,12 +315,27 @@ type client struct {
 	// Set when acting on this socket moved the controller lease, so the reply
 	// path announces the handover the same way an explicit lan:take-control does.
 	tookControl atomic.Bool
+	// Flow control, copied from the hub when the socket opens; see
+	// flowcontrol.go.
+	writeStall time.Duration
+	pingEvery  time.Duration
+	pongWait   time.Duration
+	live       liveness
+	// Set when the client connected with progress=1: large text frames are
+	// announced first (writeAnnounced).
+	announceLarge bool
+	announceBytes int
 }
 
 type outboundFrame struct {
 	payload        []byte
 	written        chan error
 	controllerOnly bool
+	// ping marks the liveness probe, whose write time starts the pong wait.
+	ping bool
+	// reply marks an invoke reply, which memoryLimit does not count: each
+	// lane holds one reply at a time until it is written.
+	reply bool
 }
 
 type pendingAccess struct {
@@ -362,6 +382,11 @@ func NewHub(options ...Options) *Hub {
 		onClientReady:     opts.OnClientReady,
 		onControllerReady: opts.OnControllerReady,
 		logf:              opts.Logf,
+		writeStall:        writeStallTimeout,
+		pingEvery:         pingInterval,
+		pongWait:          pongTimeout,
+		memoryLimit:       outboundMemoryLimit,
+		announceBytes:     largeFrameAnnounceBytes,
 	}
 	if hub.lease != nil && hub.deviceRefresh > 0 {
 		refreshContext := opts.Context
@@ -515,31 +540,24 @@ func (h *Hub) schedulingFor(channel string) invokeScheduling {
 	return scheduling
 }
 
-// Broadcast sends an event frame to every approved client. Ordinary delivery
-// is asynchronous while every bounded client queue has capacity. Saturation
-// applies lossless backpressure to the provider stream; it never disconnects a
-// healthy client merely to discard a typed event. Controller-only delivery
+// Broadcast sends an event frame to every approved client. Admission never
+// waits on a client: a slow one keeps every event, in order, in its own
+// backlog (outbound.go), so it never paces the provider stream or any other
+// client. A client whose backlog outgrows the memory limit is closed instead,
+// and its reconnect resyncs from snapshots. Controller-only delivery
 // additionally waits for the actual write to preserve authorization and
-// notification durability semantics.
+// notification durability semantics; that wait holds no lock.
 func (h *Hub) Broadcast(channel string, payload any) {
-	h.broadcastMu.Lock()
-	defer h.broadcastMu.Unlock()
 	if _, ok := controllerOnlyEventChannels[channel]; ok && h.lease != nil {
 		delivered, enqueueElapsed := h.broadcastToController(channel, payload)
-		if channel == "lan:access-request" || channel == "lan:access-request-closed" {
-			// Pairing addresses both the controller lease and the daemon's own
-			// desktop shell. A controller on another device must not make the host
-			// screen blind to a request arriving at this machine.
-			delivered += h.broadcastWhere(channel, payload, func(c *client) bool {
-				return isLocalIP(c.ip) && !h.isControllerClient(c)
-			})
-		}
 		h.recordEventEnqueue(enqueueElapsed)
 		if channel == "notify" && delivered == 0 {
 			h.QueueNotify(payload)
 		}
 		return
 	}
+	h.broadcastMu.Lock()
+	defer h.broadcastMu.Unlock()
 	started := time.Now()
 	h.broadcastWhere(channel, payload, nil)
 	h.recordEventEnqueue(time.Since(started))
@@ -725,6 +743,9 @@ func (h *Hub) controllerConnectionCount() int {
 	return count
 }
 
+// broadcastToController admits under broadcastMu, in the one global event
+// order, and waits for the controller's write only after releasing it: a
+// controller with a deep backlog delays this caller, never every publisher.
 func (h *Hub) broadcastToController(channel string, payload any) (int, time.Duration) {
 	encodeStarted := time.Now()
 	frame, err := json.Marshal(eventFrame{T: "event", Channel: channel, Payload: payload})
@@ -733,9 +754,15 @@ func (h *Hub) broadcastToController(channel string, payload any) (int, time.Dura
 	}
 	encoded := encodeTextFrame(frame)
 	enqueueElapsed := time.Since(encodeStarted)
+	// Pairing addresses both the controller lease and the daemon's own desktop
+	// shell. A controller on another device must not make the host screen
+	// blind to a request arriving at this machine.
+	shellCopy := channel == "lan:access-request" || channel == "lan:access-request-closed"
+	delivered := 0
 	// A takeover can happen between client selection and socket delivery. Retry
 	// once against the fresh controller only when nobody received the frame.
 	for attempt := 0; attempt < 2; attempt++ {
+		h.broadcastMu.Lock()
 		admissionStarted := time.Now()
 		h.mu.RLock()
 		clients := make([]*client, 0, len(h.clients))
@@ -753,35 +780,51 @@ func (h *Hub) broadcastToController(channel string, payload any) (int, time.Dura
 		pending := make([]pendingWrite, 0, len(clients))
 		for _, c := range clients {
 			written := make(chan error, 1)
-			err := c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, written: written, controllerOnly: true})
+			err := c.admitEvent(outboundFrame{payload: encoded, written: written, controllerOnly: true})
 			if err != nil {
 				frames, bytes := c.outboundSnapshot()
-				h.logf("[wire] controller event dropped before write channel=%s queuedFrames=%d queuedBytes=%d", channel, frames, bytes)
+				h.logf("[wire] controller event dropped before write channel=%s queuedFrames=%d queuedBytes=%d err=%v", channel, frames, bytes, err)
 				h.drop(c)
 				continue
 			}
 			pending = append(pending, pendingWrite{client: c, written: written})
 		}
 		enqueueElapsed += time.Since(admissionStarted)
+		h.broadcastMu.Unlock()
 
-		delivered := 0
+		written := 0
 		for _, item := range pending {
 			err := item.client.waitForWrite(item.written)
 			if err == nil {
-				delivered++
+				written++
 				continue
 			}
 			if !errors.Is(err, errControllerChanged) {
 				h.drop(item.client)
 			}
 		}
-		if delivered > 0 || len(clients) == 0 {
-			return delivered, enqueueElapsed
+		delivered += written
+		if written > 0 || len(clients) == 0 {
+			break
 		}
 	}
-	return 0, enqueueElapsed
+	if shellCopy {
+		// After the controller's write, as before the wait left the lock.
+		h.broadcastMu.Lock()
+		started := time.Now()
+		delivered += h.broadcastWhere(channel, payload, func(c *client) bool {
+			return isLocalIP(c.ip) && !h.isControllerClient(c)
+		})
+		enqueueElapsed += time.Since(started)
+		h.broadcastMu.Unlock()
+	}
+	return delivered, enqueueElapsed
 }
 
+// broadcastWhere admits one event to every selected client. Admission never
+// waits, so the caller's hold on broadcastMu stays short whatever the
+// clients' speed. A frame that lands in a client's backlog counts as
+// delivered.
 func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) bool) int {
 	frame, err := json.Marshal(eventFrame{T: "event", Channel: channel, Payload: payload})
 	if err != nil {
@@ -797,11 +840,7 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	}
 	h.mu.RUnlock()
 
-	type admission struct {
-		client *client
-		err    error
-	}
-	selected := make([]*client, 0, len(clients))
+	delivered := 0
 	for _, c := range clients {
 		if !c.readySnapshot() || !c.receivesProjectionEvents() {
 			continue
@@ -809,21 +848,12 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 		if include != nil && !include(c) {
 			continue
 		}
-		selected = append(selected, c)
-	}
-	results := make(chan admission, len(selected))
-	for _, c := range selected {
-		go func(c *client) {
-			results <- admission{client: c, err: c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded})}
-		}(c)
-	}
-	delivered := 0
-	for range selected {
-		result := <-results
-		if result.err != nil {
-			c := result.client
-			frames, bytes := c.outboundSnapshot()
-			h.logf("[wire] client event admission failed channel=%s queuedFrames=%d queuedBytes=%d err=%v", channel, frames, bytes, result.err)
+		if err := c.admitEvent(outboundFrame{payload: encoded}); err != nil {
+			// admitEvent already logged a client that cannot keep up.
+			if !errors.Is(err, errClientCannotKeepUp) {
+				frames, bytes := c.outboundSnapshot()
+				h.logf("[wire] client event admission failed channel=%s queuedFrames=%d queuedBytes=%d err=%v", channel, frames, bytes, err)
+			}
 			h.drop(c)
 			continue
 		}
@@ -871,6 +901,9 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	c.deflate = deflate
 	h.registerClient(c)
 	go h.writeLoop(c)
+	if c.pingEvery > 0 {
+		go h.livenessLoop(c)
+	}
 	h.announceClientAccess(c)
 	if c.readySnapshot() {
 		h.announceClientReady(c)
@@ -998,7 +1031,8 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	c := &client{
 		conn:            conn,
 		outbound:        make(chan outboundFrame, outboundQueueFrameLimit),
-		outboundSpace:   make(chan struct{}, 1),
+		memoryLimit:     h.memoryLimit,
+		logf:            h.logf,
 		done:            make(chan struct{}),
 		ip:              clientIP(r.RemoteAddr),
 		deviceName:      deviceNameFromRequest(r),
@@ -1006,7 +1040,14 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		localShell:      isLocalIP(clientIP(r.RemoteAddr)) && strings.TrimSpace(r.Header.Get("X-Workass-Shell")) == "1",
 		purpose:         connectionPurpose(r),
 		connectionGroup: connectionGroup(r),
+		writeStall:      h.writeStall,
+		pingEvery:       h.pingEvery,
+		pongWait:        h.pongWait,
+		announceLarge:   r.URL.Query().Get("progress") == "1",
+		announceBytes:   h.announceBytes,
 	}
+	// The handshake is the peer's first word; idleness counts from it.
+	c.live.noteInbound()
 	if h.lease == nil {
 		c.setAccessState(accessState{State: "approved"})
 		return c
@@ -1245,27 +1286,39 @@ func (h *Hub) readLoop(c *client) {
 	for {
 		n, err := c.conn.Read(tmp)
 		if n > 0 {
+			c.live.noteInbound()
 			buf = append(buf, tmp[:n]...)
 			messages, rest, closeFrame, protocolErr := dec.decode(buf)
 			buf = rest
+			if dec.pinged {
+				c.answerPing(dec.ping)
+				dec.pinged = false
+			}
 			for _, raw := range messages {
 				msg, ok := decodeInvoke(raw)
 				if !ok {
 					continue
 				}
+				// While blocked below the reader cannot see the peer answer a
+				// ping, so the liveness monitor holds its verdict until it is
+				// back. Both waits are flow control, never a dead peer.
 				queue := ordered
 				switch h.schedulingFor(msg.Channel) {
 				case invokeOutOfBandRead:
+					c.live.blockReader()
 					h.handleInvoke(c, msg)
+					c.live.unblockReader()
 					continue
 				case invokeHistoryRead:
 					queue = history
 				}
+				c.live.blockReader()
 				select {
 				case queue <- msg:
 				case <-c.done:
 					return
 				}
+				c.live.unblockReader()
 			}
 			if protocolErr != nil {
 				h.logf("[wire] closing client after websocket protocol error: %v", protocolErr)
@@ -1817,7 +1870,9 @@ func (h *Hub) fenceRevokedDevice(deviceID string) {
 			continue
 		}
 		written := make(chan error, 1)
-		if err := c.enqueueFrame(outboundFrame{payload: encodeTextFrame(frame), written: written}); err != nil {
+		// Only into an idle queue: behind a backlog the notice could not be
+		// written before the timer below closes the socket anyway.
+		if err := c.tryEnqueueFrame(outboundFrame{payload: encodeTextFrame(frame), written: written}); err != nil {
 			c.close()
 			continue
 		}
@@ -2048,16 +2103,12 @@ func (h *Hub) writeLoop(c *client) {
 			var err error
 			if frame.controllerOnly && !h.isControllerClient(c) {
 				err = errControllerChanged
+			} else if frame.ping {
+				err = c.writePing(frame.payload)
 			} else {
 				err = c.writeFrame(frame.payload)
 			}
-			c.outMu.Lock()
-			c.outboundBytes -= len(frame.payload)
-			if outboundFrameIsBulk(len(frame.payload)) {
-				c.outboundBulkBytes -= len(frame.payload)
-			}
-			c.signalOutboundSpaceLocked()
-			c.outMu.Unlock()
+			c.finishFrame(frame)
 			if frame.written != nil {
 				frame.written <- err
 			}
@@ -2071,97 +2122,11 @@ func (h *Hub) writeLoop(c *client) {
 	}
 }
 
-// enqueue preserves per-client wire order for non-semantic frames. Semantic
-// event publication uses enqueueFrameWithBackpressure below: a full bounded
-// queue slows the producer and never becomes permission to discard an event.
-// A bulk frame (larger than the regular byte budget — session:get in real
-// profiles) is admitted one at a time alongside that budget. No individual
-// frame may exceed outboundFrameByteLimit.
-func (c *client) enqueue(frame []byte) error {
-	return c.enqueueFrame(outboundFrame{payload: frame})
-}
-
-func (c *client) enqueueFrame(frame outboundFrame) error {
-	c.enqueueMu.Lock()
-	defer c.enqueueMu.Unlock()
-	return c.tryEnqueueFrame(frame)
-}
-
-func (c *client) enqueueFrameWithBackpressure(frame outboundFrame) error {
-	c.enqueueMu.Lock()
-	defer c.enqueueMu.Unlock()
-	c.outMu.Lock()
-	if c.outboundSpace == nil {
-		c.outboundSpace = make(chan struct{}, 1)
-	}
-	space := c.outboundSpace
-	c.outMu.Unlock()
-	for {
-		err := c.tryEnqueueFrame(frame)
-		if !errors.Is(err, errOutboundQueueFull) {
-			return err
-		}
-		select {
-		case <-c.done:
-			return errClientClosed
-		case <-space:
-		}
-	}
-}
-
-func (c *client) tryEnqueueFrame(frame outboundFrame) error {
-	c.outMu.Lock()
-	defer c.outMu.Unlock()
-	select {
-	case <-c.done:
-		return errClientClosed
-	default:
-	}
-	if len(frame.payload) > outboundFrameByteLimit {
-		return errOutboundFrameTooLarge
-	}
-	if len(c.outbound) >= outboundQueueFrameLimit {
-		return errOutboundQueueFull
-	}
-	if outboundFrameIsBulk(len(frame.payload)) {
-		if c.outboundBulkBytes > 0 {
-			return errOutboundQueueFull
-		}
-	} else if regular := c.outboundBytes - c.outboundBulkBytes; regular+len(frame.payload) > outboundQueueByteLimit {
-		return errOutboundQueueFull
-	}
-	select {
-	case c.outbound <- frame:
-		c.outboundBytes += len(frame.payload)
-		if outboundFrameIsBulk(len(frame.payload)) {
-			c.outboundBulkBytes += len(frame.payload)
-		}
-		return nil
-	default:
-		return errOutboundQueueFull
-	}
-}
-
-func (c *client) signalOutboundSpaceLocked() {
-	if c.outboundSpace == nil {
-		return
-	}
-	select {
-	case c.outboundSpace <- struct{}{}:
-	default:
-	}
-}
-
-func (c *client) outboundSnapshot() (frames int, bytes int) {
-	c.outMu.Lock()
-	defer c.outMu.Unlock()
-	return len(c.outbound), c.outboundBytes
-}
-
 func (c *client) close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
 		_ = c.conn.Close()
+		c.releaseQueued()
 	})
 }
 
@@ -2311,18 +2276,33 @@ func (c *client) sendEventWithScope(channel string, payload any, controllerOnly,
 	}
 	encoded := encodeTextFrame(frame)
 	if !wait {
-		return c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, controllerOnly: controllerOnly})
+		return c.admitEvent(outboundFrame{payload: encoded, controllerOnly: controllerOnly})
 	}
 	written := make(chan error, 1)
-	if err := c.enqueueFrameWithBackpressure(outboundFrame{payload: encoded, written: written, controllerOnly: controllerOnly}); err != nil {
+	if err := c.admitEvent(outboundFrame{payload: encoded, written: written, controllerOnly: controllerOnly}); err != nil {
 		return err
 	}
 	return c.waitForWrite(written)
 }
 
+// enqueueAndWait queues an invoke reply behind everything already queued for
+// the client and waits for its write. It fails only once the client is
+// closed: a slow client used to lose its socket here whenever a boot burst of
+// replies met a queue full of events.
+//
+// The wait cannot deadlock. The waiter is a lane goroutine or the socket
+// reader itself (inline out-of-band reads) and holds no lock. The writer
+// drains the queue on its own; besides the socket it needs outMu (never held
+// across a wait), stateMu and the lease lock (controller checks), and
+// projectionMu and h.mu when it drops the client, and nothing that waits on a
+// write holds any of those. So the reply goes out as fast as the peer reads,
+// and a peer that stops reading hits the writer's stall deadline, whose drop
+// closes c.done and releases every waiter. A blocked reader stops reading the
+// socket: that is TCP flow control back to the client, which reads
+// independently.
 func (c *client) enqueueAndWait(frame []byte) error {
 	written := make(chan error, 1)
-	if err := c.enqueueFrame(outboundFrame{payload: frame, written: written}); err != nil {
+	if err := c.admitReply(outboundFrame{payload: frame, written: written}); err != nil {
 		return err
 	}
 	return c.waitForWrite(written)
@@ -2618,6 +2598,11 @@ type frameDecoder struct {
 	// limit bounds one message: each declared frame length, the reassembled
 	// fragments, and the inflated size. Zero means inboundMessageByteLimit.
 	limit int
+	// pinged is set when decode met a client ping; ping holds the payload of
+	// the most recent one, the only one RFC 6455 §5.5.3 requires answering.
+	// The reader answers and clears it.
+	pinged bool
+	ping   []byte
 }
 
 // drain keeps the shape its callers know: a protocol error ends the stream
@@ -2708,7 +2693,11 @@ func (d *frameDecoder) decode(buf []byte) ([][]byte, []byte, bool, error) {
 		case 0x8:
 			closeFrame = true
 			return messages, buf[off:], closeFrame, nil
-		case 0x9, 0xA:
+		case 0x9:
+			d.ping = append(d.ping[:0], payload[:min(len(payload), maxControlPayload)]...)
+			d.pinged = true
+			continue
+		case 0xA:
 			continue
 		case 0x1:
 			if fin {
@@ -2751,14 +2740,3 @@ func completeMessage(payload []byte, compressed bool, limit int) ([]byte, error)
 }
 
 var errShortWrite = errors.New("short websocket write")
-
-func writeAll(w io.Writer, p []byte) error {
-	n, err := w.Write(p)
-	if err != nil {
-		return err
-	}
-	if n != len(p) {
-		return errShortWrite
-	}
-	return nil
-}
