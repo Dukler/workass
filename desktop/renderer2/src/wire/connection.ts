@@ -38,6 +38,10 @@ export class ConnectionMonitor {
     private readonly ping: Pinger,
     private readonly onStatus: (s: ConnStatus) => void,
     private readonly onReconnect: () => void | Promise<void>,
+    // A ping that timed out while the socket is still receiving frames for
+    // other invokes is a slow link, not a lost daemon (see wireBusy). Absent:
+    // every timeout counts, exactly as before.
+    private readonly busy: () => boolean = () => false,
   ) {}
 
   start(): void {
@@ -98,14 +102,14 @@ export class ConnectionMonitor {
       if (this.status === 'connected') {
         await this.sleep(HEALTH_INTERVAL);
         if (!this.running) break;
-        const ok = await this.pingWithTimeout(HEALTH_TIMEOUT);
+        const ok = await this.pingWithTimeout(HEALTH_TIMEOUT) || this.busy();
         if (!this.running) break;
         if (!ok) {
           // Confirm immediately before changing UI state. A renderer pause or a
           // chat actor busy resuming its provider can lose one timeout race even
           // though the daemon socket is healthy; the cheap second probe settles
           // that case without flashing a reconnect banner.
-          const confirmed = await this.pingWithTimeout(HEALTH_CONFIRM_TIMEOUT);
+          const confirmed = await this.pingWithTimeout(HEALTH_CONFIRM_TIMEOUT) || this.busy();
           if (!this.running) break;
           if (!confirmed) { this.backoff = BACKOFF_MIN; this.setStatus('disconnected'); }
         }
