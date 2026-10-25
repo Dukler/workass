@@ -1441,6 +1441,19 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		}
 		return reply, nil
 	})
+	// Additive batched read for a client's boot and reconnect: every chat's
+	// running rows, counts and obligation in one reply, instead of one
+	// spawned-work:list per chat. Per-chat detail stays on spawned-work:list.
+	hub.Register("spawned-work:summary", func(args []any) (any, error) {
+		if providerChats == nil {
+			return nil, errors.New("spawned-work:summary requires the durable chat actor")
+		}
+		chats, err := providerChats.BackgroundSummary()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"chats": chats}, nil
+	})
 	hub.Register("spawned-work:read", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		tabID, chatID, id := fieldString(arg, "tabId"), fieldString(arg, "chatId"), fieldString(arg, "id")
@@ -1896,6 +1909,7 @@ func daemonStubs() []stubDef {
 		{"app-chat:steer", func() any { return map[string]any{"ok": false, "unsupported": true, "error": ""} }},
 		{"app-chat:use-rate-limit-reset", func() any { return map[string]any{"outcome": "noCredit"} }},
 		{"spawned-work:list", func() any { return map[string]any{"items": []any{}} }},
+		{"spawned-work:summary", func() any { return map[string]any{"chats": []any{}} }},
 		{"spawned-work:read", func() any { return map[string]any{"ok": false, "error": "ACP unavailable"} }},
 		{"spawned-work:stop", func() any { return map[string]any{"ok": false, "error": "ACP unavailable"} }},
 		{"job:cancel", func() any { return acp.JobCancelResult{Reason: "unknown"} }},

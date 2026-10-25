@@ -601,7 +601,7 @@ var phaseCExpectedChatHandlers = map[string]struct{}{
 	"chat:env-get": {}, "chat:checkpoints": {}, "chat:rewind": {}, "chat:diff": {},
 	"app-chat:new-session": {}, "app-chat:refresh-plan-usage": {}, "app-chat:fork": {}, "app-chat:close-session": {},
 	"app-chat:reset": {}, "app-chat:set-model": {}, "app-chat:set-mode": {}, "app-chat:steer": {}, "app-chat:use-rate-limit-reset": {}, "app-chat:detect-acp": {},
-	"spawned-work:list": {}, "spawned-work:read": {}, "spawned-work:stop": {}, "job:start": {}, "job:cancel": {},
+	"spawned-work:list": {}, "spawned-work:summary": {}, "spawned-work:read": {}, "spawned-work:stop": {}, "job:start": {}, "job:cancel": {},
 	"visualize:host": {},
 }
 
