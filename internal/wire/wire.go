@@ -121,8 +121,8 @@ var controllerOnlyEventChannels = map[string]struct{}{
 	// Additive: a request that timed out, was decided, or whose device left.
 	// Older renderers ignore it; newer ones drop the stale row.
 	"lan:access-request-closed": {},
-	"notify":             {},
-	"show":               {},
+	"notify":                    {},
+	"show":                      {},
 }
 
 const defaultAccessRequestTimeout = 120 * time.Second
@@ -284,15 +284,15 @@ type client struct {
 	backlogBytes int
 	// Bytes of every queued frame except replies, channel and backlog
 	// together. memoryLimit bounds it.
-	eventBytes        int
-	memoryLimit       int
-	logf              func(format string, args ...any)
-	done              chan struct{}
-	closeOnce         sync.Once
-	stateMu           sync.RWMutex
-	ip                string
-	deviceName        string
-	userAgent         string
+	eventBytes  int
+	memoryLimit int
+	logf        func(format string, args ...any)
+	done        chan struct{}
+	closeOnce   sync.Once
+	stateMu     sync.RWMutex
+	ip          string
+	deviceName  string
+	userAgent   string
 	// True only when the loopback Electron view proxy stamped this socket.
 	// A normal localhost browser is not the renderer service: it may have a
 	// different localStorage machine book and must not race daemon MCP routes.
