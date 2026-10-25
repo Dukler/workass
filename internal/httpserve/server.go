@@ -140,8 +140,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rel == "/lan-bridge.js" {
-		w.Header().Set("Content-Type", mimeByExt[".js"])
-		_, _ = w.Write([]byte(LANBridgeJS))
+		// The bridge changes with the daemon, never under a renderer build's
+		// hash, so it always revalidates.
+		writeRendererFile(w, r, []byte(LANBridgeJS), mimeByExt[".js"], false)
 		return
 	}
 
@@ -152,8 +153,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		injected := strings.Replace(string(html), "</head>", "  <script src=\"/lan-bridge.js\"></script>\n</head>", 1)
-		w.Header().Set("Content-Type", mimeByExt[".html"])
-		_, _ = w.Write([]byte(injected))
+		writeRendererFile(w, r, []byte(injected), mimeByExt[".html"], false)
 		return
 	}
 
@@ -171,11 +171,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", mimeByExt[strings.ToLower(filepath.Ext(cleanRel))])
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/octet-stream")
+	contentType := mimeByExt[strings.ToLower(filepath.Ext(cleanRel))]
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
-	_, _ = w.Write(data)
+	writeRendererFile(w, r, data, contentType, isImmutableRendererAsset(cleanRel))
 }
 
 // serveChatImage authenticates a chat-image request the way the socket
