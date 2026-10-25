@@ -8,10 +8,11 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, BrowserPresentation, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
+import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache, type WireCacheEntry } from './wire-cache';
 import { browserApi, localBrowserOwnsChat } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
@@ -424,7 +425,17 @@ export function titleFromPrompt(text: string, max = 34): string {
 // be measured after the fact).
 // session:get asks for the same references as history pages: a message's own
 // images and large tool payloads load when seen or opened.
-const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true } as const;
+// `shell` leaves the selected chat's tail out of session:get: the selected
+// chat opens through its own bounded first-screen archive read, which it did
+// anyway, so the tail (up to 17 MB for a big chat) was read twice. An older
+// daemon ignores the option and sends the ordinary projection.
+const LEAN_SESSION_READ = { leanTools: true, deferImages: true, leanTitles: true, shell: true } as const;
+// The wire-cache entries a reload reuses once the daemon confirms their etag.
+const SESSION_SHELL_CACHE = 'session-shell';
+const STATE_DIGEST_CACHE = 'state-digest';
+const SPAWNED_WORK_SUMMARY_CACHE = 'spawned-work-summary';
+const SPAWNED_WORK_LIST_CACHE = 'spawned-work-list';
+const SPAWNED_WORK_LIST_CACHE_LIMIT = 16;
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
@@ -612,6 +623,22 @@ export class Store {
   private lastDigest: StateDigest | null = null;
   // The last full digest this daemon sent; its etag makes the next read conditional.
   private lastFullDigest: StateDigest | null = null;
+  // The last session shell this window read, as its JSON text and etag. Sent
+  // back as {ifNoneMatch}; an unchanged daemon answers with a receipt and the
+  // text is parsed again instead of the whole shell crossing the wire.
+  private sessionShell: WireCacheEntry | null = null;
+  // The same for the local daemon's spawned-work summary.
+  private spawnedWorkSummaryCache: WireCacheEntry | null = null;
+  // And for the full spawned-work lists this window read, by tab+chat key.
+  private spawnedWorkListCache = new Map<string, WireCacheEntry>();
+  // Detail freshness for spawned work, by tab+chat key: the sequence number
+  // at which the chat's full list (or a live event) was last read. A batched
+  // summary issued earlier never overwrites it.
+  private spawnedWorkSeq = 0;
+  private spawnedWorkDetailSeq = new Map<string, number>();
+  // The same, for the obligation alone: only a read or event that carried the
+  // obligation key says anything about it (an older daemon's list omits it).
+  private obligationSeq = new Map<string, number>();
   private sessionSyncedKey: string | null = null;
   private sessionSyncedAt = Number.NEGATIVE_INFINITY;
   // Chats whose digest row diverged: the background scope refreshes only these.
@@ -2289,6 +2316,94 @@ export class Store {
     }
   }
 
+  // session:get as a shell read. While the daemon's shell is still the one this
+  // window last read (in memory, or kept across a reload in the wire cache),
+  // the daemon answers {unchanged} and the kept text is used: byte for byte
+  // what the daemon would have sent. An older daemon ignores both options and
+  // answers the ordinary projection, which carries no etag and is not kept.
+  private async readSessionShell(label: string): Promise<{ ok: true; value: unknown } | { ok: false; value?: undefined }> {
+    const cached = this.sessionShell ?? readWireCache(SESSION_SHELL_CACHE);
+    if (cached) {
+      const step = await this.guardedStep(label, () => callThrow('getSession', { ...LEAN_SESSION_READ, ifNoneMatch: cached.etag }));
+      if (!step.ok) return step;
+      const receipt = !!step.value && typeof step.value === 'object' && (step.value as { unchanged?: unknown }).unchanged === true;
+      if (!receipt) {
+        this.rememberSessionShell(step.value);
+        return step;
+      }
+      if (isUnchangedReply(step.value, cached.etag)) {
+        const value = parseWireCache<unknown>(cached);
+        if (value) {
+          this.sessionShell = cached;
+          return { ok: true, value };
+        }
+      }
+      // A receipt this window cannot use (a different etag, an unreadable
+      // entry): forget the entry and read the shell itself.
+      this.sessionShell = null;
+      writeWireCache(SESSION_SHELL_CACHE, '', '');
+    }
+    const step = await this.guardedStep(label, () => callThrow('getSession', LEAN_SESSION_READ));
+    if (step.ok) this.rememberSessionShell(step.value);
+    return step;
+  }
+
+  // Keep a shell that names its etag. A shell carrying a running chat's rows is
+  // not kept: it changes with every chunk, so its etag would never be reused,
+  // and serializing it on every refresh of a live turn costs frames.
+  private rememberSessionShell(reply: unknown) {
+    const etag = reply && typeof reply === 'object' ? (reply as { etag?: unknown }).etag : undefined;
+    const chats = reply && typeof reply === 'object' ? (reply as Mirror).chats : undefined;
+    if (typeof etag !== 'string' || !etag || !Array.isArray(chats)
+      || chats.some((chat) => Array.isArray(chat?.messages) && chat.messages.length > 0)) {
+      this.sessionShell = null;
+      return;
+    }
+    try {
+      this.sessionShell = { etag, text: JSON.stringify(reply) };
+    } catch {
+      this.sessionShell = null;
+    }
+  }
+
+  // Leaving the page (a reload, the Electron in-place reload, a phone putting
+  // the tab away) keeps the last shell and digest for the next load of this
+  // window. Written here rather than on every read: a live turn changes the
+  // digest every heartbeat.
+  private persistWireCache() {
+    if (this.sessionShell) writeWireCache(SESSION_SHELL_CACHE, this.sessionShell.etag, this.sessionShell.text);
+    if (this.spawnedWorkSummaryCache) writeWireCache(SPAWNED_WORK_SUMMARY_CACHE, this.spawnedWorkSummaryCache.etag, this.spawnedWorkSummaryCache.text);
+    // Only the open chat's list: it is the one a reload reads at once.
+    const open = this.active();
+    const openKey = open?.chatId ? spawnedWorkChatKey(open.id, open.chatId) : '';
+    const openList = openKey ? this.spawnedWorkListCache.get(openKey) : undefined;
+    if (openList) writeWireCache(SPAWNED_WORK_LIST_CACHE, openList.etag, JSON.stringify({ key: openKey, text: openList.text }));
+    else writeWireCache(SPAWNED_WORK_LIST_CACHE, '', '');
+    const digest = this.lastFullDigest;
+    if (digest && typeof digest.etag === 'string' && digest.etag) {
+      try { writeWireCache(STATE_DIGEST_CACHE, digest.etag, JSON.stringify(digest)); } catch { /* not kept */ }
+    }
+  }
+
+  private installWireCachePersistence() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    // A digest kept by the previous load lets the first heartbeat ask
+    // {ifNoneMatch} too; the reply is still checked against its etag.
+    const kept = parseWireCache<StateDigest>(readWireCache(STATE_DIGEST_CACHE));
+    if (!this.lastFullDigest && kept && isStateDigest(kept) && typeof kept.etag === 'string' && kept.etag) this.lastFullDigest = kept;
+    const keptList = readWireCache(SPAWNED_WORK_LIST_CACHE);
+    const list = parseWireCache<{ key?: unknown; text?: unknown }>(keptList);
+    if (keptList && typeof list?.key === 'string' && typeof list.text === 'string') {
+      this.spawnedWorkListCache.set(list.key, { etag: keptList.etag, text: list.text });
+    }
+    window.addEventListener('pagehide', () => this.persistWireCache());
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') this.persistWireCache();
+      });
+    }
+  }
+
   private queueAgentRefresh(reason: string, task: () => Promise<void> = () => this.onReconnected()) {
     this.agentRefresh = this.agentRefresh
       .catch((error) => { console.warn('[store] prior refresh failed', error); })
@@ -2452,7 +2567,7 @@ export class Store {
     if (scopes.has('session')) {
       const liveEventFence = this.liveTurnEventVersion;
       const digest = this.lastDigest;
-      const result = await this.guardedStep('digest session:get', () => callThrow('getSession', LEAN_SESSION_READ));
+      const result = await this.readSessionShell('digest session:get');
       if (result.ok && this.restoreSessionSnapshot(result.value, liveEventFence)) {
         this.recoverIdleQueues();
         this.bumpApp(false);
@@ -2472,10 +2587,16 @@ export class Store {
         // Only the chats whose digest row changed: every other chat's
         // background work is unchanged, and refreshing all of them cost one
         // spawned-work read per chat (hundreds) on every divergence.
-        for (const pair of pairs) {
-          const chat = this.state.chats.find((candidate) => candidate.id === pair.tabId && candidate.chatId === pair.chatId);
-          if (chat) void this.refreshSpawnedWork(chat);
+        const chats = pairs
+          .map((pair) => this.state.chats.find((candidate) => candidate.id === pair.tabId && candidate.chatId === pair.chatId))
+          .filter((chat): chat is Chat => !!chat);
+        // Many at once (a boot whose first digest arrived before the session,
+        // so every chat looked new) is one batched summary, not a list each.
+        if (chats.length > 1 && has('spawnedWorkSummary')) {
+          void this.refreshMachineSpawnedWork('', chats.filter((chat) => !ownerMachineId(chat)));
+          return;
         }
+        for (const chat of chats) void this.refreshSpawnedWork(chat);
       });
     }
     if (scopes.has('catalog')) {
@@ -2919,7 +3040,11 @@ export class Store {
     // whole feature is invisible when that happens.
     const liveEventFence = this.liveTurnEventVersion;
     try {
-      const mirror = (await link.invoke('session:get')) as Mirror | null;
+      // The same shell read as this machine's own: the selected chat opens
+      // through its bounded archive read, and history rows are lean with
+      // images by reference, exactly as every archive read of a remote chat
+      // already is. A remote daemon that predates the options ignores them.
+      const mirror = (await link.invoke('session:get', LEAN_SESSION_READ)) as Mirror | null;
       if (!this.machines?.ownsLink(machineId, link)) return false;
       if (!mirror || !Array.isArray(mirror.chats)) {
         this.machines?.setReason(machineId, 'conectada, pero no devolvió sesión');
@@ -3171,6 +3296,8 @@ export class Store {
       const key = spawnedWorkChatKey(tabId, chat.chatId);
       delete this.state.spawnedWorkByChat[key];
       delete this.state.obligationByChat[key];
+      this.spawnedWorkDetailSeq.delete(key);
+      this.obligationSeq.delete(key);
       delete this.state.chatEnvByChat[chatEnvKey(tabId, chat.chatId)];
     }
     if (this.state.rewind.tabId === tabId) {
@@ -3582,13 +3709,20 @@ export class Store {
     on('onChatGoal', (e) => this.applyChatGoal(e as ChatGoalEvent));
     on('onAgentApply', (e) => this.onAgentApply(e as AgentApply));
     if (typeof window !== 'undefined') {
-      const bootSocketGen = typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0;
+      // The bridge queues every boot read until its first socket is ready, so
+      // that socket's open is the boot itself, not a reconnect: refreshing on
+      // it re-read the whole hydration (session, devices, settings, background
+      // work, permissions) a second time on every load. Any later socket is a
+      // reconnect.
+      const bootSocketGen = Math.max(1, typeof window.__workassSocketGen === 'number' ? window.__workassSocketGen : 0);
       window.addEventListener('workass:socket-open', (e) => {
         const gen = (e as CustomEvent<{ gen?: unknown }>).detail?.gen;
         if (typeof gen !== 'number' || gen <= bootSocketGen) return;
         this.queueAgentRefresh('socket-open');
       });
     }
+    // Before the first heartbeat, so it can already ask for the digest by etag.
+    this.installWireCachePersistence();
 
     // Construct health/retry machinery before the first hydration await. A
     // dropped session:get can now reject and re-enter this monitor's backoff
@@ -3619,7 +3753,7 @@ export class Store {
     // from the server-side session store).
     const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
-      ? await this.guardedStep('boot session:get', () => callThrow('getSession', LEAN_SESSION_READ))
+      ? await this.readSessionShell('boot session:get')
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
     if (!sessionStep.ok) {
@@ -3774,7 +3908,7 @@ export class Store {
     await this.guardedStep('reconnect app metadata', () => this.refreshAppMeta());
     const liveEventFence = this.liveTurnEventVersion;
     const sessionStep = has('getSession')
-      ? await this.guardedStep('reconnect session:get', () => callThrow('getSession', LEAN_SESSION_READ))
+      ? await this.readSessionShell('reconnect session:get')
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
     if (sessionStep.ok && this.restoreSessionSnapshot(server, liveEventFence)) {
@@ -6477,10 +6611,14 @@ export class Store {
     this.state.planUsageLoadingByProvider[s.providerId] = false;
     this.bumpApp(false);
   }
-  private onSpawnedWorkChanged(s: SpawnedWorkChanged) {
+  // `seq` orders this full list against batched summaries: a live event is the
+  // newest thing known (a fresh sequence number); a list reply is as new as
+  // the moment its read was issued.
+  private onSpawnedWorkChanged(s: SpawnedWorkChanged, seq = ++this.spawnedWorkSeq) {
     if (!s || !s.tabId || !s.chatId || !Array.isArray(s.items)) return;
     const key = spawnedWorkChatKey(s.tabId, s.chatId);
     this.state.spawnedWorkByChat[key] = s.items;
+    this.spawnedWorkDetailSeq.set(key, Math.max(seq, this.spawnedWorkDetailSeq.get(key) ?? 0));
     // `obligation` is additive. An older daemon omits the key entirely, and
     // that reply must not erase a receipt hydrated from the actor. A present
     // key is authoritative: a real obligation replaces the prior one, while
@@ -6488,27 +6626,154 @@ export class Store {
     if (Object.prototype.hasOwnProperty.call(s, 'obligation')) {
       if (s.obligation?.state) this.state.obligationByChat[key] = s.obligation;
       else delete this.state.obligationByChat[key];
+      this.obligationSeq.set(key, Math.max(seq, this.obligationSeq.get(key) ?? 0));
     }
     this.bump(SPAWNED);
   }
   async refreshSpawnedWork(chat: Chat | null = this.active()) {
     if (!chat || !chat.chatId || !this.state.hasSpawnedWorkChannels) return;
-    const result = await call('spawnedWorkList', chat.id, chat.chatId);
+    const issued = ++this.spawnedWorkSeq;
+    const key = spawnedWorkChatKey(chat.id, chat.chatId);
+    // This daemon's lists are read by etag: the open chat's list is read on
+    // every visit and reload, and one chat's is a megabyte. Another machine's
+    // are read as before (the router does not forward the option).
+    const local = !ownerMachineId(chat);
+    const cached = local ? this.spawnedWorkListCache.get(key) : undefined;
+    let result = local
+      ? await call('spawnedWorkList', chat.id, chat.chatId, { ifNoneMatch: cached?.etag ?? '' })
+      : await call('spawnedWorkList', chat.id, chat.chatId);
+    if (result && typeof result === 'object' && (result as { unchanged?: unknown }).unchanged === true) {
+      const kept = cached && isUnchangedReply(result, cached.etag) ? parseWireCache<typeof result>(cached) : null;
+      if (!kept) this.spawnedWorkListCache.delete(key);
+      result = kept ?? await call('spawnedWorkList', chat.id, chat.chatId);
+    } else if (local) {
+      this.rememberSpawnedWorkList(key, result);
+    }
     if (Array.isArray(result?.items)) {
       const update: SpawnedWorkChanged = { tabId: chat.id, chatId: chat.chatId, items: result.items };
       if (result && Object.prototype.hasOwnProperty.call(result, 'obligation')) {
         update.obligation = result.obligation;
       }
-      this.onSpawnedWorkChanged(update);
+      this.onSpawnedWorkChanged(update, issued);
+    }
+  }
+  private rememberSpawnedWorkList(key: string, result: unknown) {
+    const etag = result && typeof result === 'object' ? (result as { etag?: unknown }).etag : undefined;
+    if (typeof etag !== 'string' || !etag || !Array.isArray((result as { items?: unknown }).items)) {
+      this.spawnedWorkListCache.delete(key);
+      return;
+    }
+    if (this.spawnedWorkListCache.get(key)?.etag === etag) return;
+    try {
+      this.spawnedWorkListCache.delete(key);
+      this.spawnedWorkListCache.set(key, { etag, text: JSON.stringify(result) });
+      // The chats a user visits; the oldest read goes first.
+      while (this.spawnedWorkListCache.size > SPAWNED_WORK_LIST_CACHE_LIMIT) {
+        this.spawnedWorkListCache.delete(this.spawnedWorkListCache.keys().next().value!);
+      }
+    } catch {
+      this.spawnedWorkListCache.delete(key);
     }
   }
   private refreshAllSpawnedWork() {
     if (!this.state.hasSpawnedWorkChannels) return;
     // Existing long-lived provider tasks may not emit another lifecycle event
-    // after this renderer attaches. Refresh every immutable tab+chat pair so
-    // inactive sidebar rows also recover their correct live dot after startup
-    // or reconnect, without activating those chats.
-    for (const chat of this.state.chats) void this.refreshSpawnedWork(chat);
+    // after this renderer attaches, so every chat's sidebar dot (and what it
+    // owes) is re-read after startup or reconnect, without activating any
+    // chat. One batched summary per machine carries that; a daemon without it
+    // gets one spawned-work:list per immutable tab+chat pair, as before.
+    const byMachine = new Map<string, Chat[]>();
+    for (const chat of this.state.chats) {
+      const machineId = ownerMachineId(chat);
+      const list = byMachine.get(machineId);
+      if (list) list.push(chat);
+      else byMachine.set(machineId, [chat]);
+    }
+    for (const [machineId, chats] of byMachine) void this.refreshMachineSpawnedWork(machineId, chats);
+  }
+  private async refreshMachineSpawnedWork(machineId: string, chats: Chat[]) {
+    const issued = ++this.spawnedWorkSeq;
+    // The chat on screen shows its whole work rail (terminal rows included),
+    // so it reads its full list alongside the summary rather than after it.
+    const active = this.active();
+    const shown = active && ownerMachineId(active) === machineId ? active : null;
+    const batched = !!machineId || has('spawnedWorkSummary');
+    if (batched && shown) void this.refreshSpawnedWork(shown);
+    const summary = batched ? await this.readSpawnedWorkSummary(machineId) : null;
+    if (!summary) {
+      for (const chat of chats) if (!batched || chat !== shown) void this.refreshSpawnedWork(chat);
+      return;
+    }
+    this.applySpawnedWorkSummary(machineId, summary, issued);
+  }
+  private async readSpawnedWorkSummary(machineId: string): Promise<SpawnedWorkSummary | null> {
+    try {
+      let reply: unknown;
+      if (!machineId) {
+        // Named by its etag like the session shell: while no chat's running
+        // work or obligation changed, a reconnect gets a receipt instead of
+        // every obligation again.
+        const cached = this.spawnedWorkSummaryCache ?? readWireCache(SPAWNED_WORK_SUMMARY_CACHE);
+        reply = cached
+          ? await callThrow('spawnedWorkSummary', { ifNoneMatch: cached.etag })
+          : await callThrow('spawnedWorkSummary');
+        if (cached && reply && typeof reply === 'object' && (reply as { unchanged?: unknown }).unchanged === true) {
+          reply = isUnchangedReply(reply, cached.etag) ? parseWireCache<unknown>(cached) : null;
+          if (!reply) {
+            this.spawnedWorkSummaryCache = null;
+            writeWireCache(SPAWNED_WORK_SUMMARY_CACHE, '', '');
+            reply = await callThrow('spawnedWorkSummary');
+          }
+        }
+        const etag = reply && typeof reply === 'object' ? (reply as SpawnedWorkSummary).etag : undefined;
+        if (typeof etag === 'string' && etag && Array.isArray((reply as SpawnedWorkSummary).chats)) {
+          if (this.spawnedWorkSummaryCache?.etag !== etag) {
+            try { this.spawnedWorkSummaryCache = { etag, text: JSON.stringify(reply) }; } catch { this.spawnedWorkSummaryCache = null; }
+          }
+        }
+      } else {
+        // Another machine answers for its own chats; an older one rejects
+        // the channel and its chats are read one list at a time, as before.
+        const link = this.machines?.linkFor(machineId);
+        if (!link) return null;
+        reply = tagPayload(machineId, await link.invoke('spawned-work:summary'));
+      }
+      const chats = reply && typeof reply === 'object' ? (reply as SpawnedWorkSummary).chats : undefined;
+      return Array.isArray(chats) ? reply as SpawnedWorkSummary : null;
+    } catch {
+      return null;
+    }
+  }
+  // A summary carries only RUNNING rows, which is everything a sidebar row
+  // draws (its live dot, its clock, its background count). Every chat of the
+  // machine it does not list has no work and owes nothing. A full list or live
+  // event newer than the summary is kept as it is; the chat on screen keeps
+  // its full list, which is re-read alongside the summary.
+  private applySpawnedWorkSummary(machineId: string, summary: SpawnedWorkSummary, issued: number) {
+    const byKey = new Map<string, SpawnedWorkSummary['chats'][number]>();
+    for (const entry of summary.chats) {
+      if (entry && entry.tabId && entry.chatId) byKey.set(spawnedWorkChatKey(entry.tabId, entry.chatId), entry);
+    }
+    const active = this.active();
+    const shownKey = active?.chatId ? spawnedWorkChatKey(active.id, active.chatId) : '';
+    for (const chat of this.state.chats) {
+      if (ownerMachineId(chat) !== machineId || !chat.chatId) continue;
+      const key = spawnedWorkChatKey(chat.id, chat.chatId);
+      const entry = byKey.get(key);
+      const detailSeq = this.spawnedWorkDetailSeq.get(key);
+      if ((detailSeq ?? 0) <= issued && !(key === shownKey && detailSeq !== undefined)) {
+        const running = Array.isArray(entry?.running) ? entry.running : [];
+        if (running.length) this.state.spawnedWorkByChat[key] = running;
+        else delete this.state.spawnedWorkByChat[key];
+        this.spawnedWorkDetailSeq.delete(key);
+      }
+      if ((this.obligationSeq.get(key) ?? 0) <= issued) {
+        if (entry?.obligation?.state) this.state.obligationByChat[key] = entry.obligation;
+        else delete this.state.obligationByChat[key];
+        this.obligationSeq.delete(key);
+      }
+    }
+    this.bump(SPAWNED);
   }
   // What the chat still owes the user. Absent against an older daemon, in
   // which case the sidebar falls back to exactly its previous behaviour.

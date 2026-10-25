@@ -420,6 +420,16 @@ export interface SpawnedWorkItem {
 // different question from what is running. Older daemons omit it.
 export interface ChatObligation { state: string; source?: string; note?: string; promptId?: string }
 export interface SpawnedWorkChanged { tabId: string; chatId: string; items: SpawnedWorkItem[]; obligation?: ChatObligation; }
+/** One chat of spawned-work:summary: only its RUNNING rows (spawned-work:list
+ *  shape), its counts and its obligation. A chat with neither work nor an
+ *  obligation is absent from the reply. */
+export interface SpawnedWorkSummaryChat {
+  tabId: string; chatId: string;
+  running: SpawnedWorkItem[];
+  counts?: { total: number; running: number };
+  obligation?: ChatObligation;
+}
+export interface SpawnedWorkSummary { chats: SpawnedWorkSummaryChat[]; etag?: string }
 export interface SpawnedWorkRead { ok: boolean; item?: SpawnedWorkItem; tail?: string; tailLimited?: boolean; error?: string; }
 
 /** What one stop did. `alreadyFinished` is a success: the row was already over. */
@@ -610,6 +620,8 @@ export interface ProjectIconResult {
   found: boolean;
   mimeType?: string;
   base64?: string;
+  // Present when the read asked {ifNoneMatch} (additive).
+  etag?: string;
 }
 
 export interface StartJobOpts {
@@ -715,7 +727,9 @@ export interface WorkassApi {
   getConfig?: () => Promise<DaemonConfig>;
   // leanTools: large committed tool payloads arrive as a bounded head plus
   // outputDeferred/outputBytes; an older daemon or bridge ignores it.
-  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean }) => Promise<unknown>;
+  // `shell` and `ifNoneMatch` are additive: an older daemon ignores them and
+  // answers the ordinary projection, which carries no etag.
+  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean; shell?: boolean; ifNoneMatch?: string }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
@@ -748,7 +762,7 @@ export interface WorkassApi {
   // remote client would otherwise pick a path off its own device.
   listDir?: (path: string | null) => Promise<DirListing>;
   createDir?: (parent: string, name: string) => Promise<DirCreateResult>;
-  projectIcon?: (chatId: string, cwd: string) => Promise<ProjectIconResult>;
+  projectIcon?: (chatId: string, cwd: string, options?: { ifNoneMatch: string }) => Promise<ProjectIconResult | { unchanged: true; etag: string }>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   // deferImages: a message's own images arrive by reference (deferredImageRef)
   // and load per image through { imageRef }; an older daemon ignores it.
@@ -795,7 +809,13 @@ export interface WorkassApi {
     idempotencyKey: string,
     creditId?: string,
   ) => Promise<{ outcome: RateLimitResetOutcome; planUsage?: PlanUsageSnapshot }>;
-  spawnedWorkList?: (tabId: string, chatId: string) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation }>;
+  // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
+  // {unchanged, etag} receipt. An older bridge or daemon drops it.
+  spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;
+  /** Every chat's running rows, counts and obligation in one read (local
+   *  daemon). Additive: an older bridge lacks it and the store falls back to
+   *  one spawnedWorkList per chat. */
+  spawnedWorkSummary?: (options?: { ifNoneMatch: string }) => Promise<SpawnedWorkSummary | { unchanged: true; etag: string }>;
   /** Read-only: what a Workass update would stop right now (local daemon only). */
   appUpdateWork?: () => Promise<AppUpdateWork>;
   spawnedWorkRead?: (tabId: string, chatId: string, id: string, tailBytes?: number) => Promise<SpawnedWorkRead>;
