@@ -125,6 +125,16 @@ function safeStaticPath(rendererDir, pathname) {
   return file;
 }
 
+// A content-hashed bundle file (Vite's assets/<name>-<8 chars>.<ext>) never
+// changes under its name: a promoted renderer is a new index.html naming new
+// files, so a reload reuses the cached bundle instead of re-reading ~900 KB.
+// index.html stays no-store (it carries the per-load controller migration),
+// and every unhashed file keeps no-store as before.
+const HASHED_RENDERER_ASSET = /^\/assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
+function rendererAssetCacheControl(pathname) {
+  return HASHED_RENDERER_ASSET.test(pathname) ? 'private, max-age=31536000, immutable' : 'no-store';
+}
+
 function proxyHTTP(req, res, daemon) {
   const transport = daemon.protocol === 'https:' ? https : http;
   const upstream = transport.request({
@@ -407,7 +417,7 @@ function createViewServer({
         }
         const data = fs.readFileSync(file);
         res.writeHead(200, {
-          'Cache-Control': 'no-store',
+          'Cache-Control': rendererAssetCacheControl(pathname),
           'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
           'Content-Length': data.length,
         });
@@ -484,4 +494,4 @@ function createViewServer({
   });
 }
 
-module.exports = { createViewServer, injectBridge, safeStaticPath, tlsConnectOptions };
+module.exports = { createViewServer, injectBridge, rendererAssetCacheControl, safeStaticPath, tlsConnectOptions };

@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { createViewServer, injectBridge, safeStaticPath, tlsConnectOptions } = require('./view-server');
+const { createViewServer, injectBridge, rendererAssetCacheControl, safeStaticPath, tlsConnectOptions } = require('./view-server');
 
 test('injects bridge and one-time controller migration', () => {
   const html = injectBridge('<!doctype html><head></head><body></body>');
@@ -120,6 +120,18 @@ test('rejects renderer path traversal', () => {
   assert.equal(safeStaticPath(root, '/assets/app.js'), path.join(root, 'assets', 'app.js'));
 });
 
+// A reload reuses the content-hashed bundle; index.html and anything without a
+// content hash in its name are still read fresh on every load.
+test('only content-hashed renderer assets are cached', () => {
+  assert.equal(rendererAssetCacheControl('/assets/index-DsVAJI7v.js'), 'private, max-age=31536000, immutable');
+  assert.equal(rendererAssetCacheControl('/assets/index-Bwz3BJ4y.css'), 'private, max-age=31536000, immutable');
+  assert.equal(rendererAssetCacheControl('/assets/workass-macos-BpzNkGV0.png'), 'private, max-age=31536000, immutable');
+  assert.equal(rendererAssetCacheControl('/assets/app.js'), 'no-store');
+  assert.equal(rendererAssetCacheControl('/index.html'), 'no-store');
+  assert.equal(rendererAssetCacheControl('/favicon-DsVAJI7v.ico'), 'no-store');
+  assert.equal(rendererAssetCacheControl('/assets/nested/index-DsVAJI7v.js'), 'no-store');
+});
+
 test('TLS proxy never sends an IP literal as SNI', () => {
   const ca = Buffer.from('test-ca');
   assert.deepEqual(tlsConnectOptions({ hostname: '127.0.0.1', ca }, 18788), {
@@ -135,6 +147,7 @@ test('serves local renderer, proxies HTTP, and stamps the tunneled shell WebSock
   fs.mkdirSync(path.join(renderer, 'assets'));
   fs.writeFileSync(path.join(renderer, 'index.html'), '<!doctype html><head></head><body>local-index</body>');
   fs.writeFileSync(path.join(renderer, 'assets', 'app.js'), 'window.localBundle=true;');
+  fs.writeFileSync(path.join(renderer, 'assets', 'app-DsVAJI7v.js'), 'window.hashedBundle=true;');
   t.after(() => fs.rmSync(renderer, { recursive: true, force: true }));
 
   const daemon = http.createServer((req, res) => {
@@ -169,7 +182,13 @@ test('serves local renderer, proxies HTTP, and stamps the tunneled shell WebSock
   const index = await fetch(view.url + '/').then((r) => r.text());
   assert.match(index, /local-index/);
   assert.match(index, /lan-bridge\.js/);
-  assert.equal(await fetch(view.url + '/assets/app.js').then((r) => r.text()), 'window.localBundle=true;');
+  const unhashed = await fetch(view.url + '/assets/app.js');
+  assert.equal(unhashed.headers.get('cache-control'), 'no-store');
+  assert.equal(await unhashed.text(), 'window.localBundle=true;');
+  const hashed = await fetch(view.url + '/assets/app-DsVAJI7v.js');
+  assert.equal(hashed.headers.get('cache-control'), 'private, max-age=31536000, immutable');
+  assert.equal(await hashed.text(), 'window.hashedBundle=true;');
+  assert.equal((await fetch(view.url + '/')).headers.get('cache-control'), 'no-store');
   assert.equal(await fetch(view.url + '/lan-bridge.js').then((r) => r.text()), 'window.daemonBridge=true;');
   assert.equal(await fetch(view.url + '/daemon-only').then((r) => r.text()), 'daemon-http');
   assert.equal(await fetch(view.url + '/workass/artifacts/plain/index.html').then((r) => r.text()), 'daemon-http');
