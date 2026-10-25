@@ -940,7 +940,18 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count++
 	hub.RegisterOutOfBandRead("project:icon", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		return projectIconForWorkspace(fieldString(arg, "cwd")), nil
+		icon := projectIconForWorkspace(fieldString(arg, "cwd"))
+		// Additive conditional read, as on spawned-work:list: with
+		// {ifNoneMatch} the reply names its etag, or is a tiny receipt while
+		// the icon is unchanged, so a reload does not resend every icon.
+		if ifNoneMatch, conditional := arg["ifNoneMatch"].(string); conditional {
+			raw, err := json.Marshal(icon)
+			if err != nil {
+				return nil, err
+			}
+			return etagReply(raw, ifNoneMatch), nil
+		}
+		return icon, nil
 	})
 	count++
 
@@ -1442,11 +1453,26 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if obligation != nil {
 			reply["obligation"] = obligation
 		}
+		// Additive conditional read: a client that sends {ifNoneMatch} gets
+		// the reply named by its content hash (etag), or a tiny {unchanged,
+		// etag} receipt while the chat's work is unchanged. One chat's list can
+		// be a megabyte and the open chat reads it on every reload and visit.
+		// A client that sends no ifNoneMatch gets the reply exactly as before.
+		if ifNoneMatch, conditional := arg["ifNoneMatch"].(string); conditional {
+			raw, err := json.Marshal(reply)
+			if err != nil {
+				return nil, err
+			}
+			return etagReply(raw, ifNoneMatch), nil
+		}
 		return reply, nil
 	})
 	// Additive batched read for a client's boot and reconnect: every chat's
 	// running rows, counts and obligation in one reply, instead of one
 	// spawned-work:list per chat. Per-chat detail stays on spawned-work:list.
+	// The reply names its content hash (etag); {ifNoneMatch} gets a tiny
+	// {unchanged, etag} receipt while no chat's running work or obligation
+	// changed, so a reload does not read every obligation again.
 	hub.Register("spawned-work:summary", func(args []any) (any, error) {
 		if providerChats == nil {
 			return nil, errors.New("spawned-work:summary requires the durable chat actor")
@@ -1455,7 +1481,11 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"chats": chats}, nil
+		raw, err := json.Marshal(map[string]any{"chats": chats})
+		if err != nil {
+			return nil, err
+		}
+		return etagReply(raw, fieldString(firstMapArg(args), "ifNoneMatch")), nil
 	})
 	hub.Register("spawned-work:read", func(args []any) (any, error) {
 		arg := firstMapArg(args)
