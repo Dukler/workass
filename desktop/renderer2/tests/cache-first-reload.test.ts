@@ -117,6 +117,21 @@ describe('cache-first reload', () => {
     assert.equal(store.provisionalFirstScreens.size, 0);
   });
 
+  test('a chat the daemon sends live rows for (running) keeps them, not the cached first screen', async () => {
+    prime();
+    const live = [row('m-3', 'user', 'question'), { ...row('m-4', 'assistant', 'streaming'), status: 'running' }];
+    const archive: any[] = [];
+    const store = boot({
+      getSession: async () => shell([shellChat('tab-a', { messages: live, messageCount: 4 }), shellChat('tab-b')], 'shell-live'),
+      archiveLoad: async (_tabId: string, o: any) => { archive.push(o); return []; },
+    });
+    await store.init();
+    await flush();
+    assert.equal(store.active().messages.at(-1).status, 'running');
+    assert.equal(store.provisionalFirstScreens.size, 0);
+    assert.equal(archive.some((o) => o.ifNoneMatch === 'rows-1'), false, 'the cached rows were revalidated over a live tail');
+  });
+
   test('an older daemon answers plain arrays and nothing breaks', async () => {
     prime();
     const store = boot({
