@@ -1552,7 +1552,9 @@ export class Store {
       const prior = priorById.get(chat.id);
       if (!provisional || provisional.chatId !== chat.chatId || chat.messages.length > 0
         || !prior?.messages.length || prior.chatId !== chat.chatId) {
-        if (provisional && provisional.chatId !== chat.chatId) this.provisionalFirstScreens.delete(chat.id);
+        // A chat the daemon sent rows for (a running chat's live tail) is
+        // already current; its cached first screen is no longer needed.
+        if (provisional && (provisional.chatId !== chat.chatId || chat.messages.length > 0)) this.provisionalFirstScreens.delete(chat.id);
         continue;
       }
       chat.messages = prior.messages;
