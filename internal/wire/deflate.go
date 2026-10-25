@@ -34,11 +34,28 @@ const deflateExtensionResponse = "permessage-deflate; server_no_context_takeover
 // compressor; such frames go out exactly as encoded.
 const deflateMinPayload = 1024
 
-// BestSpeed by measurement on real profile JSON (M-series Mac, 2026-10-25): a
-// 25 MB message compresses to 21% in ~85 ms where the default level takes
-// ~175 ms for 17%, and on the 1-16 KiB events that make up most traffic the
-// fresh-context Reset of levels 2+ makes them 1.5-2.4x slower per message.
+// The level follows the payload, by measurement on real profile JSON (M-series
+// Mac, 2026-10-25).
+//   - Below deflateRatioMinPayload: BestSpeed. On the 1-16 KiB events that make
+//     up most traffic the fresh-context Reset of levels 2+ costs 1.5-2.4x per
+//     message, for a few bytes.
+//   - Up to deflateRatioMaxPayload: the default level. The reads a connect and
+//     a chat open wait on are here, and it sends a fifth fewer bytes for about
+//     2x the CPU: the 297 KB session shell goes 67.5 -> 54.7 KB for 2 ms, an
+//     8.4 MB history page 1.15 -> 0.83 MB for 35 ms. On a 400 kbps link that is
+//     seconds; on a LAN a millisecond or two.
+//   - Above it: BestSpeed again, so a 25 MB snapshot costs ~85 ms, not ~175.
 const deflateLevel = flate.BestSpeed
+const deflateRatioLevel = flate.DefaultCompression
+const deflateRatioMinPayload = 16 << 10
+const deflateRatioMaxPayload = 8 << 20
+
+func deflateLevelFor(payload int) int {
+	if payload >= deflateRatioMinPayload && payload <= deflateRatioMaxPayload {
+		return deflateRatioLevel
+	}
+	return deflateLevel
+}
 
 // inboundMessageByteLimit bounds one client message: its declared frame
 // lengths, its reassembled fragments, and its size after inflation. It matches
@@ -84,15 +101,21 @@ type deflateWriter struct {
 }
 
 // flate.NewWriter allocates its window and match tables; Reset reuses them.
-var deflateWriterPool = sync.Pool{New: func() any {
-	w := &deflateWriter{}
-	fw, err := flate.NewWriter(&w.sink, deflateLevel)
-	if err != nil {
-		return nil
-	}
-	w.fw = fw
-	return w
-}}
+// One pool per level: a writer keeps the level it was made with.
+func newDeflateWriterPool(level int) *sync.Pool {
+	return &sync.Pool{New: func() any {
+		w := &deflateWriter{}
+		fw, err := flate.NewWriter(&w.sink, level)
+		if err != nil {
+			return nil
+		}
+		w.fw = fw
+		return w
+	}}
+}
+
+var deflateWriterPool = newDeflateWriterPool(deflateLevel)
+var deflateRatioWriterPool = newDeflateWriterPool(deflateRatioLevel)
 
 var deflateBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
@@ -262,7 +285,11 @@ func deflateTextFrame(frame []byte) (*bytes.Buffer, []byte, bool) {
 	if !ok || len(payload) < deflateMinPayload {
 		return nil, nil, false
 	}
-	w, _ := deflateWriterPool.Get().(*deflateWriter)
+	pool := deflateWriterPool
+	if deflateLevelFor(len(payload)) == deflateRatioLevel {
+		pool = deflateRatioWriterPool
+	}
+	w, _ := pool.Get().(*deflateWriter)
 	if w == nil {
 		return nil, nil, false
 	}
@@ -283,7 +310,7 @@ func deflateTextFrame(frame []byte) (*bytes.Buffer, []byte, bool) {
 		err = w.fw.Flush()
 	}
 	w.sink.buf = nil
-	deflateWriterPool.Put(w)
+	pool.Put(w)
 
 	data := buf.Bytes()
 	compressed := data[maxServerFrameHeader:]

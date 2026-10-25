@@ -715,3 +715,47 @@ func (c *countingConn) Read(p []byte) (int, error) {
 	c.read.Add(int64(n))
 	return n, err
 }
+
+// The reads a connect waits on are compressed harder than small events and
+// giant snapshots; every tier inflates to the exact payload.
+func TestDeflateLevelTiersInflateExactly(t *testing.T) {
+	cases := []struct {
+		size  int
+		level int
+	}{
+		{deflateMinPayload, deflateLevel},
+		{deflateRatioMinPayload - 1, deflateLevel},
+		{deflateRatioMinPayload, deflateRatioLevel},
+		{1 << 20, deflateRatioLevel},
+		{deflateRatioMaxPayload, deflateRatioLevel},
+		{deflateRatioMaxPayload + 1, deflateLevel},
+	}
+	for _, tc := range cases {
+		if got := deflateLevelFor(tc.size); got != tc.level {
+			t.Fatalf("deflateLevelFor(%d) = %d, want %d", tc.size, got, tc.level)
+		}
+	}
+	for _, size := range []int{4 << 10, 64 << 10, 2 << 20} {
+		var payload bytes.Buffer
+		for payload.Len() < size {
+			fmt.Fprintf(&payload, `{"id":"m-%d","role":"assistant","content":"row %d of a realistic page"},`, payload.Len(), payload.Len()%977)
+		}
+		frame := encodeTextFrame(payload.Bytes()[:size])
+		buf, compressed, ok := deflateTextFrame(frame)
+		if !ok || compressed[0] != 0xC1 {
+			t.Fatalf("size %d was not compressed", size)
+		}
+		header := 2
+		switch compressed[1] & 0x7f {
+		case 126:
+			header = 4
+		case 127:
+			header = 10
+		}
+		inflated, err := inflateMessage(append([]byte(nil), compressed[header:]...), inboundMessageByteLimit)
+		releaseDeflateBuffer(buf)
+		if err != nil || !bytes.Equal(inflated, payload.Bytes()[:size]) {
+			t.Fatalf("size %d did not inflate to its payload: %v", size, err)
+		}
+	}
+}
