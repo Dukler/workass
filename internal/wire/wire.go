@@ -268,6 +268,9 @@ type Hub struct {
 	channelMu         sync.Mutex
 	invokeStats       map[string]*channelStat
 	eventStats        map[string]*channelStat
+	// inboundLimit overrides inboundMessageByteLimit when positive, so tests
+	// can prove the limit without allocating 256 MiB.
+	inboundLimit int
 }
 
 type client struct {
@@ -289,6 +292,9 @@ type client struct {
 	// A normal localhost browser is not the renderer service: it may have a
 	// different localStorage machine book and must not race daemon MCP routes.
 	localShell bool
+	// Set during the handshake, before the read and write loops start, when
+	// the client offered permessage-deflate and the server accepted it.
+	deflate bool
 	// Auxiliary authenticated sockets preserve the frozen invoke/reply bytes but
 	// never receive projection events. `control` carries send-critical ordered
 	// mutations; `urgent` isolates Stop from a blocked steer handler.
@@ -847,16 +853,22 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accept := AcceptKey(key)
+	extensions := ""
+	deflateResponse, deflate := negotiatePermessageDeflate(r.Header)
+	if deflate {
+		extensions = "Sec-WebSocket-Extensions: " + deflateResponse + "\r\n"
+	}
 	_, err = io.WriteString(conn,
 		"HTTP/1.1 101 Switching Protocols\r\n"+
 			"Upgrade: websocket\r\nConnection: Upgrade\r\n"+
-			"Sec-WebSocket-Accept: "+accept+"\r\n\r\n")
+			"Sec-WebSocket-Accept: "+accept+"\r\n"+extensions+"\r\n")
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
 
 	c := h.newClient(conn, r)
+	c.deflate = deflate
 	h.registerClient(c)
 	go h.writeLoop(c)
 	h.announceClientAccess(c)
@@ -1225,14 +1237,16 @@ func (h *Hub) readLoop(c *client) {
 		<-historyDone
 	}()
 
+	// The decoder rejects a frame whose declared length passes the limit before
+	// its payload arrives, so buf never holds more than one bounded frame.
 	var buf []byte
-	dec := &frameDecoder{}
+	dec := &frameDecoder{deflate: c.deflate, limit: h.inboundLimit}
 	tmp := make([]byte, 32*1024)
 	for {
 		n, err := c.conn.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			messages, rest, closeFrame := dec.drain(buf)
+			messages, rest, closeFrame, protocolErr := dec.decode(buf)
 			buf = rest
 			for _, raw := range messages {
 				msg, ok := decodeInvoke(raw)
@@ -1252,6 +1266,10 @@ func (h *Hub) readLoop(c *client) {
 				case <-c.done:
 					return
 				}
+			}
+			if protocolErr != nil {
+				h.logf("[wire] closing client after websocket protocol error: %v", protocolErr)
+				return
 			}
 			if closeFrame {
 				return
@@ -2031,8 +2049,7 @@ func (h *Hub) writeLoop(c *client) {
 			if frame.controllerOnly && !h.isControllerClient(c) {
 				err = errControllerChanged
 			} else {
-				_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeoutForPayload(len(frame.payload))))
-				err = writeAll(c.conn, frame.payload)
+				err = c.writeFrame(frame.payload)
 			}
 			c.outMu.Lock()
 			c.outboundBytes -= len(frame.payload)
@@ -2592,49 +2609,87 @@ func writeTextFrameHeader(header []byte, payloadLen int) {
 
 type frameDecoder struct {
 	fragment []byte
+	// deflate is set when the socket negotiated permessage-deflate; only then
+	// may the first frame of a data message carry RSV1.
+	deflate bool
+	// compressed is RSV1 of the first frame of the message being reassembled.
+	// Continuation frames never repeat it (RFC 7692 §6.1).
+	compressed bool
+	// limit bounds one message: each declared frame length, the reassembled
+	// fragments, and the inflated size. Zero means inboundMessageByteLimit.
+	limit int
 }
 
+// drain keeps the shape its callers know: a protocol error ends the stream
+// the same way a close frame does.
 func (d *frameDecoder) drain(buf []byte) ([][]byte, []byte, bool) {
+	messages, rest, closeFrame, err := d.decode(buf)
+	return messages, rest, closeFrame || err != nil
+}
+
+// decode splits buf into complete messages. Messages before a protocol error
+// are returned with it; the message that broke the rules never is.
+func (d *frameDecoder) decode(buf []byte) ([][]byte, []byte, bool, error) {
 	var messages [][]byte
 	closeFrame := false
 	off := 0
+	limit := d.limit
+	if limit <= 0 {
+		limit = inboundMessageByteLimit
+	}
 
 	for off+2 <= len(buf) {
 		b0 := buf[off]
 		b1 := buf[off+1]
 		fin := b0&0x80 != 0
+		rsv1 := b0&0x40 != 0
 		opcode := b0 & 0x0f
 		masked := b1&0x80 != 0
 		length := uint64(b1 & 0x7f)
 		p := off + 2
 
+		// No extension here uses RSV2 or RSV3, and RSV1 means "compressed"
+		// only on the first frame of a data message after the handshake
+		// accepted permessage-deflate (RFC 6455 §5.2, RFC 7692 §6.1).
+		if b0&0x30 != 0 {
+			return messages, buf[off:], closeFrame, errFrameReservedBits
+		}
+		if rsv1 && (!d.deflate || (opcode != 0x1 && opcode != 0x2)) {
+			return messages, buf[off:], closeFrame, errFrameCompressionBit
+		}
+
 		switch length {
 		case 126:
 			if p+2 > len(buf) {
-				return messages, buf[off:], closeFrame
+				return messages, buf[off:], closeFrame, nil
 			}
 			length = uint64(binary.BigEndian.Uint16(buf[p : p+2]))
 			p += 2
 		case 127:
 			if p+8 > len(buf) {
-				return messages, buf[off:], closeFrame
+				return messages, buf[off:], closeFrame, nil
 			}
 			length = binary.BigEndian.Uint64(buf[p : p+8])
 			p += 8
 		}
+		// Refuse an oversized frame on its header, before the reader buffers
+		// a byte of its payload.
+		if length > uint64(limit) || (opcode == 0x0 && uint64(len(d.fragment))+length > uint64(limit)) {
+			return messages, buf[off:], closeFrame, errInboundMessageTooLarge
+		}
 		if length > uint64(len(buf)-p) {
-			return messages, buf[off:], closeFrame
+			return messages, buf[off:], closeFrame, nil
 		}
 
 		var mask []byte
 		if masked {
 			if p+4 > len(buf) {
-				return messages, buf[off:], closeFrame
+				return messages, buf[off:], closeFrame, nil
 			}
 			mask = buf[p : p+4]
 			p += 4
 			if length > uint64(len(buf)-p) {
-				return messages, buf[off:], closeFrame
+				return messages, buf[off:], closeFrame, nil
 			}
 		}
 
@@ -2652,26 +2707,47 @@ func (d *frameDecoder) drain(buf []byte) ([][]byte, []byte, bool) {
 		switch opcode {
 		case 0x8:
 			closeFrame = true
-			return messages, buf[off:], closeFrame
+			return messages, buf[off:], closeFrame, nil
 		case 0x9, 0xA:
 			continue
 		case 0x1:
 			if fin {
-				messages = append(messages, append([]byte(nil), payload...))
 				d.fragment = nil
+				d.compressed = false
+				message, err := completeMessage(payload, rsv1, limit)
+				if err != nil {
+					return messages, buf[off:], closeFrame, err
+				}
+				messages = append(messages, message)
 			} else {
 				d.fragment = append(d.fragment[:0], payload...)
+				d.compressed = rsv1
 			}
 		case 0x0:
 			d.fragment = append(d.fragment, payload...)
 			if fin {
-				messages = append(messages, append([]byte(nil), d.fragment...))
+				fragment, compressed := d.fragment, d.compressed
 				d.fragment = nil
+				d.compressed = false
+				message, err := completeMessage(fragment, compressed, limit)
+				if err != nil {
+					return messages, buf[off:], closeFrame, err
+				}
+				messages = append(messages, message)
 			}
 		}
 	}
 
-	return messages, buf[off:], closeFrame
+	return messages, buf[off:], closeFrame, nil
+}
+
+// completeMessage returns a message the caller owns: payload may alias the
+// read buffer, which the next read overwrites.
+func completeMessage(payload []byte, compressed bool, limit int) ([]byte, error) {
+	if compressed {
+		return inflateMessage(payload, limit)
+	}
+	return append([]byte(nil), payload...), nil
 }
 
 var errShortWrite = errors.New("short websocket write")
