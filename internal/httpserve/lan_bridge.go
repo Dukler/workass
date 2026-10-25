@@ -197,11 +197,11 @@ const LANBridgeJS = `(() => {
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
-    spawnedWorkList: (tabId, chatId) => invoke('spawned-work:list', { tabId, chatId }),
+    spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch } : { tabId, chatId }),
     // Every chat's running background rows, counts and obligation in one read.
     // Additive: a renderer that finds it boots its sidebar from it instead of
     // one spawned-work:list per chat; an older bridge simply lacks it.
-    spawnedWorkSummary: () => invoke('spawned-work:summary'),
+    spawnedWorkSummary: (o) => o ? invoke('spawned-work:summary', o) : invoke('spawned-work:summary'),
     appUpdateWork: () => invoke('app-update:work'),
     chatCommandsGet: (tabId, chatId) => invoke('chat:commands-get', { tabId, chatId }),
     chatGoalGet: (tabId, chatId) => invoke('chat:goal-get', { tabId, chatId }),
@@ -215,7 +215,7 @@ const LANBridgeJS = `(() => {
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
     chatDiff: (o) => invoke('chat:diff', o), chatEnvGet: (o) => invoke('chat:env-get', o),
     providersList: () => invoke('providers:list'), providersCatalog: () => invoke('providers:catalog'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
-    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd) => invoke('project:icon', { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
+    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch } : { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
     chatPermissionDecide: (id, optionId) => invoke('chat:permission-decide', { id, optionId }),
     chatPendingPermissions: () => invoke('chat:permissions-pending'),

@@ -16,6 +16,12 @@ import (
 // actor state always hashes the same. A read without shell never reaches here
 // and keeps its byte-identical reply.
 func sessionShellReply(raw []byte, ifNoneMatch string) wire.EncodedResult {
+	return etagReply(raw, ifNoneMatch)
+}
+
+// etagReply is a JSON object reply that names its content hash as "etag", or
+// the tiny {etag, unchanged} receipt when the client already holds that hash.
+func etagReply(raw []byte, ifNoneMatch string) wire.EncodedResult {
 	sum := sha256.Sum256(raw)
 	etag := hex.EncodeToString(sum[:])
 	if ifNoneMatch != "" && ifNoneMatch == etag {

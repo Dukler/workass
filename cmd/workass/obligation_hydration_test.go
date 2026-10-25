@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -80,6 +81,32 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	if _, present := quiet["obligation"]; present {
 		t.Fatalf("quiet chat reply = %#v, want no obligation key", quiet)
 	}
+	if _, present := reply["etag"]; present {
+		t.Fatalf("a plain list read grew an etag: %#v", reply)
+	}
+
+	// The conditional read names the same reply by its etag, then answers a
+	// client that holds it with a receipt.
+	named, err := hub.Invoke("spawned-work:list", []any{map[string]any{"tabId": "tab-1", "chatId": "chat-1", "ifNoneMatch": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditional := roundTripJSON(t, named)
+	listEtag, _ := conditional["etag"].(string)
+	if len(listEtag) != 64 || conditional["obligation"] == nil || conditional["items"] == nil {
+		t.Fatalf("conditional list = %#v", conditional)
+	}
+	delete(conditional, "etag")
+	if want := roundTripJSON(t, reply); !reflect.DeepEqual(conditional, want) {
+		t.Fatalf("conditional list body = %#v, want the plain reply %#v", conditional, want)
+	}
+	receiptRaw, err := hub.Invoke("spawned-work:list", []any{map[string]any{"tabId": "tab-1", "chatId": "chat-1", "ifNoneMatch": listEtag}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := roundTripJSON(t, receiptRaw); receipt["unchanged"] != true || receipt["etag"] != listEtag {
+		t.Fatalf("unchanged list = %#v", receipt)
+	}
 
 	// A late client now boots its sidebar from the batched read rather than
 	// one list per chat; it must carry the same obligation, and nothing for a
@@ -105,6 +132,25 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	}
 	if got, ok := owes["obligation"].(map[string]any); !ok || got["state"] != obligation["state"] || got["source"] != obligation["source"] {
 		t.Fatalf("summary obligation = %#v, want the list's %#v", owes["obligation"], obligation)
+	}
+	// A client that kept the summary gets a receipt while nothing changed.
+	etag, _ := summary["etag"].(string)
+	if len(etag) != 64 {
+		t.Fatalf("summary etag = %q, want a sha256 hex digest", etag)
+	}
+	again, err := hub.Invoke("spawned-work:summary", []any{map[string]any{"ifNoneMatch": etag}})
+	if err != nil {
+		t.Fatalf("spawned-work:summary ifNoneMatch: %v", err)
+	}
+	if receipt := roundTripJSON(t, again); receipt["unchanged"] != true || receipt["etag"] != etag || len(receipt) != 2 {
+		t.Fatalf("unchanged summary = %#v", receipt)
+	}
+	stale, err := hub.Invoke("spawned-work:summary", []any{map[string]any{"ifNoneMatch": "stale"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full := roundTripJSON(t, stale); full["etag"] != etag || full["chats"] == nil {
+		t.Fatalf("a stale etag must get the whole summary: %#v", full)
 	}
 }
 
