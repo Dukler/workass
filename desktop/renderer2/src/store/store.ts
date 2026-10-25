@@ -9,7 +9,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 import { useSyncExternalStore } from 'react';
 import type { AppState, BrowserPresentation, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
-import { call, callThrow, has, on, bridgeReady } from '../wire/api';
+import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
 import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache, type WireCacheEntry } from './wire-cache';
@@ -85,6 +85,8 @@ const ACT = 'act';
 const isToolDone = (s: string) => s === 'completed' || s === 'success';
 const isToolFailed = (s: string) => s === 'failed' || s === 'error';
 const HYDRATION_STEP_TIMEOUT = 15000;
+// However busy the link, a hydration step gives up after this long.
+const HYDRATION_STEP_BUSY_CAP = 10 * 60 * 1000;
 const AGENT_REFRESH_TIMEOUT = 20000;
 const DIGEST_SYNC_DEBOUNCE = 250;
 // A daemon without providers:catalog re-publishes a drifted catalog only from a
@@ -435,6 +437,10 @@ const SESSION_SHELL_CACHE = 'session-shell';
 const STATE_DIGEST_CACHE = 'state-digest';
 const SPAWNED_WORK_SUMMARY_CACHE = 'spawned-work-summary';
 const SPAWNED_WORK_LIST_CACHE = 'spawned-work-list';
+// The open chat's first screen (the rows of its last exchange), so a reload
+// repaints the chat before the socket is even open.
+const FIRST_SCREEN_CACHE = 'first-screen';
+const FIRST_SCREEN_CACHE_CHARS = 2_000_000;
 const SPAWNED_WORK_LIST_CACHE_LIMIT = 16;
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
@@ -631,6 +637,13 @@ export class Store {
   private spawnedWorkSummaryCache: WireCacheEntry | null = null;
   // And for the full spawned-work lists this window read, by tab+chat key.
   private spawnedWorkListCache = new Map<string, WireCacheEntry>();
+  // First screens read by etag, by tab id: the rows as JSON text, the etag the
+  // daemon named them by and the durable chat they belong to.
+  private firstScreenCache = new Map<string, WireCacheEntry & { chatId: string }>();
+  // Chats painted from the window cache whose rows the daemon has not yet
+  // confirmed. Their first-screen read is revalidated by etag and replaces the
+  // rows in place if they changed.
+  private provisionalFirstScreens = new Map<string, WireCacheEntry & { chatId: string }>();
   // Detail freshness for spawned work, by tab+chat key: the sequence number
   // at which the chat's full list (or a live event) was last read. A batched
   // summary issued earlier never overwrites it.
@@ -662,6 +675,7 @@ export class Store {
     const mirror = loadMirror();
     this.manualChatOrder = normalizeChatOrder(mirror?.chatOrder);
     this.state = this.fromMirror(mirror);
+    this.paintFromWireCache();
     this.state.chats = this.orderChats(this.state.chats);
     for (const chat of this.state.chats) {
       this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -677,6 +691,64 @@ export class Store {
         localMachineId: () => this.selfMachineId,
       });
     }
+  }
+
+  // A reload paints the sidebar and the chat it was showing from what this
+  // window last read (the session shell, the work summary and the open chat's
+  // first screen, kept in sessionStorage), before the socket is open. Nothing
+  // painted here is authority: boot reads the shell by etag and replaces it
+  // wholesale (a chat deleted meanwhile disappears, a changed one updates in
+  // place), and the open chat's first screen is revalidated by etag before it
+  // counts as read. A local deletion forgets the cache (forgetWireCache), so
+  // a chat this window deleted is never painted.
+  private paintFromWireCache() {
+    const shellEntry = readWireCache(SESSION_SHELL_CACHE);
+    const shell = parseWireCache<Mirror>(shellEntry);
+    if (!shellEntry || !shell || !Array.isArray(shell.chats) || shell.chats.length === 0) return;
+    let painted: AppState;
+    try { painted = this.fromMirror(shell); } catch { return; }
+    const localActive = this.state.activeId;
+    this.state.chats = painted.chats;
+    this.state.workspaces = painted.workspaces;
+    this.state.collapsedWorkspaces = painted.collapsedWorkspaces;
+    this.state.removedWorkspaces = painted.removedWorkspaces;
+    this.state.globalRevision = painted.globalRevision;
+    this.state.activeId = localActive && painted.chats.some((chat) => chat.id === localActive) ? localActive : painted.activeId;
+    this.adoptLocalSnapshotOrder(shell, painted.chats);
+    this.sessionShell = shellEntry;
+    const active = this.state.chats.find((chat) => chat.id === this.state.activeId);
+    const firstEntry = readWireCache(FIRST_SCREEN_CACHE);
+    const first = parseWireCache<{ tabId?: unknown; chatId?: unknown; text?: unknown }>(firstEntry);
+    if (active && firstEntry && first && first.tabId === active.id && first.chatId === active.chatId && typeof first.text === 'string') {
+      try {
+        const rows = actorMessages(JSON.parse(first.text) as MirrorMsg[], active.id);
+        if (rows.length > 0) {
+          active.messages = rows;
+          active.messageCount = Math.max(active.messageCount ?? 0, rows.length);
+          active.historyComplete = false;
+          const entry = { etag: firstEntry.etag, text: first.text, chatId: String(active.chatId) };
+          this.provisionalFirstScreens.set(active.id, entry);
+          this.firstScreenCache.set(active.id, entry);
+        }
+      } catch { /* an unreadable entry paints nothing; boot reads the chat */ }
+    }
+    const summaryEntry = readWireCache(SPAWNED_WORK_SUMMARY_CACHE);
+    const summary = parseWireCache<SpawnedWorkSummary>(summaryEntry);
+    if (summaryEntry && summary && Array.isArray(summary.chats)) {
+      this.spawnedWorkSummaryCache = summaryEntry;
+      this.applySpawnedWorkSummary('', summary, 0, false);
+    }
+  }
+
+  // Everything kept for a reload that could still name a chat this window
+  // just removed. The next reads re-key it.
+  private forgetWireCache(tabId: string) {
+    this.sessionShell = null;
+    writeWireCache(SESSION_SHELL_CACHE, '', '');
+    this.firstScreenCache.delete(tabId);
+    this.provisionalFirstScreens.delete(tabId);
+    const kept = parseWireCache<{ tabId?: unknown }>(readWireCache(FIRST_SCREEN_CACHE));
+    if (kept?.tabId === tabId) writeWireCache(FIRST_SCREEN_CACHE, '', '');
   }
 
   private commitCurrentGlobalPresentation() {
@@ -1320,22 +1392,46 @@ export class Store {
     // (the user's newest message and what followed), paint it, then page in
     // the rest of the slice exactly as a size-bounded tail is paged in. An
     // older daemon ignores lastExchange and answers the whole bounded tail.
-    const firstScreen = resident.messages.length === 0;
+    // A chat painted from the window cache shows rows the daemon has not yet
+    // confirmed: its first screen is read again, by etag, and replaces them.
+    const provisional = this.provisionalFirstScreens.get(chatId);
+    const repaint = !!provisional && provisional.chatId === durableChatId;
+    const firstScreen = resident.messages.length === 0 || repaint;
+    // This daemon's first screens are read by etag, so a reload can keep and
+    // revalidate them; another machine's are read exactly as before.
+    const conditional = firstScreen && !ownerMachineId(resident);
     let firstScreenPainted: Promise<void> = Promise.resolve();
     let firstRowsReady = () => {};
     this.recentFirstRows.set(chatId, new Promise<void>((resolve) => { firstRowsReady = resolve; }));
     const load = (async () => {
       let projected: unknown;
+      let rowsEtag = '';
       try {
         const step = await this.guardedStep(
           `recent actor history (${chatId})`,
-          () => call('archiveLoad', chatId, { tail: limit, ...(firstScreen ? { lastExchange: true } : {}), ...HISTORY_READ_OPTIONS }),
+          () => call('archiveLoad', chatId, {
+            tail: limit, ...(firstScreen ? { lastExchange: true } : {}), ...HISTORY_READ_OPTIONS,
+            ...(conditional ? { ifNoneMatch: repaint ? provisional!.etag : '' } : {}),
+          }),
         );
         projected = step.ok ? step.value : undefined;
         if (!step.ok) return;
       } catch { return; }
+      if (projected && typeof projected === 'object' && !Array.isArray(projected)) {
+        const named = projected as { etag?: unknown; unchanged?: unknown; messages?: unknown };
+        if (named.unchanged === true) {
+          // The daemon confirmed the rows this window painted from its cache.
+          projected = repaint && isUnchangedReply(named, provisional!.etag) ? parseWireCache<unknown>(provisional!) : undefined;
+          if (projected) rowsEtag = provisional!.etag;
+        } else {
+          rowsEtag = typeof named.etag === 'string' ? named.etag : '';
+          projected = named.messages;
+        }
+      }
+      if (this.provisionalFirstScreens.get(chatId) === provisional) this.provisionalFirstScreens.delete(chatId);
       const chat = this.chat(chatId);
       if (!chat || chat.chatId !== durableChatId || !Array.isArray(projected)) return;
+      if (conditional && rowsEtag && durableChatId) this.keepFirstScreen(chatId, durableChatId, rowsEtag, projected);
       let messages: Msg[];
       try {
         messages = actorMessages(projected as MirrorMsg[], chatId);
@@ -1347,7 +1443,7 @@ export class Store {
       // bounded response cannot erase a known non-empty actor transcript.
       if (chat.historyComplete || (messages.length === 0 && (chat.messageCount ?? 0) > 0)) return;
       const messageCount = Math.max(chat.messageCount ?? 0, messages.length);
-      if (firstScreen && chat.messages.length === 0 && messages.length < Math.min(limit, messageCount)) {
+      if (firstScreen && (chat.messages.length === 0 || repaint) && messages.length < Math.min(limit, messageCount)) {
         // The first screen paints now; the transcript waits for the rest of
         // the slice before it loads anything older (showsFirstScreenOnly).
         // A chat on its way to the screen is published by its activation, in
@@ -1420,6 +1516,48 @@ export class Store {
       // the transcript load older history on its own.
       if (this.firstScreens.delete(chatId)) this.bumpApp(false);
     }
+  }
+
+  // Keep a first screen for a reload, as the rows the daemon named by its
+  // etag. Serialized after the frame that shows it, so opening a chat never
+  // waits on it. (Hydration only stamps each tool row's detail address on the
+  // rows, which a reload stamps identically.)
+  private keepFirstScreen(tabId: string, chatId: string, etag: string, rows: unknown[]) {
+    const kept = this.firstScreenCache.get(tabId);
+    if (kept?.etag === etag && kept.chatId === chatId) return;
+    void afterNextPaint().then(() => {
+      let text: string;
+      try { text = JSON.stringify(rows); } catch { return; }
+      this.firstScreenCache.delete(tabId);
+      if (text.length > FIRST_SCREEN_CACHE_CHARS) return;
+      this.firstScreenCache.set(tabId, { etag, text, chatId });
+      while (this.firstScreenCache.size > SPAWNED_WORK_LIST_CACHE_LIMIT) {
+        this.firstScreenCache.delete(this.firstScreenCache.keys().next().value!);
+      }
+    });
+  }
+
+  // A chat painted from the window cache keeps its rows across the boot
+  // read (the shell carries none for a settled chat) until its first screen
+  // is revalidated by etag right after.
+  private carryProvisionalFirstScreens(previous: Chat[], next: Chat[]) {
+    if (!this.provisionalFirstScreens.size) return;
+    const priorById = new Map(previous.map((chat) => [chat.id, chat]));
+    for (const chat of next) {
+      const provisional = this.provisionalFirstScreens.get(chat.id);
+      const prior = priorById.get(chat.id);
+      if (!provisional || provisional.chatId !== chat.chatId || chat.messages.length > 0
+        || !prior?.messages.length || prior.chatId !== chat.chatId) {
+        if (provisional && provisional.chatId !== chat.chatId) this.provisionalFirstScreens.delete(chat.id);
+        continue;
+      }
+      chat.messages = prior.messages;
+      chat.messageCount = Math.max(chat.messageCount ?? 0, prior.messages.length);
+      chat.historyComplete = false;
+    }
+    // A chat the daemon no longer lists is gone, with its cached rows.
+    const listed = new Set(next.map((chat) => chat.id));
+    for (const tabId of [...this.provisionalFirstScreens.keys()]) if (!listed.has(tabId)) this.provisionalFirstScreens.delete(tabId);
   }
 
   // Commit a recent slice: the same live-turn and runtime preservation as any
@@ -1555,7 +1693,7 @@ export class Store {
 
   private refreshVisibleRecentHistory(chat: Chat | null) {
     if (!chat || chat.historyComplete) return;
-    const stale = this.staleRecentHistories.has(chat.id);
+    const stale = this.staleRecentHistories.has(chat.id) || this.provisionalFirstScreens.has(chat.id);
     if (chat.messages.length < Math.min(CHAT_INITIAL_HISTORY, chat.messageCount ?? chat.messages.length) || stale) {
       void this.ensureRecentHistory(chat.id, CHAT_INITIAL_HISTORY, stale);
     }
@@ -2301,10 +2439,21 @@ export class Store {
   ): Promise<{ ok: true; value: T } | { ok: false; value?: undefined }> {
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
+      // The step's own read is in flight. While the socket keeps receiving
+      // frames for it or others (a slow link draining a large reply), the
+      // step waits on; it times out once the socket has also gone quiet.
+      const startedAt = Date.now();
       const value = await Promise.race([
         task(),
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+          const expire = () => {
+            if (wireBusy() && Date.now() - startedAt < HYDRATION_STEP_BUSY_CAP) {
+              timer = setTimeout(expire, timeoutMs);
+              return;
+            }
+            reject(new Error(`${label} timed out`));
+          };
+          timer = setTimeout(expire, timeoutMs);
         }),
       ]);
       return { ok: true, value };
@@ -2379,6 +2528,12 @@ export class Store {
     const openList = openKey ? this.spawnedWorkListCache.get(openKey) : undefined;
     if (openList) writeWireCache(SPAWNED_WORK_LIST_CACHE, openList.etag, JSON.stringify({ key: openKey, text: openList.text }));
     else writeWireCache(SPAWNED_WORK_LIST_CACHE, '', '');
+    const openFirst = open ? this.firstScreenCache.get(open.id) : undefined;
+    if (open && openFirst && openFirst.chatId === open.chatId && openFirst.text.length <= FIRST_SCREEN_CACHE_CHARS) {
+      writeWireCache(FIRST_SCREEN_CACHE, openFirst.etag, JSON.stringify({ tabId: open.id, chatId: open.chatId, text: openFirst.text }));
+    } else {
+      writeWireCache(FIRST_SCREEN_CACHE, '', '');
+    }
     const digest = this.lastFullDigest;
     if (digest && typeof digest.etag === 'string' && digest.etag) {
       try { writeWireCache(STATE_DIGEST_CACHE, digest.etag, JSON.stringify(digest)); } catch { /* not kept */ }
@@ -2419,6 +2574,9 @@ export class Store {
       () => this.pingConnection(),
       (status) => this.setConnection(status),
       () => this.onReconnected(),
+      // A ping stuck behind a large frame in transit is a slow link, not a
+      // daemon that left.
+      () => wireBusy(),
     );
     this.monitor.start();
   }
@@ -3242,6 +3400,7 @@ export class Store {
   /** Release every renderer-owned resource and in-flight index for one row. */
   private discardChatProjection(chat: Chat): void {
     const tabId = chat.id;
+    this.forgetWireCache(tabId);
     void browserApi()?.close(tabId);
     releaseDraftImages(chat.draftImages ?? []);
     for (const item of chat.queue ?? []) releaseDraftImages(item.draftImages ?? []);
@@ -3730,6 +3889,13 @@ export class Store {
     this.ensureConnectionMonitor();
 
     try {
+    // The session read leaves now, beside the process and metadata reads,
+    // instead of one round trip after each: on a slow link every sequential
+    // read cost a whole round trip before the chat list could paint. It is
+    // still APPLIED after them, in the same order as before. The live-event
+    // fence is taken before the read leaves, as it always was.
+    const liveEventFence = this.liveTurnEventVersion;
+    const sessionRead = has('getSession') ? this.readSessionShell('boot session:get') : null;
     // Background tasks (Tareas) card: only shown when the daemon exposes the
     // process registry. Feature-detected so an older/newer bridge degrades.
     this.state.hasProcChannels = has('procList');
@@ -3751,9 +3917,8 @@ export class Store {
     // the awaits above, and a wholesale `this.state = fromMirror(...)` would wipe
     // an already-received catalog, leaving the model picker empty (regression
     // from the server-side session store).
-    const liveEventFence = this.liveTurnEventVersion;
-    const sessionStep = has('getSession')
-      ? await this.readSessionShell('boot session:get')
+    const sessionStep = sessionRead
+      ? await sessionRead
       : { ok: true as const, value: undefined };
     const server = sessionStep.ok ? sessionStep.value : undefined;
     if (!sessionStep.ok) {
@@ -3786,6 +3951,7 @@ export class Store {
         this.state.activeId = live.activeId;
       }
       this.applyPendingAgentFocus();
+      this.carryProvisionalFirstScreens(live.chats, this.state.chats);
       this.preserveNewerLocalControls(live.chats, this.state.chats);
       this.preserveMatchingHydratedRuntime(live.chats, this.state.chats);
       this.preserveLiveTurnEvents(live.chats, this.state.chats, liveEventFence, '');
@@ -3831,6 +3997,16 @@ export class Store {
       this.state.activeId = c.id;
     }
 
+    // Session hydration is intentionally bounded. Paint it immediately, then
+    // fetch only a tiny recent slice if the selected row is metadata-only (or
+    // was painted from the window cache and must be revalidated). It leaves
+    // before the device, config, settings and provider reads below: the chat
+    // on screen needs none of them, and on a slow link each is a round trip.
+    if (has('archiveLoad')) {
+      this.releaseInactiveHistories(this.state.activeId);
+      this.refreshVisibleRecentHistory(this.active());
+    }
+
     // Dispositivos (real): device list + pending access requests, feature-detected.
     this.state.hasDeviceChannels = has('lanDevices');
     if (this.state.hasDeviceChannels) {
@@ -3857,12 +4033,6 @@ export class Store {
       if (Array.isArray(providers)) this.onProvidersList(providers);
     }
 
-    // Session hydration is intentionally bounded. Paint it immediately, then
-    // fetch only a tiny recent slice if the selected row is metadata-only.
-    if (has('archiveLoad')) {
-      this.releaseInactiveHistories(this.state.activeId);
-      this.refreshVisibleRecentHistory(this.active());
-    }
     await this.guardedStep('boot permissions', () => this.refreshPendingPermissions());
     } catch (error) {
       console.warn('[store] partial boot', error);
@@ -6749,7 +6919,7 @@ export class Store {
   // machine it does not list has no work and owes nothing. A full list or live
   // event newer than the summary is kept as it is; the chat on screen keeps
   // its full list, which is re-read alongside the summary.
-  private applySpawnedWorkSummary(machineId: string, summary: SpawnedWorkSummary, issued: number) {
+  private applySpawnedWorkSummary(machineId: string, summary: SpawnedWorkSummary, issued: number, publish = true) {
     const byKey = new Map<string, SpawnedWorkSummary['chats'][number]>();
     for (const entry of summary.chats) {
       if (entry && entry.tabId && entry.chatId) byKey.set(spawnedWorkChatKey(entry.tabId, entry.chatId), entry);
@@ -6773,7 +6943,7 @@ export class Store {
         this.obligationSeq.delete(key);
       }
     }
-    this.bump(SPAWNED);
+    if (publish) this.bump(SPAWNED);
   }
   // What the chat still owes the user. Absent against an older daemon, in
   // which case the sidebar falls back to exactly its previous behaviour.

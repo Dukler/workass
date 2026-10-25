@@ -778,6 +778,10 @@ export interface WorkassApi {
     // ignores it and answers the whole bounded tail.
     lastExchange?: boolean;
     toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
+    // ifNoneMatch (additive, with tail): the rows come back as {etag,
+    // messages}, or as {unchanged, etag} while they are exactly the rows the
+    // client holds. An older daemon ignores it and answers the plain array.
+    ifNoneMatch?: string;
   }) => Promise<unknown>;
   visualizeHost?: (options: { tabId: string; chatId: string; path: string; mode?: 'wide'; title?: string }) => Promise<VisualizationRegistration>;
   appChatNewSession?: (opts: { cwd?: string | null; tabId?: string; chatId?: string; operationId: string; bridgeKey?: string; providerId?: string | null; sessionId?: string; replaceSessionId?: string; workspaceRebind?: boolean; expectedWorkspaceRevision?: number }) => Promise<AcpSessionInfo>;
@@ -946,10 +950,20 @@ export interface WorkassWindowApi {
   platform: string;
 }
 
+/** What the injected bridge sees of its socket (additive; older bridges lack it). */
+export interface WireState {
+  open: boolean; ready: boolean; lastMessageAt: number; pending: number;
+  lastBulkAt?: number; inTransitBytes?: number; inTransitSince?: number;
+  // The socket is open and a large frame is in transit or large frames keep
+  // arriving: a late reply is waiting behind them, not lost.
+  busy?: boolean;
+}
+
 declare global {
   interface Window {
     api?: WorkassApi;
     workassWindow?: WorkassWindowApi;
     __workassSocketGen?: number;
+    __workassWireState?: () => WireState;
   }
 }

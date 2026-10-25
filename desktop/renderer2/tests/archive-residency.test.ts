@@ -389,7 +389,7 @@ test('opening a metadata-only chat fetches ten recent rows before the no-blank h
     assert.equal(first.messages.length, firstRows.length);
     // The first screen asks for the last exchange; this daemon predates the
     // option and answers the whole tail, which paints at once as before.
-    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true } }]);
+    assert.deepEqual(archiveCalls, [{ tabId: target.id, options: { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true, ifNoneMatch: '' } }]);
 
     historyReleased = true;
     releaseHistory(targetRows.slice(-10));
@@ -450,7 +450,7 @@ test('opening a metadata-only chat paints its last exchange, then pages in the r
     assert.equal(target.messageCount, 92);
     assert.equal(subject.showsFirstScreenOnly(target.id), true);
     assert.deepEqual(archiveCalls, [
-      { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true },
+      { tail: 10, lastExchange: true, deferImages: true, leanTools: true, leanTitles: true, ifNoneMatch: '' },
       { beforeMessageId: 'message-90', limit: 8, deferImages: true, leanTools: true, leanTitles: true },
     ]);
 
