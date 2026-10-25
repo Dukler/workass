@@ -91,6 +91,12 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 					// ignores it and answers the whole bounded tail.
 					recent = providerChats.ProjectLastExchangeByTabRaw
 				}
+				// Additive conditional read: with {ifNoneMatch} the rows come
+				// back as {etag, messages}, or as a tiny {unchanged, etag}
+				// receipt while they are exactly the rows the client already
+				// holds (a reload repainting a chat from its window cache).
+				// Without it the reply is the plain array, as before.
+				ifNoneMatch, conditional := options["ifNoneMatch"].(string)
 				if messages, found, err := recent(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {
@@ -98,7 +104,13 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 					// actor ready for the send that may follow (after this
 					// reply, which finding the chat again must not delay).
 					go providerChats.PrewarmChatByTab(stringArg(args, 0))
+					if conditional {
+						return conditionalRowsReply(messages, ifNoneMatch), nil
+					}
 					return messages, nil
+				}
+				if conditional {
+					return conditionalRowsReply(wire.EncodedResult("[]"), ifNoneMatch), nil
 				}
 				return []any{}, nil
 			}
@@ -110,4 +122,14 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 		}
 		return []any{}, nil
 	})
+}
+
+// conditionalRowsReply names a row page by its content hash: {etag, messages},
+// or {etag, unchanged} when the client already holds exactly these rows.
+func conditionalRowsReply(rows wire.EncodedResult, ifNoneMatch string) wire.EncodedResult {
+	body := make([]byte, 0, len(rows)+16)
+	body = append(body, `{"messages":`...)
+	body = append(body, rows...)
+	body = append(body, '}')
+	return etagReply(body, ifNoneMatch)
 }
