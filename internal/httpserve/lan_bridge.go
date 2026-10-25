@@ -198,6 +198,10 @@ const LANBridgeJS = `(() => {
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
     spawnedWorkList: (tabId, chatId) => invoke('spawned-work:list', { tabId, chatId }),
+    // Every chat's running background rows, counts and obligation in one read.
+    // Additive: a renderer that finds it boots its sidebar from it instead of
+    // one spawned-work:list per chat; an older bridge simply lacks it.
+    spawnedWorkSummary: () => invoke('spawned-work:summary'),
     appUpdateWork: () => invoke('app-update:work'),
     chatCommandsGet: (tabId, chatId) => invoke('chat:commands-get', { tabId, chatId }),
     chatGoalGet: (tabId, chatId) => invoke('chat:goal-get', { tabId, chatId }),

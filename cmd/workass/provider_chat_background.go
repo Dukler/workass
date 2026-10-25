@@ -436,32 +436,98 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 	})
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		item := state.Background[id].Event
-		row := map[string]any{
-			"id": item.WorkID, "taskId": item.TaskID, "tabId": state.TabID, "chatId": state.ChatID,
-			"kind": item.Kind, "label": item.Title, "role": item.Role, "status": item.Status,
-			"startedAt": item.StartedAt, "updatedAt": item.UpdatedAt,
+		out = append(out, backgroundListRow(state, id))
+	}
+	return out, nil
+}
+
+// backgroundListRow is one spawned-work:list item. The batched summary sends
+// its running rows in this same shape, so a sidebar row drawn from either read
+// is identical.
+func backgroundListRow(state chat.ActivitySnapshot, id string) map[string]any {
+	item := state.Background[id].Event
+	row := map[string]any{
+		"id": item.WorkID, "taskId": item.TaskID, "tabId": state.TabID, "chatId": state.ChatID,
+		"kind": item.Kind, "label": item.Title, "role": item.Role, "status": item.Status,
+		"startedAt": item.StartedAt, "updatedAt": item.UpdatedAt,
+	}
+	lane := state.Lanes[state.Background[id].Owner.LaneID]
+	row["providerId"] = string(lane.ProviderID)
+	if item.Forked {
+		row["forked"] = true
+	}
+	for key, value := range map[string]any{
+		"toolCallId": item.ToolCallID, "finishedAt": item.FinishedAt, "exitCode": item.ExitCode,
+		"summary": item.Summary, "outputFile": item.OutputFile, "pid": item.PID,
+		"lastToolName": item.LastToolName, "modelLabel": item.ModelLabel, "resultExcerpt": item.ResultExcerpt,
+		// A list load must carry what live updates carry. Without the brand
+		// an agent row lost its model icon on every reload and regained it
+		// on the next live event (user 2026-10-16); without the parent, an
+		// agent's own shells stopped nesting under it.
+		"assistantBrand": item.AssistantBrand, "parentTaskId": item.ParentTaskID,
+	} {
+		if value != nil && fmt.Sprint(value) != "" {
+			row[key] = value
 		}
-		lane := state.Lanes[state.Background[id].Owner.LaneID]
-		row["providerId"] = string(lane.ProviderID)
-		if item.Forked {
-			row["forked"] = true
+	}
+	return row
+}
+
+// BackgroundSummary is the batched read a client boots its sidebar from
+// (spawned-work:summary): for every chat with background work or an open
+// obligation, its running rows in the spawned-work:list shape, its counts and
+// its obligation. A chat with neither is absent. Terminal rows stay behind
+// spawned-work:list, which a client reads only for a chat it opens: they
+// were most of every connect (one ~28 KB list per chat, about 500 per connect)
+// and nothing outside the chat's own work rail shows them. The obligation rides
+// here for every chat that has one, so a late client still sees what each chat
+// owes without reading any per-chat list.
+func (r *providerChatRuntime) BackgroundSummary() ([]map[string]any, error) {
+	ids, err := r.knownChatIDs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0)
+	for _, chatID := range ids {
+		actor, summary, err := r.residentOrClosed(chatID)
+		if err != nil {
+			return nil, err
 		}
-		for key, value := range map[string]any{
-			"toolCallId": item.ToolCallID, "finishedAt": item.FinishedAt, "exitCode": item.ExitCode,
-			"summary": item.Summary, "outputFile": item.OutputFile, "pid": item.PID,
-			"lastToolName": item.LastToolName, "modelLabel": item.ModelLabel, "resultExcerpt": item.ResultExcerpt,
-			// A list load must carry what live updates carry. Without the brand
-			// an agent row lost its model icon on every reload and regained it
-			// on the next live event (user 2026-10-16); without the parent, an
-			// agent's own shells stopped nesting under it.
-			"assistantBrand": item.AssistantBrand, "parentTaskId": item.ParentTaskID,
-		} {
-			if value != nil && fmt.Sprint(value) != "" {
-				row[key] = value
+		var state chat.ActivitySnapshot
+		if summary != nil {
+			state = summary.ActivitySnapshot()
+		} else {
+			state = actor.engine.ReadActivitySnapshot()
+		}
+		if state.Deleted || strings.TrimSpace(state.TabID) == "" {
+			continue
+		}
+		obligation := actorObligationProjection(state.Obligation)
+		if len(state.Background) == 0 && obligation == nil {
+			continue
+		}
+		running := make([]string, 0)
+		for id, item := range state.Background {
+			if item.Event.Status == "running" {
+				running = append(running, id)
 			}
 		}
-		out = append(out, row)
+		// The order spawned-work:list gives its running rows.
+		sort.SliceStable(running, func(i, j int) bool {
+			return state.Background[running[i]].Event.StartedAt > state.Background[running[j]].Event.StartedAt
+		})
+		rows := make([]map[string]any, 0, len(running))
+		for _, id := range running {
+			rows = append(rows, backgroundListRow(state, id))
+		}
+		entry := map[string]any{
+			"tabId": state.TabID, "chatId": state.ChatID, "running": rows,
+			"counts": map[string]any{"total": len(state.Background), "running": len(rows)},
+		}
+		if obligation != nil {
+			entry["obligation"] = obligation
+		}
+		out = append(out, entry)
 	}
 	return out, nil
 }

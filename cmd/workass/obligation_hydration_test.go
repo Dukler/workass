@@ -80,6 +80,32 @@ func TestSpawnedWorkListCarriesTheObligation(t *testing.T) {
 	if _, present := quiet["obligation"]; present {
 		t.Fatalf("quiet chat reply = %#v, want no obligation key", quiet)
 	}
+
+	// A late client now boots its sidebar from the batched read rather than
+	// one list per chat; it must carry the same obligation, and nothing for a
+	// chat that owes nothing.
+	raw, err := hub.Invoke("spawned-work:summary", nil)
+	if err != nil {
+		t.Fatalf("spawned-work:summary invoke: %v", err)
+	}
+	summary := roundTripJSON(t, raw)
+	chats, _ := summary["chats"].([]any)
+	var owes map[string]any
+	for _, entry := range chats {
+		row, _ := entry.(map[string]any)
+		switch row["tabId"] {
+		case "tab-1":
+			owes = row
+		case "tab-2":
+			t.Fatalf("summary lists the quiet chat: %#v", row)
+		}
+	}
+	if owes == nil || owes["chatId"] != "chat-1" {
+		t.Fatalf("summary = %#v, want the chat that owes something", summary)
+	}
+	if got, ok := owes["obligation"].(map[string]any); !ok || got["state"] != obligation["state"] || got["source"] != obligation["source"] {
+		t.Fatalf("summary obligation = %#v, want the list's %#v", owes["obligation"], obligation)
+	}
 }
 
 func invokeSpawnedWorkList(t *testing.T, hub *wire.Hub, tabID, chatID string) map[string]any {
