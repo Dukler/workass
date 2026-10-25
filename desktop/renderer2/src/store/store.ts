@@ -629,6 +629,10 @@ export class Store {
   private lastDigest: StateDigest | null = null;
   // The last full digest this daemon sent; its etag makes the next read conditional.
   private lastFullDigest: StateDigest | null = null;
+  // A session-refresh that arrived while boot was still hydrating; boot runs
+  // its digest probe once it is done.
+  private digestAfterBoot = false;
+  private booting = false;
   // The last session shell this window read, as its JSON text and etag. Sent
   // back as {ifNoneMatch}; an unchanged daemon answers with a receipt and the
   // text is parsed again instead of the whole shell crossing the wire.
@@ -3522,6 +3526,10 @@ export class Store {
     // renderer save echo back as a wholesale hydration.
     // A genuine reconnection is still driven by the socket-open path below.
     const bridge = typeof window !== 'undefined' ? window.api : undefined;
+    // Boot is still reading the session and permissions itself: a digest now
+    // would only compare against a store that is not hydrated yet (and cost a
+    // whole digest before the first paint). It runs once boot is done.
+    if (this.booting) { this.digestAfterBoot = true; return; }
     if (this.monitor && bridge) this.probeStateDigest(bridge);
     else this.scheduleScopedSync(['session', 'permissions']);
   }
@@ -3882,6 +3890,7 @@ export class Store {
     }
     // Before the first heartbeat, so it can already ask for the digest by etag.
     this.installWireCachePersistence();
+    this.booting = true;
 
     // Construct health/retry machinery before the first hydration await. A
     // dropped session:get can now reject and re-enter this monitor's backoff
@@ -4040,9 +4049,16 @@ export class Store {
       // Partial hydration is still a usable renderer. The monitor and digest
       // reconciliation path continues pulling any step that failed above.
       this.state.hydrated = true;
+      this.booting = false;
       this.bumpApp(false);
       this.recoverIdleQueues();
       this.refreshAllSpawnedWork();
+      if (this.digestAfterBoot) {
+        this.digestAfterBoot = false;
+        const bridge = typeof window !== 'undefined' ? window.api : undefined;
+        if (this.monitor && bridge) this.probeStateDigest(bridge);
+        else this.scheduleScopedSync(['session', 'permissions']);
+      }
     }
     // Subscription limits are account metadata, not a model turn. Attach or
     // resume only the active frontier chat after hydration so its limits are

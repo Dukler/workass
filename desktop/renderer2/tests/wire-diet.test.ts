@@ -263,6 +263,34 @@ function shell(chats: Chat[], etag?: string) {
   };
 }
 
+describe('boot', () => {
+  afterEach(restoreGlobals);
+
+  test('a session refresh during boot is answered by one digest after boot, not one before it', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let refresh: (event: unknown) => void = () => {};
+    let digests = 0;
+    const store = subject([], {
+      getSession: async () => { await gate; return shell([chat('tab-1')]); },
+      stateDigest: async () => { digests++; return { chats: [], globalRevision: 0, catalogHash: {}, settingsRevision: '', procHash: '' }; },
+      appMeta: async () => ({ rootDir: '/tmp', workspaceDir: '/tmp' }),
+      onAgentApply: (cb: (event: unknown) => void) => { refresh = cb; },
+    });
+    (globalThis as any).window.addEventListener = () => {};
+    const booted = store.init();
+    await settle();
+    refresh({ action: 'session-refresh' });
+    await settle();
+    assert.equal(digests, 0, 'a digest was read before the session it compares against');
+    release();
+    await booted;
+    await settle(); await settle();
+    assert.equal(digests, 1);
+    store.monitor?.stop();
+  });
+});
+
 describe('session shell by etag', () => {
   afterEach(restoreGlobals);
 
