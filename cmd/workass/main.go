@@ -1039,6 +1039,9 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		if err != nil {
 			return nil, err
 		}
+		if read.sessionShell {
+			return sessionShellReply(raw, fieldString(options, "ifNoneMatch")), nil
+		}
 		return wire.EncodedResult(raw), nil
 	})
 	hub.Register("session:save", func(args []any) (any, error) {
