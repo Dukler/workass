@@ -154,6 +154,70 @@ func TestSessionShellReadOmitsTheSelectedTailAndKeepsEveryOtherField(t *testing.
 	}
 }
 
+// A reload repaints the open chat from its window cache and revalidates its
+// first screen by etag. The conditional read names the exact rows of the plain
+// read, answers a client that holds them with a receipt, and leaves the plain
+// read (an older renderer's) byte-identical.
+func TestFirstScreenConditionalRead(t *testing.T) {
+	runtime, _ := sessionShellFixture(t)
+	hub := wire.NewHub()
+	registerArchiveHandlers(hub, nil, runtime)
+	read := func(options map[string]any) []byte {
+		t.Helper()
+		reply, err := hub.Invoke("chat:archive-load", []any{"tab-alpha", options})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(reply)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	base := map[string]any{"tail": 10, "lastExchange": true, "leanTools": true, "deferImages": true, "leanTitles": true}
+	with := func(extra map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+	plain := read(base)
+	if len(plain) == 0 || plain[0] != '[' {
+		t.Fatalf("plain first-screen read is not the array it always was: %.40s", plain)
+	}
+	var named struct {
+		Etag     string          `json:"etag"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(read(with(map[string]any{"ifNoneMatch": ""})), &named); err != nil {
+		t.Fatal(err)
+	}
+	if len(named.Etag) != 64 || string(named.Messages) != string(plain) {
+		t.Fatalf("conditional read = etag %q, rows equal to the plain read: %v", named.Etag, string(named.Messages) == string(plain))
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(read(with(map[string]any{"ifNoneMatch": named.Etag})), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt["unchanged"] != true || receipt["etag"] != named.Etag || len(receipt) != 2 {
+		t.Fatalf("unchanged first screen = %#v", receipt)
+	}
+	var stale struct {
+		Etag     string          `json:"etag"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(read(with(map[string]any{"ifNoneMatch": "stale"})), &stale); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Etag != named.Etag || string(stale.Messages) != string(plain) {
+		t.Fatal("a stale etag must get the rows")
+	}
+}
+
 // A running chat keeps its tail in the shell: the rows are what shows it as
 // running in the sidebar and lets its live turn resume on screen.
 func TestSessionShellKeepsARunningChatsTail(t *testing.T) {
