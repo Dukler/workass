@@ -1706,6 +1706,15 @@ test('an owned-frame evaluation is released when its session goes away or stops 
   hangs.add('Runtime.evaluate@child-eval-2');
   manager.childSessionCommandTimeoutMs = 30;
   await assert.rejects(manager.evaluateFrame(entry, 'frame-child', 'document.title'), /did not answer Runtime\.evaluate/);
+
+  // A snapshot shares one bounded budget across child frames that stopped
+  // answering instead of waiting the per-command cap for each of them.
+  manager.childSessionCommandTimeoutMs = 60_000;
+  manager.snapshotChildFramesBudgetMs = 50;
+  const started = Date.now();
+  const snapshot = await manager.browserControl('browser.snapshot', { tabId: Number(wc.id) });
+  assert.ok(Date.now() - started < 1000, 'the snapshot completes within its child-frame budget');
+  assert.ok(Array.isArray(snapshot.frames));
   manager.destroy();
 });
 
