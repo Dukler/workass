@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { flushSync } from 'react-dom';
 import {
-  browserApi, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, browserHostedInRenderer, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds,
 } from '../browser';
+import { presentBrowserPage, slotRect, SURFACE_Z_FLOAT, SURFACE_Z_FULL, withdrawBrowserPage } from '../browser-surface';
 import { store, useApp } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import type { Chat } from '../store/types';
@@ -95,6 +96,13 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
   const [url, setUrl] = useState('');
   const [blocked, setBlocked] = useState(false);
   const full = mode === 'full';
+  // The page is a <webview> this renderer draws (browser-surface.ts): it
+  // moves and resizes with the frame in the same frame, and menus and dialogs
+  // stack above it like any HTML.
+  const hosted = browserHostedInRenderer(api);
+  const slot = useRef(Symbol('floating-browser'));
+  // Places the hosted page over the frame now (no-op for the native host).
+  const placePage = useRef<() => void>(() => {});
   // Whether the frame element is on screen (full screen, or floating once measured).
   const framed = full || container !== null;
 
@@ -123,6 +131,7 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
   // until it goes, as the image lightbox always did. Never mid-gesture: a
   // frame dragged across the Working list must not blink out; the drop checks.
   useEffect(() => {
+    if (hosted) return;
     let frameRequest = 0;
     const check = () => {
       frameRequest = 0;
@@ -139,7 +148,7 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'open', 'role'] });
     schedule();
     return () => { observer.disconnect(); if (frameRequest) cancelAnimationFrame(frameRequest); checkOverlap.current = () => {}; };
-  }, [app.imageLightbox]);
+  }, [app.imageLightbox, hosted]);
 
   useLayoutEffect(() => { if (full) relayout.current = true; }, [full]);
 
@@ -155,6 +164,13 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
     let last: WorkassBrowserBounds | null = null;
     const viewportFor = (bounds: WorkassBrowserBounds) => (full ? browserViewportForBounds(bounds) : undefined);
     const radius = full ? 0 : FLOAT_RADIUS;
+    const owner = slot.current;
+    const place = () => {
+      if (!hosted || disposed || !el.isConnected) return;
+      presentBrowserPage(chat.id, owner, { rect: slotRect(el), radius, z: full ? SURFACE_Z_FULL : SURFACE_Z_FLOAT });
+    };
+    placePage.current = place;
+    place();
     const flush = async () => {
       if (!activated || syncing) return;
       syncing = true;
@@ -172,8 +188,9 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
       }
     };
     const run = () => {
+      place();
       // A gesture places the page itself (a shell that cannot keeps resize).
-      if (disposed || !el.isConnected || (gesture.current && api.place)) return;
+      if (disposed || !el.isConnected || (gesture.current && api.place && !hosted)) return;
       const bounds = rectOf(el);
       if (sameBrowserBounds(last, bounds)) return;
       pending = bounds;
@@ -204,11 +221,13 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
       layout.disconnect();
       removeEventListener('resize', run);
       if (sync.current === run) sync.current = () => {};
+      if (placePage.current === place) placePage.current = () => {};
+      if (hosted) withdrawBrowserPage(chat.id, owner);
       void api.hide(chat.id);
     };
     // The floating frame exists only once its container is measured, so
     // `framed` (frame present) is part of what this effect depends on.
-  }, [api, chat.id, chat.chatId, blocked, full, framed]);
+  }, [api, chat.id, chat.chatId, blocked, full, framed, hosted]);
 
   // The page follows the frame when it is re-placed or the chat area changes.
   useLayoutEffect(() => { sync.current(); }, [live, placement, width, container]);
@@ -235,7 +254,7 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
 
   if (full) {
     return (
-      <div ref={host} className="fbrw-full" role="region" aria-label="Navegador a pantalla completa">
+      <div ref={host} className={`fbrw-full${hosted ? ' hosted' : ''}`} role="region" aria-label="Navegador a pantalla completa">
         <div className="fbrw-fullbar">
           <span className="fbrw-url mono" title={url}>{url || 'Navegador'}</span>
           {controls}
@@ -276,6 +295,7 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
     const startX = event.clientX, startY = event.clientY;
     const active: Gesture = { kind, armed: false };
     gesture.current = active;
+    if (hosted) { trackHosted(target, pointerId, kind, start, startX, startY, active); return; }
     const native = typeof api.place === 'function';
     let ended = false;
     let latest = start;
@@ -364,6 +384,74 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
           checkOverlap.current();
         }
       })();
+    };
+    const onUp = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return;
+      latest = frameAt(next.clientX, next.clientY);
+      finish(true);
+    };
+    const onCancel = () => finish(true);
+    const onKey = (next: KeyboardEvent) => { if (next.key === 'Escape') finish(false); };
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+    target.addEventListener('pointercancel', onCancel);
+    target.addEventListener('lostpointercapture', onCancel);
+    addEventListener('blur', onCancel);
+    addEventListener('keydown', onKey, true);
+  };
+
+  // The hosted page follows the frame in the same frame, every pointer event:
+  // the frame's new place is committed to the DOM synchronously, then the page
+  // is placed over it, both before anything is painted. The pill and the
+  // shadow step out of sight while the gesture lasts (approved chrome).
+  const trackHosted = (target: HTMLElement, pointerId: number, kind: Gesture['kind'], start: FloatRect, startX: number, startY: number, active: Gesture) => {
+    let ended = false;
+    let latest = start;
+    let shown = false;
+    const frameAt = (clientX: number, clientY: number) => {
+      const box = containerRef.current ?? container!;
+      const delta = { x: clientX - startX, y: clientY - startY };
+      return kind === 'move' ? moveFloatFrame(start, delta, box) : resizeFloatFrame(start, kind, delta, box);
+    };
+    const follow = (next: FloatRect) => {
+      flushSync(() => { if (!shown) { shown = true; setMoving(true); } setLive(next); });
+      placePage.current();
+    };
+    const onMove = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId || ended) return;
+      latest = frameAt(next.clientX, next.clientY);
+      if (!shown && latest.x === start.x && latest.y === start.y && latest.width === start.width) return;
+      active.armed = true;
+      follow(latest);
+    };
+    const finish = (commit: boolean) => {
+      if (ended) return;
+      ended = true;
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onCancel);
+      target.removeEventListener('lostpointercapture', onCancel);
+      removeEventListener('blur', onCancel);
+      removeEventListener('keydown', onKey, true);
+      try { if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId); } catch { /* already released */ }
+      const final = commit ? latest : start;
+      if (!shown && final === start) {
+        if (gesture.current === active) gesture.current = null;
+        return;
+      }
+      const box = containerRef.current ?? container!;
+      const nextPlacement = placementOf(final, final, box, placement);
+      flushSync(() => {
+        setPlacement(nextPlacement);
+        if (kind !== 'move') setWidth(final.width);
+        setLive(null);
+        setMoving(false);
+      });
+      if (gesture.current === active) gesture.current = null;
+      placePage.current();
+      remember({ chatId: chat.id, placement: nextPlacement, ...(kind !== 'move' ? { width: final.width } : {}) });
+      // The shell hears the frame's final place (its size never changes the page's layout).
+      sync.current();
     };
     const onUp = (next: PointerEvent) => {
       if (next.pointerId !== pointerId) return;

@@ -14,6 +14,7 @@ const {
   attachNodeFacts, browserSnapshotForParams, detachNodeFacts, dropSecretFieldAxRows,
 } = require('./browser-snapshot-view');
 const { browserRead } = require('./browser-read');
+const { openGuestPip } = require('./browser-pip');
 
 const MAX_BROWSER_SNAPSHOT_BYTES = 64 * 1024;
 const SNAPSHOT_FRAME_LIMIT = 100;
@@ -65,6 +66,12 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = 20000;
 // browser's serialized operation queue (and every later navigation) forever.
 const CHILD_SESSION_COMMAND_TIMEOUT_MS = 10000;
 const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
+// How long a call waits for the app renderer to mount (or, after a reload,
+// mount again) a page's <webview> before it reports that the page is not up.
+const GUEST_ATTACH_TIMEOUT_MS = 20000;
+// A page an agent drove stays painting this long after its last call.
+const PAINT_IDLE_MS = 4000;
+const CAPTURE_TIMEOUT_MS = 12000;
 // Reasons that mean the child session no longer exists, so no protocol
 // command may be sent to it (or to detach it) anymore.
 const OWNED_TARGET_GONE_REASONS = new Set(['target_gone', 'target_crashed', 'debugger_lost']);
@@ -314,13 +321,25 @@ function cdpBrowserKey(parsed) {
 }
 
 class BrowserManager {
-  constructor({ win, WebContentsView, BrowserWindow, nativeImage, session, partition = DEFAULT_PARTITION, chromeVersion, platform, onState, requestOpen, onLifecycle }) {
+  constructor({
+    win, WebContentsView, BrowserWindow, nativeImage, session, partition = DEFAULT_PARTITION, chromeVersion, platform,
+    onState, requestOpen, onLifecycle, host = 'view', webContentsFromId = null, onHosts = null, pipPreload = '',
+  }) {
     if (!win || !WebContentsView || !session) throw new Error('browser manager dependencies missing');
     this.win = win;
     this.WebContentsView = WebContentsView;
     this.BrowserWindow = BrowserWindow || null;
     this.nativeImage = nativeImage || null;
     this.partition = partition;
+    // 'webview': every page is the guest of a <webview> the app renderer
+    // mounts, so it moves and resizes with the HTML around it. 'view': the
+    // page is a WebContentsView stacked over the window (the escape hatch).
+    this.hostMode = host === 'webview' ? 'webview' : 'view';
+    this.webContentsFromId = typeof webContentsFromId === 'function' ? webContentsFromId : () => null;
+    this.onHosts = typeof onHosts === 'function' ? onHosts : () => {};
+    this.pipPreload = String(pipPreload || '');
+    // Guests the app window attached through will-attach-webview (hardened).
+    this.attachedGuests = new WeakSet();
     this.artifactNavigations = new WeakMap();
     this.platform = platform || process.platform;
     this.profile = session.fromPartition(partition, { cache: true });
@@ -349,8 +368,9 @@ class BrowserManager {
   }
 
   publicState(entry) {
-    const wc = entry.view.webContents;
-    const history = wc.navigationHistory;
+    const wc = this.liveContents(entry);
+    const history = wc && !wc.isDestroyed?.() ? wc.navigationHistory : null;
+    const live = !!wc && !wc.isDestroyed?.();
     return {
       chatId: entry.chatId,
       url: redactPageMessage(entry.url || DEFAULT_URL),
@@ -359,8 +379,8 @@ class BrowserManager {
       error: entry.error ? redactPageMessage(entry.error) : null,
       canGoBack: !!(history && history.canGoBack && history.canGoBack()),
       canGoForward: !!(history && history.canGoForward && history.canGoForward()),
-      cdpAttached: !!(wc.debugger && wc.debugger.isAttached && wc.debugger.isAttached()),
-      persistent: !!(wc.session && wc.session.isPersistent && wc.session.isPersistent()),
+      cdpAttached: !!(live && wc.debugger && wc.debugger.isAttached && wc.debugger.isAttached()),
+      persistent: !!(live && wc.session && wc.session.isPersistent && wc.session.isPersistent()),
       agentControl: this.agentControl,
       viewport: { ...entry.viewport },
       effectiveViewport: entry.effectiveViewport ? { ...entry.effectiveViewport } : null,
@@ -370,7 +390,25 @@ class BrowserManager {
       presentationBounds: entry.presentationBounds ? { ...entry.presentationBounds } : null,
       presentationScale: entry.presentationScale,
       poppedOut: !!(entry.pipWindow && !entry.pipWindow.isDestroyed()),
+      host: this.hostMode,
+      ...(this.hostMode === 'webview' ? { hostKey: entry.hostKey, tabId: entry.tabId ?? null, attached: live } : {}),
     };
+  }
+
+  // The page's webContents, or null while a webview host is between guests
+  // (the app renderer reloaded and has not mounted the page's <webview> yet).
+  liveContents(entry) {
+    const wc = entry && entry.view ? entry.view.webContents : null;
+    return wc || null;
+  }
+
+  // A tab keeps one id for its whole life. In the webview host the page's
+  // webContents is replaced when the app renderer reloads, so the id is the
+  // first guest's (webContents ids are never reused in a process).
+  tabIdOf(entry) {
+    if (entry.tabId != null) return Number(entry.tabId);
+    const wc = this.liveContents(entry);
+    return wc ? Number(wc.id) : 0;
   }
 
   setAgentControlReady(ready) {
@@ -411,18 +449,22 @@ class BrowserManager {
 
   lifecycle(entry, stage, details = {}) {
     try {
-      this.onLifecycle({ stage, chatId: entry.chatId, tabId: Number(entry.view.webContents.id), ...details });
+      this.onLifecycle({ stage, chatId: entry.chatId, tabId: this.tabIdOf(entry), ...details });
     } catch { /* test/diagnostic observers cannot interrupt browser work */ }
   }
 
   bind(entry) {
     const wc = entry.view.webContents;
+    // A webview host replaces the page's webContents when the app renderer
+    // reloads; a late event from the replaced one must not touch the tab.
+    const current = () => entry.view.webContents === wc;
+    const on = (name, handler) => wc.on(name, (...args) => { if (current()) handler(...args); });
     const syncURL = (_event, url) => {
       entry.url = String(url || wc.getURL() || DEFAULT_URL);
       entry.error = null;
       this.publish(entry);
     };
-    wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (inPlace || isMainFrame === false) return;
       entry.mainNavigationPending = true;
       entry.appliedMetrics = null;
@@ -436,23 +478,27 @@ class BrowserManager {
     });
     // A page whose subframes never finish keeps loading forever; its main
     // document is still ready to observe once DOMContentLoaded has fired.
-    wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (!inPlace && isMainFrame !== false) entry.mainDocumentReady = false;
     });
-    wc.on('dom-ready', () => { entry.mainDocumentReady = true; });
-    wc.on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
-    wc.on('did-stop-loading', () => {
+    on('dom-ready', () => { entry.mainDocumentReady = true; });
+    on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
+    on('did-stop-loading', () => {
       entry.loading = false;
       entry.url = wc.getURL() || entry.url || DEFAULT_URL;
       this.publish(entry);
       this.retryDeferredViewport(entry);
     });
-    wc.on('did-navigate', (event, url) => {
+    on('did-navigate', (event, url) => {
       syncURL(event, url);
+      this.pinGuestZoom(entry);
       this.resyncViewSize(entry);
     });
-    wc.on('did-navigate-in-page', syncURL);
-    wc.on('did-finish-load', () => {
+    // A guest follows the app's zoom (and a pinch or a zoom shortcut while it
+    // has focus); the page itself always lays out at 1:1.
+    if (this.hostMode === 'webview') on('zoom-changed', () => this.pinGuestZoom(entry));
+    on('did-navigate-in-page', syncURL);
+    on('did-finish-load', () => {
       if (!entry.initialDocumentReady || wc.isDestroyed?.() || this.entries.get(entry.chatId) !== entry) return;
       const scale = this.attachedView === entry.view ? entry.presentationScale : 1;
       void this.applyAndReadDeviceEmulation(entry, entry.viewport, scale).then((effective) => {
@@ -465,15 +511,15 @@ class BrowserManager {
         this.publish(entry);
       });
     });
-    wc.on('page-title-updated', (_event, title) => { entry.title = String(title || ''); this.publish(entry); });
-    wc.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    on('page-title-updated', (_event, title) => { entry.title = String(title || ''); this.publish(entry); });
+    on('did-fail-load', (_event, code, description, url, isMainFrame) => {
       if (!isMainFrame || code === -3) return; // ERR_ABORTED is normal during redirects.
       entry.loading = false;
       entry.url = String(url || entry.url || DEFAULT_URL);
       entry.error = String(description || `load failed (${code})`);
       this.publish(entry);
     });
-    wc.on('render-process-gone', (_event, details) => {
+    on('render-process-gone', (_event, details) => {
       entry.loading = false;
       entry.appliedMetrics = null;
       this.interruptWaiters(entry, 'renderer_lost');
@@ -481,6 +527,20 @@ class BrowserManager {
       this.invalidateFrames(entry, null, 'renderer_lost');
       entry.error = `browser renderer stopped (${String(details && details.reason || 'unknown')})`;
       this.publish(entry);
+      // A hosted page's renderer that died is brought back in place (same tab,
+      // same URL), a few times a minute at most.
+      if (this.hostMode === 'webview' && String(details && details.reason || '') !== 'clean-exit') {
+        const now = Date.now();
+        entry.crashReloads = (entry.crashReloads || []).filter((at) => now - at < 60000);
+        if (entry.crashReloads.length < 3) {
+          entry.crashReloads.push(now);
+          const timer = setTimeout(() => {
+            if (!current() || wc.isDestroyed?.() || !this.isCurrentEntry(entry)) return;
+            try { wc.reload(); } catch { /* the guest is going away */ }
+          }, 400);
+          if (typeof timer?.unref === 'function') timer.unref();
+        }
+      }
     });
     wc.setWindowOpenHandler(({ url }) => ({
       action: /^https?:\/\//i.test(String(url || '')) ? 'allow' : 'deny',
@@ -498,10 +558,11 @@ class BrowserManager {
     }));
     if (wc.debugger && typeof wc.debugger.on === 'function') {
       wc.debugger.on('message', (_event, method, params, sessionId) => {
+        if (!current()) return;
         const currentSessionId = normalizeCDPSessionId(sessionId);
         const currentSession = currentSessionId == null || entry.targetSessions.has(currentSessionId);
         if (currentSession && !String(method || '').startsWith('Target.')) {
-          this.emitCDP({ tabId: Number(wc.id), method, params: params || {}, sessionId: currentSessionId });
+          this.emitCDP({ tabId: this.tabIdOf(entry), method, params: params || {}, sessionId: currentSessionId });
         }
         void this.handleCDPMessage(entry, method, params || {}, currentSessionId).catch((error) => {
           if (this.isCurrentEntry(entry)) {
@@ -531,7 +592,8 @@ class BrowserManager {
         }
       });
       wc.debugger.on('detach', (_event, reason) => {
-        this.emitCDP({ tabId: Number(wc.id), detach: true, reason: String(reason || 'detached') });
+        if (!current()) return;
+        this.emitCDP({ tabId: this.tabIdOf(entry), detach: true, reason: String(reason || 'detached') });
         entry.cdpReady = false;
         this.interruptWaiters(entry, 'debugger_lost');
         this.cancelOwnedTargetTasks(entry, () => true, 'debugger_lost');
@@ -661,7 +723,7 @@ class BrowserManager {
     if (!accepted) return false;
     entry.targetSessions.delete(sessionId);
     this.releaseSessionCommands(entry, sessionId);
-    this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + accepted.targetId);
+    this.childSessions.delete(String(this.tabIdOf(entry)) + ':' + accepted.targetId);
     const explicitDetach = reason === 'explicit_detach';
     this.invalidateFrames(entry, accepted.frameId, explicitDetach ? 'target_detached' : reason);
     const frame = entry.frames.get(accepted.frameId);
@@ -679,7 +741,7 @@ class BrowserManager {
     for (const [nestedId, nestedTarget] of nested) {
       entry.targetSessions.delete(nestedId);
       this.releaseSessionCommands(entry, nestedId);
-      this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + nestedTarget.targetId);
+      this.childSessions.delete(String(this.tabIdOf(entry)) + ':' + nestedTarget.targetId);
       for (const key of Array.from(entry.executionContexts.keys())) if (key.startsWith(nestedTarget.targetId + ':')) entry.executionContexts.delete(key);
       this.invalidateFrames(entry, nestedTarget.frameId, explicitDetach ? 'target_detached' : 'target_destroyed');
       if (explicitDetach) {
@@ -1101,7 +1163,7 @@ class BrowserManager {
     const accepted = { targetId, frameId, parentSessionId: parentSessionId || null, sessionId: childSessionId };
     entry.targetSessions.set(childSessionId, accepted);
     if (task) task.accepted = true;
-    this.childSessions.set(String(Number(entry.view.webContents.id)) + ':' + targetId, childSessionId);
+    this.childSessions.set(String(this.tabIdOf(entry)) + ':' + targetId, childSessionId);
     candidate.targetId = targetId;
     candidate.sessionId = childSessionId;
     candidate.loaderId = String(root.loaderId || candidate.loaderId || '');
@@ -1145,7 +1207,7 @@ class BrowserManager {
       for (const [id, target] of sessions) {
         entry.targetSessions.delete(id);
         this.releaseSessionCommands(entry, id);
-        this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + target.targetId);
+        this.childSessions.delete(String(this.tabIdOf(entry)) + ':' + target.targetId);
         this.invalidateFrames(entry, target.frameId, 'target_destroyed');
       }
       return;
@@ -1157,7 +1219,7 @@ class BrowserManager {
         if (target.targetId !== targetId) continue;
         entry.targetSessions.delete(id);
         this.releaseSessionCommands(entry, id);
-        this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + target.targetId);
+        this.childSessions.delete(String(this.tabIdOf(entry)) + ':' + target.targetId);
         this.invalidateFrames(entry, target.frameId, 'target_crashed');
       }
       return;
@@ -1324,6 +1386,7 @@ class BrowserManager {
   }
 
   create(chatId) {
+    if (this.hostMode === 'webview') return this.createHosted(chatId);
     const view = new this.WebContentsView({
       webPreferences: {
         partition: this.partition,
@@ -1333,7 +1396,227 @@ class BrowserManager {
         navigateOnDragDrop: false,
       },
     });
-    const entry = {
+    const entry = this.newEntry(chatId, view);
+    try { view.setBackgroundColor('#ffffff'); } catch { /* older Electron */ }
+    try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
+    entry.tabId = Number(view.webContents.id);
+    this.entries.set(chatId, entry);
+    this.bind(entry);
+    const lifecycleToken = entry.lifecycleToken;
+    entry.ready = this.initializeEntry(entry, lifecycleToken).catch((error) => {
+      if (entry.closed || entry.lifecycleToken !== lifecycleToken || this.entries.get(entry.chatId) !== entry) return false;
+      entry.error = redactPageMessage(error && error.message || error);
+      this.publish(entry);
+      return false;
+    });
+    return entry;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The webview host. The app renderer mounts one <webview> per page (main.js
+  // hardens it in will-attach-webview) and hands its guest webContents back
+  // with registerGuest. The page then moves, resizes and composites with the
+  // HTML around it. Every agent path below runs on the guest unchanged.
+  //
+  // A reload or crash of the app renderer destroys every guest. The tab keeps
+  // its id, URL and place: the reloaded renderer mounts it again, the new
+  // guest is registered under the same host key, and the page is loaded back
+  // at its last URL in the same persistent session (sign-ins intact). Agent
+  // calls made meanwhile wait for it, bounded.
+  createHosted(chatId) {
+    const entry = this.newEntry(chatId, { webContents: null, hosted: true });
+    entry.hostKey = 'wkb-' + crypto.randomBytes(9).toString('base64url');
+    entry.guestGeneration = 0;
+    this.entries.set(chatId, entry);
+    entry.ready = this.awaitGuest(entry);
+    this.publishHosts();
+    return entry;
+  }
+
+  hostList() {
+    return Array.from(this.entries.values())
+      .filter((entry) => !entry.closed && entry.hostKey)
+      .map((entry) => ({
+        hostKey: entry.hostKey,
+        chatId: entry.chatId,
+        tabId: entry.tabId ?? null,
+        viewport: { ...entry.viewport },
+        visible: entry.visible === true,
+        poppedOut: !!(entry.pipWindow && !entry.pipWindow.isDestroyed()),
+      }))
+      .sort((a, b) => a.hostKey.localeCompare(b.hostKey));
+  }
+
+  publishHosts() {
+    if (this.hostMode !== 'webview') return;
+    try { this.onHosts(this.hostList()); } catch { /* renderer may be reloading */ }
+  }
+
+  awaitGuest(entry) {
+    const lifecycleToken = entry.lifecycleToken;
+    const generation = (entry.guestWaitGeneration || 0) + 1;
+    entry.guestWaitGeneration = generation;
+    return new Promise((resolve) => {
+      const timeoutMs = this.guestAttachTimeoutMs ?? GUEST_ATTACH_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        if (entry.guestWaiter?.generation !== generation) return;
+        entry.guestWaiter = null;
+        if (!this.isCurrentEntry(entry, lifecycleToken)) return resolve(false);
+        entry.error = 'the browser page did not come up in the Workass window; open the browser pane, or try again in a moment';
+        this.publish(entry);
+        // A later registration still brings the page up for the next call.
+        entry.ready = this.awaitGuest(entry);
+        resolve(false);
+      }, timeoutMs);
+      if (typeof timer?.unref === 'function') timer.unref();
+      entry.guestWaiter = {
+        generation,
+        settle: (value) => { clearTimeout(timer); entry.guestWaiter = null; resolve(value); },
+      };
+    });
+  }
+
+  // main.js reports every guest the app window attached after hardening it.
+  noteAttachedGuest(contents) {
+    if (contents && typeof contents === 'object') this.attachedGuests.add(contents);
+  }
+
+  // The app renderer hands over the guest it mounted for a host key.
+  registerGuest(hostKey, webContentsId) {
+    if (this.hostMode !== 'webview') return { ok: false, reason: 'this shell hosts pages in native views' };
+    const entry = Array.from(this.entries.values()).find((candidate) => candidate.hostKey === String(hostKey || ''));
+    if (!entry || entry.closed) return { ok: false, reason: 'unknown browser page' };
+    const guest = this.webContentsFromId(Number(webContentsId));
+    if (!guest || guest.isDestroyed?.() || !this.attachedGuests.has(guest)) return { ok: false, reason: 'not a page this window attached' };
+    if (typeof guest.getType === 'function' && guest.getType() !== 'webview') return { ok: false, reason: 'not a webview guest' };
+    if (guest.hostWebContents && guest.hostWebContents !== this.win.webContents) return { ok: false, reason: 'guest belongs to another window' };
+    if (guest.session && this.profile && guest.session !== this.profile) return { ok: false, reason: 'guest is not in the browser profile' };
+    if (entry.view.webContents === guest) return { ok: true, tabId: this.tabIdOf(entry), already: true };
+    for (const other of this.entries.values()) {
+      if (other !== entry && other.view.webContents === guest) return { ok: false, reason: 'guest already belongs to another page' };
+    }
+    if (entry.view.webContents && !entry.view.webContents.isDestroyed?.()) {
+      return { ok: false, reason: 'this page already has a live guest' };
+    }
+    void this.adoptGuest(entry, guest);
+    return { ok: true, tabId: entry.tabId ?? Number(guest.id) };
+  }
+
+  async adoptGuest(entry, guest) {
+    const lifecycleToken = entry.lifecycleToken;
+    const restoring = entry.guestGeneration > 0;
+    entry.guestGeneration += 1;
+    entry.view.webContents = guest;
+    if (entry.tabId == null) entry.tabId = Number(guest.id);
+    entry.cdpReady = false;
+    entry.rootTargetId = null;
+    entry.initialDocumentReady = false;
+    entry.appliedMetrics = null;
+    entry.focusEmulated = false;
+    entry.focusChange = null;
+    entry.captureInFlight = null;
+    try { guest.setUserAgent(this.userAgent); } catch { /* best effort */ }
+    this.pinGuestZoom(entry);
+    this.bind(entry);
+    guest.once('destroyed', () => this.guestGone(entry, guest));
+    this.lifecycle(entry, 'guest-attached', { restoring, generation: entry.guestGeneration });
+    let ready = false;
+    try {
+      await this.initializeGuest(entry, lifecycleToken);
+      ready = true;
+      if (restoring && /^https?:\/\//i.test(String(entry.restoreURL || ''))) {
+        const target = entry.restoreURL;
+        entry.restoreURL = null;
+        entry.loading = true;
+        entry.url = target;
+        this.artifactNavigations.set(guest, target);
+        this.publish(entry);
+        try {
+          await this.loadNavigationTarget(entry, target);
+          entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, 1);
+        } catch (error) {
+          entry.error = redactPageMessage(error && error.message || error);
+        }
+      }
+    } catch (error) {
+      if (this.isCurrentEntry(entry, lifecycleToken) && entry.view.webContents === guest) {
+        entry.error = redactPageMessage(error && error.message || error);
+      }
+    }
+    if (!this.isCurrentEntry(entry, lifecycleToken) || entry.view.webContents !== guest) return;
+    this.publish(entry);
+    this.publishHosts();
+    if (entry.guestWaiter) entry.guestWaiter.settle(ready);
+    else entry.ready = Promise.resolve(ready);
+  }
+
+  async initializeGuest(entry, lifecycleToken) {
+    const wc = entry.view.webContents;
+    // The renderer mounts the guest on about:blank; make sure that document
+    // committed before metrics are applied, as the native host does.
+    if (!wc.getURL() || wc.isLoadingMainFrame?.()) {
+      await wc.loadURL(DEFAULT_URL);
+      this.assertCurrentEntry(entry, lifecycleToken);
+    }
+    const initialDocument = await wc.executeJavaScript('({ url: location.href, readyState: document.readyState })');
+    this.assertCurrentEntry(entry, lifecycleToken);
+    if (!initialDocument || initialDocument.readyState === 'loading') {
+      throw new Error('browser initial document did not become ready');
+    }
+    entry.initialDocumentReady = true;
+    if (!await this.ensureCDP(entry)) throw new Error('browser page debugger is unavailable');
+    this.assertCurrentEntry(entry, lifecycleToken);
+    entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, 1);
+    this.assertCurrentEntry(entry, lifecycleToken);
+    if (!entry.viewportGeneration) entry.viewportGeneration = 1;
+    try { await wc.debugger.sendCommand('Runtime.enable'); } catch { /* metrics and basic page control remain available */ }
+    return true;
+  }
+
+  // The page lays out at 1:1 whatever the app's zoom is (a guest follows the
+  // app's zoom unless told otherwise).
+  pinGuestZoom(entry) {
+    if (this.hostMode !== 'webview') return;
+    const wc = this.liveContents(entry);
+    if (!wc || wc.isDestroyed?.() || typeof wc.getZoomFactor !== 'function') return;
+    try { if (Math.abs(wc.getZoomFactor() - 1) > 1e-6) wc.setZoomFactor(1); } catch { /* closing */ }
+  }
+
+  // The app renderer reloaded or crashed (or the page's element went away
+  // without a close): keep the tab, wait for its next guest.
+  guestGone(entry, guest) {
+    if (entry.closed || entry.view.webContents !== guest || this.entries.get(entry.chatId) !== entry) return;
+    entry.view.webContents = null;
+    entry.cdpReady = false;
+    entry.rootTargetId = null;
+    entry.initialDocumentReady = false;
+    entry.appliedMetrics = null;
+    entry.loading = false;
+    entry.visible = false;
+    this.interruptWaiters(entry, 'renderer_lost');
+    this.cancelOwnedTargetTasks(entry, () => true, 'renderer_lost');
+    this.invalidateFrames(entry, null, 'renderer_lost');
+    for (const [sessionId] of Array.from(entry.targetSessions.entries())) this.releaseSessionCommands(entry, sessionId);
+    entry.targetSessions.clear();
+    entry.executionContexts.clear();
+    entry.frames.clear();
+    entry.observations.clear();
+    entry.screenshots.clear();
+    entry.documentGeneration += 1;
+    entry.interactionGeneration += 1;
+    entry.frameTreeGeneration += 1;
+    entry.focusEmulated = false;
+    entry.focusChange = null;
+    entry.captureInFlight = null;
+    if (/^https?:\/\//i.test(String(entry.url || ''))) entry.restoreURL = entry.url;
+    this.lifecycle(entry, 'guest-lost', { restoreURL: !!entry.restoreURL });
+    entry.ready = this.awaitGuest(entry);
+    this.publish(entry);
+    this.publishHosts();
+  }
+
+  newEntry(chatId, view) {
+    return {
       chatId, view, url: DEFAULT_URL, title: '', loading: false, error: null,
       viewport: { ...DEFAULT_VIEWPORT }, effectiveViewport: null, viewportGeneration: 0,
       documentGeneration: 0, visible: false, presentationBounds: null, presentationScale: 1,
@@ -1346,18 +1629,6 @@ class BrowserManager {
       pendingTargetTasks: new Set(), mainNavigationPending: false,
       autoAttachAvailable: false, waits: new Set(), executionContexts: new Map(),
     };
-    try { view.setBackgroundColor('#ffffff'); } catch { /* older Electron */ }
-    try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
-    this.entries.set(chatId, entry);
-    this.bind(entry);
-    const lifecycleToken = entry.lifecycleToken;
-    entry.ready = this.initializeEntry(entry, lifecycleToken).catch((error) => {
-      if (entry.closed || entry.lifecycleToken !== lifecycleToken || this.entries.get(entry.chatId) !== entry) return false;
-      entry.error = redactPageMessage(error && error.message || error);
-      this.publish(entry);
-      return false;
-    });
-    return entry;
   }
 
   recordDiagnostic(entry, kind, text) {
@@ -1499,6 +1770,13 @@ class BrowserManager {
   // reloaded renderer presents it again, with its controls.
   hideAll() {
     this.presentationEpoch += 1;
+    if (this.hostMode === 'webview') {
+      // The page is drawn by the renderer that is going away; nothing to take
+      // off screen. Its guest goes with it and is replaced on the next mount.
+      this.activeId = null;
+      for (const entry of this.entries.values()) entry.visible = false;
+      return Promise.resolve();
+    }
     const shown = this.attachedView;
     const entry = shown ? this.browserEntries().find((candidate) => candidate.view === shown) : null;
     if (shown) {
@@ -1520,6 +1798,7 @@ class BrowserManager {
   // same bounds is a no-op, so the size is stepped and put back in one task;
   // only the final bounds are ever composited.
   resyncViewSize(entry) {
+    if (this.hostMode === 'webview') return;
     try {
       const bounds = entry.view.getBounds();
       if (!bounds || bounds.width < 2 || bounds.height < 2) return;
@@ -1607,10 +1886,54 @@ class BrowserManager {
   serialize(entry, operation) {
     const next = entry.operationChain.catch(() => {}).then(() => {
       this.assertCurrentEntry(entry);
-      return operation();
+      return this.withPainting(entry, operation);
     });
     entry.operationChain = next.catch(() => {});
     return next;
+  }
+
+  // Webview host: a guest that is not on screen paints no frames, so a
+  // capture would wait for one forever and focus() would fire nothing. While
+  // an agent drives a page it is emulated focused, which Chromium treats like
+  // a captured page and keeps painting; a few seconds after the last call it
+  // goes back to ordinary throttling (after t3code's DesktopBrowserHost).
+  async withPainting(entry, operation) {
+    if (this.hostMode !== 'webview') return operation();
+    this.holdPainting(entry);
+    try {
+      if (entry.focusChange) await entry.focusChange;
+      return await operation();
+    } finally {
+      this.releasePainting(entry);
+    }
+  }
+
+  holdPainting(entry) {
+    entry.paintHolds = (entry.paintHolds || 0) + 1;
+    clearTimeout(entry.paintIdleTimer);
+    entry.paintIdleTimer = null;
+    if (!entry.focusEmulated) this.setFocusEmulation(entry, true);
+  }
+
+  releasePainting(entry) {
+    entry.paintHolds = Math.max(0, (entry.paintHolds || 0) - 1);
+    if (entry.paintHolds || entry.closed) return;
+    clearTimeout(entry.paintIdleTimer);
+    entry.paintIdleTimer = setTimeout(() => {
+      entry.paintIdleTimer = null;
+      if (!entry.paintHolds && !entry.captureInFlight && !entry.pip) this.setFocusEmulation(entry, false);
+    }, this.paintIdleMs ?? PAINT_IDLE_MS);
+    if (typeof entry.paintIdleTimer?.unref === 'function') entry.paintIdleTimer.unref();
+  }
+
+  setFocusEmulation(entry, enabled) {
+    const wc = this.liveContents(entry);
+    entry.focusEmulated = enabled;
+    if (!wc || wc.isDestroyed?.() || !wc.debugger?.isAttached?.()) { entry.focusChange = null; return; }
+    const change = Promise.resolve(wc.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled }))
+      .then(() => undefined, () => undefined)
+      .finally(() => { if (entry.focusChange === change) entry.focusChange = null; });
+    entry.focusChange = change;
   }
 
   // Before a navigation: give owned iframe setup that is already running a
@@ -1784,6 +2107,7 @@ class BrowserManager {
 
   async ensureCaptureHost(entry) {
     this.assertCurrentEntry(entry);
+    if (this.hostMode === 'webview') throw new Error('a hosted page has no separate capture surface');
     if (entry.captureHost && !entry.captureHost.isDestroyed()) return entry.captureHost;
     if (!this.BrowserWindow) throw new Error('hidden browser capture host is unavailable in this shell');
     const host = new this.BrowserWindow({
@@ -1866,6 +2190,24 @@ class BrowserManager {
   async attach(entry) {
     this.assertCurrentEntry(entry);
     const epoch = this.presentationEpoch;
+    if (this.hostMode === 'webview') {
+      // The renderer places and scales the page itself; the page keeps its
+      // logical viewport at 1:1.
+      entry.presentationScale = 1;
+      this.pinGuestZoom(entry);
+      if (!this.metricsApplied(entry, entry.viewport, 1)) {
+        try {
+          entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, 1);
+        } catch {
+          this.deferViewport(entry);
+        }
+        this.assertCurrentEntry(entry);
+      }
+      if (epoch !== this.presentationEpoch) return;
+      for (const other of this.entries.values()) if (other !== entry) other.visible = false;
+      entry.visible = true;
+      return;
+    }
     // The capture host keeps a background page at its logical viewport size.
     // Prepare the fitted bounds and metrics while it is still hidden: adding
     // that full-size view to the visible window first paints over the chat.
@@ -1977,7 +2319,7 @@ class BrowserManager {
     entry.presentationBounds = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (viewport) await this.setViewportSerialized(entry, viewport, false);
-    if (this.attachedView === entry.view) await this.attach(entry);
+    if (this.attachedView === entry.view || (this.hostMode === 'webview' && entry.visible)) await this.attach(entry);
     return true;
   }
 
@@ -1989,6 +2331,8 @@ class BrowserManager {
   // scale, so the page never paints past its bounds. Scale changes are
   // coalesced: one is in flight at a time and the latest one wins.
   place(chatId, bounds) {
+    // A hosted page moves with its frame in the renderer itself.
+    if (this.hostMode === 'webview') return true;
     const entry = this.entries.get(safeChatId(chatId));
     if (!entry || this.attachedView !== entry.view || this.activeId !== entry.chatId || !entry.presentationBounds) return false;
     const next = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
@@ -2044,6 +2388,7 @@ class BrowserManager {
       return this.publish(entry);
     }
     if (!this.BrowserWindow) throw new Error('a separate browser window is unavailable in this shell');
+    if (this.hostMode === 'webview') return this.popOutHosted(entry);
     if (this.attachedView === entry.view) {
       try { this.win.contentView.removeChildView(entry.view); } catch { /* window is already closing */ }
       this.attachedView = null;
@@ -2101,6 +2446,37 @@ class BrowserManager {
     return this.publish(entry);
   }
 
+  // The webview host: the page stays in the app (out of sight, still
+  // painting) and the window shows it live (browser-pip.js).
+  async popOutHosted(entry) {
+    if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+    const guest = this.liveContents(entry);
+    if (!guest || guest.isDestroyed?.()) throw new Error('the browser page is not up yet; try again in a moment');
+    let title = 'Workass';
+    try { title = `Workass · ${new URL(entry.url || DEFAULT_URL).host || 'navegador'}`; } catch { /* about:blank */ }
+    const pip = openGuestPip({
+      BrowserWindow: this.BrowserWindow,
+      guest,
+      embedder: this.win && this.win.webContents,
+      title,
+      viewport: { ...entry.viewport },
+      preload: this.pipPreload,
+      sendInput: (event) => this.executeCDP({ tabId: this.tabIdOf(entry) }, 'Input.dispatchMouseEvent', event),
+      onClosed: () => {
+        if (entry.pip !== pip) return;
+        entry.pip = null;
+        entry.pipWindow = null;
+        if (this.isCurrentEntry(entry)) { this.publish(entry); this.publishHosts(); }
+      },
+    });
+    entry.pip = pip;
+    entry.pipWindow = pip.window;
+    entry.visible = false;
+    if (this.activeId === entry.chatId) this.activeId = null;
+    this.publishHosts();
+    return this.publish(entry);
+  }
+
   popIn(chatId) {
     const entry = this.entries.get(safeChatId(chatId));
     if (!entry || !entry.pipWindow || entry.pipWindow.isDestroyed()) return false;
@@ -2111,6 +2487,14 @@ class BrowserManager {
   // Taking the page back for the app: forget the separate window first, so its
   // closing never re-homes the view the app is about to show.
   releasePipWindow(entry) {
+    if (entry.pip) {
+      const pip = entry.pip;
+      entry.pip = null;
+      entry.pipWindow = null;
+      pip.close();
+      this.publishHosts();
+      return;
+    }
     const win = entry.pipWindow;
     if (!win) return;
     entry.pipWindow = null;
@@ -2125,6 +2509,11 @@ class BrowserManager {
   async hideSerialized(chatId) {
     const id = safeChatId(chatId);
     const entry = this.entries.get(id);
+    if (entry && this.hostMode === 'webview') {
+      entry.visible = false;
+      if (this.activeId === id) this.activeId = null;
+      return true;
+    }
     if (!entry || this.attachedView !== entry.view) return false;
     try { this.win.contentView.removeChildView(entry.view); } catch { /* owning window already gone */ }
     this.attachedView = null;
@@ -2213,13 +2602,14 @@ class BrowserManager {
   }
 
   tabInfo(entry) {
-    const wc = entry.view.webContents;
+    const wc = this.liveContents(entry);
+    const liveURL = wc && !wc.isDestroyed?.() ? wc.getURL() : '';
     return {
-      id: Number(wc.id),
+      id: this.tabIdOf(entry),
       ...this.publicState(entry),
       chatId: entry.chatId,
       conversationId: entry.conversationId || null,
-      url: redactPageMessage(wc.getURL() || entry.url || DEFAULT_URL),
+      url: redactPageMessage(liveURL || entry.url || DEFAULT_URL),
       title: redactPageMessage(entry.title || ''),
       active: this.activeId === entry.chatId,
       viewport: { ...entry.viewport },
@@ -2245,7 +2635,7 @@ class BrowserManager {
   entryForTab(tabId) {
     const id = Number(tabId);
     if (!Number.isInteger(id) || id <= 0) throw new Error('invalid browser tab id');
-    const entry = this.browserEntries().find((candidate) => Number(candidate.view.webContents.id) === id);
+    const entry = this.browserEntries().find((candidate) => this.tabIdOf(candidate) === id);
     if (!entry) throw new Error(`browser tab not found: ${id}`);
     return entry;
   }
@@ -2388,7 +2778,7 @@ class BrowserManager {
   // the browser has focused at that moment. The top page (and a frame
   // sharing its renderer) is addressed through the tab.
   inputTargetForFrame(entry, frameId) {
-    const tabId = Number(entry.view.webContents.id);
+    const tabId = this.tabIdOf(entry);
     const frame = frameId != null ? entry.frames.get(String(frameId)) : null;
     const owned = frame && frame.sessionId ? entry.targetSessions.get(frame.sessionId) : null;
     if (!owned || owned.targetId !== frame.targetId) return { tabId };
@@ -3784,11 +4174,13 @@ class BrowserManager {
     return { coordinates: true };
   }
 
-  async mapFramePointToRoot(entry, frameId, point) {
+  // stopAtFrameId: map only up to that ancestor (a frame's own renderer root),
+  // so input can be sent straight to the widget that draws it.
+  async mapFramePointToRoot(entry, frameId, point, { stopAtFrameId = null } = {}) {
     let frame = entry.frames.get(String(frameId));
     if (!frame || frame.detached) return { status: 'stale', reason: 'observed frame was replaced; refresh the snapshot' };
     let mappedPoint = { x: Number(point.x), y: Number(point.y) };
-    while (frame.parentFrameId) {
+    while (frame.parentFrameId && frame.id !== stopAtFrameId) {
       const parent = entry.frames.get(frame.parentFrameId);
       if (!parent || parent.detached) return { status: 'stale', reason: 'observed frame parent was removed; refresh the snapshot' };
       const sessionId = parent.sessionId || undefined;
@@ -3979,12 +4371,27 @@ class BrowserManager {
         return { ok: false, status: 'blocked', reason: 'target is outside the visible page viewport' };
       }
     }
-    const tabId = Number(entry.view.webContents.id);
+    const tabId = this.tabIdOf(entry);
     const targetFrame = target.frameId ? entry.frames.get(target.frameId) : null;
-    const inputTarget = targetFrame?.access === 'owned_oopif' && targetFrame.sessionId
-      ? { tabId, targetId: targetFrame.targetId, sessionId: targetFrame.sessionId }
-      : { tabId };
-    const inputPoint = inputTarget.sessionId ? frameLocalPoint : point;
+    // A frame inside a cross-site frame's renderer (that frame itself, or a
+    // same-site child of it) gets the click on that renderer's own widget, at
+    // the point mapped up to the widget's root frame. Routing a click from the
+    // top page down into another renderer depends on its hit-test data, which a
+    // page that is not on screen may not have produced.
+    const owned = targetFrame?.sessionId ? entry.targetSessions.get(targetFrame.sessionId) : null;
+    let inputTarget = { tabId };
+    let inputPoint = point;
+    if (owned && frameLocalPoint) {
+      let widgetPoint = frameLocalPoint;
+      if (owned.frameId !== targetFrame.id) {
+        const mapped = await this.mapFramePointToRoot(entry, targetFrame.id, frameLocalPoint, { stopAtFrameId: owned.frameId });
+        widgetPoint = mapped.status === 'ready' ? mapped : null;
+      }
+      if (widgetPoint) {
+        inputTarget = { tabId, targetId: owned.targetId, sessionId: targetFrame.sessionId };
+        inputPoint = { x: widgetPoint.x, y: widgetPoint.y };
+      }
+    }
     await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: inputPoint.x, y: inputPoint.y });
     await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
     await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
@@ -4007,6 +4414,7 @@ class BrowserManager {
       return { result, png, dimensions };
     };
 
+    if (this.hostMode === 'webview') return this.captureHostedPng(entry, captureParams, decode);
     const expandedExtent = options.expandedExtent;
     if (expandedExtent && (expandedExtent.width > entry.viewport.width || expandedExtent.height > entry.viewport.height)) {
       const original = {
@@ -4143,8 +4551,95 @@ class BrowserManager {
     throw new Error(`browser capture failed on the first surface (${String(firstError && firstError.message || firstError)}) and the same-page hidden host (${String(fallbackError && fallbackError.message || fallbackError)})`);
   }
 
+  // One capture at a time per page, bounded. Chromium below 157 can bring the
+  // whole app down when a guest's renderer exits with a screenshot copy in
+  // flight (crbug.com/567321049; this shell pins Chromium 150), and a capture
+  // given up on stays pending in Chromium: a later one waits for it to settle
+  // rather than overlapping it.
+  async captureHostedPng(entry, captureParams, decode) {
+    const wc = this.liveContents(entry);
+    if (!wc || wc.isDestroyed?.()) throw new Error('the browser page is not up; try again in a moment');
+    if (entry.captureInFlight) {
+      await this.boundedCapture(entry.captureInFlight, 'an earlier screenshot of this page is still being taken; try again in a moment');
+    }
+    this.assertCurrentEntry(entry);
+    let release;
+    const turn = new Promise((resolve) => { release = resolve; });
+    entry.captureInFlight = turn;
+    try {
+      const png = await this.capturePageRegion(entry, wc, captureParams.clip);
+      return { ...decode({ data: png.toString('base64') }), surface: 'webview' };
+    } finally {
+      if (entry.captureInFlight === turn) entry.captureInFlight = null;
+      release();
+    }
+  }
+
+  boundedCapture(promise, message) {
+    const limitMs = this.captureTimeoutMs ?? CAPTURE_TIMEOUT_MS;
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), limitMs); }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  // A webview guest is captured from its own surface (webContents
+  // capturePage): sharp whatever size the page is shown at, and whatever
+  // covers it. (Page.captureScreenshot on a guest copies the window's
+  // composited output instead: blurry when the page is shown small, and
+  // waiting forever while the app covers it.) The guest's view is its
+  // viewport at 1:1, so view coordinates are the viewport's CSS pixels. A
+  // region beyond the viewport is taken one viewport at a time, scrolling the
+  // page there and back.
+  async capturePageRegion(entry, wc, clip) {
+    if (!this.nativeImage) throw new Error('image encoding is unavailable in this shell');
+    const at = await this.readEffectiveViewport(entry);
+    const vw = at.width;
+    const vh = at.height;
+    const outW = Math.max(1, Math.round(clip.width));
+    const outH = Math.max(1, Math.round(clip.height));
+    const snap = async (rect, width, height) => {
+      const capture = Promise.resolve(wc.capturePage({
+        x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)),
+      }));
+      const image = await this.boundedCapture(capture, `the page did not give a frame within ${Math.round((this.captureTimeoutMs ?? CAPTURE_TIMEOUT_MS) / 1000)}s; try again, or reload it if it stays stuck`);
+      if (!image || image.isEmpty()) throw new Error('browser capture returned an empty image');
+      const size = image.getSize();
+      return size.width === width && size.height === height ? image : image.resize({ width, height, quality: 'best' });
+    };
+    const inside = clip.x >= at.scrollX - 0.5 && clip.y >= at.scrollY - 0.5 &&
+      clip.x + clip.width <= at.scrollX + vw + 0.5 && clip.y + clip.height <= at.scrollY + vh + 0.5;
+    if (inside) {
+      return (await snap({ x: clip.x - at.scrollX, y: clip.y - at.scrollY, width: clip.width, height: clip.height }, outW, outH)).toPNG();
+    }
+    if (clip.width > vw + 0.5) {
+      throw new Error(`a capture wider than the page's viewport (${vw} CSS pixels) is not available here; capture a narrower clip or set a wider viewport`);
+    }
+    const pixels = Buffer.alloc(outW * outH * 4);
+    const scrollTo = (x, y) => this.evaluateMainWorld(entry, `(async () => { scrollTo({ left: ${JSON.stringify(x)}, top: ${JSON.stringify(y)}, behavior: 'instant' }); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); return { x: scrollX, y: scrollY }; })()`);
+    let row = 0;
+    try {
+      while (row < outH) {
+        const want = clip.y + row;
+        const scrolled = await this.boundedCapture(Promise.resolve(scrollTo(clip.x, want)), 'the page did not scroll for the capture');
+        const top = want - Number(scrolled?.y || 0);
+        const left = clip.x - Number(scrolled?.x || 0);
+        if (top < 0 || top >= vh || left < 0 || left + clip.width > vw + 0.5) throw new Error('the page could not be scrolled to the requested region');
+        const rows = Math.min(outH - row, Math.floor(vh - top));
+        if (rows <= 0) throw new Error('the page could not be scrolled to the requested region');
+        const bitmap = (await snap({ x: left, y: top, width: clip.width, height: rows }, outW, rows)).toBitmap();
+        bitmap.copy(pixels, row * outW * 4, 0, Math.min(bitmap.length, rows * outW * 4));
+        row += rows;
+      }
+    } finally {
+      try { await scrollTo(at.scrollX, at.scrollY); } catch { /* the page navigated; nothing to restore */ }
+    }
+    return this.nativeImage.createFromBitmap(pixels, { width: outW, height: outH }).toPNG();
+  }
+
   browserScreenshot(entry, params = {}) {
-    return this.serializePresentation(() => this.browserScreenshotSerialized(entry, params));
+    return this.serializePresentation(() => this.withPainting(entry, () => this.browserScreenshotSerialized(entry, params)));
   }
 
   async browserScreenshotSerialized(entry, params = {}) {
@@ -4168,6 +4663,14 @@ class BrowserManager {
     if (mode === 'viewport') {
       cssRect = { x: effective.scrollX, y: effective.scrollY, width: entry.viewport.width, height: entry.viewport.height };
       captureParams.clip = { ...cssRect, scale: 1 };
+    } else if (mode === 'full_page' && this.hostMode === 'webview') {
+      // A hosted page is captured from its own surface, one viewport at a
+      // time (captureHostedPng); the page's width is the viewport's.
+      const metrics = await wc.debugger.sendCommand('Page.getLayoutMetrics');
+      const content = metrics && (metrics.cssContentSize || metrics.contentSize);
+      cssRect = { x: 0, y: 0, width: Math.min(Number(content?.width), entry.viewport.width), height: Number(content?.height) };
+      fullPageRasterExtent = { width: Math.ceil(cssRect.width), height: Math.ceil(cssRect.height) };
+      captureParams.clip = { ...cssRect, ...fullPageRasterExtent, scale: 1 };
     } else if (mode === 'full_page') {
       const metrics = await wc.debugger.sendCommand('Page.getLayoutMetrics');
       const content = metrics && (metrics.cssContentSize || metrics.contentSize);
@@ -4193,7 +4696,7 @@ class BrowserManager {
     const expectedSize = fullPageRasterExtent
       ? { minWidth: fullPageRasterExtent.width, maxWidth: fullPageRasterExtent.width, minHeight: fullPageRasterExtent.height, maxHeight: fullPageRasterExtent.height }
       : captureRasterBounds(cssRect);
-    const captureSurfaceOptions = mode === 'full_page'
+    const captureSurfaceOptions = mode === 'full_page' && this.hostMode !== 'webview'
       ? {
         expandedExtent: {
           width: Math.max(entry.viewport.width, Math.ceil(cssRect.x + fullPageRasterExtent.width)),
@@ -4333,7 +4836,7 @@ class BrowserManager {
         stopPendingEvaluation();
         let tab;
         try { tab = this.tabInfo(entry); }
-        catch { tab = { id: Number(entry.view.webContents.id), chatId: redactPageMessage(entry.chatId, 256), closed: true }; }
+        catch { tab = { id: this.tabIdOf(entry), chatId: redactPageMessage(entry.chatId, 256), closed: true }; }
         resolve({ ...value, state: safeState(value.state || lastState), tab });
       };
       const waiter = {
@@ -4604,7 +5107,7 @@ class BrowserManager {
     if (method === 'browser.screenshot') {
       return this.browserScreenshot(entry, params);
     }
-    if (method === 'browser.wait') return this.browserWait(entry, params);
+    if (method === 'browser.wait') return this.withPainting(entry, () => this.browserWait(entry, params));
     if (method === 'browser.diagnostics') {
       const after = params.afterSequence == null ? 0 : Number(params.afterSequence);
       const limit = params.limit == null ? 20 : Number(params.limit);
@@ -4641,11 +5144,12 @@ class BrowserManager {
     entry.diagnosticBytes = 0;
     entry.documentGeneration += 1;
     entry.interactionGeneration += 1;
-    const tabId = Number(entry.view.webContents.id);
+    const tabId = this.tabIdOf(entry);
     for (const [sessionId, target] of Array.from(entry.targetSessions.entries())) {
       this.childSessions.delete(`${tabId}:${target.targetId}`);
       try {
-        void entry.view.webContents.debugger.sendCommand('Target.detachFromTarget', { sessionId }, target.parentSessionId || undefined).catch(() => {});
+        const debug = this.liveContents(entry)?.debugger;
+        if (debug) void Promise.resolve(debug.sendCommand('Target.detachFromTarget', { sessionId }, target.parentSessionId || undefined)).catch(() => {});
       } catch { /* debugger may already be gone */ }
       entry.targetSessions.delete(sessionId);
       this.releaseSessionCommands(entry, sessionId);
@@ -4653,6 +5157,20 @@ class BrowserManager {
     entry.executionContexts.clear();
     entry.frames.clear();
     this.releasePipWindow(entry);
+    if (entry.guestWaiter) entry.guestWaiter.settle(false);
+    if (this.hostMode === 'webview') {
+      // The renderer drops the page's <webview> (its guest goes with it); a
+      // renderer that is gone or busy does not keep the page alive.
+      entry.visible = false;
+      if (this.activeId === id) this.activeId = null;
+      this.publishHosts();
+      const guest = this.liveContents(entry);
+      if (guest) {
+        const timer = setTimeout(() => { try { if (!guest.isDestroyed()) guest.close(); } catch { /* already gone */ } }, 1500);
+        if (typeof timer?.unref === 'function') timer.unref();
+      }
+      return true;
+    }
     try { entry.view.webContents.close(); } catch { /* already gone */ }
     try { if (entry.captureHost && !entry.captureHost.isDestroyed()) entry.captureHost.destroy(); } catch { /* host teardown is idempotent */ }
     entry.captureHost = null;
