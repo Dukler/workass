@@ -59,6 +59,15 @@ const LANBridgeJS = `(() => {
     // Ask the daemon to announce large frames before writing them (additive;
     // an older daemon ignores the parameter).
     params.set('progress', '1');
+    // The provider list this window kept (renderer2 store, wire cache entry
+    // "providers-list": its etag, a newline, its JSON): the connect replay
+    // skips it while it is still that list (additive; an older daemon
+    // ignores the parameter).
+    try {
+      const kept = sessionStorage.getItem('workass.renderer2.wire-cache.providers-list') || '';
+      const etag = kept.slice(0, kept.indexOf('\n'));
+      if (/^[0-9a-f]{64}$/.test(etag)) params.append('replayKnown', 'providers:list:' + etag);
+    } catch (_) { /* no storage: the replay is sent */ }
     const qs = params.toString();
     return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + (qs ? '?' + qs : '');
   }
@@ -252,8 +261,8 @@ const LANBridgeJS = `(() => {
     appChatFork: (o) => invoke('app-chat:fork', o),
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
     chatDiff: (o) => invoke('chat:diff', o), chatEnvGet: (o) => invoke('chat:env-get', o),
-    providersList: () => invoke('providers:list'), providersCatalog: () => invoke('providers:catalog'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
-    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch } : { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
+    providersList: (o) => o && o.ifNoneMatch ? invoke('providers:list', { ifNoneMatch: o.ifNoneMatch }) : invoke('providers:list'), providersCatalog: () => invoke('providers:catalog'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
+    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? (o.byURL === true ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch, byURL: true } : { chatId, cwd, ifNoneMatch: o.ifNoneMatch }) : { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
     chatPermissionDecide: (id, optionId) => invoke('chat:permission-decide', { id, optionId }),
     chatPendingPermissions: () => invoke('chat:permissions-pending'),

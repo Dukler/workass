@@ -358,7 +358,7 @@ function DispositivosPanel() {
       <div className="gtitle">Clientes con acceso</div>
       <div className="group">
         {devices.length === 0
-          ? <div className="lrow"><div className="body"><span className="empty">Sin dispositivos aprobados todavía.</span></div></div>
+          ? (app.devicesLoaded === false ? null : <div className="lrow"><div className="body"><span className="empty">Sin dispositivos aprobados todavía.</span></div></div>)
           : devices.map((d) => <DeviceRow key={d.deviceId} d={d} />)}
       </div>
       <div className="ghint">Cada cliente aprobado recibe su propio acceso. Revocar elimina únicamente ese cliente; no se administran usuarios, contraseñas ni direcciones manuales.</div>

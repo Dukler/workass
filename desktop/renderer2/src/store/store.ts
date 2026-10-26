@@ -13,6 +13,7 @@ import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
 import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache, type WireCacheEntry } from './wire-cache';
+import { applyShellDelta, isShellDelta, pageSettledBefore, parseDeferredChats, type SessionPageRequest } from './session-page';
 import { browserApi, localBrowserOwnsChat } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
@@ -437,11 +438,16 @@ const SESSION_SHELL_CACHE = 'session-shell';
 const STATE_DIGEST_CACHE = 'state-digest';
 const SPAWNED_WORK_SUMMARY_CACHE = 'spawned-work-summary';
 const SPAWNED_WORK_LIST_CACHE = 'spawned-work-list';
+// The local provider list; the bridge reads this entry's etag on connect
+// (internal/httpserve/lan_bridge.go), so the name is shared with it.
+const PROVIDERS_LIST_CACHE = 'providers-list';
 // The open chat's first screen (the rows of its last exchange), so a reload
 // repaints the chat before the socket is even open.
 const FIRST_SCREEN_CACHE = 'first-screen';
 const FIRST_SCREEN_CACHE_CHARS = 2_000_000;
 const SPAWNED_WORK_LIST_CACHE_LIMIT = 16;
+// A search keystroke waits this long for the next before asking the daemon.
+const PAGE_SEARCH_DEBOUNCE_MS = 120;
 
 function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function') return;
@@ -637,6 +643,23 @@ export class Store {
   // back as {ifNoneMatch}; an unchanged daemon answers with a receipt and the
   // text is parsed again instead of the whole shell crossing the wire.
   private sessionShell: WireCacheEntry | null = null;
+  // What the paged shell is asked for beyond what the sidebar shows (see
+  // sessionPageRequest): chats this window was asked to open, and the
+  // sidebar's search.
+  private pageIncludes = new Set<string>();
+  private pageSearch: { needle: string; labels: [string, string][] } | null = null;
+  private pageSearchLoaded = false;
+  private pageSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  private pageSearchTicket = 0;
+  // Local providers:list events received (the daemon replays one per socket).
+  private localProvidersEvents = 0;
+  // This window's chat order is a paged shell's partial one (see
+  // adoptLocalSnapshotOrder).
+  private localChatOrderPartial = false;
+  // The local provider list this window keeps for its next load (wire cache
+  // "providers-list"), named by the etag the daemon computes for it.
+  private providersCacheEtag = '';
+  private providersCacheEpoch = 0;
   // The same for the local daemon's spawned-work summary.
   private spawnedWorkSummaryCache: WireCacheEntry | null = null;
   // And for the full spawned-work lists this window read, by tab+chat key.
@@ -680,6 +703,7 @@ export class Store {
     this.manualChatOrder = normalizeChatOrder(mirror?.chatOrder);
     this.state = this.fromMirror(mirror);
     this.paintFromWireCache();
+    this.paintProvidersFromWireCache();
     this.state.chats = this.orderChats(this.state.chats);
     for (const chat of this.state.chats) {
       this.committedPresentationFingerprints.set(chat.id, presentationFingerprint(chat));
@@ -713,6 +737,7 @@ export class Store {
     try { painted = this.fromMirror(shell); } catch { return; }
     const localActive = this.state.activeId;
     this.state.chats = painted.chats;
+    this.state.deferredChats = painted.deferredChats;
     this.state.workspaces = painted.workspaces;
     this.state.collapsedWorkspaces = painted.collapsedWorkspaces;
     this.state.removedWorkspaces = painted.removedWorkspaces;
@@ -742,6 +767,36 @@ export class Store {
       this.spawnedWorkSummaryCache = summaryEntry;
       this.applySpawnedWorkSummary('', summary, 0, false);
     }
+  }
+
+  // The provider list this window kept paints at once. The bridge names it
+  // on the socket URL, so the daemon's connect replay skips it while it is
+  // unchanged (and sends it otherwise), and boot confirms it by etag.
+  private paintProvidersFromWireCache() {
+    const entry = readWireCache(PROVIDERS_LIST_CACHE);
+    const kept = parseWireCache<unknown>(entry);
+    if (!entry || !Array.isArray(kept)) return;
+    this.providersCacheEtag = entry.etag;
+    this.onProvidersList(kept as ProviderRecord[]);
+  }
+
+  // Keeps the local provider list as the daemon sent it, named by the hash the
+  // daemon computes for it (json.Marshal, reproduced by stateDigestHash).
+  // Written at once, not at pagehide: the bridge reads it on every connect.
+  private rememberProvidersList(providers: unknown) {
+    if (!Array.isArray(providers)) return;
+    const epoch = ++this.providersCacheEpoch;
+    void stateDigestHash(providers).then((etag) => {
+      if (epoch !== this.providersCacheEpoch) return;
+      if (!etag) {
+        this.providersCacheEtag = '';
+        writeWireCache(PROVIDERS_LIST_CACHE, '', '');
+        return;
+      }
+      if (etag === this.providersCacheEtag) return;
+      this.providersCacheEtag = etag;
+      try { writeWireCache(PROVIDERS_LIST_CACHE, etag, JSON.stringify(providers)); } catch { writeWireCache(PROVIDERS_LIST_CACHE, '', ''); }
+    });
   }
 
   // Everything kept for a reload that could still name a chat this window
@@ -777,6 +832,10 @@ export class Store {
 
   private adoptLocalSnapshotOrder(mirror: Mirror, localChats: readonly Chat[]) {
     const localIDs = new Set(localChats.map((chat) => chat.id));
+    // A paged shell's order names only the chats it sent (and other
+    // machines'). This window's order is then partial too, and its saves say
+    // so: the daemon folds them into the whole order (session_page.go).
+    this.localChatOrderPartial = mirror.chatOrderPartial === true;
     // This daemon is authoritative for untagged membership. Tagged ids name
     // another machine and may be absent from the snapshot while that link is
     // reconnecting, so they remain anchored.
@@ -1201,12 +1260,21 @@ export class Store {
     // every ordinary chat pulse. Once that receipt ledger grew large, one live
     // turn became a permanent save/get/GC loop. Only a real global mutation (or
     // the stable retry of one already in flight) crosses session:save now.
-    if (globalChanged || this.pendingGlobalPresentationOperation) {
+    // A partial chat order is only ever sent to a daemon that folds it into
+    // the whole one; any other would keep it as the whole order. Until this
+    // window holds a whole order again (its next shell from such a daemon),
+    // the global save waits.
+    const orderHeld = this.localChatOrderPartial && this.state.meta?.chatOrderMode !== 'partial-v1';
+    if (orderHeld && (globalChanged || this.pendingGlobalPresentationOperation)) {
+      savedOK = false;
+      this.schedulePersist(1000);
+    } else if (globalChanged || this.pendingGlobalPresentationOperation) {
       if (!this.pendingGlobalPresentationOperation || this.pendingGlobalPresentationOperation.fingerprint !== globalFingerprint) {
         this.pendingGlobalPresentationOperation = { fingerprint: globalFingerprint, operationId: rid('global-op') };
       }
       snapshot.globalRevision = this.state.globalRevision;
       snapshot._workassGlobalOperationId = this.pendingGlobalPresentationOperation.operationId;
+      if (this.localChatOrderPartial) snapshot.chatOrderPartial = true;
       const saved = await call('saveSession', snapshot);
       savedOK = saved === true || (!!saved && typeof saved === 'object' && saved.ok === true);
       if (saved && typeof saved === 'object' && saved.ok === true) this.state.globalRevision = saved.globalRevision;
@@ -1231,7 +1299,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelScores: {}, modelFavorites: [], planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelScores: {}, modelFavorites: [], planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -1240,7 +1308,7 @@ export class Store {
       settingsOpen: false, settingsSection: 'agentes', commandBarOpen: false,
       machines: [], hasMachineChannels: false, hasFleetKey: false,
       fleetKeys: [], fleetCanReveal: false, hasFleetKeyChannels: false,
-      hasDeviceChannels: false, devices: [], accessRequests: [],
+      hasDeviceChannels: false, devices: [], devicesLoaded: false, accessRequests: [],
       hasConfigChannel: false,
       rewind: { open: false, tabId: null, chatId: null, loading: false, items: [] },
       review: { open: false, tabId: null, chatId: null, loading: false, repos: [], diffLoading: false },
@@ -1251,6 +1319,7 @@ export class Store {
       updateProgress: {},
     };
     if (!m) return base;
+    base.deferredChats = parseDeferredChats(m.deferredChats);
     base.workspaces = normalizeWorkspaces(m.workspaces);
     base.collapsedWorkspaces = Array.isArray(m.collapsedWorkspaces) ? m.collapsedWorkspaces.filter((p) => typeof p === 'string') : [];
     base.removedWorkspaces = Array.isArray(m.removedWorkspaces) ? m.removedWorkspaces.filter((p): p is string => typeof p === 'string').map(normalizeWorkspacePath) : [];
@@ -1414,7 +1483,9 @@ export class Store {
         const step = await this.guardedStep(
           `recent actor history (${chatId})`,
           () => call('archiveLoad', chatId, {
-            tail: limit, ...(firstScreen ? { lastExchange: true } : {}), ...HISTORY_READ_OPTIONS,
+            // toolSummaries (additive): a settled turn's calls arrive as what
+            // its folded Worked row shows; a row reads the rest when it opens.
+            tail: limit, ...(firstScreen ? { lastExchange: true, toolSummaries: true } : {}), ...HISTORY_READ_OPTIONS,
             ...(conditional ? { ifNoneMatch: repaint ? provisional!.etag : '' } : {}),
           }),
         );
@@ -2342,6 +2413,7 @@ export class Store {
       previousChats,
       this.carryPendingCreatedChats(previousChats, restored.chats),
     ));
+    this.state.deferredChats = restored.deferredChats;
     // Keep the create fence alive through the merge above. The actor row can
     // become visible before daemon-global chatOrder catches up; clearing first
     // allowed that early echo to move a freshly created thread to the bottom.
@@ -2478,9 +2550,25 @@ export class Store {
   // answers the ordinary projection, which carries no etag and is not kept.
   private async readSessionShell(label: string): Promise<{ ok: true; value: unknown } | { ok: false; value?: undefined }> {
     const cached = this.sessionShell ?? readWireCache(SESSION_SHELL_CACHE);
+    // This daemon's shell is paged (session-page.ts) and a changed one may
+    // come back as a delta against the kept one. An older daemon ignores both.
+    const read = { ...LEAN_SESSION_READ, page: this.sessionPageRequest(), delta: true };
     if (cached) {
-      const step = await this.guardedStep(label, () => callThrow('getSession', { ...LEAN_SESSION_READ, ifNoneMatch: cached.etag }));
+      const step = await this.guardedStep(label, () => callThrow('getSession', { ...read, ifNoneMatch: cached.etag }));
       if (!step.ok) return step;
+      if (isShellDelta(step.value)) {
+        const rebuilt = applyShellDelta(parseWireCache<unknown>(cached), cached.etag, step.value);
+        if (rebuilt) {
+          this.rememberSessionShell(rebuilt);
+          return { ok: true, value: rebuilt };
+        }
+        // A delta against a shell this window does not hold: read it whole.
+        this.sessionShell = null;
+        writeWireCache(SESSION_SHELL_CACHE, '', '');
+        const whole = await this.guardedStep(label, () => callThrow('getSession', read));
+        if (whole.ok) this.rememberSessionShell(whole.value);
+        return whole;
+      }
       const receipt = !!step.value && typeof step.value === 'object' && (step.value as { unchanged?: unknown }).unchanged === true;
       if (!receipt) {
         this.rememberSessionShell(step.value);
@@ -2498,9 +2586,93 @@ export class Store {
       this.sessionShell = null;
       writeWireCache(SESSION_SHELL_CACHE, '', '');
     }
-    const step = await this.guardedStep(label, () => callThrow('getSession', LEAN_SESSION_READ));
+    const step = await this.guardedStep(label, () => callThrow('getSession', read));
     if (step.ok) this.rememberSessionShell(step.value);
     return step;
+  }
+
+  // What this window asks a paged read for (session:get, state:digest and
+  // spawned-work:summary carry the same request, so the daemon lists the same
+  // chats in all three): everything the sidebar shows without a search, the
+  // chat on screen, the chats it was asked to open, and the matches of the
+  // sidebar's search. Ids of another machine are harmless: the daemon lists
+  // only its own.
+  private sessionPageRequest(): SessionPageRequest {
+    const include = new Set<string>(this.pageIncludes);
+    if (this.state?.activeId) include.add(this.state.activeId);
+    if (this.pendingAgentFocus?.tabId) include.add(this.pendingAgentFocus.tabId);
+    const request: SessionPageRequest = { settledBefore: pageSettledBefore(), include: [...include].filter((id) => !machineOf(id)) };
+    if (this.pageSearch) {
+      request.search = this.pageSearch.needle;
+      request.labels = this.pageSearch.labels;
+    }
+    return request;
+  }
+
+  /**
+   * The sidebar's search. A paged shell left the archive on the daemon, so a
+   * search asks the daemon for its matches too; they arrive as ordinary rows
+   * of the next shell and the sidebar filters them like every other row.
+   * Clearing the search lets the next shell drop them again.
+   */
+  setSidebarSearch(needle: string, labels: [string, string][]) {
+    const clean = needle.trim().toLowerCase();
+    const next = clean ? { needle: clean, labels } : null;
+    if ((next?.needle ?? '') === (this.pageSearch?.needle ?? '')) return;
+    this.pageSearch = next;
+    if (!this.state.deferredChats?.count && !this.pageSearchLoaded) return;
+    this.pageSearchLoaded = !!next;
+    if (this.pageSearchTimer) clearTimeout(this.pageSearchTimer);
+    const ticket = ++this.pageSearchTicket;
+    this.setSidebarSearchPending(!!next);
+    this.pageSearchTimer = setTimeout(() => {
+      this.pageSearchTimer = null;
+      this.queueAgentRefresh('search', async () => {
+        try {
+          await this.refreshPagedSession('search session:get');
+        } finally {
+          if (ticket === this.pageSearchTicket) this.setSidebarSearchPending(false);
+        }
+      });
+    }, next ? PAGE_SEARCH_DEBOUNCE_MS : 0);
+  }
+
+  private setSidebarSearchPending(pending: boolean) {
+    if (!!this.state.sidebarSearchPending === pending) return;
+    this.state.sidebarSearchPending = pending;
+    this.bumpApp(false);
+  }
+
+  // One paged shell read applied in place, for a change of what the page
+  // asks for (a search, a chat to open) rather than of the daemon's state.
+  private async refreshPagedSession(label: string): Promise<boolean> {
+    const liveEventFence = this.liveTurnEventVersion;
+    const result = await this.readSessionShell(label);
+    if (!result.ok || !this.restoreSessionSnapshot(result.value, liveEventFence)) return false;
+    this.recoverIdleQueues();
+    this.bumpApp(false);
+    return true;
+  }
+
+  /**
+   * Makes a chat of this daemon a row of this window, reading it from the
+   * daemon if the paged shell left it out (a notification, a link, an agent
+   * focusing it). Resolves true once the row is here.
+   */
+  async ensureChatLoaded(tabId: string): Promise<boolean> {
+    if (this.chat(tabId)) return true;
+    if (!tabId || machineOf(tabId) || !this.state.deferredChats?.count || !has('getSession')) return false;
+    this.pageIncludes.add(tabId);
+    let loaded = false;
+    await new Promise<void>((resolve) => {
+      this.queueAgentRefresh('open chat', async () => {
+        try { loaded = await this.refreshPagedSession('open session:get') && !!this.chat(tabId); } finally { resolve(); }
+      });
+    });
+    // Once it is the chat on screen the page lists it on its own; until then
+    // it stays asked for, so a refresh in between does not drop it again.
+    if (!loaded) this.pageIncludes.delete(tabId);
+    return loaded;
   }
 
   // Keep a shell that names its etag. A shell carrying a running chat's rows is
@@ -2625,7 +2797,10 @@ export class Store {
     // the argument and sends the full digest, which is used as before.
     const cached = this.lastFullDigest;
     const etag = typeof cached?.etag === 'string' && cached.etag ? cached.etag : '';
-    const reply = await (etag ? bridge.stateDigest({ ifNoneMatch: etag }) : bridge.stateDigest());
+    // {page}: the digest covers the chats the paged shell lists, which are
+    // the rows this window holds (an older daemon ignores it).
+    const page = this.sessionPageRequest();
+    const reply = await (etag ? bridge.stateDigest({ ifNoneMatch: etag, page }) : bridge.stateDigest({ page }));
     let digest: StateDigest;
     if (cached && etag && isUnchangedStateDigest(reply, etag)) digest = cached;
     else if (isStateDigest(reply)) {
@@ -3505,7 +3680,9 @@ export class Store {
     if (event.focus === true && typeof event.tabId === 'string' && event.tabId
       && typeof event.chatId === 'string' && event.chatId) {
       this.pendingAgentFocus = { tabId: event.tabId, chatId: event.chatId };
-      this.applyPendingAgentFocus();
+      // A filed chat the paged shell left out is read first; the restore
+      // that brings its row applies the focus.
+      if (!this.applyPendingAgentFocus()) void this.ensureChatLoaded(event.tabId);
     }
     if (event.created === true && event.tabId && event.chatId
       && !this.state.chats.some((chat) => chat.id === event.tabId && chat.chatId === event.chatId)) {
@@ -3840,10 +4017,14 @@ export class Store {
     // in the provider replay set, so this only keeps the card live after turns;
     // fresh-client hydration is refreshChatEnv() via chat:env-get.
     on('onChatEnv', (e) => this.onChatEnv(e as ChatEnvPayload));
-    on('onProvidersList', (providers) => this.onProvidersList(
-      providers as ProviderRecord[],
-      machineScopeOf(providers),
-    ));
+    on('onProvidersList', (providers) => {
+      const machineId = machineScopeOf(providers);
+      if (!machineId && Array.isArray(providers)) {
+        this.localProvidersEvents += 1;
+        this.rememberProvidersList(providers);
+      }
+      this.onProvidersList(providers as ProviderRecord[], machineId);
+    });
     on('onProcChanged', (e) => this.onProcChanged(e as ProcChanged));
     on('onLanAccessRequest', (r) => this.onAccessRequest(r as AccessRequest));
     on('onLanAccessRequestClosed', (r) => { const id = String((r as { requestId?: string })?.requestId || ''); if (id) this.clearRequest(id); });
@@ -3992,6 +4173,7 @@ export class Store {
       this.state.appUpdate = live.appUpdate;
       this.state.updateProgress = live.updateProgress;
       this.state.devices = live.devices;
+      this.state.devicesLoaded = live.devicesLoaded;
       this.state.accessRequests = live.accessRequests;
       this.rebuildJobRefs();
       this.requireFullSave();
@@ -4017,12 +4199,16 @@ export class Store {
       this.releaseInactiveHistories(this.state.activeId);
       this.refreshVisibleRecentHistory(this.active());
     }
+    // ...and publish it now: the reads below are a round trip each, and the
+    // list waited for all of them (a reload paints from its window cache
+    // before any of them, so nothing on screen needs them first).
+    if (receivedSession) this.bumpApp(false);
 
     // Dispositivos (real): device list + pending access requests, feature-detected.
+    // The approved-device list is shown only in Settings, which reads it when
+    // it opens (one row per browser that ever paired: 14 KB of every connect
+    // otherwise). Access requests arrive as replayed events, not here.
     this.state.hasDeviceChannels = has('lanDevices');
-    if (this.state.hasDeviceChannels) {
-      await this.guardedStep('boot devices', () => this.loadDevices());
-    }
 
     // Agentes + Engines read the daemon config snapshot (config:get). Stubbed to
     // defaults today, so controls stay read-only — no fake persistence.
@@ -4038,10 +4224,22 @@ export class Store {
     // so the authoritative daemon value wins on every startup/reload.
     await this.guardedStep('boot settings', () => this.hydrateSettings());
 
-    if (has('providersList')) {
-      const providersStep = await this.guardedStep('boot providers', () => call('providersList'));
-      const providers = providersStep.ok ? providersStep.value : undefined;
-      if (Array.isArray(providers)) this.onProvidersList(providers);
+    // The daemon replays its provider list to every socket it accepts; once
+    // that replay is here, reading the same list again is 3 KB for nothing.
+    // A window that kept the list asked the replay to skip it while it is
+    // unchanged (the bridge's replayKnown), and confirms it here by etag.
+    if (has('providersList') && this.localProvidersEvents === 0) {
+      const etag = this.providersCacheEtag;
+      const providersStep = await this.guardedStep('boot providers', () => call('providersList', etag ? { ifNoneMatch: etag } : undefined));
+      let providers: unknown = providersStep.ok ? providersStep.value : undefined;
+      if (etag && providers && !Array.isArray(providers) && !isUnchangedReply(providers, etag) && this.localProvidersEvents === 0) {
+        const again = await this.guardedStep('boot providers', () => call('providersList'));
+        providers = again.ok ? again.value : undefined;
+      }
+      if (Array.isArray(providers) && this.localProvidersEvents === 0) {
+        this.onProvidersList(providers);
+        this.rememberProvidersList(providers);
+      }
     }
 
     await this.guardedStep('boot permissions', () => this.refreshPendingPermissions());
@@ -4127,7 +4325,8 @@ export class Store {
     // Re-read scores from the daemon settings blob: another controller/device may
     // have edited them while this view was offline (parity with getConfig above).
     await this.guardedStep('reconnect settings', () => this.hydrateSettings());
-    if (this.state.hasDeviceChannels) {
+    // Only Settings shows the device list; it is re-read there.
+    if (this.state.hasDeviceChannels && this.state.settingsOpen) {
       await this.guardedStep('reconnect devices', () => this.loadDevices());
     }
     await this.guardedStep('reconnect permissions', () => this.refreshPendingPermissions());
@@ -4156,6 +4355,7 @@ export class Store {
       daemon: meta.daemon === true,
       sessionSaveMode: meta.sessionSaveMode === LEAN_SESSION_SAVE_MODE ? LEAN_SESSION_SAVE_MODE : undefined,
       workspaceRebindMode: meta.workspaceRebindMode === 'transactional-v1' ? 'transactional-v1' : undefined,
+      chatOrderMode: meta.chatOrderMode === 'partial-v1' ? 'partial-v1' : undefined,
     };
     if (this.state.groups.length) {
       reportShellCatalog(this.state.groups);
@@ -4425,7 +4625,7 @@ export class Store {
   // ---- devices / access requests (real; controller-gated) --------------
   async loadDevices() {
     const r = await call('lanDevices');
-    if (r && Array.isArray(r.devices)) { this.state.devices = r.devices; this.bump(DEV); this.bumpApp(false); }
+    if (r && Array.isArray(r.devices)) { this.state.devices = r.devices; this.state.devicesLoaded = true; this.bump(DEV); this.bumpApp(false); }
   }
   private onAccessRequest(r: AccessRequest) {
     if (!r || !r.requestId) return;
@@ -4915,6 +5115,8 @@ export class Store {
   private activateChat(chat: Chat) {
     const id = chat.id;
     this.state.activeId = id;
+    // The chat on screen is always listed by a paged read on its own.
+    this.pageIncludes.delete(id);
     this.releaseInactiveHistories(id);
     if (chat.unread) {
       chat.unread = false;
@@ -4946,7 +5148,15 @@ export class Store {
       return;
     }
     const target = this.chat(id);
-    if (!target) return;
+    if (!target) {
+      // A chat the paged shell left out (a notification, a link to a filed
+      // chat): read its row, then select it, unless something newer was
+      // selected meanwhile.
+      void this.ensureChatLoaded(id).then((loaded) => {
+        if (loaded && selectionVersion === this.chatSelectionVersion) this.switchChat(id);
+      });
+      return;
+    }
     // A resident recent slice is already the exact newest actor projection and
     // can paint immediately. Complete history remains an explicit older/search
     // request, never a prerequisite for selecting a row.
@@ -6902,15 +7112,18 @@ export class Store {
         // work or obligation changed, a reconnect gets a receipt instead of
         // every obligation again.
         const cached = this.spawnedWorkSummaryCache ?? readWireCache(SPAWNED_WORK_SUMMARY_CACHE);
+        // {page}: only the chats the paged shell lists, which are every chat
+        // of this daemon this window holds (an older daemon ignores it).
+        const page = this.sessionPageRequest();
         reply = cached
-          ? await callThrow('spawnedWorkSummary', { ifNoneMatch: cached.etag })
-          : await callThrow('spawnedWorkSummary');
+          ? await callThrow('spawnedWorkSummary', { ifNoneMatch: cached.etag, page })
+          : await callThrow('spawnedWorkSummary', { page });
         if (cached && reply && typeof reply === 'object' && (reply as { unchanged?: unknown }).unchanged === true) {
           reply = isUnchangedReply(reply, cached.etag) ? parseWireCache<unknown>(cached) : null;
           if (!reply) {
             this.spawnedWorkSummaryCache = null;
             writeWireCache(SPAWNED_WORK_SUMMARY_CACHE, '', '');
-            reply = await callThrow('spawnedWorkSummary');
+            reply = await callThrow('spawnedWorkSummary', { page });
           }
         }
         const etag = reply && typeof reply === 'object' ? (reply as SpawnedWorkSummary).etag : undefined;

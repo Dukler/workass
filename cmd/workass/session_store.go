@@ -270,6 +270,18 @@ type globalPresentationSaveResult struct {
 
 // SaveActorGlobalSnapshot persists daemon-global UI preferences only.
 func (s *sessionStore) SaveActorGlobalSnapshot(raw any) (globalPresentationSaveResult, error) {
+	return s.saveActorGlobalSnapshot(raw, nil)
+}
+
+// SaveActorGlobalSnapshotMergingOrder is SaveActorGlobalSnapshot for a
+// snapshot whose chatOrder is partial (session_page.go): mergeOrder folds it
+// into the stored order under the store's lock. The operation's receipt names
+// the snapshot as sent, so a retry is answered by its receipt, as any other.
+func (s *sessionStore) SaveActorGlobalSnapshotMergingOrder(raw any, mergeOrder func(stored, incoming []any) []any) (globalPresentationSaveResult, error) {
+	return s.saveActorGlobalSnapshot(raw, mergeOrder)
+}
+
+func (s *sessionStore) saveActorGlobalSnapshot(raw any, mergeOrder func(stored, incoming []any) []any) (globalPresentationSaveResult, error) {
 	if s == nil || !s.enabled() {
 		return globalPresentationSaveResult{}, errors.New("session presentation store is unavailable")
 	}
@@ -299,7 +311,12 @@ func (s *sessionStore) SaveActorGlobalSnapshot(raw any) (globalPresentationSaveR
 	if expectedRevision != currentRevision {
 		return globalPresentationSaveResult{}, errors.New("daemon-global presentation changed in another controller; reload before saving")
 	}
-	changed := digest != globalPresentationDigest(actorGlobalSessionSnapshot(s.snapshot))
+	stateDigest := digest
+	if mergeOrder != nil {
+		root["chatOrder"] = mergeOrder(normalizedActorChatOrder(s.snapshot["chatOrder"]), normalizedActorChatOrder(root["chatOrder"]))
+		stateDigest = globalPresentationDigest(root)
+	}
+	changed := stateDigest != globalPresentationDigest(actorGlobalSessionSnapshot(s.snapshot))
 	if changed {
 		currentRevision++
 	}

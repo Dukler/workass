@@ -172,18 +172,22 @@ func phaseCSessionStoreExpression(expr ast.Expr) bool {
 }
 
 var phaseCAllowedSessionStoreMethods = map[string]struct{}{
-	"enabled":                    {},
-	"Get":                        {},
-	"GlobalSnapshot":             {},
-	"SaveActorGlobalSnapshot":    {},
-	"SaveGlobalActiveTab":        {},
-	"PersistProviderAttachments": {},
-	"PlanProviderAttachments":    {},
-	"ResolveProviderAttachment":  {},
-	"LoadError":                  {},
-	"publishedGeneration":        {},
-	"recordLoadError":            {},
-	"persistSnapshot":            {},
+	"enabled":                 {},
+	"Get":                     {},
+	"GlobalSnapshot":          {},
+	"SaveActorGlobalSnapshot": {},
+	// The same daemon-global save, folding a paged renderer's partial chat
+	// order into the stored one (session_page.go).
+	"SaveActorGlobalSnapshotMergingOrder": {},
+	"saveActorGlobalSnapshot":             {},
+	"SaveGlobalActiveTab":                 {},
+	"PersistProviderAttachments":          {},
+	"PlanProviderAttachments":             {},
+	"ResolveProviderAttachment":           {},
+	"LoadError":                           {},
+	"publishedGeneration":                 {},
+	"recordLoadError":                     {},
+	"persistSnapshot":                     {},
 }
 
 func TestPhaseCSessionStoreSurfaceIsExplicit(t *testing.T) {
