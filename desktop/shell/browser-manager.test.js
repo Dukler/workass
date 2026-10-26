@@ -2181,6 +2181,21 @@ test('a popup an agent-driven page opens keeps its opener and request, becomes a
   manager.destroy();
 });
 
+test('a native-view page off screen is held painting while an agent drives it, so its input is taken', async () => {
+  // Chromium hands mouse moves to a page on its next frame; a page in its
+  // hidden host paints none, and a protocol click there never completes.
+  const { manager } = fixture({ requestOpen: () => {} });
+  manager.paintIdleMs = 20;
+  await manager.browserControl('browser.open', { chatId: 'hidden-input', visible: false });
+  const entry = manager.entries.get('hidden-input');
+  const focus = () => entry.view.webContents.debugger.commandCalls.filter((call) => call.method === 'Emulation.setFocusEmulationEnabled').map((call) => call.params.enabled);
+  await manager.browserControl('browser.click', { chatId: 'hidden-input', selector: '#save' });
+  assert.deepEqual(focus().slice(0, 1), [true], 'held painting while the agent drives it');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(focus().at(-1), false, 'and let go shortly after');
+  manager.destroy();
+});
+
 test('a window.open popup of an agent-driven page is a window the person sees and a tab the agent drives; closing either ends both', async () => {
   const { agentDriven } = require('./browser-actions');
   const { manager } = fixture({ requestOpen: () => {} });
