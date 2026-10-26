@@ -114,3 +114,7 @@ echo "release=$release"
 echo "log=$run_log"
 echo "seconds=$((finished - started))"
 echo "activation=not-requested"
+
+# Retention after every publish: older release candidates, finished scratch and
+# leftover Brave copies go (scripts/dev-disk-hygiene.sh). Never fails a release.
+sh "$repo_root/scripts/dev-disk-hygiene.sh" auto >&2 || true
