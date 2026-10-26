@@ -189,15 +189,19 @@ test('will-attach-webview allows only a blank page in the browser profile, witho
   assert.equal(hardenWebviewAttach({}, { partition: 'persist:workass-browser', src: 'https://example.com' }, { partition: 'persist:workass-browser' }).allow, false);
 });
 
-test('the browser host is webview by default on macOS and Windows, and view stays selectable', () => {
+test('the browser host is webview by default on macOS, view on Windows, and either stays selectable', () => {
   const files = new Map();
   const fs = { readFileSync: (file) => { if (!files.has(file)) throw new Error('ENOENT'); return files.get(file); } };
   assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
-  assert.equal(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }).host, 'webview');
+  assert.equal(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }).host, 'view');
+  assert.deepEqual(resolveBrowserHost({ env: { WORKASS_BROWSER_HOST: 'webview' }, platform: 'win32', dataRoot: '/d', fs }), { host: 'webview', source: 'env' });
   assert.equal(resolveBrowserHost({ env: {}, platform: 'linux', dataRoot: '/d', fs }).host, 'view');
   assert.deepEqual(resolveBrowserHost({ env: { WORKASS_BROWSER_HOST: 'view' }, platform: 'darwin', dataRoot: '/d', fs }), { host: 'view', source: 'env' });
   files.set('/d/shell-settings.json', JSON.stringify({ browserHost: 'view' }));
   assert.deepEqual(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }), { host: 'view', source: 'settings' });
+  assert.deepEqual(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }), { host: 'view', source: 'settings' });
+  files.set('/d/shell-settings.json', JSON.stringify({ browserHost: 'webview' }));
+  assert.deepEqual(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }), { host: 'webview', source: 'settings' });
   files.set('/d/shell-settings.json', '{not json');
   assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
 });
@@ -211,4 +215,26 @@ test('the separate window maps clicks and scrolls onto the page and keeps its sh
     { type: 'mouseWheel', x: 0, y: 900, deltaX: 0, deltaY: 2000 });
   assert.equal(pipInputToPage({ type: 'keyDown', x: 0.5, y: 0.5 }, viewport), null, 'only clicks and scrolls are sent');
   assert.equal(pipInputToPage({ type: 'mousePressed', x: 1.2, y: 0.5 }, viewport), null);
+});
+
+test('a page an agent drives copies frames only while the app window is hidden or minimized', () => {
+  const state = { visible: false, minimized: false, subscribed: 0, ended: 0 };
+  const self = {
+    win: { isDestroyed: () => false, isVisible: () => state.visible, isMinimized: () => state.minimized },
+    addFrameSubscriber: (_entry, _callback, options) => { assert.equal(options.full, false); state.subscribed += 1; return () => { state.ended += 1; }; },
+    hostWindowShowing: BrowserManager.prototype.hostWindowShowing,
+  };
+  const sync = (entry) => BrowserManager.prototype.syncPaintSource.call(self, entry);
+  const entry = { painting: true };
+  sync(entry);
+  assert.equal(state.subscribed, 1, 'hidden app: frames are kept coming');
+  state.visible = true;
+  sync(entry);
+  assert.equal(state.ended, 1, 'app on screen: the page paints by itself');
+  state.minimized = true;
+  sync(entry);
+  assert.equal(state.subscribed, 2, 'minimized counts as hidden');
+  entry.painting = false;
+  sync(entry);
+  assert.equal(state.ended, 2, 'no agent driving: no frames copied');
 });
