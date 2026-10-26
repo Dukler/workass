@@ -60,6 +60,7 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = 20000;
 // is retired, and capped so a renderer that stopped answering cannot hold the
 // browser's serialized operation queue (and every later navigation) forever.
 const CHILD_SESSION_COMMAND_TIMEOUT_MS = 10000;
+const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // Reasons that mean the child session no longer exists, so no protocol
 // command may be sent to it (or to detach it) anymore.
 const OWNED_TARGET_GONE_REASONS = new Set(['target_gone', 'target_crashed', 'debugger_lost']);
@@ -799,7 +800,7 @@ class BrowserManager {
 
   // Chromium drops the reply to a command in flight on a child session that
   // goes away, so an owned-frame observation must not await it unbounded.
-  ownedSessionCommand(entry, method, params, sessionId) {
+  ownedSessionCommand(entry, method, params, sessionId, timeoutMs = null) {
     if (sessionId && !entry.targetSessions.has(sessionId)) return Promise.reject(new Error('browser frame target is no longer owned'));
     const command = Promise.resolve(entry.view.webContents.debugger.sendCommand(method, params, sessionId || undefined));
     if (!sessionId) return command;
@@ -816,8 +817,9 @@ class BrowserManager {
       };
       const fail = (message) => finish(reject, new Error(message));
       pending.add(fail);
-      const timeoutMs = this.childSessionCommandTimeoutMs ?? CHILD_SESSION_COMMAND_TIMEOUT_MS;
-      timer = setTimeout(() => fail(`browser frame did not answer ${method} within ${Math.round(timeoutMs / 1000)}s`), timeoutMs);
+      const capMs = this.childSessionCommandTimeoutMs ?? CHILD_SESSION_COMMAND_TIMEOUT_MS;
+      const limitMs = Math.max(1, Math.min(capMs, Number(timeoutMs) > 0 ? Number(timeoutMs) : capMs));
+      timer = setTimeout(() => fail(`browser frame did not answer ${method} within ${Math.round(limitMs / 1000)}s`), limitMs);
       command.then((value) => finish(resolve, value), (error) => finish(reject, error));
     });
   }
@@ -2086,7 +2088,7 @@ class BrowserManager {
       awaitPromise: options.awaitPromise !== false,
       ...(frame.contextId != null ? { contextId: frame.contextId } : {}),
     };
-    const response = await this.ownedSessionCommand(entry, 'Runtime.evaluate', params, frame.sessionId || null);
+    const response = await this.ownedSessionCommand(entry, 'Runtime.evaluate', params, frame.sessionId || null, options.timeoutMs);
     return unwrapCDPValue(response);
   }
 
@@ -2104,21 +2106,21 @@ class BrowserManager {
     const frame = target.frameId ? entry.frames.get(target.frameId) : this.frameForSession(entry, null);
     if (!frame || frame.detached) throw new Error('observed frame is stale; refresh the snapshot');
     const sessionId = frame.sessionId || undefined;
-    const resolved = await entry.view.webContents.debugger.sendCommand('DOM.resolveNode', {
+    const resolved = await this.ownedSessionCommand(entry, 'DOM.resolveNode', {
       backendNodeId: target.backendDOMNodeId,
       ...(frame.contextId != null ? { executionContextId: frame.contextId } : {}),
     }, sessionId);
     const objectId = resolved?.object?.objectId;
     if (!objectId) throw new Error('observed node is stale; refresh the snapshot');
     try {
-      const installed = await entry.view.webContents.debugger.sendCommand('Runtime.callFunctionOn', {
+      const installed = await this.ownedSessionCommand(entry, 'Runtime.callFunctionOn', {
         objectId,
         functionDeclaration: "function(){ if(!this||!this.isConnected)return false; globalThis[Symbol.for('workass.browser.action-target')]=this; return true; }",
         returnByValue: true,
       }, sessionId);
       if (installed?.result?.value !== true) throw new Error('observed node is stale; refresh the snapshot');
     } finally {
-      try { await entry.view.webContents.debugger.sendCommand('Runtime.releaseObject', { objectId }, sessionId); } catch { /* context owns the remote object */ }
+      try { await this.ownedSessionCommand(entry, 'Runtime.releaseObject', { objectId }, sessionId); } catch { /* context owns the remote object */ }
     }
     return {
       clear: () => this.evaluateFrame(entry, target.frameId, "delete globalThis[Symbol.for('workass.browser.action-target')]"),
@@ -2708,11 +2710,10 @@ class BrowserManager {
   }
 
   async backendNodeKeys(entry, frame, backendDOMNodeId) {
-    const debug = entry.view.webContents.debugger;
     const sessionId = frame.sessionId || undefined;
     let resolved;
     try {
-      resolved = await debug.sendCommand('DOM.resolveNode', {
+      resolved = await this.ownedSessionCommand(entry, 'DOM.resolveNode', {
         backendNodeId: Number(backendDOMNodeId),
         ...(frame.contextId != null ? { executionContextId: frame.contextId } : {}),
       }, sessionId);
@@ -2720,7 +2721,7 @@ class BrowserManager {
     const objectId = resolved && resolved.object && resolved.object.objectId;
     if (!objectId) return [];
     try {
-      const response = await debug.sendCommand('Runtime.callFunctionOn', {
+      const response = await this.ownedSessionCommand(entry, 'Runtime.callFunctionOn', {
         objectId,
         functionDeclaration: "function(){ const refs=globalThis[Symbol.for('workass.browser.observed-node-refs')]; return refs&&refs.get(this)?Array.from(refs.get(this)):[]; }",
         returnByValue: true,
@@ -2730,7 +2731,7 @@ class BrowserManager {
         : [];
     } catch { return []; }
     finally {
-      try { await debug.sendCommand('Runtime.releaseObject', { objectId }, sessionId); } catch { /* resolved node released with its context */ }
+      try { await this.ownedSessionCommand(entry, 'Runtime.releaseObject', { objectId }, sessionId); } catch { /* resolved node released with its context */ }
     }
   }
 
@@ -2767,8 +2768,16 @@ class BrowserManager {
     let nodeCount = 0;
     let semanticTruncatedCount = 0;
 
+    // Child frames that stopped answering share one bounded budget, so a page
+    // full of stuck ad frames cannot stretch one snapshot frame by frame.
+    const childFramesDeadline = Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS);
     const observe = async (frame) => {
       const script = observationScript({ snapshotId, maxNodes: 500, maxText: 32 * 1024, rootOnly: true });
+      if (frame && frame.sessionId) {
+        const remainingMs = childFramesDeadline - Date.now();
+        if (remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
+        return this.evaluateFrame(entry, frame.id, script, { timeoutMs: remainingMs });
+      }
       if (frame) return this.evaluateFrame(entry, frame.id, script);
       return this.evaluateMainWorld(entry, script, true);
     };
@@ -2864,7 +2873,7 @@ class BrowserManager {
       const sessionId = frame.sessionId || undefined;
       let response;
       try {
-        response = await entry.view.webContents.debugger.sendCommand(
+        response = await this.ownedSessionCommand(entry,
           'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId,
         );
       } catch {
@@ -2988,7 +2997,7 @@ class BrowserManager {
       let ownerBackendId = null;
       if (parent && frame.id) {
         try {
-          const owner = await entry.view.webContents.debugger.sendCommand(
+          const owner = await this.ownedSessionCommand(entry,
             'DOM.getFrameOwner', { frameId: frame.id }, parent.sessionId || undefined,
           );
           ownerBackendId = Number(owner && owner.backendNodeId) || null;
