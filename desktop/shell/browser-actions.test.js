@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { dialogOpened, noteActivity, pushEvent, runAction } = require('./browser-actions');
+const { browserEvaluate, dialogOpened, noteActivity, pushEvent, runAction, takeDownload } = require('./browser-actions');
 
 // A manager double: the page's activity count is whatever `count()` says,
 // every outline read is counted, and the CDP session accepts Network.enable.
@@ -229,4 +229,67 @@ test('a drag that fails halfway turns interception off and puts the pointer back
   assert.ok(sent.some(([method, type]) => method === 'Input.dispatchMouseEvent' && type === 'mouseReleased'), 'the press is released');
   assert.ok(sent.some(([method]) => method === 'Input.cancelDragging'), 'the drag is cancelled');
   assert.equal(entry.pointerDown, null);
+});
+
+test('commands on the top frame honour their time limit too', async () => {
+  const { BrowserManager } = require('./browser-manager');
+  const self = Object.create(BrowserManager.prototype);
+  const entry = { targetSessions: new Map(), view: { webContents: { debugger: { sendCommand: () => new Promise(() => {}) } } } };
+  const started = Date.now();
+  await assert.rejects(self.ownedSessionCommand(entry, 'Runtime.evaluate', {}, null, 60), /did not answer/);
+  assert.ok(Date.now() - started < 1000, 'bounded like a frame\'s command');
+});
+
+test('evaluate aimed at a frame without its own script context is refused, never run in the parent', async () => {
+  const calls = [];
+  const manager = {
+    observationTarget: async () => ({ frameId: 'child' }),
+    frameForSession: () => ({ id: 'root', parentFrameId: null }),
+    ownedSessionCommand: async (...args) => { calls.push(args); return { result: { value: 1 } }; },
+  };
+  const entry = { frames: new Map([['child', { id: 'child', parentFrameId: 'root', sessionId: null, contextId: null }]]), interactionGeneration: 0 };
+  const result = await browserEvaluate(manager, entry, { expression: 'document.title', selector: '#inside' });
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(calls, [], 'nothing ran');
+});
+
+test('an agent-driven page cannot fill the disk with downloads', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wk-dl-'));
+  const entry = { chatId: 'dl-chat', visible: false, agentActiveAt: Date.now() };
+  const manager = { downloadsRoot: root };
+  const item = (name, total = 10) => {
+    const events = {};
+    return { name, cancelled: false, getFilename: () => name, setSavePath(file) { this.path = file; }, getURL: () => 'https://files.example/' + name,
+      getTotalBytes: () => total, getReceivedBytes: () => total, on(event, fn) { events[event] = fn; }, once(event, fn) { events[event] = fn; },
+      cancel() { this.cancelled = true; }, finish() { fs.writeFileSync(this.path, 'x'.repeat(total)); events.done({}, 'completed'); } };
+  };
+  let allowed = 0;
+  for (let index = 0; index < 15; index += 1) {
+    const download = item(`f${index}.txt`);
+    takeDownload(manager, entry, download);
+    if (!download.cancelled) { allowed += 1; download.finish(); }
+  }
+  assert.ok(allowed <= 10, `a burst is capped (${allowed} allowed)`);
+  assert.ok(entry.events.some((event) => event.type === 'download_blocked'), 'and reported');
+  const huge = item('huge.bin', 3 * 1024 * 1024 * 1024);
+  entry.downloadTimes = [];
+  takeDownload(manager, entry, huge);
+  assert.equal(huge.cancelled, true, 'the folder total is capped');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a navigation near its operation deadline reports the page as loading instead of failing', async () => {
+  const { entry, manager } = fixture();
+  entry.mainDocumentReady = false;
+  entry.loading = true;
+  entry.mainCommitPending = true;
+  entry.operationDeadlineAt = Date.now() + 400;
+  const started = Date.now();
+  const report = await runAction(manager, entry, async () => ({ id: 1, loading: true, loadingNote: 'The page is still loading.' }), { before: null, method: 'browser.navigate' });
+  assert.ok(Date.now() - started < 1500, 'returns before the deadline');
+  assert.equal(report.loadingNote, 'The page is still loading.');
+  assert.equal(report.changes.loading, true);
 });
