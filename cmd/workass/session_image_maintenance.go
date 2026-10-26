@@ -635,7 +635,7 @@ func (m *imageStoreMaintenance) cleanupTemps() {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(m.imagesDir, name))
+			removeSessionImageTemp(filepath.Join(m.imagesDir, name))
 		}
 	}
 }

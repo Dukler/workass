@@ -43,6 +43,12 @@ func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string,
 	if stat.Size != int64(len(raw)) {
 		return cloneDifferent, errors.New("clone source has a different size")
 	}
+	// A clone carries its source's BSD flags. A system immutable, append-only
+	// or no-unlink flag is one this process could never clear on the clone,
+	// which would then be impossible to remove: such a source is not cloned.
+	if stat.Flags&(unix.SF_IMMUTABLE|unix.SF_APPEND|unix.SF_NOUNLINK) != 0 {
+		return cloneUnavailable, errors.New("clone source has system file flags")
+	}
 	var dirStat unix.Stat_t
 	if err := unix.Stat(dir, &dirStat); err != nil {
 		return cloneUnavailable, err
@@ -73,7 +79,12 @@ func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string,
 		}
 		return cloneFailed, err
 	}
-	defer os.Remove(tmpName)
+	defer removeSessionImageTemp(tmpName)
+	// The clone is this process's own file: drop a locked (uchg) or
+	// append-only source's user flags before anything else touches it.
+	if err := clearSessionImageLockFlags(tmpName); err != nil {
+		return cloneFailed, err
+	}
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return cloneFailed, err
 	}
@@ -195,6 +206,34 @@ func openSessionImageSource(guard sessionImageSourceGuard, candidate string) (*o
 		}
 	}
 	return refuse(errors.New("clone source path is empty"))
+}
+
+// sessionImageLockFlags are the user flags that stop a file being changed
+// or removed; its owner may clear them.
+const sessionImageLockFlags = unix.UF_IMMUTABLE | unix.UF_APPEND
+
+func clearSessionImageLockFlags(path string) error {
+	var stat unix.Stat_t
+	if err := unix.Lstat(path, &stat); err != nil {
+		return err
+	}
+	if stat.Flags&sessionImageLockFlags == 0 {
+		return nil
+	}
+	// Only ever a temporary file this process created (Lstat above saw no
+	// symlink), so following is not a concern.
+	return unix.Chflags(path, int(stat.Flags&^sessionImageLockFlags))
+}
+
+// removeSessionImageTemp removes a temporary file of the store, clearing
+// lock flags first when a plain remove is refused.
+func removeSessionImageTemp(path string) {
+	if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if clearSessionImageLockFlags(path) == nil {
+		_ = os.Remove(path)
+	}
 }
 
 func openSessionImageDir(path string) (int, error) {

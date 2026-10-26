@@ -36,3 +36,7 @@ func syncSessionImageDataToDevice(file *os.File) error {
 }
 
 func nonLocalMountPoints() []string { return nil }
+
+// removeSessionImageTemp removes a temporary file of the store. Only darwin
+// clones carry flags that can refuse it.
+func removeSessionImageTemp(path string) { _ = os.Remove(path) }
