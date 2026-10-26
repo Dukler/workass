@@ -114,6 +114,11 @@ function safeBounds(raw, contentSize) {
   return { x, y, width, height };
 }
 
+function safeRadius(value) {
+  const radius = Math.round(Number(value) || 0);
+  return Math.max(0, Math.min(32, radius));
+}
+
 function captureRasterBounds(rect) {
   return {
     minWidth: Math.max(1, Math.floor(rect.width)), maxWidth: Math.ceil(rect.width),
@@ -327,6 +332,9 @@ class BrowserManager {
     this.activeId = null;
     this.attachedView = null;
     this.presentationChain = Promise.resolve();
+    // Bumped when the renderer that presented the page goes away: a request it
+    // sent before that never puts the page back on screen.
+    this.presentationEpoch = 0;
     this.agentControl = false;
     this.cdpListeners = new Set();
     this.childSessions = new Map();
@@ -417,6 +425,7 @@ class BrowserManager {
     wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (inPlace || isMainFrame === false) return;
       entry.mainNavigationPending = true;
+      entry.appliedMetrics = null;
       entry.documentGeneration += 1;
       entry.interactionGeneration += 1;
       entry.frameTreeGeneration += 1;
@@ -438,7 +447,10 @@ class BrowserManager {
       this.publish(entry);
       this.retryDeferredViewport(entry);
     });
-    wc.on('did-navigate', syncURL);
+    wc.on('did-navigate', (event, url) => {
+      syncURL(event, url);
+      this.resyncViewSize(entry);
+    });
     wc.on('did-navigate-in-page', syncURL);
     wc.on('did-finish-load', () => {
       if (!entry.initialDocumentReady || wc.isDestroyed?.() || this.entries.get(entry.chatId) !== entry) return;
@@ -463,6 +475,7 @@ class BrowserManager {
     });
     wc.on('render-process-gone', (_event, details) => {
       entry.loading = false;
+      entry.appliedMetrics = null;
       this.interruptWaiters(entry, 'renderer_lost');
       this.cancelOwnedTargetTasks(entry, () => true, 'renderer_lost');
       this.invalidateFrames(entry, null, 'renderer_lost');
@@ -1396,13 +1409,96 @@ class BrowserManager {
     }
     const webContents = entry.view.webContents;
     if (!webContents?.debugger?.isAttached?.()) throw new Error('browser viewport metrics require the owned CDP session');
+    const applied = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1;
+    entry.appliedMetrics = null;
+    // dontSetVisibleSize: by default Chromium also resizes the page's view to
+    // the emulated size, so until the next setBounds the page was painted at
+    // its full 1440 × 900 layout, unscaled and spilling past its frame over
+    // the chat. That was the floating browser "expanding" on every drag step
+    // (2026-10-25, real app). The view's size is always set explicitly here.
     await webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
       width: viewport.width,
       height: viewport.height,
       deviceScaleFactor: viewport.deviceScaleFactor,
       mobile: false,
-      scale: Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1,
+      scale: applied,
+      dontSetVisibleSize: true,
     });
+    entry.appliedMetrics = { width: viewport.width, height: viewport.height, deviceScaleFactor: viewport.deviceScaleFactor, scale: applied };
+  }
+
+  // Every drag step of the floating browser used to re-apply the same metrics
+  // (a CDP round trip, and with the view resized to 1440 × 900 each time, the
+  // flicker and the ballooning). Metrics that are already in place are kept.
+  metricsApplied(entry, viewport, scale) {
+    const applied = entry.appliedMetrics;
+    return !!applied && !entry.deferredViewport && applied.width === viewport.width && applied.height === viewport.height &&
+      applied.deviceScaleFactor === viewport.deviceScaleFactor && Math.abs(applied.scale - scale) < 1e-9;
+  }
+
+  // The renderer measures in CSS pixels; the window places views in DIPs. They
+  // differ by the app's zoom (View > Zoom In, Cmd +), and without this the page
+  // drifted off its frame at any zoom but 100%. Bounds arrive unrounded and are
+  // rounded once, here; the size from the size, so a moving frame never
+  // changes the page's size.
+  hostBounds(bounds) {
+    if (!bounds || typeof bounds !== 'object') return bounds;
+    const zoom = Number(this.win && this.win.webContents && this.win.webContents.getZoomFactor && this.win.webContents.getZoomFactor()) || 1;
+    const at = (value) => Math.round((Number(value) || 0) * zoom);
+    return { x: at(bounds.x), y: at(bounds.y), width: at(bounds.width), height: at(bounds.height) };
+  }
+
+  // The floating page has the frame's rounded corners (approved mock
+  // browser-pip-v1 · B, "only the page, with rounded corners"). Rounding the
+  // view also clips it: whatever the page paints stays inside its bounds and
+  // can never spill over the chat.
+  applyRadius(entry, radius) {
+    const next = safeRadius(radius);
+    if (entry.appliedRadius === next || typeof entry.view.setBorderRadius !== 'function') return;
+    try {
+      entry.view.setBorderRadius(next);
+      entry.appliedRadius = next;
+    } catch {
+      /* an older Electron draws it square */
+    }
+  }
+
+  // The renderer that presented the page is gone (a reload, a crash): nothing
+  // may stay on screen without the controls it drew around the page. The page
+  // leaves the window at once, not after whatever presentation step is in
+  // flight, and nothing that renderer asked for before can bring it back. A
+  // reloaded renderer presents it again, with its controls.
+  hideAll() {
+    this.presentationEpoch += 1;
+    const shown = this.attachedView;
+    const entry = shown ? this.browserEntries().find((candidate) => candidate.view === shown) : null;
+    if (shown) {
+      try { this.win.contentView.removeChildView(shown); } catch { /* owning window already gone */ }
+      this.attachedView = null;
+      this.activeId = null;
+    }
+    if (entry) entry.visible = false;
+    return this.serializePresentation(async () => {
+      if (!entry || !this.isCurrentEntry(entry) || this.attachedView === entry.view || entry.pipWindow) return;
+      if (entry.captureHost && !entry.captureHost.isDestroyed()) await this.attachToCaptureHost(entry, false);
+    });
+  }
+
+  // A new document can come up believing its view is the emulated 1440 × 900
+  // while the view itself is still the frame's size: the page then painted
+  // unscaled, spilling past its frame, until something resized the view (seen
+  // in the real app after every navigation of the floating page). Setting the
+  // same bounds is a no-op, so the size is stepped and put back in one task;
+  // only the final bounds are ever composited.
+  resyncViewSize(entry) {
+    try {
+      const bounds = entry.view.getBounds();
+      if (!bounds || bounds.width < 2 || bounds.height < 2) return;
+      entry.view.setBounds({ ...bounds, width: bounds.width - 1 });
+      entry.view.setBounds(bounds);
+    } catch {
+      /* the view is closing */
+    }
   }
 
   async applyAndReadDeviceEmulation(entry, viewport = entry.viewport, scale = 1) {
@@ -1705,6 +1801,7 @@ class BrowserManager {
       entry.captureHostAttached = true;
     }
     entry.view.setBounds({ x: 0, y: 0, width: entry.viewport.width, height: entry.viewport.height });
+    this.applyRadius(entry, 0);
     if (entry.initialDocumentReady) {
       await this.applyAndReadDeviceEmulation(entry, entry.viewport, 1);
       this.assertCurrentEntry(entry);
@@ -1739,19 +1836,23 @@ class BrowserManager {
 
   async attach(entry) {
     this.assertCurrentEntry(entry);
+    const epoch = this.presentationEpoch;
     // The capture host keeps a background page at its logical viewport size.
     // Prepare the fitted bounds and metrics while it is still hidden: adding
     // that full-size view to the visible window first paints over the chat.
     const fitted = entry.presentationBounds ? presentationFor(entry.viewport, entry.presentationBounds) : null;
     if (fitted) {
       entry.presentationScale = fitted.scale || 1;
-      try {
-        entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
-      } catch {
-        this.deferViewport(entry);
+      if (!this.metricsApplied(entry, entry.viewport, entry.presentationScale)) {
+        try {
+          entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale);
+        } catch {
+          this.deferViewport(entry);
+        }
+        this.assertCurrentEntry(entry);
       }
-      this.assertCurrentEntry(entry);
     }
+    if (epoch !== this.presentationEpoch) return;
     if (this.attachedView !== entry.view) {
       if (this.attachedView) {
         const previous = this.browserEntries().find((candidate) => candidate.view === this.attachedView);
@@ -1764,6 +1865,7 @@ class BrowserManager {
             previous.view.setBounds({ x: 0, y: 0, width: previous.viewport.width, height: previous.viewport.height });
             await this.applyAndReadDeviceEmulation(previous, previous.viewport, 1);
             this.assertCurrentEntry(entry);
+            if (epoch !== this.presentationEpoch) return;
           }
         } else {
           try { this.win.contentView.removeChildView(this.attachedView); } catch { /* owning window is already closing */ }
@@ -1774,21 +1876,28 @@ class BrowserManager {
         entry.captureHost.contentView.removeChildView(entry.view);
         entry.captureHostAttached = false;
       }
-      if (fitted) entry.view.setBounds(fitted.bounds);
+      if (fitted) entry.view.setBounds(presentationFor(entry.viewport, entry.presentationBounds).bounds);
+      this.applyRadius(entry, entry.presentationRadius);
       this.win.contentView.addChildView(entry.view);
       this.attachedView = entry.view;
     } else if (fitted) {
-      entry.view.setBounds(fitted.bounds);
+      entry.view.setBounds(presentationFor(entry.viewport, entry.presentationBounds).bounds);
+      this.applyRadius(entry, entry.presentationRadius);
     }
     entry.visible = true;
   }
 
   activate(options) {
-    return this.serializePresentation(() => this.activateSerialized(options));
+    const epoch = this.presentationEpoch;
+    return this.serializePresentation(() => this.activateSerialized({ ...(options || {}), epoch }));
   }
 
-  async activateSerialized({ chatId, conversationId, bounds, viewport, url }) {
+  async activateSerialized({ chatId, conversationId, bounds, viewport, url, radius, epoch }) {
     const id = safeChatId(chatId);
+    if (epoch !== undefined && epoch !== this.presentationEpoch) {
+      const stale = this.entries.get(id);
+      return stale ? this.publish(stale) : null;
+    }
     // Adopt any background entry the agent opened for this conversation (keyed by
     // its conversation id) so the user's visible view and the agent's browser are
     // ONE view, never a duplicate.
@@ -1798,7 +1907,8 @@ class BrowserManager {
     this.releasePipWindow(entry);
     if (conversationId) entry.conversationId = String(conversationId);
     this.activeId = entry.chatId;
-    entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
+    entry.presentationRadius = safeRadius(radius);
+    entry.presentationBounds = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
     if (viewport) {
@@ -1824,19 +1934,66 @@ class BrowserManager {
     return this.publish(entry);
   }
 
-  resize(chatId, bounds, viewport) {
-    return this.serializePresentation(() => this.resizeSerialized(chatId, bounds, viewport));
+  resize(chatId, bounds, viewport, radius) {
+    const epoch = this.presentationEpoch;
+    return this.serializePresentation(() => this.resizeSerialized(chatId, bounds, viewport, radius, epoch));
   }
 
-  async resizeSerialized(chatId, bounds, viewport) {
+  async resizeSerialized(chatId, bounds, viewport, radius, epoch) {
     const id = safeChatId(chatId);
     const entry = this.entries.get(id);
-    if (!entry || this.activeId !== id) return false;
-    entry.presentationBounds = safeBounds(bounds, this.win.getContentSize());
+    if (!entry || this.activeId !== id || (epoch !== undefined && epoch !== this.presentationEpoch)) return false;
+    if (entry.rescaling) await entry.rescaling;
+    if (radius !== undefined) entry.presentationRadius = safeRadius(radius);
+    entry.presentationBounds = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (viewport) await this.setViewportSerialized(entry, viewport, false);
     if (this.attachedView === entry.view) await this.attach(entry);
     return true;
+  }
+
+  // A drag or a resize of the floating frame, one call per animation frame.
+  // The page view itself follows the pointer, placed here and now rather than
+  // through resize (an awaited round trip queued behind every other
+  // presentation step, which left the page trailing its frame). A move only
+  // sets the view's bounds; a new size sets them first and then the page's
+  // scale, so the page never paints past its bounds. Scale changes are
+  // coalesced: one is in flight at a time and the latest one wins.
+  place(chatId, bounds) {
+    const entry = this.entries.get(safeChatId(chatId));
+    if (!entry || this.attachedView !== entry.view || this.activeId !== entry.chatId || !entry.presentationBounds) return false;
+    const next = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
+    entry.presentationBounds = next;
+    entry.bounds = next;
+    const fitted = presentationFor(entry.viewport, next);
+    entry.view.setBounds(fitted.bounds);
+    if (fitted.scale && !this.metricsApplied(entry, entry.viewport, fitted.scale)) {
+      entry.presentationScale = fitted.scale;
+      this.rescale(entry);
+    }
+    return true;
+  }
+
+  rescale(entry) {
+    if (entry.rescaling) {
+      entry.rescaleOwed = true;
+      return;
+    }
+    entry.rescaling = (async () => {
+      try {
+        do {
+          entry.rescaleOwed = false;
+          const scale = entry.presentationScale;
+          try {
+            await this.applyDeviceEmulation(entry, entry.viewport, scale);
+          } catch {
+            this.deferViewport(entry);
+          }
+        } while (entry.rescaleOwed && !entry.closed && this.isCurrentEntry(entry));
+      } finally {
+        entry.rescaling = null;
+      }
+    })();
   }
 
   // The page in its own small window that stays above every app (approved
@@ -1907,6 +2064,7 @@ class BrowserManager {
         }
       }).finally(() => { if (this.isCurrentEntry(entry)) this.publish(entry); });
     });
+    this.applyRadius(entry, 0);
     win.contentView.addChildView(entry.view);
     await fit();
     try { win.show(); } catch { /* headless fake */ }
