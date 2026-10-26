@@ -777,6 +777,49 @@ test('finding 12: the pop-out window takes typing, hover, drags and double click
   manager.destroy();
 });
 
+test('real-Electron follow-up: a hidden native-view page an agent drives is held painting, then let go (native-view host)', async () => {
+  const { manager } = viewHost();
+  manager.paintIdleMs = 20;
+  await manager.browserControl('browser.open', { chatId: 'chat-hidden', visible: false });
+  const entry = manager.browserEntries().find((candidate) => candidate.chatId === 'chat-hidden');
+  const wc = entry.view.webContents;
+  const frames = { begun: 0, ended: 0, onlyDirty: null };
+  wc.beginFrameSubscription = (onlyDirty) => { frames.begun += 1; frames.onlyDirty = onlyDirty; };
+  wc.endFrameSubscription = () => { frames.ended += 1; };
+  const focus = () => wc.debugger.calls.filter((call) => call.method === 'Emulation.setFocusEmulationEnabled').map((call) => call.params.enabled);
+  let during = null;
+  const original = wc.executeJavaScript.bind(wc);
+  wc.executeJavaScript = async (script) => {
+    if (script.includes('window.scrollBy(')) during = { focus: focus(), begun: frames.begun };
+    return original(script);
+  };
+  await manager.browserControl('browser.scroll', { chatId: 'chat-hidden', x: 0, y: 200 });
+  assert.deepEqual(during && during.focus, [true], 'held focused (painting) while the call runs');
+  assert.equal(during.begun, 1, 'frames are kept coming while it is off screen');
+  assert.equal(frames.onlyDirty, true, 'only damaged regions are copied');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(focus(), [true, false], 'let go after the call');
+  assert.equal(frames.ended, 1);
+  manager.destroy();
+});
+
+test('parity: a native view the person is looking at is never held or copied (native-view host)', async () => {
+  const { manager, win } = viewHost();
+  win.isVisible = () => true;
+  manager.paintIdleMs = 20;
+  await manager.activate({ chatId: 'chat-shown', bounds: PANE });
+  const entry = manager.entries.get('chat-shown');
+  const wc = entry.view.webContents;
+  let begun = 0;
+  wc.beginFrameSubscription = () => { begun += 1; };
+  wc.endFrameSubscription = () => {};
+  await manager.browserControl('browser.scroll', { chatId: 'chat-shown', x: 0, y: 200 });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(wc.debugger.calls.some((call) => call.method === 'Emulation.setFocusEmulationEnabled'), false);
+  assert.equal(begun, 0);
+  manager.destroy();
+});
+
 test('finding 14: top-frame commands honour the caller\'s time limit; a frame without a script context is refused', async () => {
   const entry = { targetSessions: new Map(), view: { webContents: { debugger: { sendCommand: () => new Promise(() => {}) } } } };
   const bounded = BrowserManager.prototype.ownedSessionCommand.call({}, entry, 'Runtime.evaluate', { expression: 'new Promise(() => {})' }, null, 60);
