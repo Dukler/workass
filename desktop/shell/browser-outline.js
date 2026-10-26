@@ -197,6 +197,9 @@ function buildOutline(frames, { refFor = () => null, title = '', url = '' } = {}
         return;
       }
       if (LEAF_FIELD_ROLES.has(role)) return;
+      // Nothing inside a secret field is shown either: an editable combobox's
+      // inner text is its value, a select's chosen option is its value.
+      if (secret) return;
       // A control named by its own text does not repeat that text below it.
       const nameCovers = (child) => TEXT_ROLES.has(String(axValue(child.role) || '')) && name && name.includes(clip(String(axValue(child.name) || ''), NAME_LIMIT));
       renderChildren(children.filter((child) => !nameCovers(child)), depthNow + 1, key, guard, name);

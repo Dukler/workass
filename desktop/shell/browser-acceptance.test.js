@@ -420,7 +420,7 @@ test('finding 2: the outline never shows a secret field\'s value, in a read or i
   assert.doesNotMatch(JSON.stringify(diff), /000111|hunter3/);
 });
 
-test('finding 2, open: a secret field\'s inner text and its chosen option stay hidden too', { todo: 'secret-field descendants still render (reported to the builder)' }, async () => {
+test('finding 2, open: a secret field\'s inner text and its chosen option stay hidden too', async () => {
   const { fake, root, document } = page('https://shop.example/pay', ({ h, body }) => {
     body.append(
       h('input', { id: 'code', role: 'combobox', autocomplete: 'one-time-code', $value: '482913' }),
