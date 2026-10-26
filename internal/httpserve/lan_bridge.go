@@ -13,6 +13,25 @@ const LANBridgeJS = `(() => {
   const PRE_READY_CHANNELS = new Set(['lan:pairing-info', 'fleet:challenge', 'fleet:enroll']);
   const INVOKE_TIMEOUT_MS = 30000;
   const SESSION_INVOKE_TIMEOUT_MS = 120000;
+  // On a slow link one large frame can take longer than any fixed timeout
+  // while the socket is plainly alive, and every reply queued behind it waits
+  // too. The daemon announces each large frame it is about to write
+  // (wire:incoming, asked for with ?progress=1); until the next message
+  // arrives that frame is in transit. Large messages that keep arriving mean
+  // the same. Either way the socket is busy, not lost, and no timeout fires.
+  const BUSY_RECENT_MS = 10000;
+  const BULK_MESSAGE_CHARS = 16384;
+  let lastMessageAt = 0, lastBulkAt = 0, inTransit = null;
+  function socketOpen() { return !!(open && ws && ws.readyState === WebSocket.OPEN); }
+  function wireBusy() {
+    return socketOpen() && (!!inTransit || (lastBulkAt > 0 && Date.now() - lastBulkAt < BUSY_RECENT_MS));
+  }
+  // Additive, read-only: what the renderer's health monitor needs to tell a
+  // busy slow link from a dead one. An older bridge simply lacks it.
+  window.__workassWireState = () => ({
+    open: socketOpen(), ready, lastMessageAt, lastBulkAt, pending: pending.size,
+    inTransitBytes: inTransit ? inTransit.bytes : 0, inTransitSince: inTransit ? inTransit.at : 0, busy: wireBusy(),
+  });
   class WorkassInvokeError extends Error {
     constructor(code, channel, generation) {
       super('Workass invoke ' + channel + ' failed: ' + code);
@@ -37,6 +56,9 @@ const LANBridgeJS = `(() => {
     const token = getStored(TOKEN_KEY);
     if (token) params.set('deviceToken', token);
     params.set('deviceName', deviceName());
+    // Ask the daemon to announce large frames before writing them (additive;
+    // an older daemon ignores the parameter).
+    params.set('progress', '1');
     const qs = params.toString();
     return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + (qs ? '?' + qs : '');
   }
@@ -84,12 +106,21 @@ const LANBridgeJS = `(() => {
     };
     socket.onclose = () => {
       if (ws !== socket || gen !== socketGen) return;
+      inTransit = null;
       rejectPending('socket-closed', gen);
       ws = null; open = false; ready = false;
       setTimeout(connect, 1500);
     };
     socket.onmessage = (ev) => {
       if (ws !== socket || gen !== socketGen) return;
+      lastMessageAt = Date.now();
+      if (typeof ev.data === 'string' && ev.data.length >= BULK_MESSAGE_CHARS) lastBulkAt = lastMessageAt;
+      if (typeof ev.data === 'string' && ev.data.length < 200 && ev.data.indexOf('"channel":"wire:incoming"') >= 0) {
+        let announced = 0; try { announced = Number(JSON.parse(ev.data).payload.bytes) || 0; } catch (e) {}
+        inTransit = { bytes: announced, at: lastMessageAt };
+        return;
+      }
+      inTransit = null;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.t === 'reply') {
         const p = pending.get(m.id);
@@ -126,9 +157,16 @@ const LANBridgeJS = `(() => {
       const id = ++seq;
       const generation = socketGen;
       const timeoutMs = channel === 'session:get' || channel === 'session:save' ? SESSION_INVOKE_TIMEOUT_MS : INVOKE_TIMEOUT_MS;
-      const timer = setTimeout(() => {
+      const expire = () => {
+        const item = pending.get(id);
+        if (!item) return;
+        if (generation === socketGen && wireBusy()) {
+          item.timer = setTimeout(expire, BUSY_RECENT_MS);
+          return;
+        }
         rejectInvoke(id, new WorkassInvokeError('invoke-timeout', channel, generation));
-      }, timeoutMs);
+      };
+      const timer = setTimeout(expire, timeoutMs);
       pending.set(id, { resolve, reject, timer, channel, generation });
       const data = JSON.stringify({ t: 'invoke', id, channel, args });
       const entry = { id, data, generation };
@@ -197,7 +235,11 @@ const LANBridgeJS = `(() => {
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
-    spawnedWorkList: (tabId, chatId) => invoke('spawned-work:list', { tabId, chatId }),
+    spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch } : { tabId, chatId }),
+    // Every chat's running background rows, counts and obligation in one read.
+    // Additive: a renderer that finds it boots its sidebar from it instead of
+    // one spawned-work:list per chat; an older bridge simply lacks it.
+    spawnedWorkSummary: (o) => o ? invoke('spawned-work:summary', o) : invoke('spawned-work:summary'),
     appUpdateWork: () => invoke('app-update:work'),
     chatCommandsGet: (tabId, chatId) => invoke('chat:commands-get', { tabId, chatId }),
     chatGoalGet: (tabId, chatId) => invoke('chat:goal-get', { tabId, chatId }),
@@ -211,7 +253,7 @@ const LANBridgeJS = `(() => {
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
     chatDiff: (o) => invoke('chat:diff', o), chatEnvGet: (o) => invoke('chat:env-get', o),
     providersList: () => invoke('providers:list'), providersCatalog: () => invoke('providers:catalog'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
-    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd) => invoke('project:icon', { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
+    pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch } : { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
     chatPermissionDecide: (id, optionId) => invoke('chat:permission-decide', { id, optionId }),
     chatPendingPermissions: () => invoke('chat:permissions-pending'),

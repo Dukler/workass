@@ -2,7 +2,7 @@
 // Every consumer goes through `api` (a proxy that tolerates a missing method)
 // and `has(name)` for capability checks driving graceful degradation.
 
-import type { WorkassApi } from './types';
+import type { WireState, WorkassApi } from './types';
 
 // E3: when machines are mounted, every call goes through a router that picks a
 // daemon by the tag on the id it was given. With no machines mounted this is
@@ -91,4 +91,24 @@ export async function callThrow<K extends keyof WorkassApi>(
 
 export function bridgeReady(): boolean {
   return !!bridge();
+}
+
+/** The local bridge's view of its socket; null with an older bridge. */
+export function wireState(): WireState | null {
+  try {
+    const read = typeof window !== 'undefined' ? window.__workassWireState : undefined;
+    const state = typeof read === 'function' ? read() : null;
+    return state && typeof state === 'object' ? state : null;
+  } catch { return null; }
+}
+
+/**
+ * True while the bridge's socket is open and a large frame is in transit (the
+ * daemon announced it) or large frames keep arriving: on a slow link a reply
+ * that is late is waiting behind them, not lost. An older bridge reports
+ * nothing, which keeps every fixed timeout exactly as before.
+ */
+export function wireBusy(): boolean {
+  const state = wireState();
+  return !!state && state.open && state.busy === true;
 }

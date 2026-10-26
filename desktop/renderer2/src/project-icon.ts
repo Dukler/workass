@@ -2,6 +2,7 @@ import { normalizeWorkspacePath } from './workspaces.ts';
 import { call, has } from './wire/api.ts';
 import { machineOf } from './wire/machineIds.ts';
 import type { ProjectIconResult } from './wire/types.ts';
+import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache } from './store/wire-cache.ts';
 
 const MAX_PROJECT_ICON_BASE64_CHARS = 349_528;
 const PROJECT_ICON_MIME_TYPES = new Set([
@@ -15,6 +16,33 @@ const PROJECT_ICON_MIME_TYPES = new Set([
 
 const values = new Map<string, string | null>();
 const pending = new Map<string, Promise<string | null>>();
+
+// Icons this window already read from its own daemon, kept across a reload
+// with the etag the daemon named them by. A reload asks {ifNoneMatch} and a
+// receipt reuses the kept icon; a changed icon arrives whole, as before.
+const KEPT_ICONS = 'project-icons';
+const KEPT_ICON_LIMIT = 64;
+const KEPT_ICON_CHARS = 1_000_000;
+type KeptIcon = { etag: string; source: string | null };
+let kept: Record<string, KeptIcon> | null = null;
+
+function keptIcons(): Record<string, KeptIcon> {
+  if (!kept) {
+    const stored = parseWireCache<Record<string, KeptIcon>>(readWireCache(KEPT_ICONS));
+    kept = stored && typeof stored === 'object' ? stored : {};
+  }
+  return kept;
+}
+
+function keepIcon(key: string, etag: string, source: string | null) {
+  const icons = keptIcons();
+  delete icons[key];
+  icons[key] = { etag, source };
+  const keys = Object.keys(icons);
+  for (const old of keys.slice(0, Math.max(0, keys.length - KEPT_ICON_LIMIT))) delete icons[old];
+  const text = JSON.stringify(icons);
+  writeWireCache(KEPT_ICONS, 'v1', text.length <= KEPT_ICON_CHARS ? text : '');
+}
 
 export function projectIconCacheKey(chatId: string, cwd: string): string {
   return `${machineOf(chatId)}\u0000${normalizeWorkspacePath(cwd)}`;
@@ -45,7 +73,24 @@ export async function loadProjectIcon(chatId: string, cwd: string): Promise<stri
   if (existing) return existing;
 
   const request = (async () => {
-    const source = projectIconDataURL(await call('projectIcon', chatId, clean));
+    // Only this daemon's icons are read by etag; the router does not forward
+    // the option to another machine, and an older bridge drops it.
+    const local = !machineOf(chatId);
+    const prior = local ? keptIcons()[key] : undefined;
+    let reply = local
+      ? await call('projectIcon', chatId, clean, { ifNoneMatch: prior?.etag ?? '' })
+      : await call('projectIcon', chatId, clean);
+    let source: string | null;
+    if (prior && isUnchangedReply(reply, prior.etag)) {
+      source = prior.source;
+    } else {
+      if (reply && typeof reply === 'object' && (reply as { unchanged?: unknown }).unchanged === true) {
+        reply = await call('projectIcon', chatId, clean);
+      }
+      source = projectIconDataURL(reply as ProjectIconResult | undefined);
+      const etag = (reply as { etag?: unknown } | undefined)?.etag;
+      if (local && typeof etag === 'string' && etag) keepIcon(key, etag, source);
+    }
     // The icon list is bounded by the visible project list. Keep a defensive
     // cap so repeatedly mounting arbitrary remote workspaces cannot grow this
     // renderer-local cache without limit.

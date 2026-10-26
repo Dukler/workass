@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,8 +164,21 @@ func TestReplyActionRunsOnceAfterFailedReplyAttempt(t *testing.T) {
 		}
 	}
 
-	hub.handleInvoke(client, invokeMessage{ID: json.Number("42"), Channel: "job:start"})
+	// The reply waits behind the full queue; the attempt fails when the
+	// socket closes underneath it, and only then does the durable dispatch run.
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		hub.handleInvoke(client, invokeMessage{ID: json.Number("42"), Channel: "job:start"})
+	}()
+	select {
+	case <-called:
+		t.Fatal("durable dispatch ran while its reply was still waiting to be written")
+	case <-time.After(50 * time.Millisecond):
+	}
+	client.close()
 	waitForClosed(t, called, "lost-reply durable dispatch")
+	waitForClosed(t, handled, "lost-reply invoke")
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("lost-reply dispatch calls = %d, want 1", got)
 	}
@@ -492,7 +504,9 @@ func TestSlowClientDoesNotDelayOrderedFramesToFastClient(t *testing.T) {
 	}
 }
 
-func TestSlowClientBackpressurePreservesEveryOrderedFrame(t *testing.T) {
+// A saturated client keeps every event, in order, in its backlog; the
+// producer never waits for it to drain.
+func TestSlowClientBacklogPreservesEveryOrderedFrame(t *testing.T) {
 	hub := NewHub()
 	serverConn, peerConn := net.Pipe()
 	client := addDirectClient(t, hub, serverConn)
@@ -508,11 +522,8 @@ func TestSlowClientBackpressurePreservesEveryOrderedFrame(t *testing.T) {
 			hub.Broadcast("job:event", map[string]any{"type": "chunk", "seq": i})
 		}
 	}()
-	select {
-	case <-returned:
-		t.Fatal("saturated event producer returned before the slow client drained")
-	case <-time.After(25 * time.Millisecond):
-	}
+	// Nothing has been read: the channel is full and the rest is backlog.
+	waitForClosed(t, returned, "event producer facing a saturated client")
 
 	for want := 0; want < count; want++ {
 		var event struct {
@@ -527,16 +538,11 @@ func TestSlowClientBackpressurePreservesEveryOrderedFrame(t *testing.T) {
 			t.Fatalf("ordered frame %d = %#v", want, event)
 		}
 	}
-	select {
-	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("event producer remained blocked after the client drained")
-	}
 	hub.mu.RLock()
 	_, connected := hub.clients[client]
 	hub.mu.RUnlock()
 	if !connected {
-		t.Fatal("saturated client was disconnected instead of applying lossless backpressure")
+		t.Fatal("saturated client was disconnected instead of keeping a lossless backlog")
 	}
 }
 
@@ -563,11 +569,7 @@ func TestFastClientReceivesWhileAnotherClientIsSaturated(t *testing.T) {
 		hub.Broadcast("job:event", map[string]any{"type": "chunk", "seq": 1})
 		close(returned)
 	}()
-	select {
-	case <-returned:
-		t.Fatal("broadcast returned despite a saturated client")
-	case <-time.After(25 * time.Millisecond):
-	}
+	waitForClosed(t, returned, "broadcast beside a saturated client")
 
 	var event decodedWireEvent
 	if err := json.Unmarshal(reader.readText(t), &event); err != nil {
@@ -577,15 +579,38 @@ func TestFastClientReceivesWhileAnotherClientIsSaturated(t *testing.T) {
 		t.Fatalf("fast client event = %+v", event)
 	}
 
-	slow.close()
-	select {
-	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("saturated producer remained blocked after the slow client closed")
+	// The saturated client still owes the event, behind its prefill.
+	frames := drainQueuedFrames(slow)
+	if len(frames) != outboundQueueFrameLimit+1 {
+		t.Fatalf("saturated client queued %d frames, want %d", len(frames), outboundQueueFrameLimit+1)
+	}
+	messages, _, _ := (&frameDecoder{}).drain(frames[len(frames)-1].payload)
+	if err := json.Unmarshal(firstMessage(messages), &event); err != nil || int(event.Payload["seq"].(float64)) != 1 {
+		t.Fatalf("saturated client's last frame = %s (%v)", firstMessage(messages), err)
 	}
 }
 
-func TestBackpressuredProducerUnblocksOnDoneAndSocketFailure(t *testing.T) {
+// A producer never waits on a saturated client, and the client's queue is
+// released once it closes or its socket fails.
+func TestSaturatedClientNeverBlocksProducerAndCloseFreesItsQueue(t *testing.T) {
+	waitForEmptyQueue := func(t *testing.T, c *client) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			frames, bytes := c.outboundSnapshot()
+			c.outMu.Lock()
+			events := c.eventBytes
+			c.outMu.Unlock()
+			if frames == 0 && bytes == 0 && events == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("closed client still holds frames=%d bytes=%d eventBytes=%d", frames, bytes, events)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
 	t.Run("done", func(t *testing.T) {
 		hub := NewHub()
 		serverConn, peerConn := net.Pipe()
@@ -600,15 +625,13 @@ func TestBackpressuredProducerUnblocksOnDoneAndSocketFailure(t *testing.T) {
 				hub.Broadcast("job:event", map[string]any{"seq": i})
 			}
 		}()
-		waitForOutboundFrames(t, client, outboundQueueFrameLimit)
-		select {
-		case <-returned:
-			t.Fatal("producer returned before done was closed")
-		default:
+		waitForClosed(t, returned, "producer facing a client with no writer")
+		if frames, _ := client.outboundSnapshot(); frames != outboundQueueFrameLimit+2 {
+			t.Fatalf("queued frames = %d, want %d", frames, outboundQueueFrameLimit+2)
 		}
 
 		client.close()
-		waitForClosed(t, returned, "done-closed producer")
+		waitForEmptyQueue(t, client)
 	})
 
 	t.Run("socket failure", func(t *testing.T) {
@@ -625,78 +648,89 @@ func TestBackpressuredProducerUnblocksOnDoneAndSocketFailure(t *testing.T) {
 				hub.Broadcast("job:event", map[string]any{"seq": i})
 			}
 		}()
-		waitForOutboundFrames(t, client, outboundQueueFrameLimit-1)
-		select {
-		case <-returned:
-			t.Fatal("producer returned before the peer failed")
-		default:
-		}
+		waitForClosed(t, returned, "producer facing a peer that does not read")
 
 		if err := peerConn.Close(); err != nil {
 			t.Fatalf("close failed peer: %v", err)
 		}
-		waitForClosed(t, returned, "socket-failed producer")
+		waitForClosed(t, client.done, "client whose socket failed")
+		waitForEmptyQueue(t, client)
 	})
 }
 
+// Concurrent publishers are admitted in one global order: a saturated client
+// (whose events go to its backlog) and an idle one see the same sequence.
 func TestConcurrentBroadcastsPreserveAdmissionOrder(t *testing.T) {
 	hub := NewHub()
-	serverConn, peerConn := net.Pipe()
-	client := addDirectClientWithoutWriter(t, hub, serverConn)
-	defer peerConn.Close()
-	defer hub.drop(client)
+	saturatedServer, saturatedPeer := net.Pipe()
+	saturated := addDirectClientWithoutWriter(t, hub, saturatedServer)
+	defer saturatedPeer.Close()
+	defer hub.drop(saturated)
 	for i := 0; i < outboundQueueFrameLimit; i++ {
-		if err := client.enqueue([]byte("prefill")); err != nil {
+		if err := saturated.enqueue([]byte("prefill")); err != nil {
 			t.Fatalf("prefill frame %d: %v", i, err)
 		}
 	}
+	idleServer, idlePeer := net.Pipe()
+	idle := addDirectClientWithoutWriter(t, hub, idleServer)
+	defer idlePeer.Close()
+	defer hub.drop(idle)
 
-	firstDone := make(chan struct{})
+	const publishers, each = 8, 40
+	var wg sync.WaitGroup
+	for p := 0; p < publishers; p++ {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				hub.Broadcast("job:event", map[string]any{"seq": p*each + i})
+			}
+		}(p)
+	}
+	published := make(chan struct{})
 	go func() {
-		hub.Broadcast("job:event", map[string]any{"seq": 1})
-		close(firstDone)
+		wg.Wait()
+		close(published)
 	}()
-	if !waitForBroadcastLock(t, &hub.broadcastMu) {
-		client.close()
-		waitForClosed(t, firstDone, "first broadcast")
-		t.Fatal("first broadcast did not enter the admission critical section")
-	}
+	waitForClosed(t, published, "concurrent publishers")
 
-	secondDone := make(chan struct{})
-	go func() {
-		hub.Broadcast("job:event", map[string]any{"seq": 2})
-		close(secondDone)
-	}()
-	select {
-	case <-secondDone:
-		client.close()
-		waitForClosed(t, firstDone, "first broadcast after overtaking")
-		t.Fatal("second broadcast overtook a blocked first broadcast")
-	case <-time.After(25 * time.Millisecond):
-	}
-
-	_ = takeQueuedFrame(client)
-	waitForClosed(t, firstDone, "first broadcast")
-	_ = takeQueuedFrame(client)
-	waitForClosed(t, secondDone, "second broadcast")
-
-	frames := drainQueuedFrames(client)
-	var seen []int
-	for _, frame := range frames {
-		messages, rest, closeFrame := (&frameDecoder{}).drain(frame.payload)
-		if closeFrame || len(rest) != 0 || len(messages) != 1 {
-			continue
+	sequence := func(c *client) []int {
+		var seen []int
+		for _, frame := range drainQueuedFrames(c) {
+			messages, rest, closeFrame := (&frameDecoder{}).drain(frame.payload)
+			if closeFrame || len(rest) != 0 || len(messages) != 1 {
+				continue
+			}
+			var event decodedWireEvent
+			if err := json.Unmarshal(messages[0], &event); err != nil || event.T != "event" {
+				continue
+			}
+			if raw, ok := event.Payload["seq"].(float64); ok {
+				seen = append(seen, int(raw))
+			}
 		}
-		var event decodedWireEvent
-		if err := json.Unmarshal(messages[0], &event); err != nil || event.T != "event" {
-			continue
-		}
-		if raw, ok := event.Payload["seq"].(float64); ok {
-			seen = append(seen, int(raw))
+		return seen
+	}
+	fromSaturated, fromIdle := sequence(saturated), sequence(idle)
+	if len(fromSaturated) != publishers*each || len(fromIdle) != publishers*each {
+		t.Fatalf("events seen saturated=%d idle=%d, want %d each", len(fromSaturated), len(fromIdle), publishers*each)
+	}
+	for i := range fromIdle {
+		if fromSaturated[i] != fromIdle[i] {
+			t.Fatalf("event %d: saturated client saw %d, idle client saw %d", i, fromSaturated[i], fromIdle[i])
 		}
 	}
-	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
-		t.Fatalf("concurrent broadcast order = %v, want [1 2]", seen)
+	// Each publisher's own events keep its order.
+	last := make([]int, publishers)
+	for i := range last {
+		last[i] = -1
+	}
+	for _, seq := range fromIdle {
+		p := seq / each
+		if seq <= last[p] {
+			t.Fatalf("publisher %d: event %d after %d", p, seq, last[p])
+		}
+		last[p] = seq
 	}
 }
 
@@ -730,8 +764,13 @@ func TestControllerNotifySocketFailureQueuesBacklog(t *testing.T) {
 	}
 }
 
-func TestOrdinaryInvokeReplyRejectsBoundedQueueWithoutWaiting(t *testing.T) {
+// A reply that meets a full queue queues behind it instead of failing (which
+// used to drop the socket), and fails only once the client is closed.
+func TestInvokeReplyQueuesBehindAFullQueueAndFailsOnlyOnClose(t *testing.T) {
+	serverConn, peerConn := net.Pipe()
+	defer peerConn.Close()
 	client := &client{
+		conn:     serverConn,
 		outbound: make(chan outboundFrame, outboundQueueFrameLimit),
 		done:     make(chan struct{}),
 	}
@@ -745,11 +784,50 @@ func TestOrdinaryInvokeReplyRejectsBoundedQueueWithoutWaiting(t *testing.T) {
 	go func() { returned <- client.enqueueAndWait([]byte("reply")) }()
 	select {
 	case err := <-returned:
-		if !errors.Is(err, errOutboundQueueFull) {
-			t.Fatalf("ordinary reply error = %v, want queue full", err)
+		t.Fatalf("reply returned %v against a full queue instead of waiting", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The reply sits in the backlog behind everything already queued and
+	// moves up as the queue drains.
+	_ = takeQueuedFrame(client)
+	waitForOutboundFrames(t, client, outboundQueueFrameLimit)
+	frames := drainQueuedFrames(client)
+	last := frames[len(frames)-1]
+	if string(last.payload) != "reply" || last.written == nil {
+		t.Fatalf("last queued frame = %q, want the reply", last.payload)
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("reply returned %v before its write completed", err)
+	default:
+	}
+	last.written <- nil
+	if err := <-returned; err != nil {
+		t.Fatalf("written reply error = %v", err)
+	}
+
+	// A reply still queued when the client closes fails with the close, not
+	// with a full queue.
+	for i := 0; i < outboundQueueFrameLimit; i++ {
+		if err := client.enqueue([]byte("queued")); err != nil {
+			t.Fatalf("refill frame %d: %v", i, err)
+		}
+	}
+	go func() { returned <- client.enqueueAndWait([]byte("reply")) }()
+	select {
+	case err := <-returned:
+		t.Fatalf("second reply returned %v against a full queue instead of waiting", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	client.close()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, errClientClosed) {
+			t.Fatalf("reply error after close = %v, want client closed", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("ordinary invoke reply waited behind a bounded full queue")
+		t.Fatal("reply kept waiting after the client closed")
 	}
 }
 
@@ -859,47 +937,26 @@ func waitForClosed(t *testing.T, done <-chan struct{}, name string) {
 	}
 }
 
-func waitForBroadcastLock(t *testing.T, mutex *sync.Mutex) bool {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if !mutex.TryLock() {
-			return true
-		}
-		// The first broadcast has not run yet if this succeeds. Release the
-		// probe lock and let its goroutine make progress before trying again.
-		// This avoids making the ordering test depend on a scheduler sleep.
-		mutex.Unlock()
-		runtime.Gosched()
-	}
-	return false
-}
-
+// takeQueuedFrame stands in for the socket writer: it takes the next frame
+// and promotes the backlog the way the writer does after a write.
 func takeQueuedFrame(c *client) outboundFrame {
-	c.outMu.Lock()
-	defer c.outMu.Unlock()
 	frame := <-c.outbound
-	c.outboundBytes -= len(frame.payload)
-	if outboundFrameIsBulk(len(frame.payload)) {
-		c.outboundBulkBytes -= len(frame.payload)
-	}
-	c.signalOutboundSpaceLocked()
+	c.finishFrame(frame)
 	return frame
 }
 
+// drainQueuedFrames takes every queued frame, channel then backlog, in order.
 func drainQueuedFrames(c *client) []outboundFrame {
-	c.outMu.Lock()
-	defer c.outMu.Unlock()
-	frames := make([]outboundFrame, 0, len(c.outbound))
-	for len(c.outbound) > 0 {
-		frame := <-c.outbound
-		frames = append(frames, frame)
-		c.outboundBytes -= len(frame.payload)
-		if outboundFrameIsBulk(len(frame.payload)) {
-			c.outboundBulkBytes -= len(frame.payload)
+	var frames []outboundFrame
+	for {
+		select {
+		case frame := <-c.outbound:
+			c.finishFrame(frame)
+			frames = append(frames, frame)
+		default:
+			return frames
 		}
 	}
-	return frames
 }
 
 type decodedReply struct {
@@ -1724,15 +1781,5 @@ func TestSecondBulkRejectedWhileOneDrains(t *testing.T) {
 	}
 	if err := client.enqueue(bulk); !errors.Is(err, errOutboundQueueFull) {
 		t.Fatalf("second bulk error = %v, want queue full", err)
-	}
-}
-
-func TestWriteTimeoutScalesWithPayload(t *testing.T) {
-	if got := writeTimeoutForPayload(0); got != writeDeadlineBase {
-		t.Fatalf("empty payload timeout = %v, want %v", got, writeDeadlineBase)
-	}
-	// 20 MiB at the 512 KiB/s floor is 40s of patience on top of the base.
-	if got, want := writeTimeoutForPayload(20<<20), writeDeadlineBase+40*time.Second; got != want {
-		t.Fatalf("20MiB payload timeout = %v, want %v", got, want)
 	}
 }

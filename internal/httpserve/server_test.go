@@ -257,7 +257,7 @@ func TestLanBridgeServed(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "listDir: (p) => invoke('fs:list-dir', p)") ||
 		!strings.Contains(string(body), "createDir: (parent, name) => invoke('fs:create-dir', { parent, name })") ||
-		!strings.Contains(string(body), "projectIcon: (chatId, cwd) => invoke('project:icon', { chatId, cwd })") {
+		!strings.Contains(string(body), "projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch } : { chatId, cwd })") {
 		t.Fatalf("bridge missing server-owned project filesystem methods")
 	}
 	if !strings.Contains(string(body), "machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname })") {
@@ -321,6 +321,79 @@ setTimeout(() => {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("node bridge close behavior test failed: %v\n%s", err, out)
+	}
+}
+
+// On a slow link one large frame can outlast any fixed invoke timeout. The
+// bridge does not time an invoke out while an announced frame is in transit
+// or large frames keep arriving, and tells the renderer what it sees.
+func TestLanBridgeInvokeTimeoutWaitsWhileTheSocketIsBusy(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not available for lan bridge behavior test: %v", err)
+	}
+	script := `
+const assert = require('assert');
+let now = 1000000;
+let nextTimer = 1;
+const timers = new Map();
+global.setTimeout = (fn, ms) => { const id = nextTimer++; timers.set(id, { at: now + (ms || 0), fn }); return id; };
+global.clearTimeout = (id) => { timers.delete(id); };
+Date.now = () => now;
+function advance(to) {
+  for (;;) {
+    let due = null;
+    for (const [id, t] of timers) if (t.at <= to && (!due || t.at < due[1].at)) due = [id, t];
+    if (!due) break;
+    timers.delete(due[0]);
+    now = due[1].at;
+    due[1].fn();
+  }
+  now = to;
+}
+let socket;
+class FakeWebSocket { constructor() { this.readyState = FakeWebSocket.OPEN; socket = this; } send() {} close() {} }
+FakeWebSocket.OPEN = 1;
+Object.defineProperty(global, 'window', { value: { dispatchEvent() {} }, configurable: true });
+global.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } };
+Object.defineProperty(global, 'localStorage', { value: { getItem: () => null, setItem: () => {}, removeItem: () => {} }, configurable: true });
+Object.defineProperty(global, 'navigator', { value: { platform: 'Test' }, configurable: true });
+Object.defineProperty(global, 'location', { value: { protocol: 'http:', host: 'example.test' }, configurable: true });
+Object.defineProperty(global, 'WebSocket', { value: FakeWebSocket, configurable: true });
+eval(process.env.LAN_BRIDGE_JS);
+socket.onopen();
+const event = (channel, payload) => socket.onmessage({ data: JSON.stringify({ t: 'event', channel, payload }) });
+event('lan:access-state', { state: 'approved' });
+const start = now;
+let rejectedAt = 0, code = '';
+window.api.appMeta().then(() => { throw new Error('resolved'); }, (error) => { rejectedAt = now; code = error.code; });
+assert.equal(window.__workassWireState().pending, 1);
+assert.equal(window.__workassWireState().open, true);
+// Large frames keep arriving: the 30 s timeout does not fire.
+const bulk = 'x'.repeat(20000);
+for (let t = 5000; t <= 40000; t += 5000) { advance(start + t); event('job:event', { bulk }); }
+assert.equal(window.__workassWireState().busy, true);
+// Then a large frame is announced and takes a long time to arrive.
+socket.onmessage({ data: JSON.stringify({ t: 'event', channel: 'wire:incoming', payload: { bytes: 4000000 } }) });
+assert.equal(window.__workassWireState().inTransitBytes, 4000000);
+advance(start + 200000);
+assert.equal(window.__workassWireState().pending, 1, 'timed out while a frame was in transit');
+// It arrives; small frames only after that: the invoke times out once the
+// socket is no longer busy.
+event('job:event', { done: true });
+assert.equal(window.__workassWireState().inTransitBytes, 0);
+advance(start + 225000);
+assert.equal(window.__workassWireState().pending, 0, 'an idle socket never timed the invoke out');
+setImmediate(() => {
+  assert.equal(code, 'invoke-timeout');
+  // Asked for announcements on its socket URL.
+  process.exit(0);
+});
+`
+	cmd := exec.Command("node", "-e", script)
+	cmd.Env = append(os.Environ(), "LAN_BRIDGE_JS="+LANBridgeJS)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node bridge timeout behavior test failed: %v\n%s", err, out)
 	}
 }
 
