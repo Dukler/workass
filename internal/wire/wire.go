@@ -325,6 +325,10 @@ type client struct {
 	// announced first (writeAnnounced).
 	announceLarge bool
 	announceBytes int
+	// replayKnown is what the client says it already holds of the connect
+	// replay (?replayKnown=<channel>:<etag>, see replay_known.go): a replayed
+	// event whose payload hashes to that etag is not sent again.
+	replayKnown map[string]string
 }
 
 type outboundFrame struct {
@@ -926,7 +930,7 @@ func (h *Hub) announceClientReady(c *client) {
 	if fn == nil {
 		return
 	}
-	go fn(c.sendEvent)
+	go fn(c.replaySend)
 }
 
 func (h *Hub) announceControllerReady(c *client) {
@@ -1045,6 +1049,7 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		pongWait:        h.pongWait,
 		announceLarge:   r.URL.Query().Get("progress") == "1",
 		announceBytes:   h.announceBytes,
+		replayKnown:     replayKnownFromQuery(r.URL.Query()["replayKnown"]),
 	}
 	// The handshake is the peer's first word; idleness counts from it.
 	c.live.noteInbound()

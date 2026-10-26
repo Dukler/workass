@@ -38,6 +38,10 @@ type providerChatRuntime struct {
 	// scheduled is the daemon-owned scheduled-message store; nil until the
 	// daemon (or a test) attaches one. Set before the runtime serves requests.
 	scheduled *scheduledmessage.Scheduler
+	// forkRunning names the chats with a fork child running now (a paged
+	// session read always lists them: the sidebar shows them working). Nil
+	// until the daemon attaches its fork service.
+	forkRunning func() map[string]struct{}
 
 	mu      sync.Mutex
 	closeMu sync.Mutex

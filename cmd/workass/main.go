@@ -340,6 +340,7 @@ func main() {
 	handler.MocksDir = mocksDir
 	handler.ArtifactHosts = artifactHosting
 	handler.ChatImages = newChatImageHTTPHandler(providerChats)
+	handler.ProjectIcons = projectIconHTTP{}
 	if staticDir == "" {
 		handler.RendererFS = embeddedRendererFS()
 	}
@@ -379,6 +380,9 @@ func main() {
 	agentControl.artifacts = artifactHosting
 	forkService := newForkService(stateDir, acpManager, hub.Broadcast)
 	agentControl.forks = forkService
+	if providerChats != nil && forkService != nil {
+		providerChats.forkRunning = forkService.RunningChats
+	}
 	registerForkWireHandlers(hub, forkService)
 	rendererAgentRouter := registerRendererAgentRouter(hub)
 	agentControl.remoteChats = rendererAgentRouter
@@ -940,10 +944,14 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count++
 	hub.RegisterOutOfBandRead("project:icon", func(args []any) (any, error) {
 		arg := firstMapArg(args)
-		icon := projectIconForWorkspace(fieldString(arg, "cwd"))
 		// Additive conditional read, as on spawned-work:list: with
 		// {ifNoneMatch} the reply names its etag, or is a tiny receipt while
 		// the icon is unchanged, so a reload does not resend every icon.
+		// {byURL} (project_icon_http.go) names a raster icon without its bytes.
+		if ifNoneMatch, conditional := arg["ifNoneMatch"].(string); conditional && arg["byURL"] == true {
+			return projectIconWireReply(fieldString(arg, "cwd"), ifNoneMatch, true)
+		}
+		icon := projectIconForWorkspace(fieldString(arg, "cwd"))
 		if ifNoneMatch, conditional := arg["ifNoneMatch"].(string); conditional {
 			raw, err := json.Marshal(icon)
 			if err != nil {
@@ -1006,7 +1014,13 @@ func registerStateDigestHandler(hub *wire.Hub, providerChats *providerChatRuntim
 		if providerChats == nil {
 			return nil, errors.New("state digest requires the authoritative chat actor runtime")
 		}
-		digest, err := providerChats.StateDigest(catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes))
+		// {page} is additive: the digest then covers exactly the chats a
+		// session:get with the same page lists (session_page.go).
+		var page *sessionPage
+		if len(args) > 0 {
+			page = sessionPageFrom(mapFromAnyMain(args[0]))
+		}
+		digest, err := providerChats.StateDigestPage(catalogHashes, stateDigestHash(settingsValue), stateDigestHash(processes), page)
 		if err != nil {
 			return nil, err
 		}
@@ -1046,9 +1060,15 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 			options = mapFromAnyMain(args[0])
 		}
 		read := archiveReadOptionsFrom(options)
+		// {page} (session_page.go) and {delta} (session_shell_delta.go) are
+		// additive shell options; an older renderer sends neither.
+		read.page = sessionPageFrom(options)
 		raw, err := providerChats.ProjectSessionRaw(read)
 		if err != nil {
 			return nil, err
+		}
+		if read.sessionShell && options["delta"] == true {
+			return sessionShellDeltaReply(raw, fieldString(options, "ifNoneMatch")), nil
 		}
 		if read.sessionShell {
 			return sessionShellReply(raw, fieldString(options, "ifNoneMatch")), nil
@@ -1477,7 +1497,8 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if providerChats == nil {
 			return nil, errors.New("spawned-work:summary requires the durable chat actor")
 		}
-		chats, err := providerChats.BackgroundSummary()
+		// {page} is additive, as on session:get (session_page.go).
+		chats, err := providerChats.BackgroundSummaryPage(sessionPageFrom(firstMapArg(args)))
 		if err != nil {
 			return nil, err
 		}
@@ -1624,7 +1645,7 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		return providerChats.ChatDiff(context.Background(), fieldString(arg, "tabId"), fieldString(arg, "chatId"), fieldString(arg, "repo"), fieldString(arg, "path"))
 	})
 	hub.Register("providers:list", func(args []any) (any, error) {
-		return manager.ProvidersList(), nil
+		return providersListReply(manager.ProvidersList(), fieldString(firstMapArg(args), "ifNoneMatch")), nil
 	})
 	// Additive read: the chat:catalog payload state:digest hashes, without a
 	// detection pass. providers:list carries no catalog groups, so it could
@@ -2080,6 +2101,9 @@ func appMeta(cwd string) map[string]any {
 		"daemon":              true,
 		"sessionSaveMode":     "lean-payload-v2",
 		"workspaceRebindMode": "transactional-v1",
+		// session:save folds a {chatOrderPartial} order into the stored one
+		// (session_page.go), which a paged shell's renderer relies on.
+		"chatOrderMode": "partial-v1",
 	}
 }
 

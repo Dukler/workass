@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Chat, Msg } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
 import { IcSearch, IcPlus, IcFolder, IcChevron, IcClose, ModelIcon } from '../icons';
-import { buildWorkspaceGroups, lastProject, newChatTarget, normalizeWorkspacePath, workspaceLabelForChat, type WorkspaceGroup } from '../workspaces';
+import { buildWorkspaceGroups, deferredSearchLabels, lastProject, newChatTarget, normalizeWorkspacePath, workspaceLabelForChat, type WorkspaceGroup } from '../workspaces';
+import { ARCHIVE_AFTER_SETTLED_MS as SHARED_ARCHIVE_AFTER_SETTLED_MS, SIDEBAR_LIFECYCLE_TICK_MS } from '../store/session-page';
 import { chatHasLiveActivity, isServiceWork } from '../chat-activity';
 import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
@@ -40,9 +41,12 @@ import {
 // those still archive via ARCHIVE_AFTER_SETTLED_MS below.
 const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
 const AUTO_SETTLE_BY_AGE_ENABLED = false;
-export const ARCHIVE_AFTER_SETTLED_MS = 5 * 24 * 60 * 60 * 1000;
-const LIFECYCLE_TICK_MS = 60 * 60 * 1000;
+// Shared with the store, which asks the daemon to leave exactly this archive
+// out of a paged session shell (store/session-page.ts).
+export const ARCHIVE_AFTER_SETTLED_MS = SHARED_ARCHIVE_AFTER_SETTLED_MS;
+const LIFECYCLE_TICK_MS = SIDEBAR_LIFECYCLE_TICK_MS;
 const TAIL_PAGE = 24;            // T3 pages its settled tail; deep history is rare
+const NO_DEFERRED: [string, number][] = [];
 const TOOLTIP_DELAY_MS = 150;    // T3's TooltipProvider delay
 const SCOPE_KEY = 'workass.sv2.scope';
 
@@ -646,7 +650,9 @@ export function SidebarV2() {
   useSpawnedWork();
   const forkVersion = useForks();
   useEffect(() => { forkStore.start(); }, []);
-  const groups = buildWorkspaceGroups(app.workspaces, app.chats, app.removedWorkspaces);
+  // A paged session shell's filed-away chats still make their folders.
+  const deferredCwds = app.deferredChats?.cwds ?? NO_DEFERRED;
+  const groups = buildWorkspaceGroups(app.workspaces, app.chats, app.removedWorkspaces, deferredCwds);
   const [browsing, setBrowsing] = useState(false);
   const [scope, setScope] = useState<string | null>(() => {
     try { const v = localStorage.getItem(SCOPE_KEY); return v === null || v === '__all' ? null : v; } catch { return null; }
@@ -688,6 +694,15 @@ export function SidebarV2() {
     const id = window.setInterval(() => setLifecycleNow(Date.now()), LIFECYCLE_TICK_MS);
     return () => window.clearInterval(id);
   }, []);
+
+  // The archive a paged shell left on the daemon is searched there too; its
+  // matches arrive as ordinary rows and the filter below applies to them as
+  // to every other row.
+  useEffect(() => {
+    store.setSidebarSearch(query, query.trim() ? deferredSearchLabels(groups, deferredCwds) : []);
+    // Only a new query asks again; the labels are read for it.
+  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => store.setSidebarSearch('', []), []);
 
   const dropChatBefore = (targetChatId: string) => {
     if (drag) store.reorderChat(drag.id, targetChatId);
@@ -765,6 +780,10 @@ export function SidebarV2() {
   const searchRows = useMemo(() => orderSearchRows(rows), [rows]);
   const tailVisible = tailOpen ? tail.slice(0, tailShown) : [];
   const tailHidden = tail.length - tailVisible.length;
+  // Filed chats the daemon has not sent are archived rows of this view too.
+  const deferredInView = groups.reduce((sum, g) => (
+    scope === null || scope === normalizeWorkspacePath(g.path) ? sum + (g.deferred ?? 0) : sum
+  ), 0);
 
   const scopeLabel = scope === null
     ? 'Todos los proyectos'
@@ -850,10 +869,10 @@ export function SidebarV2() {
       </div>
 
       <div className="sv2-list" onScroll={() => setTip(null)}>
-        {(searching ? searchRows.length === 0 : cards.length + tail.length === 0) && (
+        {(searching ? searchRows.length === 0 && !app.sidebarSearchPending : cards.length + tail.length === 0) && (
           <div className="side-empty">{searching
             ? 'Nada coincide con la búsqueda.'
-            : archived.length ? 'Las conversaciones están archivadas. Buscalas arriba.' : 'Sin conversaciones todavía.'}</div>
+            : archived.length || deferredInView ? 'Las conversaciones están archivadas. Buscalas arriba.' : 'Sin conversaciones todavía.'}</div>
         )}
         <ul role="list">
           {searching ? searchRows.map((row) => (

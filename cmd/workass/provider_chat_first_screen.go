@@ -60,6 +60,11 @@ const (
 
 var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true}
 
+// firstScreenWarmSummaryOptions is the first screen itself: the renderer asks
+// for it with toolSummaries (FIRST_SCREEN_READ_OPTIONS), and pages the rest of
+// the slice with firstScreenWarmOptions.
+var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true}
+
 type firstScreenEntry struct {
 	revision uint64
 	limit    int
@@ -362,11 +367,11 @@ func (r *providerChatRuntime) warmChat(summary chat.ActorSummary) bool {
 	if err != nil || stored > warmTailStoredBytes {
 		return false
 	}
-	first, found, err := r.lastExchangeRawByChat(summary.ChatID, firstScreenWarmLimit, firstScreenWarmOptions)
+	first, found, err := r.lastExchangeRawByChat(summary.ChatID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 	if err != nil || !found {
 		return false
 	}
-	_, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, firstScreenWarmOptions)
+	_, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 	r.warmSlice(summary, first)
 	return kept
 }
