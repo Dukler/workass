@@ -458,6 +458,27 @@ function recordSwitchTiming(chatId: string, clickedAt: number, cold: boolean) {
   }));
 }
 
+// Where each chat's browser is shown outside the pane (float, full screen, its
+// own window), kept for this window's session so a reload restores it.
+const BROWSER_PRESENTATION_KEY = 'workass.browserPresentation.v1';
+
+function readBrowserPresentation(): Record<string, BrowserPresentation> {
+  try {
+    const raw = JSON.parse(globalThis.sessionStorage?.getItem(BROWSER_PRESENTATION_KEY) ?? 'null') as Record<string, unknown> | null;
+    const out: Record<string, BrowserPresentation> = {};
+    for (const [tabId, mode] of Object.entries(raw && typeof raw === 'object' ? raw : {})) {
+      if (mode === 'float' || mode === 'full' || mode === 'window') out[tabId] = mode;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeBrowserPresentation(value: Record<string, BrowserPresentation> | undefined) {
+  try { globalThis.sessionStorage?.setItem(BROWSER_PRESENTATION_KEY, JSON.stringify(value ?? {})); } catch { /* storage unavailable */ }
+}
+
 export class Store {
   private readonly toastTimers = new Set<ReturnType<typeof setTimeout>>();
   state: AppState;
@@ -702,6 +723,10 @@ export class Store {
     const mirror = loadMirror();
     this.manualChatOrder = normalizeChatOrder(mirror?.chatOrder);
     this.state = this.fromMirror(mirror);
+    // A reload of this window brings the floating or full-screen browser back
+    // as it was, with its controls (the shell takes the page down the moment
+    // the reload starts, so it is never left on screen without them).
+    this.state.browserPresentation = readBrowserPresentation();
     this.paintFromWireCache();
     this.paintProvidersFromWireCache();
     this.state.chats = this.orderChats(this.state.chats);
@@ -4170,6 +4195,9 @@ export class Store {
       this.state.hasSpawnedWorkChannels = live.hasSpawnedWorkChannels;
       this.state.chatEnvByChat = live.chatEnvByChat;
       this.state.hasBrowserChannels = live.hasBrowserChannels;
+      // Where this window shows each chat's browser is this window's alone
+      // (restored from its session by the constructor), never the daemon's.
+      this.state.browserPresentation = live.browserPresentation;
       // The machine book is mounted before hydration and lives on no mirror —
       // it is this client's view of the fleet, not this daemon's session. Left
       // out, the Máquinas pane reports "no book" on a daemon that has one, and
@@ -4440,12 +4468,14 @@ export class Store {
   }
   private setBrowserPresentation(tabId: string, mode: BrowserPresentation) {
     this.state.browserPresentation = { ...(this.state.browserPresentation ?? {}), [tabId]: mode };
+    writeBrowserPresentation(this.state.browserPresentation);
   }
   private clearBrowserPresentation(tabId: string) {
     const next = { ...(this.state.browserPresentation ?? {}) };
     if (next[tabId] === 'window') void browserApi()?.popIn?.(tabId);
     delete next[tabId];
     this.state.browserPresentation = next;
+    writeBrowserPresentation(next);
   }
   // The pane's "Flotante": the page leaves the right column and floats.
   floatBrowser() {
