@@ -69,7 +69,7 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 	})}
 	tools := browserMCPTools()
-	if len(tools) != 15 {
+	if len(tools) != 16 {
 		t.Fatalf("tool count = %d", len(tools))
 	}
 	snapshot, err := callBrowserMCPTool(browserMCPCallParams{
@@ -108,6 +108,68 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"type":"image"`) || !strings.Contains(string(encoded), `"data":"ZmFrZS1wbmc="`) || !strings.Contains(metadataText, `"screenshot_id":"shot-1"`) {
 		t.Fatalf("screenshot response = %s", encoded)
+	}
+}
+
+func TestBrowserReadAndCompactSnapshotArgumentsMapAndValidate(t *testing.T) {
+	read, err := prepareBrowserMCPCall(browserMCPCallParams{
+		Name: "workass_browser_read",
+		Arguments: map[string]any{"tab_id": 42, "offset": float64(32768), "max_bytes": float64(4096),
+			"selector": ".item", "frame_ref": "f1", "snapshot_id": "snap-a", "include_frames": false},
+	})
+	if err != nil || read.Mutating || read.Method != "browser.read" {
+		t.Fatalf("read preparation = %#v, err=%v", read, err)
+	}
+	want := map[string]any{"tabId": 42, "offset": float64(32768), "maxBytes": float64(4096), "selector": ".item",
+		"frameRef": "f1", "snapshotId": "snap-a", "includeFrames": false}
+	for key, value := range want {
+		if read.Params[key] != value {
+			t.Fatalf("read params[%s] = %#v, want %#v (all %#v)", key, read.Params[key], value, read.Params)
+		}
+	}
+	for _, bad := range []map[string]any{
+		{"element_ref": "e1"},
+		{"snapshot_id": "snap-a"},
+		{"element_ref": "e1", "frame_ref": "f1", "snapshot_id": "snap-a"},
+		{"element_ref": "e1", "selector": ".x", "snapshot_id": "snap-a"},
+		{"max_bytes": float64(100)},
+		{"offset": float64(-1)},
+		{"selector": "  "},
+		{"operation_id": "read-1"},
+	} {
+		if _, err := prepareBrowserMCPCall(browserMCPCallParams{Name: "workass_browser_read", Arguments: bad}); err == nil {
+			t.Fatalf("read accepted invalid arguments %#v", bad)
+		}
+	}
+	compact, err := prepareBrowserMCPCall(browserMCPCallParams{
+		Name: "workass_browser_snapshot", Arguments: map[string]any{"format": "compact", "since_snapshot_id": "snap-a"},
+	})
+	if err != nil || compact.Mutating || compact.Params["format"] != "compact" || compact.Params["sinceSnapshotId"] != "snap-a" {
+		t.Fatalf("compact snapshot preparation = %#v, err=%v", compact, err)
+	}
+	for _, bad := range []map[string]any{
+		{"format": "yaml"},
+		{"format": "json", "since_snapshot_id": "snap-a"},
+		{"since_snapshot_id": ""},
+	} {
+		if _, err := prepareBrowserMCPCall(browserMCPCallParams{Name: "workass_browser_snapshot", Arguments: bad}); err == nil {
+			t.Fatalf("snapshot accepted invalid arguments %#v", bad)
+		}
+	}
+	var readTool map[string]any
+	for _, tool := range browserMCPTools() {
+		if tool["name"] == "workass_browser_read" {
+			readTool = tool
+		}
+	}
+	if readTool == nil || mapFromAnyMain(readTool["annotations"])["readOnlyHint"] != true {
+		t.Fatalf("read tool = %#v", readTool)
+	}
+	if err := validateToolArguments(readTool, map[string]any{"max_bytes": float64(70000)}); err == nil {
+		t.Fatal("schema accepted max_bytes above 65536")
+	}
+	if workassToolMutates(browserToolKind, "workass_browser_read") {
+		t.Fatal("browser read must not require an operation_id")
 	}
 }
 
