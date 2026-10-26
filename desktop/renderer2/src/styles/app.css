@@ -2530,8 +2530,8 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .fbrw-fullview { flex: 1; position: relative; }
 /* A hosted page is drawn under this layer (same stacking order, earlier in
    the DOM): only the bar is opaque, the page shows through the view area. */
-.fbrw-full.hosted { background: transparent; }
-.fbrw-full.hosted .fbrw-fullbar { background: var(--bg); }
+.fbrw-full.hosted { background: transparent; pointer-events: none; }
+.fbrw-full.hosted .fbrw-fullbar { background: var(--bg); pointer-events: auto; }
 
 /* ============ Fork subsessions (approved mock forks/sidebar-nested.html) ============
    Children of a fork point live in the sidebar, nested under their parent chat;
