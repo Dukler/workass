@@ -1768,6 +1768,9 @@ class BrowserManager {
       }
     }
     if (!this.isCurrentEntry(entry, lifecycleToken) || entry.view.webContents !== guest) return;
+    // A page in its separate window: the window now shows (and drives) this
+    // guest, not the one that went away.
+    if (entry.pip && typeof entry.pip.follow === 'function') entry.pip.follow(guest);
     this.publish(entry);
     this.publishHosts();
     if (entry.guestWaiter) entry.guestWaiter.settle(ready);
@@ -2877,7 +2880,7 @@ class BrowserManager {
       title,
       viewport: { ...entry.viewport },
       preload: this.pipPreload,
-      sendInput: (event) => this.executeCDP({ tabId: this.tabIdOf(entry) }, 'Input.dispatchMouseEvent', event),
+      sendInput: (method, params) => this.executeCDP({ tabId: this.tabIdOf(entry) }, method, params),
       onClosed: () => {
         if (entry.pip !== pip) return;
         entry.pip = null;

@@ -1,7 +1,7 @@
 'use strict';
 
 // Preload of the separate browser window (browser-pip.js): live frames in,
-// clicks and scrolls out. Nothing else is exposed.
+// the person's pointer and keyboard out. Nothing else is exposed.
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('workassPip', {

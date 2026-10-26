@@ -255,15 +255,66 @@ test('the browser host is webview by default on macOS, view on Windows, and eith
   assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
 });
 
-test('the separate window maps clicks and scrolls onto the page and keeps its shape', () => {
+test('the separate window sends a person\'s pointer and keyboard to the page as on main', () => {
   const viewport = { width: 1440, height: 900 };
   assert.deepEqual(pipContentSize(viewport), [420, 263]);
-  assert.deepEqual(pipInputToPage({ type: 'mousePressed', button: 0, x: 0.5, y: 0.25 }, viewport),
-    { type: 'mousePressed', x: 720, y: 225, button: 'left', clickCount: 1, buttons: 1 });
-  assert.deepEqual(pipInputToPage({ type: 'mouseWheel', x: 0, y: 1, deltaX: 0, deltaY: 99999 }, viewport),
-    { type: 'mouseWheel', x: 0, y: 900, deltaX: 0, deltaY: 2000 });
-  assert.equal(pipInputToPage({ type: 'keyDown', x: 0.5, y: 0.5 }, viewport), null, 'only clicks and scrolls are sent');
-  assert.equal(pipInputToPage({ type: 'mousePressed', x: 1.2, y: 0.5 }, viewport), null);
+  const mouse = (input) => pipInputToPage(input, viewport);
+  assert.deepEqual(mouse({ type: 'mousePressed', button: 0, buttons: 1, clickCount: 1, x: 0.5, y: 0.25 }),
+    { method: 'Input.dispatchMouseEvent', params: { type: 'mousePressed', x: 720, y: 225, button: 'left', buttons: 1, clickCount: 1, modifiers: 0 } });
+  assert.deepEqual(mouse({ type: 'mouseWheel', x: 0, y: 1, deltaX: 0, deltaY: 99999 }),
+    { method: 'Input.dispatchMouseEvent', params: { type: 'mouseWheel', x: 0, y: 900, deltaX: 0, deltaY: 2000, modifiers: 0 } });
+  // hover, and a drag or a text selection (moves with the button held)
+  assert.deepEqual(mouse({ type: 'mouseMoved', buttons: 0, x: 0.1, y: 0.1 }),
+    { method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x: 144, y: 90, button: 'none', buttons: 0, modifiers: 0 } });
+  assert.deepEqual(mouse({ type: 'mouseMoved', buttons: 1, x: 0.2, y: 0.1 }).params, { type: 'mouseMoved', x: 288, y: 90, button: 'left', buttons: 1, modifiers: 0 });
+  // a double click
+  assert.equal(mouse({ type: 'mousePressed', button: 0, buttons: 1, clickCount: 2, x: 0.5, y: 0.5 }).params.clickCount, 2);
+  // typing, a shortcut, a composed (IME) text
+  assert.deepEqual(mouse({ type: 'keyDown', key: 'a', code: 'KeyA', keyCode: 65, text: 'a' }),
+    { method: 'Input.dispatchKeyEvent', params: { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 0, text: 'a', unmodifiedText: 'a' } });
+  assert.deepEqual(mouse({ type: 'keyDown', key: 'v', code: 'KeyV', keyCode: 86, meta: true }).params.commands, ['paste']);
+  assert.equal(mouse({ type: 'keyUp', key: 'Enter', code: 'Enter', keyCode: 13 }).params.type, 'keyUp');
+  assert.deepEqual(mouse({ type: 'insertText', text: '日本' }), { method: 'Input.insertText', params: { text: '日本' } });
+  // bounded
+  assert.equal(mouse({ type: 'mousePressed', x: 1.2, y: 0.5 }), null);
+  assert.equal(mouse({ type: 'insertText', text: 'x'.repeat(5000) }), null);
+  assert.equal(mouse({ type: 'dispatchSomethingElse', x: 0.5, y: 0.5 }), null);
+  // The window's own page script parses.
+  const { pipPageURL } = require('./browser-pip');
+  const html = decodeURIComponent(pipPageURL().replace(/^data:text\/html;charset=utf-8,/u, ''));
+  const script = html.match(/<script>([\s\S]*)<\/script>/u)[1];
+  assert.doesNotThrow(() => new Function(script));
+  for (const listener of ["'mousemove'", "'keydown'", "'keyup'", "'compositionend'"]) assert.ok(script.includes(listener), listener);
+});
+
+test('after an app renderer reload the separate window follows the new page instead of freezing', async () => {
+  const { openGuestPip } = require('./browser-pip');
+  class FakeWin extends EventEmitter {
+    constructor() {
+      super();
+      this.destroyed = false;
+      this.webContents = Object.assign(new EventEmitter(), {
+        ipc: new EventEmitter(), sent: [], setWindowOpenHandler() {}, send(channel, payload) { this.sent.push([channel, payload]); },
+      });
+    }
+    async loadURL() { setTimeout(() => this.webContents.emit('did-finish-load'), 0); }
+    setAlwaysOnTop() {} setAspectRatio() {} show() {} isDestroyed() { return this.destroyed; } destroy() { this.destroyed = true; this.emit('closed'); }
+    getContentSize() { return [420, 263]; }
+  }
+  const page = (name) => ({ name, isDestroyed: () => false, setBackgroundThrottling() {}, capturePage: async () => ({ isEmpty: () => true }) });
+  const subscribed = [];
+  let current = page('first');
+  const pip = openGuestPip({
+    BrowserWindow: FakeWin, guest: current, title: 't', viewport: { width: 1440, height: 900 }, preload: '',
+    sendInput: () => {}, onClosed: () => {}, embedder: null,
+    subscribe: () => { subscribed.push(current.name); return () => subscribed.push(`end:${current.name}`); },
+  });
+  await settle(); await settle();
+  assert.deepEqual(subscribed, ['first']);
+  current = page('second'); // the reloaded renderer mounted a new guest
+  pip.follow(current);
+  assert.deepEqual(subscribed, ['first', 'end:second', 'second'], 'the window is subscribed again, to the new page');
+  pip.close();
 });
 
 test('a page an agent drives copies frames only while the app window is hidden or minimized', () => {
