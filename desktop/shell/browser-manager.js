@@ -71,6 +71,23 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = 20000;
 // is retired, and capped so a renderer that stopped answering cannot hold the
 // browser's serialized operation queue (and every later navigation) forever.
 const CHILD_SESSION_COMMAND_TIMEOUT_MS = 10000;
+// Workass's own JavaScript world in every page and frame. Nothing Workass
+// runs in a page runs in the page's world: the page can neither see it (no
+// globals, observers, listeners or timers of ours) nor change what it sees.
+// Only workass_browser_evaluate runs the agent's own code in the page.
+const AGENT_WORLD_NAME = 'workass-agent';
+// Electron's equivalent, only for a page without a CDP session yet.
+const AGENT_WORLD_ID = 1999;
+// One input command (a mouse, key or drag event) that the page does not
+// take within this is given up on, and whatever it left pressed is released.
+const INPUT_COMMAND_TIMEOUT_MS = 5000;
+const INPUT_RELEASE_TIMEOUT_MS = 1000;
+// A one-line <select> opens a native menu: agent input cannot operate it,
+// and on macOS it holds the window's input until it closes.
+const NATIVE_MENU_REFUSAL = Object.freeze({ ok: false, status: 'native_menu',
+  reason: 'a select list opens a native menu that agent input cannot operate; choose its option with workass_browser_select' });
+const MENU_OPENING_KEYS = new Set(['Space', ' ', 'Enter', 'ArrowDown', 'ArrowUp']);
+const STALE_CONTEXT = /Cannot find context|context with specified id|Execution context was destroyed|Cannot find default execution context|No frame with given id/u;
 const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // How long a call waits for the app renderer to mount (or, after a reload,
 // mount again) a page's <webview> before it reports that the page is not up.
@@ -396,6 +413,11 @@ class BrowserManager {
       for (const event of ['hide', 'show', 'minimize', 'restore']) {
         win.on(event, () => { for (const entry of this.entries.values()) this.syncPaintSource(entry); });
       }
+    }
+    // The app losing focus ends any pointer press an agent left down, so no
+    // page keeps the pointer captured.
+    if (typeof win.on === 'function') {
+      win.on('blur', () => { for (const entry of this.entries.values()) if (entry.pointerDown) void this.releaseStuckInput(entry); });
     }
     if (typeof this.profile.on === 'function') {
       this.profile.on('will-download', (_event, item, contents) => {
@@ -1751,23 +1773,91 @@ class BrowserManager {
     return true;
   }
 
-  // Electron defers executeJavaScript() until the page stops loading, which a
-  // page with a never-finishing subframe never does; that would hold the
-  // serialized operation and presentation queues (and every later navigation)
-  // forever. While the main frame is still loading, evaluate over the owned
-  // root CDP session instead.
-  evaluateMainWorld(entry, expression, userGesture = false) {
+  // The agent world's execution context in a frame (CDP
+  // Page.createIsolatedWorld), one per document.
+  async agentContextId(entry, frame) {
+    if (!frame) throw new Error('browser frame execution context is unavailable');
+    const forDocument = `${frame.loaderId || ''}|${frame.contextId ?? ''}`;
+    if (frame.agentWorld && frame.agentWorld.forDocument === forDocument) return frame.agentWorld.id;
+    const created = await this.ownedSessionCommand(entry, 'Page.createIsolatedWorld',
+      { frameId: frame.id, worldName: AGENT_WORLD_NAME, grantUniveralAccess: false }, frame.sessionId || null);
+    const id = Number(created && created.executionContextId);
+    if (!Number.isSafeInteger(id)) throw new Error('browser frame execution context is unavailable');
+    frame.agentWorld = { forDocument, id };
+    return id;
+  }
+
+  // Runs one command against a frame's agent world, making the world again
+  // once if the document replaced it in between.
+  async withAgentContext(entry, frame, run) {
+    for (let attempt = 0; ; attempt += 1) {
+      const contextId = await this.agentContextId(entry, frame);
+      try {
+        return await run(contextId);
+      } catch (error) {
+        if (attempt > 0 || !STALE_CONTEXT.test(String(error && error.message))) throw error;
+        frame.agentWorld = null;
+      }
+    }
+  }
+
+  // A code editor's full text lives only in the editor's own objects
+  // (Monaco's models, CodeMirror's instance), which exist only in the page's
+  // world. This one read-only call asks the editor API for it, and only on a
+  // page that has such an editor; the agent world reads everything else.
+  async readEditorModels(entry, frame, editors) {
+    const selectors = editors.map((editor) => (editor && typeof editor.selector === 'string' ? editor.selector : null));
+    if (!selectors.some(Boolean)) return;
+    const expression = `(() => ${JSON.stringify(selectors)}.map((selector) => {
+      try {
+        const root = selector ? document.querySelector(selector) : null;
+        if (!root) return null;
+        if (root.matches('.monaco-editor')) {
+          const editor = (globalThis.monaco?.editor?.getEditors?.() || []).find((candidate) => candidate?.getDomNode?.() === root);
+          const model = editor?.getModel?.();
+          return model ? { value: String(model.getValue()), readOnly: editor?.getRawOptions?.()?.readOnly === true } : null;
+        }
+        if (root.CodeMirror?.getValue) return { value: String(root.CodeMirror.getValue()), readOnly: root.CodeMirror.getOption?.('readOnly') === true };
+      } catch (_) { /* the rendered lines stay */ }
+      return null;
+    }))()`;
+    const target = frame || this.frameForSession(entry, null);
+    let values = null;
+    try {
+      values = unwrapCDPValue(await this.ownedSessionCommand(entry, 'Runtime.evaluate', {
+        expression, returnByValue: true, ...(target && target.contextId != null ? { contextId: target.contextId } : {}),
+      }, target?.sessionId || null, 2000));
+    } catch { return; }
+    if (!Array.isArray(values)) return;
+    values.forEach((model, index) => {
+      const editor = editors[index];
+      if (!editor || !model || typeof model.value !== 'string') return;
+      editor.text = model.value.slice(0, 12000);
+      editor.valueLength = model.value.length;
+      editor.truncated = model.value.length > 12000;
+      editor.readOnly = editor.readOnly === true || model.readOnly === true;
+    });
+  }
+
+  // Script on the top document, in the agent world. Over the root CDP
+  // session: Electron's executeJavaScript() also waits until the page stops
+  // loading, which a page with a never-finishing subframe never does.
+  async evaluateAgentWorld(entry, expression, userGesture = false) {
     const wc = entry.view.webContents;
-    const loading = typeof wc.isLoadingMainFrame === 'function' && (!wc.getURL() || wc.isLoadingMainFrame()) &&
-      wc.debugger?.isAttached?.() === true;
-    if (!loading) return wc.executeJavaScript(expression, userGesture);
-    return Promise.resolve(wc.debugger.sendCommand('Runtime.evaluate', {
-      expression: String(expression), returnByValue: true, awaitPromise: true, userGesture: userGesture === true,
-    })).then(unwrapCDPValue);
+    const root = wc.debugger?.isAttached?.() === true ? this.frameForSession(entry, null) : null;
+    if (root) {
+      return this.withAgentContext(entry, root, (contextId) => Promise.resolve(wc.debugger.sendCommand('Runtime.evaluate', {
+        expression: String(expression), contextId, returnByValue: true, awaitPromise: true, userGesture: userGesture === true,
+      })).then(unwrapCDPValue));
+    }
+    if (typeof wc.executeJavaScriptInIsolatedWorld === 'function') {
+      return wc.executeJavaScriptInIsolatedWorld(AGENT_WORLD_ID, [{ code: String(expression) }], userGesture);
+    }
+    throw new Error('browser page execution context is unavailable');
   }
 
   async readEffectiveViewport(entry) {
-    const effective = await this.evaluateMainWorld(entry, '({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })');
+    const effective = await this.evaluateAgentWorld(entry, '({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })');
     if (!effective || !Number.isFinite(Number(effective.width)) || !Number.isFinite(Number(effective.height)) || !Number.isFinite(Number(effective.deviceScaleFactor))) {
       throw new Error('browser page did not report effective viewport metrics');
     }
@@ -1962,9 +2052,15 @@ class BrowserManager {
   // finish by its deadline is reported and the queue moves on without it (a
   // wedged page cannot hold every later call).
   serialize(entry, operation, { deadlineMs = null } = {}) {
+    const hold = {};
     const run = entry.operationChain.catch(() => {}).then(() => {
       this.assertCurrentEntry(entry);
-      return this.withPainting(entry, operation);
+      return this.withPainting(entry, operation, hold);
+    });
+    // Whatever the operation left pressed (it failed between a press and its
+    // release) is released as soon as it ends.
+    run.then(() => {}, () => {}).then(() => {
+      if (entry.pointerDown || entry.inputTimedOut) void this.releaseStuckInput(entry);
     });
     const limitMs = deadlineMs ?? this.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
     let timer = null;
@@ -1974,6 +2070,11 @@ class BrowserManager {
         timer = setTimeout(() => {
           entry.wedgedAt = Date.now();
           this.lifecycle(entry, 'operation-deadline', { limitMs });
+          // The tab moves on: it no longer stays emulated focused and
+          // painting for an operation that may never end, and its input is
+          // put back to rest.
+          if (hold.release) hold.release();
+          void this.releaseStuckInput(entry);
           reject(new Error(`the browser did not finish this within ${Math.round(limitMs / 1000)}s; the page may be stuck. Try again, or reset the tab with workass_browser_close`));
         }, limitMs);
         if (typeof timer?.unref === 'function') timer.unref();
@@ -1989,14 +2090,16 @@ class BrowserManager {
   // an agent drives a page it is emulated focused, which Chromium treats like
   // a captured page and keeps painting; a few seconds after the last call it
   // goes back to ordinary throttling (after t3code's DesktopBrowserHost).
-  async withPainting(entry, operation) {
+  async withPainting(entry, operation, hold = {}) {
     if (this.hostMode !== 'webview') return operation();
     this.holdPainting(entry);
+    // Released once: when the operation ends, or at its deadline.
+    hold.release = () => { if (hold.released) return; hold.released = true; this.releasePainting(entry); };
     try {
       if (entry.focusChange) await entry.focusChange;
       return await operation();
     } finally {
-      this.releasePainting(entry);
+      hold.release();
     }
   }
 
@@ -3136,7 +3239,58 @@ class BrowserManager {
         throw new Error('browser child session is not owned by this tab and frame');
       }
     }
+    if (commandName.startsWith('Input.')) return this.boundedInput(entry, debug, commandName, commandParams || {}, sessionId);
     return debug.sendCommand(commandName, commandParams || {}, sessionId || undefined);
+  }
+
+  // Input commands never wait without bound: a page that does not take one
+  // (a hung renderer, a drag handed elsewhere) fails the call, and a press it
+  // left down is released by the operation that made it (serialize) or on
+  // blur.
+  async boundedInput(entry, debug, method, params, sessionId) {
+    const pointer = method === 'Input.dispatchMouseEvent' ? String(params.type || '') : '';
+    if (pointer === 'mousePressed') {
+      entry.pointerDown = { sessionId: sessionId || null, x: Number(params.x) || 0, y: Number(params.y) || 0, button: params.button || 'left' };
+    }
+    let timer = null;
+    const limitMs = this.inputCommandTimeoutMs ?? INPUT_COMMAND_TIMEOUT_MS;
+    try {
+      const result = await Promise.race([
+        Promise.resolve(debug.sendCommand(method, params, sessionId || undefined)),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`the page did not take ${method.slice('Input.'.length)} within ${Math.round(limitMs / 1000)}s`)), limitMs);
+        }),
+      ]);
+      if (pointer === 'mouseReleased') entry.pointerDown = null;
+      return result;
+    } catch (error) {
+      if (/did not take/u.test(String(error && error.message))) {
+        entry.inputTimedOut = true;
+        this.lifecycle(entry, 'input-command-timeout', { method, type: pointer || null });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Puts the page's input back to rest: a press left down is released where
+  // it was made, and a drag in progress (an intercepted HTML drag) is
+  // cancelled. Each step is bounded and its failure ignored.
+  async releaseStuckInput(entry) {
+    const down = entry.pointerDown;
+    entry.pointerDown = null;
+    entry.inputTimedOut = false;
+    const wc = this.liveContents(entry);
+    const debug = wc && wc.debugger;
+    if (!debug || debug.isAttached?.() !== true) return;
+    const send = (method, params, sessionId) => Promise.race([
+      Promise.resolve().then(() => debug.sendCommand(method, params, sessionId || undefined)).catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, INPUT_RELEASE_TIMEOUT_MS)),
+    ]);
+    if (down) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: down.x, y: down.y, button: down.button, buttons: 0, clickCount: 1 }, down.sessionId);
+    await send('Input.cancelDragging', {}, down ? down.sessionId : null);
+    this.lifecycle(entry, 'input-released', { pressed: !!down });
   }
 
   async evaluateFrame(entry, frameId, expression, options = {}) {
@@ -3156,7 +3310,7 @@ class BrowserManager {
     }
     if (!frame || (!frame.sessionId && frame.contextId == null)) {
       if (!explicitFrameId || frame.parentFrameId == null) {
-        return this.evaluateMainWorld(entry, expression, true);
+        return this.evaluateAgentWorld(entry, expression, true);
       }
       throw new Error('browser frame execution context is unavailable');
     }
@@ -3176,10 +3330,9 @@ class BrowserManager {
       expression: String(expression),
       returnByValue: options.returnByValue !== false,
       awaitPromise: options.awaitPromise !== false,
-      ...(frame.contextId != null ? { contextId: frame.contextId } : {}),
     };
-    const response = await this.ownedSessionCommand(entry, 'Runtime.evaluate', params, frame.sessionId || null, options.timeoutMs);
-    return unwrapCDPValue(response);
+    return this.withAgentContext(entry, frame, async (contextId) => unwrapCDPValue(
+      await this.ownedSessionCommand(entry, 'Runtime.evaluate', { ...params, contextId }, frame.sessionId || null, options.timeoutMs)));
   }
 
   // Text input for a frame goes to that frame's own owned target, so it
@@ -3208,10 +3361,9 @@ class BrowserManager {
     const frame = target.frameId ? entry.frames.get(target.frameId) : this.frameForSession(entry, null);
     if (!frame || frame.detached) throw new Error('observed frame is stale; refresh the snapshot');
     const sessionId = frame.sessionId || undefined;
-    const resolved = await this.ownedSessionCommand(entry, 'DOM.resolveNode', {
-      backendNodeId: target.backendDOMNodeId,
-      ...(frame.contextId != null ? { executionContextId: frame.contextId } : {}),
-    }, sessionId);
+    const resolved = await this.withAgentContext(entry, frame, (executionContextId) => this.ownedSessionCommand(entry, 'DOM.resolveNode', {
+      backendNodeId: target.backendDOMNodeId, executionContextId,
+    }, sessionId));
     const objectId = resolved?.object?.objectId;
     if (!objectId) throw new Error('observed node is stale; refresh the snapshot');
     try {
@@ -3244,10 +3396,9 @@ class BrowserManager {
       const owner = await debug.sendCommand('DOM.getFrameOwner', { frameId: child.id }, sessionId);
       const backendNodeId = Number(owner && owner.backendNodeId);
       if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return false;
-      const resolved = await debug.sendCommand('DOM.resolveNode', {
-        backendNodeId,
-        ...(parent.contextId != null ? { executionContextId: parent.contextId } : {}),
-      }, sessionId);
+      const resolved = await this.withAgentContext(entry, parent, (executionContextId) => debug.sendCommand('DOM.resolveNode', {
+        backendNodeId, executionContextId,
+      }, sessionId));
       ownerObjectId = resolved?.object?.objectId || null;
       if (!ownerObjectId) return false;
       const active = await debug.sendCommand('Runtime.callFunctionOn', {
@@ -3876,10 +4027,9 @@ class BrowserManager {
     const sessionId = frame.sessionId || undefined;
     let resolved;
     try {
-      resolved = await this.ownedSessionCommand(entry, 'DOM.resolveNode', {
-        backendNodeId: Number(backendDOMNodeId),
-        ...(frame.contextId != null ? { executionContextId: frame.contextId } : {}),
-      }, sessionId);
+      resolved = await this.withAgentContext(entry, frame, (executionContextId) => this.ownedSessionCommand(entry, 'DOM.resolveNode', {
+        backendNodeId: Number(backendDOMNodeId), executionContextId,
+      }, sessionId));
     } catch { return []; }
     const objectId = resolved && resolved.object && resolved.object.objectId;
     if (!objectId) return [];
@@ -3944,7 +4094,7 @@ class BrowserManager {
         return this.evaluateFrame(entry, frame.id, script, { timeoutMs: remainingMs });
       }
       if (frame) return this.evaluateFrame(entry, frame.id, script);
-      return this.evaluateMainWorld(entry, script, true);
+      return this.evaluateAgentWorld(entry, script, true);
     };
 
     for (const frame of liveFrames.length ? liveFrames : [null]) {
@@ -3967,6 +4117,7 @@ class BrowserManager {
         source.semantic = Array.isArray(raw.semantic) ? raw.semantic : [];
         source.interactive = Array.isArray(raw.interactive) ? raw.interactive : [];
         source.editors = Array.isArray(raw.editors) ? raw.editors : [];
+        if (source.editors.length) await this.readEditorModels(entry, frame, source.editors);
         source.frames = Array.isArray(raw.frames) ? raw.frames : [];
         const isRootObservation = !frame || frame.id === rootFrame?.id;
         if (isRootObservation) textSource = raw;
@@ -4555,7 +4706,7 @@ class BrowserManager {
     if (hasSelector) {
       const selector = params.selector.trim();
       let count;
-      try { count = await this.evaluateMainWorld(entry, 'document.querySelectorAll(' + JSON.stringify(selector) + ').length'); }
+      try { count = await this.evaluateAgentWorld(entry, 'document.querySelectorAll(' + JSON.stringify(selector) + ').length'); }
       catch { return { status: 'missing', reason: 'selector is invalid' }; }
       if (count === 0) return { status: 'missing', reason: 'selector did not match an element' };
       if (count !== 1) return { status: 'ambiguous', reason: 'selector matched ' + count + ' elements; use a more specific selector or an observed element_ref' };
@@ -4628,9 +4779,9 @@ class BrowserManager {
       if (!mapped.available) return { status: 'unavailable', reason: mapped.reason };
       let ownerObjectId = null;
       try {
-        const resolvedOwner = await entry.view.webContents.debugger.sendCommand('DOM.resolveNode', {
-          backendNodeId: owner.backendNodeId,
-        }, sessionId);
+        const resolvedOwner = await this.withAgentContext(entry, parent, (executionContextId) => entry.view.webContents.debugger.sendCommand('DOM.resolveNode', {
+          backendNodeId: owner.backendNodeId, executionContextId,
+        }, sessionId));
         ownerObjectId = resolvedOwner?.object?.objectId || null;
         if (!ownerObjectId) return { status: 'unavailable', reason: 'owned_frame_owner_unavailable' };
         const hitTest = await entry.view.webContents.debugger.sendCommand('Runtime.callFunctionOn', {
@@ -4729,6 +4880,7 @@ class BrowserManager {
     const aimed = await this.pointerTarget(entry, params, { coordinates: true });
     if (aimed.failure) return aimed.failure;
     const { inputTarget, inputPoint, point, reportedTarget } = aimed;
+    if (point.nativeMenu === true || point.target?.nativeMenu === true) return { ...NATIVE_MENU_REFUSAL };
     await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: inputPoint.x, y: inputPoint.y });
     for (let count = 1; count <= clickCount; count += 1) {
       await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: inputPoint.x, y: inputPoint.y, button, clickCount: count });
@@ -4775,12 +4927,13 @@ class BrowserManager {
       if (point.x < 0 || point.y < 0 || point.x >= currentStamp.metrics.width || point.y >= currentStamp.metrics.height) {
         return { failure: { ok: false, status: 'blocked', reason: 'screenshot point is outside the current visible viewport' } };
       }
-      const inspected = await this.evaluateMainWorld(entry, '(() => {' +
+      const inspected = await this.evaluateAgentWorld(entry, '(() => {' +
         'const x=' + JSON.stringify(point.x) + ';const y=' + JSON.stringify(point.y) + ';' +
         'const deep=(doc,px,py)=>{let hit=doc.elementFromPoint(px,py);const seen=new Set();while(hit&&!seen.has(hit)){seen.add(hit);const nested=hit.shadowRoot?.elementFromPoint?.(px,py);if(!nested||nested===hit)break;hit=nested;}return hit;};' +
         'const target=deep(document,x,y);if(!target)return {status:"missing"};' +
         'for(let node=target;node&&node.nodeType===1;node=node.parentElement||node.getRootNode?.()?.host||null){if(node.disabled||node.getAttribute("aria-disabled")==="true"||node.hasAttribute("inert"))return {status:"disabled"};}' +
-        'return {status:"ready",tag:String(target.tagName||"").toLowerCase(),role:target.getAttribute("role")||null,name:String(target.getAttribute("aria-label")||target.innerText||target.textContent||"").trim().slice(0,160)};' +
+        'const pick=target.closest?.("select");' +
+        'return {status:"ready",tag:String(target.tagName||"").toLowerCase(),role:target.getAttribute("role")||null,name:String(target.getAttribute("aria-label")||target.innerText||target.textContent||"").trim().slice(0,160),nativeMenu:!!pick&&!pick.multiple&&!(pick.size>1)};' +
         '})()');
       if (!inspected || inspected.status !== 'ready') {
         return { failure: { ok: false, status: inspected?.status || 'blocked', reason: inspected?.status === 'disabled' ? 'the screenshot target is disabled' : 'no target is present at those screenshot coordinates' } };
@@ -5058,7 +5211,7 @@ class BrowserManager {
       throw new Error(`a capture wider than the page's viewport (${vw} CSS pixels) is not available here; capture a narrower clip or set a wider viewport`);
     }
     const pixels = Buffer.alloc(outW * outH * 4);
-    const scrollTo = (x, y) => this.evaluateMainWorld(entry, `(async () => { scrollTo({ left: ${JSON.stringify(x)}, top: ${JSON.stringify(y)}, behavior: 'instant' }); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); return { x: scrollX, y: scrollY }; })()`);
+    const scrollTo = (x, y) => this.evaluateAgentWorld(entry, `(async () => { scrollTo({ left: ${JSON.stringify(x)}, top: ${JSON.stringify(y)}, behavior: 'instant' }); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); return { x: scrollX, y: scrollY }; })()`);
     let row = 0;
     try {
       while (row < outH) {
@@ -5518,7 +5671,7 @@ class BrowserManager {
           try { await temporary?.clear(); } catch { /* navigation already removed the frame context */ }
         }
       }
-      const result = await this.evaluateMainWorld(entry, '(() => { const before = { x: scrollX, y: scrollY }; window.scrollBy(' + JSON.stringify(x) + ', ' + JSON.stringify(y) + '); const after = { x: scrollX, y: scrollY }; return { changed: before.x !== after.x || before.y !== after.y, before, after }; })()');
+      const result = await this.evaluateAgentWorld(entry, '(() => { const before = { x: scrollX, y: scrollY }; window.scrollBy(' + JSON.stringify(x) + ', ' + JSON.stringify(y) + '); const after = { x: scrollX, y: scrollY }; return { changed: before.x !== after.x || before.y !== after.y, before, after }; })()');
       if (result?.changed) entry.interactionGeneration += 1;
       return result;
     }
@@ -5526,6 +5679,13 @@ class BrowserManager {
       const parsed = internal.parsedKey || parseBrowserKey(params.key, this.platform);
       const focusedFrame = await this.focusedFrame(entry);
       const focusedFrameId = focusedFrame?.id ?? null;
+      if (MENU_OPENING_KEYS.has(String(parsed.keyCode))) {
+        let onSelect = false;
+        try {
+          onSelect = await this.evaluateFrame(entry, focusedFrameId, '(() => { let el = document.activeElement; while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; return !!el && el.tagName === "SELECT" && !el.multiple && !(el.size > 1); })()') === true;
+        } catch { /* the key goes ahead */ }
+        if (onSelect) return { ...NATIVE_MENU_REFUSAL };
+      }
       let deletionBefore = null;
       if (parsed.keyCode === 'Backspace' || parsed.keyCode === 'Delete') {
         try { deletionBefore = await this.focusedTextLength(entry, focusedFrameId); }

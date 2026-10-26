@@ -15,6 +15,12 @@ class FakeDebugger extends EventEmitter {
     this.commandCalls.push({ method, params, sessionId });
     this.lastCommand = { method, params, sessionId };
     if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: `target-${this.owner.id}` } };
+    // The agent world: scripts there behave like the fake page's scripts.
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: sessionId ? 9200 : 9100 };
+    if (method === 'Runtime.evaluate' && !sessionId && params && params.contextId === 9100) {
+      const value = await this.owner.executeJavaScript(params.expression, params.userGesture);
+      return { result: value === undefined ? { type: 'undefined' } : { type: typeof value, value } };
+    }
     if (method === 'Page.getFrameTree') {
       if (sessionId && this.owner.childFrameTree) return this.owner.childFrameTree;
       return this.owner.frameTree || { frameTree: { frame: { id: `frame-${this.owner.id}`, loaderId: 'loader-root', url: this.owner.url, securityOrigin: 'http://fixture.invalid' }, childFrames: [] } };
@@ -88,6 +94,11 @@ class FakeWebContents extends EventEmitter {
       return { snapshotId, url: this.url, title: 'Fixture', text: '', textLength: 0, textTruncated: false, semantic: [], nodeCount: 0, semanticTruncated: false, refs: [], frames: [], editors: [], interactive: [], scroll: { ...this.metrics } };
     }
     return { ok: true };
+  }
+  // Electron's isolated world for a page without a CDP session yet.
+  async executeJavaScriptInIsolatedWorld(worldId, scripts, userGesture) {
+    this.lastIsolatedWorld = worldId;
+    return this.executeJavaScript(scripts[0].code, userGesture);
   }
   async insertText(text) { this.insertedTexts = [...(this.insertedTexts || []), text]; }
   // Electron resolves capturePage() with an EMPTY image for a view that is not
@@ -874,6 +885,7 @@ test('an explicit missing frame stays stale and cannot fall back into the root d
   entry.frames.clear();
   assert.equal(await manager.evaluateFrame(entry, null, 'root startup fallback'), 'root-result');
   assert.deepEqual(executed, ['root startup fallback'], 'the no-registry root startup path remains available');
+  assert.equal(wc.lastIsolatedWorld, 1999, 'and runs in Workass\'s own world, not the page\'s');
   executed.length = 0;
 
   const rootId = `frame-${wc.id}`;

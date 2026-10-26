@@ -20,6 +20,8 @@ class FakeDebugger extends EventEmitter {
     if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: `target-${this.owner.id}` } };
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: `frame-${this.owner.id}`, loaderId: 'l', url: this.owner.url }, childFrames: [] } };
     if (method === 'Emulation.setDeviceMetricsOverride') { this.owner.metrics = { ...this.owner.metrics, width: params.width, height: params.height, deviceScaleFactor: params.deviceScaleFactor }; return {}; }
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 77 };
+    if (method === 'Runtime.evaluate' && params && params.contextId === 77) return { result: { value: await this.owner.executeJavaScript(params.expression) } };
     return {};
   }
 }

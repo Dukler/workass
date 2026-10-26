@@ -18,7 +18,7 @@ function fixture({ count = () => 3, frames = false, lines = ['- button "Go" [e1]
   const manager = {
     documentKey: () => 'doc-1',
     liveContents: () => ({ getURL: () => 'http://127.0.0.1/page', debugger: { isAttached: () => true, sendCommand: async (name) => { calls.network.push(name); } } }),
-    evaluateMainWorld: async () => ({ n: count(), quietFor: 1000 }),
+    evaluateAgentWorld: async () => ({ n: count(), quietFor: 1000 }),
     takeOutline: async (_entry, options = {}) => {
       calls.outlines.push(options.activity ? 'with-activity' : 'fresh');
       const outline = { id: `o${calls.outlines.length}`, documentKey: 'doc-1', takenAt: Date.now(), lines: outlineLines.map((text, i) => ({ depth: 0, text, key: `k${i}:${text}` })),
@@ -37,7 +37,8 @@ test('an action that changes nothing on a page without frames reads no outline',
   const report = await runAction(manager, entry, async () => ({ ok: true }), { method: 'browser.click' });
   assert.equal(report.changes.none, true);
   assert.deepEqual(calls.outlines, [], 'neither a before nor an after outline');
-  assert.deepEqual(calls.network, ['Network.enable', 'Network.disable'], 'requests are watched only while the action settles');
+  assert.deepEqual(calls.network, ['Network.enable', 'Page.setInterceptFileChooserDialog', 'Network.disable', 'Page.setInterceptFileChooserDialog'],
+    'requests are watched, and a file chooser intercepted, only while the action runs');
 });
 
 test('a change is outlined after the action and reported as a diff against the clean last outline', async () => {
@@ -108,7 +109,7 @@ test('an unchanged page keeps its newest outline; a change, a load, or age on a 
   const { BrowserManager } = require('./browser-manager');
   let n = 3;
   const entry = { lastOutline: { id: 'o1', documentKey: 'd', activityN: 3, activitySeq: 0, takenAt: Date.now() }, frames: new Map(), activitySeq: 0 };
-  const self = { documentKey: () => 'd', evaluateMainWorld: async () => ({ n }) };
+  const self = { documentKey: () => 'd', evaluateAgentWorld: async () => ({ n }) };
   const reuse = () => BrowserManager.prototype.reusableOutline.call(self, entry);
   assert.equal((await reuse())?.id, 'o1');
   n = 4;
@@ -143,4 +144,88 @@ test('a tab the action opens is in its report even when it takes a moment to com
     return { ok: true };
   }, { method: 'browser.click' });
   assert.ok(report.events.some((event) => event.type === 'tab_opened'));
+});
+
+test('a file chooser the page opens during an action is reported, never shown', async () => {
+  const { entry, manager } = fixture();
+  await manager.takeOutline(entry, {});
+  const report = await runAction(manager, entry, async () => {
+    noteActivity(entry, 'Page.fileChooserOpened', { mode: 'selectSingle', backendNodeId: 7 }, null);
+    return { ok: true };
+  }, { method: 'browser.click' });
+  const opened = report.events.find((event) => event.type === 'file_chooser_opened');
+  assert.ok(opened, 'reported');
+  assert.match(opened.note, /workass_browser_upload/);
+  assert.equal(entry.fileChooserWatched, false, 'interception ends with the action');
+  noteActivity(entry, 'Page.fileChooserOpened', { mode: 'selectSingle' }, null);
+  assert.equal(entry.events.filter((event) => event.type === 'file_chooser_opened').length, 1, 'a person\'s own chooser between actions is not taken over');
+});
+
+// The shell's input path, put back to rest whatever happens.
+function inputDouble({ hang = () => false } = {}) {
+  const { BrowserManager } = require('./browser-manager');
+  const sent = [];
+  const debug = {
+    isAttached: () => true,
+    sendCommand: (method, params = {}) => { sent.push([method, params.type ?? params.enabled ?? null]); return hang(method, params) ? new Promise(() => {}) : Promise.resolve({}); },
+  };
+  const entry = { operationChain: Promise.resolve() };
+  const self = {
+    hostMode: 'webview', inputCommandTimeoutMs: 40, operationDeadlineMs: 80, events: [],
+    lifecycle(_entry, stage) { self.events.push(stage); },
+    liveContents: () => ({ debugger: debug }),
+    assertCurrentEntry() {},
+    holdPainting(target) { target.holds = (target.holds || 0) + 1; },
+    releasePainting(target) { target.holds -= 1; },
+  };
+  for (const name of ['boundedInput', 'releaseStuckInput', 'withPainting', 'serialize', 'browserClick']) self[name] = BrowserManager.prototype[name];
+  self.executeCDP = (_target, method, params) => self.boundedInput(entry, debug, method, params, null);
+  return { self, entry, sent };
+}
+
+test('an input command the page never takes fails in bounded time, and the press it left down is released', async () => {
+  const { self, entry, sent } = inputDouble({ hang: (method, params) => method === 'Input.dispatchMouseEvent' && params.type === 'mouseMoved' });
+  await self.executeCDP({}, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 5, y: 6, button: 'left' });
+  assert.deepEqual(entry.pointerDown, { sessionId: null, x: 5, y: 6, button: 'left' });
+  const started = Date.now();
+  await assert.rejects(self.executeCDP({}, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: 9, y: 9 }), /did not take dispatchMouseEvent/);
+  assert.ok(Date.now() - started < 1000);
+  await self.releaseStuckInput(entry);
+  assert.deepEqual(sent.slice(-2), [['Input.dispatchMouseEvent', 'mouseReleased'], ['Input.cancelDragging', null]]);
+  assert.equal(entry.pointerDown, null);
+});
+
+test('an operation past its deadline lets go of focus emulation, painting and the pointer', async () => {
+  const { self, entry, sent } = inputDouble();
+  entry.pointerDown = { sessionId: null, x: 1, y: 2, button: 'left' };
+  await assert.rejects(self.serialize(entry, () => new Promise(() => {})), /did not finish/);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(entry.holds, 0, 'the paint and focus hold is released at the deadline');
+  assert.ok(sent.some(([method, type]) => method === 'Input.dispatchMouseEvent' && type === 'mouseReleased'));
+  assert.ok(sent.some(([method]) => method === 'Input.cancelDragging'));
+});
+
+test('a click on a select list is refused instead of opening a native menu', async () => {
+  const { self, sent } = inputDouble();
+  self.pointerTarget = async () => ({ inputTarget: {}, inputPoint: { x: 3, y: 4 }, point: { x: 3, y: 4, nativeMenu: true }, reportedTarget: { tag: 'select' } });
+  const result = await self.browserClick({}, { selector: '#pick' });
+  assert.equal(result.status, 'native_menu');
+  assert.match(result.reason, /workass_browser_select/);
+  assert.deepEqual(sent, [], 'no input was sent');
+});
+
+test('a drag that fails halfway turns interception off and puts the pointer back to rest', async () => {
+  const { browserDrag } = require('./browser-actions');
+  const { self, entry, sent } = inputDouble({ hang: (method, params) => method === 'Input.dispatchMouseEvent' && params.type === 'mouseMoved' && params.buttons === 1 });
+  const manager = {
+    pointerTarget: async () => ({ inputTarget: {}, inputPoint: { x: 10, y: 10 }, reportedTarget: { tag: 'div' } }),
+    liveContents: () => ({ debugger: { on() {}, removeListener() {} } }),
+    executeCDP: self.executeCDP,
+    releaseStuckInput: (target) => self.releaseStuckInput(target),
+  };
+  await assert.rejects(browserDrag(manager, entry, { fromSelector: '#a', deltaX: 50, deltaY: 0 }), /did not take/);
+  assert.deepEqual(sent.find(([method, value]) => method === 'Input.setInterceptDrags' && value === false), ['Input.setInterceptDrags', false]);
+  assert.ok(sent.some(([method, type]) => method === 'Input.dispatchMouseEvent' && type === 'mouseReleased'), 'the press is released');
+  assert.ok(sent.some(([method]) => method === 'Input.cancelDragging'), 'the drag is cancelled');
+  assert.equal(entry.pointerDown, null);
 });

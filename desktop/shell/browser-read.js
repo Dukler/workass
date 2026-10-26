@@ -670,7 +670,7 @@ async function evaluateReadFrame(manager, entry, frame, script, deadline) {
     return manager.evaluateFrame(entry, frame.id, script, { timeoutMs: remainingMs });
   }
   if (frame) return manager.evaluateFrame(entry, frame.id, script);
-  return manager.evaluateMainWorld(entry, script, false);
+  return manager.evaluateAgentWorld(entry, script, false);
 }
 
 // Tags each child frame's owner element in its parent document so the read
@@ -686,9 +686,9 @@ async function markFrameOwner(manager, entry, parent, child, token, deadline) {
   const owner = await manager.ownedSessionCommand(entry, 'DOM.getFrameOwner', { frameId: child.id }, sessionId, remaining());
   const backendNodeId = Number(owner && owner.backendNodeId);
   if (!backendNodeId) return false;
-  const resolved = await manager.ownedSessionCommand(entry, 'DOM.resolveNode', {
-    backendNodeId, ...(parent.contextId != null ? { executionContextId: parent.contextId } : {}),
-  }, sessionId, remaining());
+  const resolved = await manager.withAgentContext(entry, parent, (executionContextId) => manager.ownedSessionCommand(entry, 'DOM.resolveNode', {
+    backendNodeId, executionContextId,
+  }, sessionId, remaining()));
   const objectId = resolved && resolved.object && resolved.object.objectId;
   if (!objectId) return false;
   try {
