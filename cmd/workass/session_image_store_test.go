@@ -344,6 +344,9 @@ func TestSessionImageSourceGuardRefusesProtectedLocations(t *testing.T) {
 		"/Users/me/mnt/nas/x.png",      // a non-local mount
 		"/private/nfs/share/x.png",
 		"/Users/me/Workspace/../Desktop/x.png", // lexical escape
+		"/Users/me/Deſktop/x.png",              // long s: APFS reads it as Desktop
+		"/Users/me/DesKtop/x.png",              // Kelvin sign: a k to APFS
+		"/Users/me/Work;space/x.png",           // Greek question mark: ';' once normalized
 		"relative/x.png",
 		"",
 	}
@@ -360,6 +363,7 @@ func TestSessionImageSourceGuardRefusesProtectedLocations(t *testing.T) {
 		"/private/tmp/wk-pip/x.png",
 		"/private/var/folders/rf/abc/T/x.png",
 		"/opt/data/x.png",
+		"/Users/me/Workspace/fotos/año-ß.png", // non-ASCII that is no ASCII letter's alias
 	}
 	for _, path := range allowed {
 		if err := guard.check(path); err != nil {

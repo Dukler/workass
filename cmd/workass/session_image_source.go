@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"workass/internal/acp"
 )
@@ -80,11 +82,50 @@ var sessionImageProtectedRoots = []string{"/Volumes", "/net", "/Network", "/auto
 // /System/Volumes/Data/Users/me/Desktop is ~/Desktop.
 const darwinDataVolumePrefix = "/System/Volumes/Data"
 
+// fold maps a path to the form a case-insensitive volume compares: every
+// rune to one member of its Unicode simple case-folding orbit, the letters
+// strings.EqualFold treats as one (APFS opens ~/Deſktop, long s, as
+// ~/Desktop; the Kelvin sign is a k). strings.ToLower is not enough.
 func (g sessionImageSourceGuard) fold(path string) string {
-	if g.caseInsensitive {
-		return strings.ToLower(path)
+	if !g.caseInsensitive {
+		return path
 	}
-	return path
+	var out strings.Builder
+	out.Grow(len(path))
+	for _, r := range path {
+		out.WriteRune(foldSessionImageRune(r))
+	}
+	return out.String()
+}
+
+func foldSessionImageRune(r rune) rune {
+	smallest := r
+	for other := unicode.SimpleFold(r); other != r; other = unicode.SimpleFold(other) {
+		if other < smallest {
+			smallest = other
+		}
+	}
+	if smallest < utf8.RuneSelf {
+		return unicode.ToLower(smallest)
+	}
+	return smallest
+}
+
+// asciiAliasRune reports a non-ASCII rune that a case-insensitive or
+// normalization-insensitive volume (APFS is both) can treat as an ASCII
+// character: a case-fold partner of one (long s, Kelvin sign) or a
+// canonical singleton decomposition to one (Greek question mark, varia).
+// Every protected name is ASCII, so a path holding one is refused rather
+// than trusted to compare correctly.
+func asciiAliasRune(r rune) bool {
+	if r < utf8.RuneSelf {
+		return false
+	}
+	switch r {
+	case 0x037E, 0x1FEF, 0x212A:
+		return true
+	}
+	return foldSessionImageRune(r) < utf8.RuneSelf
 }
 
 func pathWithin(path, root string) bool {
@@ -106,6 +147,9 @@ func (g sessionImageSourceGuard) check(path string) error {
 	path = filepath.ToSlash(path)
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("%w: not an absolute path", errSessionImageSourceProtected)
+	}
+	if !utf8.ValidString(path) || strings.IndexFunc(path, asciiAliasRune) >= 0 {
+		return fmt.Errorf("%w: a character the volume may read as another", errSessionImageSourceProtected)
 	}
 	clean := g.fold(filepath.ToSlash(filepath.Clean(path)))
 	candidates := []string{clean}
