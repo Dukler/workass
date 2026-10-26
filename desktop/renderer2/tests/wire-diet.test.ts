@@ -15,6 +15,16 @@ let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let wireCache: any;
 const fixtureStores: any[] = [];
+// Paged reads (store/session-page.ts) add {page} to every local read; these
+// tests are about the rest of the arguments.
+function withoutPage(calls: unknown[][]): unknown[][] {
+  return calls.map((args) => args.map((arg) => {
+    if (!arg || typeof arg !== 'object' || Array.isArray(arg)) return arg;
+    const { page: _page, ...rest } = arg as Record<string, unknown>;
+    return rest;
+  }));
+}
+
 
 before(async () => {
   vite = await createServer({
@@ -213,7 +223,7 @@ describe('spawned work at connect', () => {
     store.state.obligationByChat = {};
     store.refreshAllSpawnedWork();
     await settle(); await settle();
-    assert.deepEqual(sent, [[], [{ ifNoneMatch: 'sum-1' }]]);
+    assert.deepEqual(withoutPage(sent), [[{}], [{ ifNoneMatch: 'sum-1' }]]);
     assert.deepEqual(store.spawnedWork(chats[1]).map((item: any) => item.id), ['w-2']);
     assert.deepEqual(store.obligation(chats[1]), { state: 'needs_input' });
   });
@@ -364,7 +374,7 @@ describe('session shell by etag', () => {
     assert.equal((sent[0] as any).ifNoneMatch, 'etag-1');
     assert.deepEqual(read.value, shell(chats, 'etag-1'));
     assert.deepEqual(await after.readStateDigest((globalThis as any).window.api), digest);
-    assert.deepEqual(digestArgs, [[{ ifNoneMatch: 'digest-1' }]]);
+    assert.deepEqual(withoutPage(digestArgs as unknown[][]), [[{ ifNoneMatch: 'digest-1' }]]);
   });
 
   test('wire cache entries round-trip and refuse what they cannot keep', () => {

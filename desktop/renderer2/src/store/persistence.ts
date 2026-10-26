@@ -84,6 +84,12 @@ export interface Mirror {
   // (settings:get / settings:set) so the agent-facing catalog reads the same
   // authority — never localStorage and never the session mirror.
   chats: MirrorChat[];
+  // A paged session shell's count of the chats it did not send, by folder
+  // (session-page.ts). Absent from every other mirror.
+  deferredChats?: unknown;
+  // chatOrder names only the chats that were sent (and other machines'): a
+  // paged shell's, and a save from a window that read one.
+  chatOrderPartial?: boolean;
 }
 
 const KEY = 'workass.renderer2.session.v1';

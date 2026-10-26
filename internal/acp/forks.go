@@ -1252,6 +1252,36 @@ func (s *ForkService) Summary() []map[string]any {
 	return out
 }
 
+// RunningChats names the chats with a fork child running now (Summary's
+// counts.running > 0), from what is in memory: a fork child runs only in the
+// process that started it, so its chat is always loaded. A heartbeat can
+// afford it; Summary reads every fork file.
+func (s *ForkService) RunningChats() map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]struct{}{}
+	for chatID, file := range s.chats {
+		if file == nil || len(file.Points) == 0 {
+			continue
+		}
+		for _, run := range file.Runs {
+			latestAttempt := map[string]ForkChild{}
+			for _, child := range run.Children {
+				key := firstNonEmpty(child.RetryOf, child.ID)
+				if prior, ok := latestAttempt[key]; !ok || child.Attempt >= prior.Attempt {
+					latestAttempt[key] = child
+				}
+			}
+			for _, child := range latestAttempt {
+				if child.Status == ForkStatusRunning {
+					out[chatID] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // RunOwner returns the chat that owns a run, for authorization.
 func (s *ForkService) RunOwner(runID string) (chatID, tabID string, ok bool) {
 	s.mu.Lock()

@@ -257,7 +257,7 @@ func TestLanBridgeServed(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "listDir: (p) => invoke('fs:list-dir', p)") ||
 		!strings.Contains(string(body), "createDir: (parent, name) => invoke('fs:create-dir', { parent, name })") ||
-		!strings.Contains(string(body), "projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch } : { chatId, cwd })") {
+		!strings.Contains(string(body), "projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? (o.byURL === true ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch, byURL: true } : { chatId, cwd, ifNoneMatch: o.ifNoneMatch }) : { chatId, cwd })") {
 		t.Fatalf("bridge missing server-owned project filesystem methods")
 	}
 	if !strings.Contains(string(body), "machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname })") {

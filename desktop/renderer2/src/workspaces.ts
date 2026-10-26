@@ -1,6 +1,8 @@
 import type { Chat, Workspace } from './store/types';
 
-export interface WorkspaceGroup extends Workspace { chats: Chat[]; machineId?: string; }
+// `deferred` counts the group's chats the daemon did not send (a paged session
+// shell leaves the filed-away archive out until a search asks for it).
+export interface WorkspaceGroup extends Workspace { chats: Chat[]; machineId?: string; deferred?: number; }
 
 export interface InheritedChatControls {
   providerId: string | null;
@@ -65,7 +67,11 @@ export function normalizeWorkspaces(values: Workspace[] | undefined): Workspace[
   return result;
 }
 
-export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], removed: string[] = []): WorkspaceGroup[] {
+// `deferred` is the [cwd, count] list of this daemon's chats a paged session
+// shell did not send: they still make their folders, exactly as if they had
+// been sent, and are counted on their group. They are this daemon's own chats,
+// so they carry no machine id.
+export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], removed: string[] = [], deferred: readonly (readonly [string, number])[] = []): WorkspaceGroup[] {
   // Folders the user removed are excluded from inference: a chat still lives (its
   // cwd unchanged), it just falls to the unassigned "Chats" bucket instead of
   // re-creating the folder group.
@@ -73,6 +79,7 @@ export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], rem
   const all = normalizeWorkspaces([
     ...workspaces,
     ...chats.map((chat) => workspaceFromPath(chat.cwd ?? '')).filter((item): item is Workspace => item !== null),
+    ...deferred.map(([cwd]) => workspaceFromPath(cwd)).filter((item): item is Workspace => item !== null),
   ]).filter((workspace) => !removedKeys.has(pathKey(workspace.path)));
   const groups: WorkspaceGroup[] = all.map((workspace) => ({ ...workspace, chats: [] as Chat[] }));
   const byPath = new Map(groups.map((group) => [pathKey(group.path), group]));
@@ -82,12 +89,35 @@ export function buildWorkspaceGroups(workspaces: Workspace[], chats: Chat[], rem
     if (group) group.chats.push(chat);
     else unassigned.push(chat);
   }
-  if (unassigned.length) groups.push({ path: '', name: 'Chats', chats: unassigned });
+  let unassignedDeferred = 0;
+  for (const [cwd, count] of deferred) {
+    if (!(count > 0)) continue;
+    const group = byPath.get(pathKey(cwd));
+    if (group) group.deferred = (group.deferred ?? 0) + count;
+    else unassignedDeferred += count;
+  }
+  if (unassigned.length || unassignedDeferred) {
+    groups.push({ path: '', name: 'Chats', chats: unassigned, ...(unassignedDeferred ? { deferred: unassignedDeferred } : {}) });
+  }
   for (const group of groups) {
     const machineIds = new Set(group.chats.map((chat) => String(chat.machineId ?? '').trim()));
+    if (group.deferred) machineIds.add('');
     if (machineIds.size === 1 && !machineIds.has('')) group.machineId = machineIds.values().next().value;
   }
   return groups;
+}
+
+/**
+ * The project label the sidebar search matches for each folder of `deferred`
+ * chats (workspaceLabelForChat over the same groups), so the daemon can search
+ * the chats it did not send exactly as the sidebar searches the ones it has.
+ */
+export function deferredSearchLabels(groups: readonly WorkspaceGroup[], deferred: readonly (readonly [string, number])[]): [string, string][] {
+  const byPath = new Map(groups.filter((group) => normalizeWorkspacePath(group.path)).map((group) => [pathKey(group.path), group]));
+  return deferred.map(([cwd]) => {
+    const group = byPath.get(pathKey(cwd)) ?? { path: '', name: 'Chats' };
+    return [cwd, workspaceLabelForChat(group, { cwd })];
+  });
 }
 
 // A removed project is intentionally kept out of the scope menu, but its chats

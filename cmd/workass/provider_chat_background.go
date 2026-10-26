@@ -483,12 +483,32 @@ func backgroundListRow(state chat.ActivitySnapshot, id string) map[string]any {
 // here for every chat that has one, so a late client still sees what each chat
 // owes without reading any per-chat list.
 func (r *providerChatRuntime) BackgroundSummary() ([]map[string]any, error) {
+	return r.BackgroundSummaryPage(nil)
+}
+
+// BackgroundSummaryPage is BackgroundSummary restricted to the chats a
+// session:get with the same {page} lists (session_page.go). A chat it leaves
+// out runs nothing and owes nothing the sidebar shows (it is filed away).
+func (r *providerChatRuntime) BackgroundSummaryPage(page *sessionPage) ([]map[string]any, error) {
 	ids, err := r.knownChatIDs()
 	if err != nil {
 		return nil, err
 	}
+	var selection *sessionPageSelection
+	if page != nil {
+		activeID := ""
+		if r.sessions != nil {
+			activeID = strings.TrimSpace(fieldString(r.sessions.GlobalSnapshot(), "activeId"))
+		}
+		if selection, err = r.selectSessionPage(page, activeID); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]map[string]any, 0)
 	for _, chatID := range ids {
+		if !selection.has(chatID) {
+			continue
+		}
 		actor, summary, err := r.residentOrClosed(chatID)
 		if err != nil {
 			return nil, err

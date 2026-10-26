@@ -3,6 +3,7 @@
 
 import type { ModelControlMemory } from '../model-controls';
 import type { PermissionContext } from '../permission-explain';
+import type { SessionPageRequest } from '../store/session-page';
 
 // `efforts` is an optional, ordered list of reasoning-effort stops the model
 // supports (e.g. ["low","medium","high","xhigh","max","ultra"]). Providers
@@ -716,7 +717,8 @@ export interface WorkassApi {
   appMeta?: () => Promise<{ rootDir: string; workspaceDir: string; version: string; profile?: 'prod' | 'dev' | 'test' } & Record<string, unknown>>;
   // Additive, body-free reconciliation digest. Liveness uses appMeta so an
   // actor busy resuming a provider cannot masquerade as a daemon disconnect.
-  stateDigest?: (options?: { ifNoneMatch: string }) => Promise<StateDigest | StateDigestUnchanged>;
+  // page (additive): the digest covers the chats a paged session:get lists.
+  stateDigest?: (options?: { ifNoneMatch?: string; page?: SessionPageRequest }) => Promise<StateDigest | StateDigestUnchanged>;
   getSettings?: () => Promise<unknown>;
   // Controller-gated write of the app-settings blob (settings:set). REPLACES the
   // stored blob, so callers round-trip getSettings and touch only their slice.
@@ -729,7 +731,9 @@ export interface WorkassApi {
   // outputDeferred/outputBytes; an older daemon or bridge ignores it.
   // `shell` and `ifNoneMatch` are additive: an older daemon ignores them and
   // answers the ordinary projection, which carries no etag.
-  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean; shell?: boolean; ifNoneMatch?: string }) => Promise<unknown>;
+  // page and delta (additive): a paged shell and a delta against the kept
+  // one (store/session-page.ts).
+  getSession?: (options?: { leanTools?: boolean; deferImages?: boolean; leanTitles?: boolean; shell?: boolean; ifNoneMatch?: string; page?: SessionPageRequest; delta?: boolean }) => Promise<unknown>;
   saveSession?: (snap: unknown) => Promise<boolean | { ok: boolean; globalRevision: number }>;
   chatQueueReplace?: (opts: {
     tabId: string; chatId: string; operationId: string; expectedRevision: number; queue: unknown[];
@@ -762,7 +766,8 @@ export interface WorkassApi {
   // remote client would otherwise pick a path off its own device.
   listDir?: (path: string | null) => Promise<DirListing>;
   createDir?: (parent: string, name: string) => Promise<DirCreateResult>;
-  projectIcon?: (chatId: string, cwd: string, options?: { ifNoneMatch: string }) => Promise<ProjectIconResult | { unchanged: true; etag: string }>;
+  // byURL (additive): a raster icon is named, not sent, and loads by URL.
+  projectIcon?: (chatId: string, cwd: string, options?: { ifNoneMatch: string; byURL?: boolean }) => Promise<ProjectIconResult | { unchanged: true; etag: string }>;
   archiveAppend?: (tabId: string, messages: unknown[]) => Promise<boolean>;
   // deferImages: a message's own images arrive by reference (deferredImageRef)
   // and load per image through { imageRef }; an older daemon ignores it.
@@ -777,6 +782,10 @@ export interface WorkassApi {
     // user's newest own message on (a chat's first screen); an older daemon
     // ignores it and answers the whole bounded tail.
     lastExchange?: boolean;
+    // toolSummaries (additive): a settled turn's tool calls arrive without
+    // their input and with the head of their output (outputDeferred), read
+    // in full through toolDetail when a row opens; an older daemon ignores it.
+    toolSummaries?: boolean;
     toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
@@ -819,7 +828,7 @@ export interface WorkassApi {
   /** Every chat's running rows, counts and obligation in one read (local
    *  daemon). Additive: an older bridge lacks it and the store falls back to
    *  one spawnedWorkList per chat. */
-  spawnedWorkSummary?: (options?: { ifNoneMatch: string }) => Promise<SpawnedWorkSummary | { unchanged: true; etag: string }>;
+  spawnedWorkSummary?: (options?: { ifNoneMatch?: string; page?: SessionPageRequest }) => Promise<SpawnedWorkSummary | { unchanged: true; etag: string }>;
   /** Read-only: what a Workass update would stop right now (local daemon only). */
   appUpdateWork?: () => Promise<AppUpdateWork>;
   spawnedWorkRead?: (tabId: string, chatId: string, id: string, tailBytes?: number) => Promise<SpawnedWorkRead>;
@@ -849,7 +858,9 @@ export interface WorkassApi {
   // Optional agent probe — not exposed by the daemon bridge today; Probar is
   // hidden unless a future bridge surfaces it.
   appChatDetectAcp?: (opts?: Record<string, unknown>) => Promise<DetectAcpResult>;
-  providersList?: () => Promise<ProviderRecord[]>;
+  // ifNoneMatch (additive): the etag a client computes for the list it holds;
+  // the reply is then {unchanged, etag} while the list is that one.
+  providersList?: (options?: { ifNoneMatch: string }) => Promise<ProviderRecord[] | { unchanged: true; etag: string }>;
   // Additive read: the chat:catalog payload the daemon's state:digest hashes,
   // without a detection pass. Absent on older daemon bridges.
   providersCatalog?: () => Promise<ChatCatalog>;
