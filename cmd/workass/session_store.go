@@ -898,8 +898,19 @@ func persistSessionImagePlan(plan sessionImageWritePlan) error {
 	if err := ensureSessionImageDir(plan.dir); err != nil {
 		return err
 	}
+	// While the window is open the legacy file is the durable copy, so the raw
+	// one is written batched (its data handed to the device, nothing flushed)
+	// and the legacy write's own full flushes, of its file and then of the
+	// directory both share, make both durable at once. A legacy file that was
+	// already durable leaves the raw one to the reclaim's barrier, which comes
+	// before anything relies on it. After the window the raw file is flushed
+	// itself. Either way one image costs one pair of full flushes, as before.
+	durability := sessionImageDurable
+	if shadow {
+		durability = sessionImageBatched
+	}
 	if !sessionImageVerifiedCurrent(rawPath) {
-		if _, err := persistRawSessionImage(plan.dir, name, raw, plan.cloneSources, sessionImageDurable); err != nil {
+		if _, err := persistRawSessionImage(plan.dir, name, raw, plan.cloneSources, durability); err != nil {
 			return err
 		}
 	}
