@@ -141,6 +141,13 @@ class Window extends EventEmitter {
     super();
     Window.made.push(this);
     this.options = options;
+    const page = new EventEmitter();
+    page.ipc = new EventEmitter();
+    page.sent = [];
+    page.send = (channel, payload) => page.sent.push({ channel, payload });
+    page.setWindowOpenHandler = () => {};
+    page.isDestroyed = () => this.destroyed;
+    this.webContents = page;
     this.destroyed = false;
     this.size = [options.width || 1200, options.height || 800];
     this.contentView = {
@@ -150,6 +157,8 @@ class Window extends EventEmitter {
     };
   }
   setBounds() {}
+  setAlwaysOnTop() {}
+  setAspectRatio() {}
   getContentSize() { return this.size; }
   setContentSize(width, height) { this.size = [width, height]; }
   isDestroyed() { return this.destroyed; }
@@ -193,13 +202,21 @@ class Guest extends Contents {
     this.gate = gate;
   }
   getType() { return 'webview'; }
+  beginFrameSubscription(_onlyDirty, callback) { this.frameCallback = callback; }
+  endFrameSubscription() { this.frameCallback = null; }
+  setBackgroundThrottling(value) { this.throttling = value; }
+  capturePage() { return Promise.resolve(frameImage()); }
   async executeJavaScript(script) {
     if (script.includes('location.href, readyState: document.readyState') && this.gate) await this.gate;
     return super.executeJavaScript(script);
   }
 }
 
-function webviewHost({ autoMount = true } = {}) {
+function frameImage() {
+  return { isEmpty: () => false, getSize: () => ({ width: 1440, height: 900 }), resize() { return this; }, toJPEG: () => Buffer.from('jpeg') };
+}
+
+function webviewHost({ autoMount = true, host = 'webview', preferredHost = undefined } = {}) {
   const profile = {
     isPersistent: () => true, setUserAgent() {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {},
     on(name, handler) { this[`on-${name}`] = handler; },
@@ -220,7 +237,7 @@ function webviewHost({ autoMount = true } = {}) {
   const published = [];
   manager = new BrowserManager({
     win, WebContentsView: View, BrowserWindow: Window, session: { fromPartition: () => profile },
-    chromeVersion: '150.0.0.0', platform: 'darwin', host: 'webview', onState: () => {}, requestOpen: () => {},
+    chromeVersion: '150.0.0.0', platform: 'darwin', host, ...(preferredHost ? { preferredHost } : {}), onState: () => {}, requestOpen: () => {},
     webContentsFromId: (id) => guests.get(id) || null,
     onHosts: (hosts) => {
       published.push(hosts);
@@ -668,6 +685,95 @@ test('finding 9: the tabs a page opened close with it', async () => {
   assert.equal(manager.browserEntries().filter((candidate) => candidate.extraTab).length, 2);
   manager.close('chat-owner');
   assert.deepEqual(manager.browserEntries().filter((candidate) => candidate.extraTab).map((candidate) => candidate.chatId), []);
+  manager.destroy();
+});
+
+test('finding 10: the webview host starts only when the app renderer asks for it', async () => {
+  // main.js: native views until the renderer asks (an older renderer never does).
+  const source = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  assert.doesNotMatch(source, /host:\s*browserHost\.host/, 'the shell must not start in the webview host on its own');
+  assert.match(source, /preferredHost:\s*browserHost\.host/);
+  assert.match(source, /rendererHostMode\(\)/);
+  const { manager, published, mounted } = webviewHost({ host: 'view', preferredHost: 'webview' });
+  // An older renderer: its pages are native views and come up without a guest.
+  const older = await manager.browserControl('browser.open', { chatId: 'chat-old', visible: false });
+  assert.equal(older.host, 'view');
+  assert.equal(published.length, 0);
+  // A renderer that can host pages asks; pages made from then on are hosted.
+  assert.equal(manager.rendererHostMode(), 'webview');
+  const hosted = await manager.browserControl('browser.open', { chatId: 'chat-new', visible: false });
+  assert.equal(hosted.host, 'webview');
+  assert.ok(mounted.size >= 1);
+  // The page made before still works as a native view.
+  await manager.activate({ chatId: manager.browserEntries().find((entry) => entry.chatId === 'chat-old').chatId, bounds: PANE });
+  assert.ok(manager.win.contentView.children.length >= 1);
+  // Windows keeps native views whatever the renderer says.
+  const windows = webviewHost({ host: 'view', preferredHost: 'view' });
+  assert.equal(windows.manager.rendererHostMode(), 'view');
+  manager.destroy();
+  windows.manager.destroy();
+});
+
+async function poppedOut() {
+  const made = webviewHost();
+  const entry = made.manager.get('chat-pip');
+  assert.equal(await entry.ready, true);
+  const before = Window.made.length;
+  await made.manager.popOut('chat-pip');
+  const pip = Window.made.slice(before).find((win) => win.options.alwaysOnTop);
+  assert.ok(pip, 'the pop-out window opened');
+  pip.webContents.emit('did-finish-load');
+  await settle();
+  return { ...made, entry, pip };
+}
+
+test('finding 11: the pop-out window follows the page across an app renderer reload (webview host)', async () => {
+  const { manager, entry, pip, mounted } = await poppedOut();
+  const first = entry.view.webContents;
+  assert.equal(typeof first.frameCallback, 'function', 'frames flow from the page');
+  first.destroy(); // the app renderer reloads
+  await settle();
+  assert.equal(await entry.ready, true);
+  await settle();
+  const second = mounted.get(entry.hostKey);
+  assert.ok(second && second !== first);
+  assert.equal(typeof second.frameCallback, 'function', 'the window shows the page that came back');
+  const sent = pip.webContents.sent.length;
+  second.frameCallback(frameImage(), { x: 0, y: 0, width: 10, height: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.ok(pip.webContents.sent.slice(sent).some((message) => message.channel === 'workass-pip:frame'));
+  manager.destroy();
+});
+
+test('finding 12: the pop-out window takes typing, hover, drags and double clicks (webview host)', async () => {
+  const { manager, entry, pip } = await poppedOut();
+  const guest = entry.view.webContents;
+  const [onInput] = pip.webContents.ipc.listeners('workass-pip:input');
+  assert.equal(typeof onInput, 'function');
+  const send = (input) => onInput({ sender: pip.webContents }, input);
+  send({ type: 'mouseMoved', x: 0.5, y: 0.5, buttons: 0 });
+  send({ type: 'mousePressed', x: 0.1, y: 0.1, button: 0, buttons: 1, clickCount: 2 });
+  send({ type: 'mouseMoved', x: 0.3, y: 0.1, buttons: 1 });
+  send({ type: 'mouseReleased', x: 0.3, y: 0.1, button: 0, buttons: 0, clickCount: 2 });
+  send({ type: 'keyDown', key: 'a', code: 'KeyA', keyCode: 65, text: 'a' });
+  send({ type: 'keyUp', key: 'a', code: 'KeyA', keyCode: 65 });
+  send({ type: 'insertText', text: 'ñandú' });
+  await settle(10);
+  const input = guest.debugger.calls.filter((call) => call.method.startsWith('Input.'));
+  const mouse = input.filter((call) => call.method === 'Input.dispatchMouseEvent').map((call) => call.params);
+  assert.ok(mouse.some((event) => event.type === 'mouseMoved' && event.buttons === 0), 'hover');
+  assert.ok(mouse.some((event) => event.type === 'mouseMoved' && event.buttons === 1 && event.button === 'left'), 'a drag or a text selection');
+  assert.ok(mouse.some((event) => event.type === 'mousePressed' && event.clickCount === 2), 'a double click');
+  const keys = input.filter((call) => call.method === 'Input.dispatchKeyEvent').map((call) => call.params);
+  assert.ok(keys.some((event) => event.type === 'keyDown' && event.text === 'a'), 'typing');
+  assert.ok(keys.some((event) => event.type === 'keyUp' && event.key === 'a'));
+  assert.ok(input.some((call) => call.method === 'Input.insertText' && call.params.text === 'ñandú'), 'composed text');
+  // Nothing but input reaches the page from the window.
+  const count = guest.debugger.calls.length;
+  send({ type: 'Runtime.evaluate', expression: 'alert(1)' });
+  onInput({ sender: {} }, { type: 'keyDown', key: 'b', code: 'KeyB', keyCode: 66, text: 'b' });
+  await settle(10);
+  assert.equal(guest.debugger.calls.length, count);
   manager.destroy();
 });
 
