@@ -259,7 +259,10 @@ function createWindow(url, browserReporter, isController) {
     BrowserWindow,
     nativeImage,
     session,
-    host: browserHost.host,
+    // Native views until the app renderer asks for the host (a renderer that
+    // can host pages asks at startup; an older one never does).
+    host: 'view',
+    preferredHost: browserHost.host,
     webContentsFromId: (id) => webContents.fromId(id),
     onHosts: (hosts) => {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:hosts', hosts);
@@ -372,7 +375,7 @@ function createWindow(url, browserReporter, isController) {
     : { ok: false, reason: 'untrusted renderer' });
   ipcMain.handle('workass-browser:hosts', (event) => own(event) ? browserManager.hostList() : []);
   ipcMain.on('workass-browser:host-mode', (event) => {
-    event.returnValue = own(event) && browserManager ? browserManager.hostMode : 'view';
+    event.returnValue = own(event) && browserManager ? browserManager.rendererHostMode() : 'view';
   });
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
   ipcMain.handle('workass-browser:set-viewport', (event, payload) => own(event) && payload

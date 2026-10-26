@@ -177,6 +177,7 @@ function fixture(overrides = {}) {
   const manager = new BrowserManager({
     win, WebContentsView: FakeView, BrowserWindow: overrides.BrowserWindow || FakeBrowserWindow, nativeImage: overrides.nativeImage,
     session, chromeVersion: '140.0.7339.1', platform: 'darwin',
+    ...(overrides.preferredHost ? { host: 'view', preferredHost: overrides.preferredHost } : {}),
     onState: (state) => states.push(state),
     requestOpen: overrides.requestOpen,
   });
@@ -2209,6 +2210,21 @@ test('resetting the page a person is looking at puts the fresh page in the same 
   assert.ok(win.contentView.children.includes(fresh.view), 'the fresh page is on screen');
   assert.deepEqual(fresh.presentationBounds, bounds, 'where the old one was');
   assert.equal(manager.activeId, 'chat-reset');
+  manager.destroy();
+});
+
+test('a shell that prefers the webview host uses native views until the app renderer asks for the host', async () => {
+  const { manager } = fixture({ requestOpen: () => {}, preferredHost: 'webview' });
+  // An older renderer never asks: pages are native views, up at once.
+  const before = manager.get('before-opt-in');
+  assert.equal(manager.isHosted(before), false);
+  assert.equal(await before.ready, true, 'no wait for a <webview> nobody will mount');
+  // A renderer that can host pages asks, and is answered with the webview host.
+  assert.equal(manager.rendererHostMode(), 'webview');
+  const after = manager.get('after-opt-in');
+  assert.equal(manager.isHosted(after), true);
+  assert.match(after.hostKey, /^wkb-/);
+  assert.equal(manager.isHosted(before), false, 'pages made before stay native until replaced');
   manager.destroy();
 });
 
