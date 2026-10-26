@@ -70,6 +70,28 @@ the file and the reason until the file is fixed or removed and the import comple
 is not the file's (the database busy, the disk full, a read error) stops the start the same way but
 writes no refusal: the error names the cause, and the next start retries the import.
 
+Chat images (`state/images/`). Every image keeps one identity, sha256 of its standard base64
+text, which every Ref, URL and SQLite row names. It is stored as `images/<digest>.raw` (the image
+bytes; on macOS usually an APFS clone of the file a "View image" call read, verified byte for byte
+before and after) and/or the legacy `images/<digest>` (the base64 text, the only form 0.1.229 and
+older read). Readers take the raw file first and fall back to the legacy one; text that is not
+canonical base64 (a data URL) keeps the legacy form. Clone sources are never read in
+TCC-protected places (Desktop, Documents, Downloads, Pictures, Movies, Music, the Trash, all of
+`~/Library`, another user's home, `/Volumes`, network mounts); those images are written instead.
+A background pass, two minutes after start and then daily, gives every legacy image a raw twin and
+records receipts in `state/image-store/` (`receipts.jsonl`, `marker.json`). Legacy files stay until
+the store has been complete for `imageStoreRollbackWindow` (7 days); until then each new image is
+written in both forms. A legacy-only image newer than the window's start can only come from an
+older build, so it restarts the window. After the window, each raw twin is verified again and its
+legacy file is removed. Rollback before that point loses nothing. Rollback after it: an older build
+finds no file for a reclaimed or newer image, so the message keeps its metadata, the image is missing
+(the image URL answers 404, a resend by reference fails), and the raw files stay for this build or a
+later one to serve again. Images that only chats deleted more than 7 days ago reference are removed;
+any other reference in any chat or state file, a read error, or a write in the last hour keeps them.
+Dev and test profiles accept `WORKASS_IMAGE_STORE_ROLLBACK_WINDOW`, `WORKASS_IMAGE_STORE_DELETED_GRACE`,
+`WORKASS_IMAGE_STORE_START_DELAY` (Go durations) and `WORKASS_IMAGE_STORE_RATE` (bytes/s, 0 =
+unthrottled); production ignores them. Progress is in `GET /workass/metrics` → `imageStore`.
+
 Daemon logs are written to stderr. Stdout is unused.
 
 ## Daemon restart

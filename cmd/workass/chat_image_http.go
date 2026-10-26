@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/url"
@@ -10,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"workass/internal/httpserve"
 )
@@ -40,7 +40,28 @@ func newChatImageHTTPHandler(chats *providerChatRuntime) http.Handler {
 	return chatImageHTTP{chats: chats, thumbs: newChatImageThumbs(filepath.Dir(chats.sessions.path))}
 }
 
+// chatImageRequests marks image reads in progress for background maintenance
+// that yields to them (session_image_maintenance.go).
+var chatImageRequests struct {
+	inFlight atomic.Int64
+	last     atomic.Int64
+}
+
+// chatImageHTTPBusy reports an image read in flight or finished within tail.
+func chatImageHTTPBusy(tail time.Duration) bool {
+	if chatImageRequests.inFlight.Load() > 0 {
+		return true
+	}
+	last := chatImageRequests.last.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < tail
+}
+
 func (h chatImageHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	chatImageRequests.inFlight.Add(1)
+	defer func() {
+		chatImageRequests.last.Store(time.Now().UnixNano())
+		chatImageRequests.inFlight.Add(-1)
+	}()
 	tabID, digest, ok := parseChatImagePath(r.URL.EscapedPath())
 	if !ok {
 		http.NotFound(w, r)
@@ -128,31 +149,11 @@ func parseChatImagePath(escapedPath string) (tabID, digest string, ok bool) {
 	return tabID, digest, true
 }
 
-// readChatImageBytes reads a verified sidecar (base64 text, or a data URL the
-// store wrote) and returns the image bytes.
+// readChatImageBytes returns the verified image bytes of ref from either
+// stored form: a raw file as it is, legacy base64 text (or a data URL the
+// store wrote) decoded.
 func readChatImageBytes(ref, stateDir string) ([]byte, error) {
-	text, err := readExternalSessionImage(ref, stateDir)
-	if err != nil {
-		return nil, err
-	}
-	body := []byte(text)
-	if bytes.HasPrefix(body, []byte("data:")) {
-		head := body
-		if len(head) > sessionImageDataURLPrefixLimit {
-			head = head[:sessionImageDataURLPrefixLimit]
-		}
-		comma := bytes.IndexByte(head, ',')
-		if comma < 0 || !bytes.Contains(head[:comma], []byte(";base64")) {
-			return nil, errors.New("session image is not base64")
-		}
-		body = body[comma+1:]
-	}
-	data := make([]byte, base64.StdEncoding.DecodedLen(len(body)))
-	n, err := base64.StdEncoding.Decode(data, body)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
+	return readSessionImageBytes(ref, stateDir)
 }
 
 func etagMatches(header, etag string) bool {

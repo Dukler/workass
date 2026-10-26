@@ -175,11 +175,11 @@ func inlinedImageBytes(value any, stateDir string, imageSizes map[string]int64) 
 			if ref := fieldString(item, sessionImageDataRefField); ref != "" {
 				bytes, found := imageSizes[ref]
 				if !found {
-					_, _, info, err := externalSessionImageInfo(ref, stateDir)
+					file, err := locateSessionImage(ref, stateDir)
 					if err != nil {
 						return err
 					}
-					bytes = info.Size()
+					bytes = file.logicalSize()
 					imageSizes[ref] = bytes
 				}
 				// Persisted image data is base64, which needs no JSON escaping.
