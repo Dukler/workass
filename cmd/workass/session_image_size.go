@@ -84,17 +84,25 @@ func sessionImageRefSize(ref, stateDir string) (int, int) {
 			return size.width, size.height
 		}
 	}
-	name, path, _, err := externalSessionImageInfo(ref, stateDir)
+	stored, err := locateSessionImage(ref, stateDir)
 	if err != nil {
 		return 0, 0
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(stored.path)
 	if err != nil {
 		return 0, 0
 	}
 	defer file.Close()
-	size := readSessionImageSize(file)
-	sessionImageSizes.store(name, size)
+	var size sessionImageSize
+	if stored.raw {
+		// A raw file is the image itself: read its header directly.
+		if width, height, err := imagesize.ReadDimensions(bufio.NewReader(file)); err == nil {
+			size = sessionImageSize{width: width, height: height}
+		}
+	} else {
+		size = readSessionImageSize(file)
+	}
+	sessionImageSizes.store(stored.name, size)
 	return size.width, size.height
 }
 
