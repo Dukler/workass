@@ -1653,6 +1653,18 @@ test('navigation returns once the document is ready when a subframe never finish
   assert.equal(result.url, 'https://fixture.invalid/streaming-ad');
   assert.ok(events.some((event) => event.stage === 'user-navigation-load-pending' && event.committed === true));
   assert.equal(entry.effectiveViewport.width, 1440);
+  // Main-world page actions on the still-loading page use the root CDP
+  // session too, so they cannot park the serialized queue either.
+  const viaCDP = wc.debugger.sendCommand;
+  wc.debugger.sendCommand = (method, params, sessionId) => {
+    if (method === 'Runtime.evaluate' && !sessionId && String(params?.expression).includes('window.scrollBy(')) {
+      return Promise.resolve({ result: { type: 'object', value: { changed: true, before: { x: 0, y: 0 }, after: { x: 0, y: 200 } } } });
+    }
+    return viaCDP(method, params, sessionId);
+  };
+  const scrolled = await manager.browserControl('browser.scroll', { tabId: tab.id, y: 200 });
+  assert.equal(scrolled.changed, true);
+  wc.debugger.sendCommand = viaCDP;
 
   wc.loadURL = () => new Promise(() => {}); // the main document never commits
   await assert.rejects(

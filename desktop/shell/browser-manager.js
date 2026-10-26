@@ -59,7 +59,7 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = 20000;
 // Observation commands on a child session: released as soon as the session
 // is retired, and capped so a renderer that stopped answering cannot hold the
 // browser's serialized operation queue (and every later navigation) forever.
-const CHILD_SESSION_COMMAND_TIMEOUT_MS = 30000;
+const CHILD_SESSION_COMMAND_TIMEOUT_MS = 10000;
 // Reasons that mean the child session no longer exists, so no protocol
 // command may be sent to it (or to detach it) anymore.
 const OWNED_TARGET_GONE_REASONS = new Set(['target_gone', 'target_crashed', 'debugger_lost']);
@@ -1347,18 +1347,23 @@ class BrowserManager {
     return true;
   }
 
-  async readEffectiveViewport(entry) {
+  // Electron defers executeJavaScript() until the page stops loading, which a
+  // page with a never-finishing subframe never does; that would hold the
+  // serialized operation and presentation queues (and every later navigation)
+  // forever. While the main frame is still loading, evaluate over the owned
+  // root CDP session instead.
+  evaluateMainWorld(entry, expression, userGesture = false) {
     const wc = entry.view.webContents;
-    const expression = '({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })';
-    // Electron defers executeJavaScript() until the page stops loading, which
-    // a page with a never-finishing subframe never does; that would hold the
-    // navigation and presentation queues forever. Read over the root CDP
-    // session while the main frame is still loading.
     const loading = typeof wc.isLoadingMainFrame === 'function' && (!wc.getURL() || wc.isLoadingMainFrame()) &&
       wc.debugger?.isAttached?.() === true;
-    const effective = loading
-      ? unwrapCDPValue(await wc.debugger.sendCommand('Runtime.evaluate', { expression, returnByValue: true }))
-      : await wc.executeJavaScript(expression);
+    if (!loading) return wc.executeJavaScript(expression, userGesture);
+    return Promise.resolve(wc.debugger.sendCommand('Runtime.evaluate', {
+      expression: String(expression), returnByValue: true, awaitPromise: true, userGesture: userGesture === true,
+    })).then(unwrapCDPValue);
+  }
+
+  async readEffectiveViewport(entry) {
+    const effective = await this.evaluateMainWorld(entry, '({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })');
     if (!effective || !Number.isFinite(Number(effective.width)) || !Number.isFinite(Number(effective.height)) || !Number.isFinite(Number(effective.deviceScaleFactor))) {
       throw new Error('browser page did not report effective viewport metrics');
     }
@@ -2067,7 +2072,7 @@ class BrowserManager {
     }
     if (!frame || (!frame.sessionId && frame.contextId == null)) {
       if (!explicitFrameId || frame.parentFrameId == null) {
-        return entry.view.webContents.executeJavaScript(expression, true);
+        return this.evaluateMainWorld(entry, expression, true);
       }
       throw new Error('browser frame execution context is unavailable');
     }
@@ -2765,7 +2770,7 @@ class BrowserManager {
     const observe = async (frame) => {
       const script = observationScript({ snapshotId, maxNodes: 500, maxText: 32 * 1024, rootOnly: true });
       if (frame) return this.evaluateFrame(entry, frame.id, script);
-      return entry.view.webContents.executeJavaScript(script, true);
+      return this.evaluateMainWorld(entry, script, true);
     };
 
     for (const frame of liveFrames.length ? liveFrames : [null]) {
@@ -3351,7 +3356,7 @@ class BrowserManager {
     if (hasSelector) {
       const selector = params.selector.trim();
       let count;
-      try { count = await entry.view.webContents.executeJavaScript('document.querySelectorAll(' + JSON.stringify(selector) + ').length'); }
+      try { count = await this.evaluateMainWorld(entry, 'document.querySelectorAll(' + JSON.stringify(selector) + ').length'); }
       catch { return { status: 'missing', reason: 'selector is invalid' }; }
       if (count === 0) return { status: 'missing', reason: 'selector did not match an element' };
       if (count !== 1) return { status: 'ambiguous', reason: 'selector matched ' + count + ' elements; use a more specific selector or an observed element_ref' };
@@ -3539,7 +3544,7 @@ class BrowserManager {
       if (point.x < 0 || point.y < 0 || point.x >= currentStamp.metrics.width || point.y >= currentStamp.metrics.height) {
         return { ok: false, status: 'blocked', reason: 'screenshot point is outside the current visible viewport' };
       }
-      const inspected = await entry.view.webContents.executeJavaScript('(() => {' +
+      const inspected = await this.evaluateMainWorld(entry, '(() => {' +
         'const x=' + JSON.stringify(point.x) + ';const y=' + JSON.stringify(point.y) + ';' +
         'const deep=(doc,px,py)=>{let hit=doc.elementFromPoint(px,py);const seen=new Set();while(hit&&!seen.has(hit)){seen.add(hit);const nested=hit.shadowRoot?.elementFromPoint?.(px,py);if(!nested||nested===hit)break;hit=nested;}return hit;};' +
         'const target=deep(document,x,y);if(!target)return {status:"missing"};' +
@@ -4133,7 +4138,7 @@ class BrowserManager {
           try { await temporary?.clear(); } catch { /* navigation already removed the frame context */ }
         }
       }
-      const result = await wc.executeJavaScript('(() => { const before = { x: scrollX, y: scrollY }; window.scrollBy(' + JSON.stringify(x) + ', ' + JSON.stringify(y) + '); const after = { x: scrollX, y: scrollY }; return { changed: before.x !== after.x || before.y !== after.y, before, after }; })()');
+      const result = await this.evaluateMainWorld(entry, '(() => { const before = { x: scrollX, y: scrollY }; window.scrollBy(' + JSON.stringify(x) + ', ' + JSON.stringify(y) + '); const after = { x: scrollX, y: scrollY }; return { changed: before.x !== after.x || before.y !== after.y, before, after }; })()');
       if (result?.changed) entry.interactionGeneration += 1;
       return result;
     }
