@@ -6,8 +6,9 @@
 // It mirrors app.css, and tests/tool-image-layout.test.ts reads app.css to
 // keep the two in step:
 //   .tool-images        { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 7px; }
-//   .ri                 { border: 1px solid }      (padding 0)
+//   .ri                 { border: 1px solid transparent }   (padding 0)
 //   .ri-media           { width: 100%; aspect-ratio: var(--iw) / var(--ih); }
+//   .ri-tool            { width: min(100%, natural + 2px, 340px * aspect + 2px) }
 //   .ri-tool .ri-media  { max-height: 340px; }
 // A grid row is as tall as its tallest frame (items stretch).
 
@@ -37,7 +38,10 @@ export function toolImageGridLayout(width: number, frames: ReadonlyArray<readonl
     let row = 0;
     for (let index = start; index < Math.min(count, start + columns); index++) {
       const [iw, ih] = frames[index];
-      const height = Math.min(media * ih / iw, TOOL_IMAGE_MEDIA_MAX) + TOOL_IMAGE_FRAME_BORDER;
+      // The frame is its image's size within the track (app.css .ri-tool):
+      // the track's width, the image's natural size or the media cap,
+      // whichever is smallest.
+      const height = Math.min(media * ih / iw, TOOL_IMAGE_MEDIA_MAX, ih) + TOOL_IMAGE_FRAME_BORDER;
       if (height > row) row = height;
     }
     rowHeights.push(row);

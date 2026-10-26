@@ -785,7 +785,9 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .assistant-inline-image:hover { border-color: color-mix(in srgb, var(--acc) 45%, var(--line2)); }
 .assistant-inline-image img { display: block; max-width: 100%; max-height: 620px; object-fit: contain; background: var(--bg); }
 .assistant-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
-.assistant-images .assistant-inline-image { width: 100%; margin: 0; }
+/* A gallery frame is its image's size (capped like the inline image), not
+   the whole grid track: one image never stretches into a full-width box. */
+.assistant-images .assistant-inline-image { width: min(100%, calc(var(--iw) * 1px + 2px), calc(620px * var(--iw) / var(--ih) + 2px)); margin: 0; justify-self: start; align-self: start; }
 .assistant-images .assistant-inline-image img { width: 100%; }
 
 /* A reserved image (.ri), ported from the approved mock image-placeholder
@@ -794,7 +796,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
    today's caps. The media box below the frame's 1px border carries the exact
    aspect ratio, so swapping the placeholder for the image never changes a
    single pixel of layout. The older classes stay on the same elements. */
-.ri { position: relative; display: block; padding: 0; overflow: hidden; border: 1px solid var(--line2); text-align: left; }
+.ri { position: relative; display: block; padding: 0; overflow: hidden; border: 1px solid transparent; text-align: left; }
 .ri-media { position: relative; display: block; width: 100%; aspect-ratio: var(--iw) / var(--ih); container-type: size; background: var(--field); }
 .ri-media > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-width: none; max-height: none; border: 0; border-radius: 0; background: none; object-fit: contain; opacity: 0; transition: opacity .16s ease; }
 .ri-media > img.zoomable { transition: opacity .16s ease, filter .12s ease; }
@@ -813,7 +815,10 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .ri-user[data-state="loaded"] .ri-media { background: var(--panel); }
 .ri-inline { width: min(calc(var(--iw) * 1px + 2px), 100%, calc(620px * var(--iw) / var(--ih) + 2px)); margin: 8px 0 2px; border-radius: 8px; background: var(--field); cursor: zoom-in; }
 .ri-gallery .ri-media { max-height: 620px; }
-.ri-tool { min-width: 0; border-radius: 8px; background: var(--field); cursor: zoom-in; }
+/* A tool image's frame is its image's size within its grid track, capped at
+   its natural size and the 340px media height (tool-image-layout.ts
+   mirrors this), so a lone screenshot never becomes a full-width box. */
+.ri-tool { min-width: 0; width: min(100%, calc(var(--iw) * 1px + 2px), calc(340px * var(--iw) / var(--ih) + 2px)); justify-self: start; align-self: start; border-radius: 8px; background: var(--field); cursor: zoom-in; }
 .ri-tool .ri-media { max-height: 340px; }
 /* A failed read keeps its box; nothing below moves. */
 .ri[data-state="failed"] .ri-ph .cap { display: block; }
