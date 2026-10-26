@@ -67,11 +67,14 @@ func locateSessionImage(ref, stateDir string) (sessionImageFile, error) {
 		return sessionImageFile{}, fmt.Errorf("invalid session image ref %q", ref)
 	}
 	if file, err := statSessionImageForm(stateDir, name, true); err == nil {
-		// Both forms stand for one text of one length. A raw file whose size
-		// disagrees with its legacy twin is damaged (a write cut short): the
-		// legacy file is the image, and so are its size and header.
+		// Both forms stand for one text of one length, so a size disagreement
+		// means one of them is damaged (a write cut short). It is rare, so
+		// the raw file is verified to settle which: the intact form is the
+		// image, and so are its size and header.
 		if legacy, legacyErr := statSessionImageForm(stateDir, name, false); legacyErr == nil && legacy.info.Size() != file.logicalSize() {
-			return legacy, nil
+			if verifyRawSessionImageFile(file.path, name, file.info.Size()) != nil {
+				return legacy, nil
+			}
 		}
 		return file, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -177,12 +180,10 @@ func readSessionImageVerified(ref, stateDir string) (data []byte, raw bool, err 
 	if err == nil {
 		return data, file.raw, nil
 	}
-	if file.raw {
-		// A damaged raw file never hides an intact legacy one.
-		if legacy, legacyErr := statSessionImageForm(stateDir, file.name, false); legacyErr == nil {
-			if text, textErr := readSessionImageForm(legacy); textErr == nil {
-				return text, false, nil
-			}
+	// A damaged form never hides an intact twin, whichever of the two it is.
+	if other, otherErr := statSessionImageForm(stateDir, file.name, !file.raw); otherErr == nil {
+		if otherData, otherReadErr := readSessionImageForm(other); otherReadErr == nil {
+			return otherData, other.raw, nil
 		}
 	}
 	return nil, false, fmt.Errorf("read session image ref %s: %w", ref, err)

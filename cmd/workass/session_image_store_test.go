@@ -129,6 +129,36 @@ func TestSessionImageDamagedRawFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+func TestSessionImageDamagedLegacyNeverHidesAnIntactRaw(t *testing.T) {
+	stateDir := t.TempDir()
+	raw := testImageBytes(t, 12)
+	name := writeRawTestImage(t, stateDir, raw)
+	text := base64.StdEncoding.EncodeToString(raw)
+	// A legacy twin cut short: its size disagrees, so the raw file decides.
+	if err := os.WriteFile(sessionImageLegacyPath(stateDir, name), []byte(text[:len(text)/2]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := sessionImageDirname + "/" + name
+	if got, err := readChatImageBytes(ref, stateDir); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("intact raw twin not served: %v", err)
+	}
+	if got, err := readExternalSessionImage(ref, stateDir); err != nil || got != text {
+		t.Fatalf("intact raw twin not read as base64: %v", err)
+	}
+	if file, err := locateSessionImage(ref, stateDir); err != nil || !file.raw || file.logicalSize() != int64(len(text)) {
+		t.Fatalf("metadata must come from the intact raw twin: %+v %v", file, err)
+	}
+	// Same size, wrong bytes (a legacy file damaged in place).
+	damaged := []byte(text)
+	damaged[0] ^= 1
+	if err := os.WriteFile(sessionImageLegacyPath(stateDir, name), damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readChatImageBytes(ref, stateDir); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("raw twin not served beside a damaged legacy file: %v", err)
+	}
+}
+
 func TestSessionImageNewWritesAreRawWithShadowDuringWindow(t *testing.T) {
 	for _, shadow := range []bool{true, false} {
 		t.Run(map[bool]string{true: "window open", false: "window closed"}[shadow], func(t *testing.T) {
