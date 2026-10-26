@@ -475,7 +475,7 @@ test('finding 4: a popup an agent-driven page opens keeps its opener (createWind
   manager.destroy();
 });
 
-test('finding 4, open: a window.open popup of an agent-driven page can still be seen and used by the person, as on main', { todo: 'popup tabs are never shown to the person (reported to the builder)' }, async () => {
+test('finding 4, open: a window.open popup of an agent-driven page can still be seen and used by the person, as on main', async () => {
   const { manager, profile } = viewHost();
   await manager.browserControl('browser.open', { chatId: 'chat-auth', visible: false });
   const entry = manager.browserEntries().find((candidate) => candidate.chatId === 'chat-auth');

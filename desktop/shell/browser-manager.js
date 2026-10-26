@@ -159,6 +159,10 @@ const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // mount again) a page's <webview> before it reports that the page is not up.
 const GUEST_ATTACH_TIMEOUT_MS = 20000;
 const PRESENTATION_READY_SLACK_MS = 2000;
+// A popup window shown to the person: its page is the window's size, never
+// below the smallest viewport the tools accept.
+const POPUP_WINDOW_MIN_WIDTH = 320;
+const POPUP_WINDOW_MIN_HEIGHT = 240;
 const EDITOR_PAGE_CALL_TIMEOUT_MS = 3000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
@@ -3368,16 +3372,25 @@ class BrowserManager {
     try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
     this.entries.set(key, tab);
     this.bind(tab);
+    const lifecycleToken = tab.lifecycleToken;
+    // A popup that closes itself (window.close() at the end of a sign-in)
+    // ends its tab, and its window.
+    if (typeof view.webContents.once === 'function') {
+      view.webContents.once('destroyed', () => { if (this.isCurrentEntry(tab, lifecycleToken)) this.close(tab.chatId); });
+    }
+    // A window.open popup is shown to the person as on main; a link opened
+    // in a new tab stays in the background.
+    if (disposition === 'new-window') this.showPopupWindow(tab);
     opener.pendingTabs = (opener.pendingTabs || 0) + 1;
     touchActivity(opener);
     let pending = true;
     const settled = () => { if (pending) { pending = false; opener.pendingTabs = Math.max(0, (opener.pendingTabs || 1) - 1); touchActivity(opener); } };
-    const lifecycleToken = tab.lifecycleToken;
     tab.ready = this.initializePopup(tab, lifecycleToken).then(() => {
       if (!this.isCurrentEntry(tab, lifecycleToken)) { settled(); return false; }
       pushEvent(opener, {
         type: 'tab_opened', tab_id: this.tabIdOf(tab), url: redactPageMessage(url, 1024),
         how: disposition === 'new-window' ? 'window_open' : 'link_new_tab', opener: true,
+        ...(tab.popupWindow ? { in_window: true } : {}),
       });
       settled();
       return true;
@@ -3393,10 +3406,14 @@ class BrowserManager {
   // A popup's first document is Chromium's to load (with its opener and
   // request); it gets a capture surface, CDP and the chat's viewport.
   async initializePopup(tab, lifecycleToken) {
-    await this.ensureCaptureHost(tab);
-    this.assertCurrentEntry(tab, lifecycleToken);
-    await this.attachToCaptureHost(tab, false);
-    this.assertCurrentEntry(tab, lifecycleToken);
+    // A popup in a window of its own paints there; a background tab gets a
+    // hidden host.
+    if (!tab.popupWindow) {
+      await this.ensureCaptureHost(tab);
+      this.assertCurrentEntry(tab, lifecycleToken);
+      await this.attachToCaptureHost(tab, false);
+      this.assertCurrentEntry(tab, lifecycleToken);
+    }
     tab.initialDocumentReady = true;
     if (!await this.ensureCDP(tab)) throw new Error('browser page debugger is unavailable');
     this.assertCurrentEntry(tab, lifecycleToken);
@@ -3404,6 +3421,76 @@ class BrowserManager {
     tab.viewportGeneration = 1;
     try { await tab.view.webContents.debugger.sendCommand('Runtime.enable'); } catch { /* basic control remains */ }
     return true;
+  }
+
+  // A window.open popup of an agent-driven page (a sign-in, a payment, a
+  // 3-D Secure check) is shown in a window of its own, 980x760 as on main,
+  // because a second factor, a captcha or a passkey needs the person; it
+  // stays a tab the agent lists and drives. Its page is the window's size.
+  // The person closing the window closes the tab, and the other way round.
+  showPopupWindow(tab) {
+    if (!this.BrowserWindow) return false;
+    let win;
+    try {
+      win = new this.BrowserWindow({
+        width: 980, height: 760, minWidth: POPUP_WINDOW_MIN_WIDTH, minHeight: POPUP_WINDOW_MIN_HEIGHT,
+        title: 'workass browser', backgroundColor: '#ffffff',
+        webPreferences: { partition: this.partition, nodeIntegration: false, contextIsolation: true, sandbox: true },
+      });
+    } catch {
+      return false;
+    }
+    tab.popupWindow = win;
+    const size = () => {
+      const [width, height] = win.getContentSize();
+      return {
+        bounds: { x: 0, y: 0, width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) },
+        viewport: {
+          width: Math.min(3840, Math.max(POPUP_WINDOW_MIN_WIDTH, Math.round(width))),
+          height: Math.min(2160, Math.max(POPUP_WINDOW_MIN_HEIGHT, Math.round(height))),
+        },
+      };
+    };
+    const first = size();
+    win.contentView.addChildView(tab.view);
+    tab.view.setBounds(first.bounds);
+    tab.viewport = { ...tab.viewport, ...first.viewport };
+    win.on('resize', () => {
+      if (tab.popupWindow !== win || win.isDestroyed() || !this.isCurrentEntry(tab)) return;
+      const next = size();
+      tab.view.setBounds(next.bounds);
+      void this.serialize(tab, () => this.setViewportSerialized(tab, next.viewport, false)).catch(() => this.deferViewport(tab, next.viewport));
+    });
+    win.on('close', () => {
+      try { win.contentView.removeChildView(tab.view); } catch { /* already detached */ }
+    });
+    win.on('closed', () => {
+      if (tab.popupWindow !== win) return;
+      tab.popupWindow = null;
+      if (this.isCurrentEntry(tab)) this.close(tab.chatId);
+    });
+    return true;
+  }
+
+  // A capture that borrowed the hidden host gives a popup back to its window.
+  restorePopupWindow(entry) {
+    const win = entry.popupWindow;
+    if (!win || win.isDestroyed?.()) return;
+    if (entry.captureHostAttached && entry.captureHost && !entry.captureHost.isDestroyed()) {
+      try { entry.captureHost.contentView.removeChildView(entry.view); } catch { /* host is closing */ }
+      entry.captureHostAttached = false;
+    }
+    try { win.contentView.addChildView(entry.view); } catch { return; }
+    const [width, height] = win.getContentSize();
+    entry.view.setBounds({ x: 0, y: 0, width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) });
+  }
+
+  releasePopupWindow(entry) {
+    const win = entry.popupWindow;
+    if (!win) return;
+    entry.popupWindow = null;
+    try { win.contentView.removeChildView(entry.view); } catch { /* already detached */ }
+    try { if (!win.isDestroyed()) win.destroy(); } catch { /* already gone */ }
   }
 
   // workass_browser_close: a tab a page opened goes away; the chat's own page
@@ -5237,6 +5324,7 @@ class BrowserManager {
           entry.captureHostAttached = false;
           temporaryHost.destroy();
         }
+        this.restorePopupWindow(entry);
         const restored = await this.readEffectiveViewport(entry);
         const expected = options.expectedPageState;
         if (expected) {
@@ -5295,6 +5383,7 @@ class BrowserManager {
         entry.visible = wasVisible;
         await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale || 1);
       }
+      this.restorePopupWindow(entry);
     }
     throw new Error(`browser capture failed on the first surface (${String(firstError && firstError.message || firstError)}) and the same-page hidden host (${String(fallbackError && fallbackError.message || fallbackError)})`);
   }
@@ -5958,6 +6047,7 @@ class BrowserManager {
     entry.executionContexts.clear();
     entry.frames.clear();
     this.releasePipWindow(entry);
+    this.releasePopupWindow(entry);
     if (entry.guestWaiter) entry.guestWaiter.settle(false);
     // The tabs this page opened go with it (they hold renderers and count
     // against the chat's tab limit).
