@@ -255,6 +255,44 @@ test('the browser host is webview by default on macOS, view on Windows, and eith
   assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
 });
 
+test('a press-and-move in the pop-out that starts an HTML drag goes through Chromium\'s drag events, never an OS drag', async () => {
+  const { manager, published, mount } = hostedFixture();
+  const entry = manager.get('chat-pipdrag');
+  const { guest } = mount(published.at(-1).find((host) => host.chatId === 'chat-pipdrag').hostKey);
+  await entry.ready;
+  let intercepting = false;
+  const base = guest.debugger.sendCommand.bind(guest.debugger);
+  guest.debugger.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Input.setInterceptDrags') intercepting = params.enabled;
+    const result = await base(method, params, sessionId);
+    // A link under the pointer: Chromium starts its drag on the first move.
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseMoved' && params.buttons === 1 && intercepting) {
+      guest.debugger.emit('message', {}, 'Input.dragIntercepted', { data: { items: [{ mimeType: 'text/uri-list', data: 'https://a.example/' }], dragOperationsMask: 1 } });
+    }
+    return result;
+  };
+  const send = (type, extra = {}) => manager.pipInput(entry, 'Input.dispatchMouseEvent', { type, x: 10, y: 10, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, modifiers: 0, ...extra });
+  const steps = () => guest.debugger.calls.filter((call) => call.method.startsWith('Input.')).map((call) => (
+    call.method === 'Input.dispatchMouseEvent' ? `mouse:${call.params.type}`
+      : call.method === 'Input.dispatchDragEvent' ? `drag:${call.params.type}`
+        : call.method === 'Input.setInterceptDrags' ? `intercept:${call.params.enabled}` : call.method));
+  await send('mousePressed', { clickCount: 1 });
+  await send('mouseMoved', { x: 20 });
+  await send('mouseMoved', { x: 40 });
+  await send('mouseReleased', { x: 60, clickCount: 1 });
+  assert.deepEqual(steps(), ['intercept:true', 'mouse:mousePressed', 'mouse:mouseMoved', 'drag:dragEnter', 'drag:dragOver', 'drag:drop', 'mouse:mouseReleased', 'intercept:false']);
+  const drop = guest.debugger.calls.find((call) => call.method === 'Input.dispatchDragEvent' && call.params.type === 'drop');
+  assert.equal(drop.params.x, 60, 'dropped where the person let go');
+  // A plain click: no drag, and interception is off again after it.
+  guest.debugger.calls.length = 0;
+  intercepting = false;
+  await send('mousePressed', { clickCount: 1 });
+  await send('mouseReleased', { clickCount: 1 });
+  assert.deepEqual(steps(), ['intercept:true', 'mouse:mousePressed', 'mouse:mouseReleased', 'intercept:false']);
+  assert.equal(guest.debugger.listenerCount('message') <= 1, true, 'no listener left behind');
+  manager.destroy();
+});
+
 test('the separate window sends a person\'s pointer and keyboard to the page as on main', () => {
   const viewport = { width: 1440, height: 900 };
   assert.deepEqual(pipContentSize(viewport), [420, 263]);
