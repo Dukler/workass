@@ -105,7 +105,21 @@ func browserMCPTools() []map[string]any {
 		tool("workass_browser_list", agenttext.Get("tools.workass_browser_list"), object(map[string]any{}), true, true),
 		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{"url": map[string]any{"type": "string"}, "visible": map[string]any{"type": "boolean"}, "operation_id": operationID}, "operation_id"), false, false),
 		tool("workass_browser_navigate", agenttext.Get("tools.workass_browser_navigate"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
-		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{"tab_id": tabID}), true, true),
+		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{
+			"tab_id":            tabID,
+			"format":            map[string]any{"type": "string", "enum": []string{"json", "compact"}, "description": agenttext.Get("schema.browserSnapshot.format")},
+			"since_snapshot_id": map[string]any{"type": "string", "description": agenttext.Get("schema.browserSnapshot.since_snapshot_id")},
+		}), true, true),
+		tool("workass_browser_read", agenttext.Get("tools.workass_browser_read"), object(map[string]any{
+			"tab_id":         tabID,
+			"offset":         map[string]any{"type": "integer", "minimum": 0, "description": agenttext.Get("schema.browserRead.offset")},
+			"max_bytes":      map[string]any{"type": "integer", "minimum": 2048, "maximum": 65536, "description": agenttext.Get("schema.browserRead.max_bytes")},
+			"selector":       map[string]any{"type": "string", "description": agenttext.Get("schema.browserRead.selector")},
+			"element_ref":    map[string]any{"type": "string", "description": agenttext.Get("schema.browserRead.element_ref")},
+			"frame_ref":      map[string]any{"type": "string", "description": agenttext.Get("schema.browserRead.frame_ref")},
+			"snapshot_id":    map[string]any{"type": "string", "description": agenttext.Get("schema.browserRead.snapshot_id")},
+			"include_frames": map[string]any{"type": "boolean", "description": agenttext.Get("schema.browserRead.include_frames")},
+		}), true, true),
 		tool("workass_browser_click", agenttext.Get("tools.workass_browser_click"), object(map[string]any{
 			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
 			"x": coordinates, "y": coordinates, "screenshot_id": map[string]any{"type": "string"}, "operation_id": operationID,
@@ -246,7 +260,10 @@ func browserMCPToolBoundary(name string) (string, bool, bool, map[string]string,
 	case "workass_browser_navigate":
 		return "browser.navigate", true, false, fields("tab_id", "tabId", "url", "url"), nil
 	case "workass_browser_snapshot":
-		return "browser.snapshot", false, false, fields("tab_id", "tabId"), nil
+		return "browser.snapshot", false, false, fields("tab_id", "tabId", "format", "format", "since_snapshot_id", "sinceSnapshotId"), nil
+	case "workass_browser_read":
+		return "browser.read", false, false, fields("tab_id", "tabId", "offset", "offset", "max_bytes", "maxBytes", "selector", "selector",
+			"element_ref", "elementRef", "frame_ref", "frameRef", "snapshot_id", "snapshotId", "include_frames", "includeFrames"), nil
 	case "workass_browser_click":
 		return "browser.click", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "x", "x", "y", "y", "screenshot_id", "screenshotId"), nil
 	case "workass_browser_type":
@@ -310,14 +327,14 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 		}
 		return nil
 	}
-	for _, key := range []string{"selector", "elementRef", "snapshotId", "screenshotId", "url", "key", "text", "condition", "mode", "action"} {
+	for _, key := range []string{"selector", "elementRef", "snapshotId", "screenshotId", "url", "key", "text", "condition", "mode", "action", "format", "sinceSnapshotId", "frameRef"} {
 		if _, present := params[key]; present {
 			if err := stringField(key, false); err != nil {
 				return err
 			}
 		}
 	}
-	for _, key := range []string{"visible", "submit", "observeAfter"} {
+	for _, key := range []string{"visible", "submit", "observeAfter", "includeFrames"} {
 		if err := boolField(key); err != nil {
 			return err
 		}
@@ -328,6 +345,21 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 		}
 	}
 	switch name {
+	case "workass_browser_snapshot":
+		format := browserString(params["format"])
+		if _, present := params["format"]; present && format != "json" && format != "compact" {
+			return errors.New("format must be json or compact")
+		}
+		if _, present := params["sinceSnapshotId"]; present {
+			if err := stringField("sinceSnapshotId", true); err != nil {
+				return errors.New("since_snapshot_id must be a non-empty string")
+			}
+			if format == "json" {
+				return errors.New("since_snapshot_id requires format compact")
+			}
+		}
+	case "workass_browser_read":
+		return validateBrowserReadParams(params)
 	case "workass_browser_navigate":
 		return stringField("url", true)
 	case "workass_browser_click":
@@ -409,6 +441,56 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateBrowserReadParams(params map[string]any) error {
+	if offset, present := params["offset"]; present {
+		if err := validateBrowserInteger(offset, "offset", 0, 1<<53-1); err != nil {
+			return err
+		}
+	}
+	if maxBytes, present := params["maxBytes"]; present {
+		if err := validateBrowserInteger(maxBytes, "max_bytes", 2048, 65536); err != nil {
+			return err
+		}
+	}
+	nonEmpty := func(key, label string) (bool, error) {
+		value, present := params[key]
+		if !present {
+			return false, nil
+		}
+		if text, ok := value.(string); !ok || strings.TrimSpace(text) == "" {
+			return true, fmt.Errorf("%s must be a non-empty string", label)
+		}
+		return true, nil
+	}
+	hasSelector, err := nonEmpty("selector", "selector")
+	if err != nil {
+		return err
+	}
+	hasRef, err := nonEmpty("elementRef", "element_ref")
+	if err != nil {
+		return err
+	}
+	hasFrame, err := nonEmpty("frameRef", "frame_ref")
+	if err != nil {
+		return err
+	}
+	hasSnapshot, err := nonEmpty("snapshotId", "snapshot_id")
+	if err != nil {
+		return err
+	}
+	switch {
+	case (hasRef || hasFrame) && !hasSnapshot:
+		return errors.New("element_ref and frame_ref need the snapshot_id they came from")
+	case hasSnapshot && !hasRef && !hasFrame:
+		return errors.New("snapshot_id is only used with element_ref or frame_ref")
+	case hasRef && hasFrame:
+		return errors.New("pass element_ref or frame_ref, not both")
+	case hasRef && hasSelector:
+		return errors.New("pass element_ref or selector, not both")
 	}
 	return nil
 }
