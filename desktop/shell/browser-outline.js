@@ -14,7 +14,7 @@
 //     - textbox "Card number" [e6] value=""
 //   - button "Pay" [e7] disabled
 
-const { redactPageMessage } = require('./browser-observation');
+const { pageSecretField, redactPageMessage } = require('./browser-observation');
 
 const MAX_LINES = 20000;
 const NAME_LIMIT = 200;
@@ -73,11 +73,21 @@ function secretValue(value) {
   return text.length > 0 && /^[•●*]+$/u.test(text);
 }
 
-function stateText(role, props, value) {
+// The same rule the json snapshot and read apply (browser-observation.js,
+// pageSecretField): type, autocomplete, name and id of the field's element,
+// given as CDP's flat [name, value, name, value, ...] attribute list.
+function outlineSecretField(attributes) {
+  const map = new Map();
+  const list = Array.isArray(attributes) ? attributes : [];
+  for (let index = 0; index + 1 < list.length; index += 2) map.set(String(list[index]).toLowerCase(), String(list[index + 1]));
+  return pageSecretField({ getAttribute: (name) => (map.has(name) ? map.get(name) : null), type: map.get('type') || '', id: map.get('id') || '' });
+}
+
+function stateText(role, props, value, secret = false) {
   const parts = [];
   if (props.level != null && role === 'heading') parts.push(`level=${props.level}`);
   if (value !== undefined && value !== null && (VALUE_ROLES.has(role) || String(value) !== '')) {
-    if (secretValue(value) || props.protected === true) parts.push('value=[redacted]');
+    if (secret || secretValue(value) || props.protected === true) parts.push('value=[redacted]');
     else parts.push(`value=${quote(clip(redactPageMessage(String(value), VALUE_LIMIT * 2), VALUE_LIMIT))}`);
   }
   if (props.checked !== undefined && props.checked !== 'false' && props.checked !== false) parts.push(props.checked === 'mixed' ? 'checked=mixed' : 'checked');
@@ -93,7 +103,7 @@ function stateText(role, props, value) {
   if (props.focused === true) parts.push('focused');
   if (props.modal === true) parts.push('modal');
   if (props.hasPopup && props.hasPopup !== 'false' && role !== 'combobox') parts.push(`haspopup=${props.hasPopup}`);
-  if (props.valuetext && VALUE_ROLES.has(role) && String(props.valuetext) !== String(value ?? '')) parts.push(`valuetext=${quote(clip(props.valuetext, 80))}`);
+  if (!secret && props.valuetext && VALUE_ROLES.has(role) && String(props.valuetext) !== String(value ?? '')) parts.push(`valuetext=${quote(clip(props.valuetext, 80))}`);
   return parts;
 }
 
@@ -159,7 +169,8 @@ function buildOutline(frames, { refFor = () => null, title = '', url = '' } = {}
       const parts = [`- ${shown}`];
       if (name) parts.push(quote(name));
       if (ref) parts.push(`[${ref}]`);
-      parts.push(...stateText(role, props, VALUE_ROLES.has(role) || props.editable ? value : undefined));
+      const secret = !!(frame.secretBackendIds && frame.secretBackendIds.has(backend));
+      parts.push(...stateText(role, props, VALUE_ROLES.has(role) || props.editable ? value : undefined, secret));
       if (props.url && (role === 'link' || FRAME_ROLES.has(role) || role === 'image' || role === 'img')) {
         parts.push(`-> ${clip(redactPageMessage(String(props.url), URL_LIMIT * 2), URL_LIMIT)}`);
       }
@@ -355,4 +366,4 @@ function diffOutlines(before, after, { maxBytes = 6000 } = {}) {
   return { added, removed, changed, text: out.join('\n'), omitted, total: before.length };
 }
 
-module.exports = { buildOutline, diffOutlines, pageLines, renderLine, secretValue };
+module.exports = { buildOutline, diffOutlines, outlineSecretField, pageLines, renderLine, secretValue };

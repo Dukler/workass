@@ -171,7 +171,7 @@ function inputDouble({ hang = () => false } = {}) {
   };
   const entry = { operationChain: Promise.resolve() };
   const self = {
-    hostMode: 'webview', inputCommandTimeoutMs: 40, operationDeadlineMs: 80, events: [],
+    hostMode: 'webview', inputCommandTimeoutMs: 40, operationDeadlineMs: 80, events: [], isHosted: () => true,
     lifecycle(_entry, stage) { self.events.push(stage); },
     liveContents: () => ({ debugger: debug }),
     assertCurrentEntry() {},

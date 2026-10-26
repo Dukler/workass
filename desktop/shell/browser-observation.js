@@ -527,19 +527,9 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
       let valueRead = false;
       let readOnly = root.getAttribute('aria-readonly') === 'true';
       const kind = root.matches('.monaco-editor') ? 'monaco' : 'code-editor';
-      try {
-        if (kind === 'monaco') {
-          const api = globalThis.monaco?.editor;
-          const candidates = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = candidates.find((candidate) => candidate?.getDomNode?.() === root);
-          const model = editor?.getModel?.();
-          if (model) { value = String(model.getValue()); valueRead = true; }
-          readOnly = readOnly || editor?.getRawOptions?.()?.readOnly === true;
-        } else if (root.CodeMirror?.getValue) {
-          value = String(root.CodeMirror.getValue()); valueRead = true;
-          readOnly = readOnly || root.CodeMirror.getOption?.('readOnly') === true;
-        }
-      } catch { /* the rendered editor lines remain available below */ }
+      // The editor's own model (Monaco, CodeMirror) is in the page's world,
+      // not this one: the shell reads it afterwards (readEditorModels); here
+      // the rendered lines stand in.
       let lineScanTruncated = false;
       if (!valueRead) {
         try {

@@ -30,6 +30,9 @@ func TestBrowserMCPOutlineRefsAndNewActionsValidate(t *testing.T) {
 	ok("workass_browser_click", op(map[string]any{"element_ref": "e12", "snapshot_id": "oAbc", "click_count": 2, "button": "right"}))
 	ok("workass_browser_click", op(map[string]any{"element_ref": "el_opaque", "snapshot_id": "snap-1"}))
 	bad("workass_browser_click", op(map[string]any{"element_ref": "el_opaque"}), "element_ref")
+	// A compact ref (c12) is its own namespace: it always needs its snapshot_id.
+	bad("workass_browser_click", op(map[string]any{"element_ref": "c12"}), "element_ref")
+	ok("workass_browser_click", op(map[string]any{"element_ref": "c12", "snapshot_id": "snap-compact"}))
 	bad("workass_browser_click", op(map[string]any{"element_ref": "e12", "click_count": 4}), "click_count")
 	ok("workass_browser_type", op(map[string]any{"element_ref": "e3", "text": "hi"}))
 	ok("workass_browser_scroll", op(map[string]any{"element_ref": "e3", "y": 400}))

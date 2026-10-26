@@ -177,6 +177,48 @@ test('uploads take only plain files the agent names, never credentials, links or
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('an upload path that goes through a linked folder, or into a known credentials folder, is refused', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wk-upload-'));
+  fs.mkdirSync(path.join(dir, '.kube'));
+  fs.writeFileSync(path.join(dir, '.kube', 'config'), 'kube');
+  fs.symlinkSync(path.join(dir, '.kube'), path.join(dir, 'innocent'));
+  assert.throws(() => checkUploadPaths([path.join(dir, 'innocent', 'config')]), /link/u, 'a linked folder');
+  fs.mkdirSync(path.join(dir, 'docs'));
+  fs.writeFileSync(path.join(dir, 'docs', 'plain.txt'), 'plain');
+  fs.symlinkSync(path.join(dir, 'docs'), path.join(dir, 'docs-link'));
+  assert.throws(() => checkUploadPaths([path.join(dir, 'docs-link', 'plain.txt')]), /link/u, 'any linked folder, not only credential ones');
+  for (const parts of [['.config', 'gh', 'hosts.yml'], ['.claude', '.credentials.json'], ['.docker', 'config.json'], ['.config', 'op', 'config']]) {
+    fs.mkdirSync(path.join(dir, ...parts.slice(0, -1)), { recursive: true });
+    fs.writeFileSync(path.join(dir, ...parts), 'x');
+    assert.throws(() => checkUploadPaths([path.join(dir, ...parts)]), /credential/u, parts.join('/'));
+  }
+  // The system's own aliases (/tmp, /var on macOS) are not links the agent chose.
+  assert.equal(checkUploadPaths([path.join(dir, 'docs', 'plain.txt')]).length, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a secret field never shows its value in the outline or its diffs, by type, autocomplete, name or id', () => {
+  const { outlineSecretField } = require('./browser-outline');
+  const fields = [
+    { backend: 41, name: 'One-time code', value: '482913', attributes: ['type', 'text', 'autocomplete', 'one-time-code'] },
+    { backend: 42, name: 'Card number', value: '4111 1111 1111 1111', attributes: ['type', 'text', 'autocomplete', 'cc-number'] },
+    { backend: 43, name: 'Security code', value: '737', attributes: ['type', 'text', 'name', 'cvv'] },
+    { backend: 44, name: 'Password', value: 'hunter2-shown', attributes: ['type', 'text', 'id', 'password'] },
+    { backend: 45, name: 'City', value: 'Lima', attributes: ['type', 'text', 'name', 'city'] },
+  ];
+  for (const field of fields) assert.equal(outlineSecretField(field.attributes), field.backend !== 45, field.name);
+  const nodes = fields.map((field) => ax('textbox', { name: field.name, value: field.value, props: { focusable: true, editable: 'plaintext' }, backend: field.backend }));
+  const root = ax('RootWebArea', { name: 'Pay', children: nodes });
+  const frame = { frameKey: 'top:1', url: 'https://pay.example/', nodes: [root, ...nodes], secretBackendIds: new Set([41, 42, 43, 44]) };
+  const { lines } = buildOutline([frame], { refFor: (_f, backend) => `e${backend}` });
+  const text = lines.map(renderLine).join('\n');
+  for (const secret of ['482913', '4111', '737', 'hunter2']) assert.doesNotMatch(text, new RegExp(secret), secret);
+  assert.match(text, /textbox "City" \[e45\] value="Lima"/);
+  assert.equal((text.match(/value=\[redacted\]/g) || []).length, 4);
+  const changed = buildOutline([{ ...frame, nodes: [root, ...nodes.map((node) => (node.backendDOMNodeId === 45 ? node : { ...node, value: { value: 'NEW-SECRET-9' } }))] }], { refFor: (_f, backend) => `e${backend}` });
+  assert.doesNotMatch(diffOutlines(lines, changed.lines).text, /NEW-SECRET-9/, 'a diff shows no secret either');
+});
+
 test('events are numbered so an action reports only what happened during it', () => {
   const entry = {};
   pushEvent(entry, { type: 'navigated', url: 'a' });
