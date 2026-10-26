@@ -107,3 +107,10 @@ export function browserApi(): WorkassBrowserApi | undefined {
 export function browserHostedInRenderer(api: WorkassBrowserApi | undefined = browserApi()): boolean {
   return typeof api?.hostMode === 'function' && typeof api.registerGuest === 'function' && api.hostMode() === 'webview';
 }
+
+// One page: a page the shell made before this renderer asked for the webview
+// host stays a native view (over all HTML) until it is replaced, so it is
+// treated as one. A state that does not say follows the renderer's host.
+export function browserPageHosted(api: WorkassBrowserApi | undefined, host?: 'webview' | 'view'): boolean {
+  return browserHostedInRenderer(api) && host !== 'view';
+}

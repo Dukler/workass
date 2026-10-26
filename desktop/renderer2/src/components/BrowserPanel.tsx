@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  browserApi, browserHostedInRenderer, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, browserPageHosted, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
 import { presentBrowserPage, slotRect, SURFACE_Z_DOCKED, withdrawBrowserPage } from '../browser-surface';
@@ -57,7 +57,7 @@ function LocalBrowserPanel({
   const viewport = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<WorkassBrowserState>(() => initialState(chatId));
   const [address, setAddress] = useState('');
-  const hosted = browserHostedInRenderer(api);
+  const hosted = browserPageHosted(api, state.host);
   const slot = useRef(Symbol('docked-pane'));
 
   // The native-view host paints the page ABOVE all HTML, so an HTML overlay

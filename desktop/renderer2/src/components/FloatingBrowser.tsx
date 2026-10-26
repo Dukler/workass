@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { flushSync } from 'react-dom';
 import {
-  browserApi, browserHostedInRenderer, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, browserPageHosted, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds,
 } from '../browser';
 import { presentBrowserPage, slotRect, SURFACE_Z_FLOAT, SURFACE_Z_FULL, withdrawBrowserPage } from '../browser-surface';
@@ -99,7 +99,9 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
   // The page is a <webview> this renderer draws (browser-surface.ts): it
   // moves and resizes with the frame in the same frame, and menus and dialogs
   // stack above it like any HTML.
-  const hosted = browserHostedInRenderer(api);
+  // A page made before this renderer asked for the host is still native.
+  const [pageHost, setPageHost] = useState<'webview' | 'view' | undefined>(undefined);
+  const hosted = browserPageHosted(api, pageHost);
   const slot = useRef(Symbol('floating-browser'));
   // Places the hosted page over the frame now (no-op for the native host).
   const placePage = useRef<() => void>(() => {});
@@ -125,6 +127,7 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
   useEffect(() => api.onState((state) => {
     if (state.chatId !== chat.id) return;
     setUrl(state.url === 'about:blank' ? '' : state.url);
+    if (state.host) setPageHost(state.host);
   }), [api, chat.id]);
 
   // A menu, dialog or the open Working list over the frame hides the page
