@@ -29,6 +29,11 @@ import (
 // response and writes the matching private context file for the CLI to read.
 func fixtureContextFile(t *testing.T, status int, responseError string) string {
 	t.Helper()
+	return fixtureContextFileResponse(t, status, toolcli.Response{Error: responseError})
+}
+
+func fixtureContextFileResponse(t *testing.T, status int, response toolcli.Response) string {
+	t.Helper()
 	root := t.TempDir()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -50,7 +55,7 @@ func fixtureContextFile(t *testing.T, status int, responseError string) string {
 	}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(toolcli.Response{Error: responseError})
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	server.StartTLS()
@@ -135,5 +140,22 @@ func TestRunSurfacesOtherDaemonRejectionsUnchanged(t *testing.T) {
 	err := runList(t)
 	if err == nil || err.Error() != "forbidden" {
 		t.Fatalf("forbidden request: %v", err)
+	}
+}
+
+func TestRunPrintsURLsInResultsLiterally(t *testing.T) {
+	const href = "https://shop.example/itm/1?hash=item1&var=<2>"
+	path := fixtureContextFileResponse(t, http.StatusOK, toolcli.Response{Result: map[string]any{"href": href}})
+	t.Setenv("WORKASS_TOOL_CONTEXT", path)
+	var output, diagnostics bytes.Buffer
+	if err := Run(context.Background(), []string{"call", "workass_browser_read"}, strings.NewReader("{}"), &output, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), href) {
+		t.Fatalf("output = %s", output.String())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded["href"] != href {
+		t.Fatalf("decoded = %#v, err=%v", decoded, err)
 	}
 }
