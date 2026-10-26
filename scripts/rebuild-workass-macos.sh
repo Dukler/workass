@@ -477,13 +477,17 @@ rebuild_daemon() {
   echo "DAEMON_HANDOFF_DISPATCHED label=$handoff_label"
 }
 
+# Retention after every finished rebuild (scripts/dev-disk-hygiene.sh); never
+# fails it. Help and usage errors exit before it runs.
+disk_hygiene() { sh "$repo_root/scripts/dev-disk-hygiene.sh" auto >&2 || true; }
+
 require_macos
 [ "$#" -ge 1 ] || { usage >&2; exit 2; }
 mode="$1"
 shift
 case "$mode" in
-  electron) rebuild_electron "$@" ;;
-  daemon) rebuild_daemon "$@" ;;
+  electron) rebuild_electron "$@"; disk_hygiene ;;
+  daemon) rebuild_daemon "$@"; disk_hygiene ;;
   -h|--help) usage ;;
   *) usage >&2; die "unknown mode: $mode" ;;
 esac
