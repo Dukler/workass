@@ -67,6 +67,12 @@ func locateSessionImage(ref, stateDir string) (sessionImageFile, error) {
 		return sessionImageFile{}, fmt.Errorf("invalid session image ref %q", ref)
 	}
 	if file, err := statSessionImageForm(stateDir, name, true); err == nil {
+		// Both forms stand for one text of one length. A raw file whose size
+		// disagrees with its legacy twin is damaged (a write cut short): the
+		// legacy file is the image, and so are its size and header.
+		if legacy, legacyErr := statSessionImageForm(stateDir, name, false); legacyErr == nil && legacy.info.Size() != file.logicalSize() {
+			return legacy, nil
+		}
 		return file, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		// A raw form that is not a bounded regular file is unusable, but the
