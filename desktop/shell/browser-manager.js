@@ -413,6 +413,7 @@ class BrowserManager {
     wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (inPlace || isMainFrame === false) return;
       entry.mainNavigationPending = true;
+      entry.mainDocumentReady = false;
       entry.documentGeneration += 1;
       entry.interactionGeneration += 1;
       entry.frameTreeGeneration += 1;
@@ -421,6 +422,9 @@ class BrowserManager {
       this.invalidateFrames(entry, null, 'document_replaced');
       this.interruptWaiters(entry, 'navigation');
     });
+    // A page whose subframes never finish keeps loading forever; its main
+    // document is still ready to observe once DOMContentLoaded has fired.
+    wc.on('dom-ready', () => { entry.mainDocumentReady = true; });
     wc.on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
     wc.on('did-stop-loading', () => {
       entry.loading = false;
@@ -754,16 +758,16 @@ class BrowserManager {
     const debug = entry.view.webContents.debugger;
     const step = (promise) => this.ownedTargetStep(task, promise);
     for (const domain of ['Page', 'Runtime', 'DOM', 'Accessibility']) {
-      try { await step(debug.sendCommand(domain + '.enable', {}, sessionId || undefined)); }
+      try { await step(() => debug.sendCommand(domain + '.enable', {}, sessionId || undefined)); }
       catch (error) {
         if (error instanceof OwnedTargetSetupCancelled) throw error;
         /* an unavailable optional domain remains explicitly unavailable */
       }
     }
-    const tree = await step(this.readFrameTree(entry, sessionId));
+    const tree = await step(() => this.readFrameTree(entry, sessionId));
     this.recordFrameTree(entry, tree, sessionId);
     try {
-      await step(debug.sendCommand('Target.setAutoAttach', {
+      await step(() => debug.sendCommand('Target.setAutoAttach', {
         autoAttach: true,
         waitForDebuggerOnStart: false,
         flatten: true,
@@ -777,12 +781,16 @@ class BrowserManager {
   }
 
   // Races one setup step against its task's cancellation (timeout, target
-  // gone, navigation, entry closed). The abandoned protocol promise may never
-  // settle; nothing waits on it after this.
-  ownedTargetStep(task, promise) {
-    if (!task) return promise;
+  // gone, navigation, entry closed). The step starts only while the task is
+  // live, so a cancelled setup sends nothing more; an abandoned protocol
+  // promise may never settle, and nothing waits on it after this.
+  ownedTargetStep(task, work) {
+    const start = () => (typeof work === 'function' ? work() : work);
+    if (!task) return start();
     if (task.cancelled) return Promise.reject(new OwnedTargetSetupCancelled(task.cancelled));
-    return Promise.race([Promise.resolve(promise), task.cancelSignal]);
+    let promise;
+    try { promise = Promise.resolve(start()); } catch (error) { promise = Promise.reject(error); }
+    return Promise.race([promise, task.cancelSignal]);
   }
 
   // A target auto-attached with waitForDebuggerOnStart stays paused until its
@@ -939,7 +947,7 @@ class BrowserManager {
   async rejectAttachedTarget(entry, parentSessionId, childSessionId, task = null) {
     this.resumeWaitingTarget(entry, task);
     try {
-      await this.ownedTargetStep(task, entry.view.webContents.debugger.sendCommand(
+      await this.ownedTargetStep(task, () => entry.view.webContents.debugger.sendCommand(
         'Target.detachFromTarget', { sessionId: childSessionId }, parentSessionId || undefined,
       ));
     } catch (error) {
@@ -950,7 +958,7 @@ class BrowserManager {
 
   async acceptAttachedTarget(entry, params, parentSessionId, task = null) {
     const step = (promise) => this.ownedTargetStep(task, promise);
-    const pause = () => step(new Promise((resolve) => setTimeout(resolve, 50)));
+    const pause = () => step(() => new Promise((resolve) => setTimeout(resolve, 50)));
     const targetInfo = params && params.targetInfo;
     const childSessionId = params && params.sessionId;
     if (!this.isCurrentEntry(entry) || !targetInfo || !childSessionId || targetInfo.type !== 'iframe') {
@@ -969,9 +977,9 @@ class BrowserManager {
     // TargetInfo does not provide a portable parentTargetId for iframe
     // targets. Bind the session only through the exact frame id in the
     // parent's authoritative Page.getFrameTree response.
-    const parentTree = await step(this.readFrameTree(entry, parentSessionId || null));
+    const parentTree = await step(() => this.readFrameTree(entry, parentSessionId || null));
     this.recordFrameTree(entry, parentTree, parentSessionId || null);
-    const response = await step(this.readFrameTree(entry, childSessionId));
+    const response = await step(() => this.readFrameTree(entry, childSessionId));
     if (!response) {
       await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       this.lifecycle(entry, 'owned-frame-target-rejected', { reason: 'child_frame_tree_unavailable' });
@@ -995,7 +1003,7 @@ class BrowserManager {
       const parentRecord = entry.frames.get(claimedParent);
       if (parentRecord && !parentRecord.detached && parentRecord.targetId === parentTargetId) break;
       await pause();
-      const refreshedTree = await step(this.readFrameTree(entry, parentSessionId || null));
+      const refreshedTree = await step(() => this.readFrameTree(entry, parentSessionId || null));
       this.recordFrameTree(entry, refreshedTree, parentSessionId || null);
       parentTreeContainsChild = frameTreeRows(refreshedTree).some(({ frame }) => String(frame.id) === frameId);
       candidate = entry.frames.get(frameId) || null;
@@ -1041,7 +1049,7 @@ class BrowserManager {
     for (let attempt = 0; frameId && targetId && root.loaderId && candidate?.loaderId &&
       String(root.loaderId) !== String(candidate.loaderId) && attempt < 50; attempt += 1) {
       await pause();
-      const refreshedTree = await step(this.readFrameTree(entry, parentSessionId || null));
+      const refreshedTree = await step(() => this.readFrameTree(entry, parentSessionId || null));
       this.recordFrameTree(entry, refreshedTree, parentSessionId || null);
       candidate = entry.frames.get(frameId) || null;
     }
@@ -1393,9 +1401,58 @@ class BrowserManager {
 
   async applyAndReadDeviceEmulation(entry, viewport = entry.viewport, scale = 1) {
     await this.applyDeviceEmulation(entry, viewport, scale);
-    const effective = await this.readEffectiveViewport(entry);
+    const effective = await this.readVerifiedViewport(entry, viewport, scale);
     this.assertEffectiveViewport(viewport, effective);
     return effective;
+  }
+
+  // A same-site frame nested inside cross-site frames shares the main frame's
+  // renderer and renders at the native screen scale. Until the next visual
+  // properties sync, the main frame's devicePixelRatio can then report that
+  // native scale although the page itself renders at the emulated one. When
+  // only the scale disagrees, measure what the emulation controls: the raster
+  // of a small CSS-pixel capture of the main frame (which also resyncs it). A
+  // main frame that really renders at another scale still fails.
+  async readVerifiedViewport(entry, requested, scale = 1) {
+    const effective = await this.readEffectiveViewport(entry);
+    if (effective.width !== requested.width || effective.height !== requested.height ||
+        effective.deviceScaleFactor === requested.deviceScaleFactor) {
+      return effective;
+    }
+    const rasterScale = await this.mainFrameRasterScale(entry, effective);
+    const expected = [requested.deviceScaleFactor, requested.deviceScaleFactor * (Number(scale) > 0 ? Number(scale) : 1)];
+    if (rasterScale == null || !expected.some((value) => Math.abs(rasterScale - value) < 0.05)) {
+      this.lifecycle(entry, 'viewport-scale-mismatch', { reported: effective.deviceScaleFactor, raster: rasterScale });
+      return effective;
+    }
+    const reread = await this.readEffectiveViewport(entry);
+    this.lifecycle(entry, 'viewport-scale-verified-by-raster', {
+      reported: effective.deviceScaleFactor, raster: rasterScale,
+      resynced: reread.deviceScaleFactor === requested.deviceScaleFactor,
+    });
+    return { ...reread, deviceScaleFactor: requested.deviceScaleFactor };
+  }
+
+  async mainFrameRasterScale(entry, effective) {
+    const size = 10;
+    let timer = null;
+    try {
+      const capture = Promise.resolve(entry.view.webContents.debugger.sendCommand('Page.captureScreenshot', {
+        format: 'png',
+        clip: { x: Number(effective.scrollX) || 0, y: Number(effective.scrollY) || 0, width: size, height: size, scale: 1 },
+      }));
+      const response = await Promise.race([
+        capture,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 3000); }),
+      ]);
+      if (!response || !response.data) return null;
+      const { width } = pngDimensions(Buffer.from(String(response.data), 'base64'));
+      return width / size;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   assertEffectiveViewport(requested, effective) {
@@ -1502,7 +1559,7 @@ class BrowserManager {
     wc.on('dom-ready', onDomReady);
     timers.push(setTimeout(() => {
       if (committed) settle.resolve('load_pending');
-      else settle.reject(new Error(`browser navigation did not commit within ${Math.round(commitTimeoutMs / 1000)}s; the page is still loading`));
+      else settle.reject(new Error(`browser navigation did not commit within ${Math.round(commitTimeoutMs / 1000)}s; the page is still loading in the background. Take a snapshot later to see whether it arrived, or navigate again to retry`));
     }, commitTimeoutMs));
     let load;
     try {
@@ -1537,7 +1594,7 @@ class BrowserManager {
     this.assertCurrentEntry(entry);
     const next = validateViewport(viewport.width, viewport.height);
     if (entry.viewport.width === next.width && entry.viewport.height === next.height && entry.viewport.deviceScaleFactor === next.deviceScaleFactor) {
-      const effective = await this.readEffectiveViewport(entry);
+      const effective = await this.readVerifiedViewport(entry, next, this.attachedView === entry.view ? entry.presentationScale : 1);
       this.assertEffectiveViewport(next, effective);
       entry.effectiveViewport = effective;
       this.publish(entry);
@@ -1927,6 +1984,37 @@ class BrowserManager {
 
   browserEntries() {
     return Array.from(this.entries.values()).filter((entry) => entry.chatId !== '__workass-health__');
+  }
+
+  // A navigation can return while some frames are still loading (a hung ad
+  // request never lets the page finish). Say so in the result itself.
+  navigationResult(entry) {
+    const tab = this.tabInfo(entry);
+    if (tab.loading === true) {
+      tab.loadingNote = entry.mainDocumentReady
+        ? 'The page is still loading: its document is ready, but some frames have not finished. Snapshot or screenshot it now, or navigate again to retry the load.'
+        : 'The page is still loading. Snapshot it in a moment, or navigate again to retry the load.';
+    }
+    return tab;
+  }
+
+  // The first snapshot of a page that is still attaching or loading frames
+  // can see them change mid-observation. Retry once before reporting it.
+  async browserSnapshotSettled(entry) {
+    const changed = (error) => /changed during snapshot/.test(String(error && error.message));
+    try {
+      return await this.browserSnapshot(entry);
+    } catch (error) {
+      if (!changed(error)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, this.snapshotRetryDelayMs ?? 250));
+    this.assertCurrentEntry(entry);
+    try {
+      return await this.browserSnapshot(entry);
+    } catch (error) {
+      if (!changed(error)) throw error;
+      throw new Error('browser page kept changing while it was observed (frames are still loading or navigating); take the snapshot again in a moment');
+    }
   }
 
   tabInfo(entry) {
@@ -2871,10 +2959,12 @@ class BrowserManager {
       const frame = source.frame;
       if (!frame || !frame.id || !source.raw) continue;
       const sessionId = frame.sessionId || undefined;
+      const remainingMs = sessionId ? childFramesDeadline - Date.now() : null;
       let response;
       try {
+        if (remainingMs != null && remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
         response = await this.ownedSessionCommand(entry,
-          'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId,
+          'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId, remainingMs,
         );
       } catch {
         frame.axAvailable = false;
@@ -3495,15 +3585,22 @@ class BrowserManager {
     this.assertCurrentEntry(entry);
     await this.refreshFrameTree(entry);
     const frames = [];
+    const childFramesDeadline = Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS);
     for (const frame of Array.from(entry.frames.values()).filter((item) => !item.detached)) {
       let scroll = null;
-      try { scroll = await this.evaluateFrame(entry, frame.id, '({ x: scrollX, y: scrollY, width: innerWidth, height: innerHeight })'); }
-      catch { /* unavailable frames remain represented by their identity */ }
+      const remainingMs = frame.sessionId ? childFramesDeadline - Date.now() : null;
+      try {
+        if (remainingMs == null || remainingMs > 0) {
+          scroll = await this.evaluateFrame(entry, frame.id, '({ x: scrollX, y: scrollY, width: innerWidth, height: innerHeight })',
+            remainingMs == null ? {} : { timeoutMs: remainingMs });
+        }
+      } catch { /* unavailable frames remain represented by their identity */ }
       frames.push([frame.id, frame.generation, frame.loaderId, frame.targetId, frame.sessionId,
         finiteMetric(scroll?.x), finiteMetric(scroll?.y), finiteMetric(scroll?.width), finiteMetric(scroll?.height)]);
     }
     let top = null;
-    try { top = await this.readEffectiveViewport(entry); } catch { /* caller reports an unavailable metric */ }
+    try { top = await this.readVerifiedViewport(entry, entry.viewport, this.attachedView === entry.view ? entry.presentationScale : 1); }
+    catch { /* caller reports an unavailable metric */ }
     frames.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
     return {
       documentGeneration: entry.documentGeneration,
@@ -3769,10 +3866,10 @@ class BrowserManager {
     if (!['viewport', 'full_page', 'clip'].includes(mode)) throw new Error('mode must be viewport, full_page, or clip');
     if (mode === 'clip' && (!params.clip || typeof params.clip !== 'object')) throw new Error('clip mode requires a CSS clip rectangle');
     if (mode !== 'clip' && params.clip != null) throw new Error('clip is only accepted with mode=clip');
-    if (entry.loading) throw new Error('browser page is navigating; wait for navigation before taking a screenshot');
+    if (entry.loading && !entry.mainDocumentReady) throw new Error('browser page is navigating; wait for navigation before taking a screenshot');
     await this.ensureCDP(entry);
     const beforeStamp = await this.readInteractionStamp(entry);
-    if (entry.loading) throw new Error('browser page is navigating; wait for navigation before taking a screenshot');
+    if (entry.loading && !entry.mainDocumentReady) throw new Error('browser page is navigating; wait for navigation before taking a screenshot');
     const beforeMetricsStamp = screenshotMetricStamp(beforeStamp.metrics, mode);
     const effective = beforeStamp.metrics;
     this.assertEffectiveViewport(entry.viewport, effective);
@@ -3847,13 +3944,13 @@ class BrowserManager {
         beforeStamp.interactionGeneration !== afterStamp.interactionGeneration ||
         JSON.stringify(beforeStamp.frames) !== JSON.stringify(afterStamp.frames) ||
         JSON.stringify(beforeMetricsStamp) !== JSON.stringify(afterMetricsStamp) ||
-        entry.loading) {
+        (entry.loading && !entry.mainDocumentReady)) {
       const changed = [];
       for (const key of ['documentGeneration', 'viewportGeneration', 'frameTreeGeneration', 'interactionGeneration']) {
         if (beforeStamp[key] !== afterStamp[key]) changed.push(key);
       }
       if (JSON.stringify(beforeMetricsStamp) !== JSON.stringify(afterMetricsStamp)) changed.push('metrics');
-      if (entry.loading) changed.push('navigation_in_progress');
+      if (entry.loading && !entry.mainDocumentReady) changed.push('navigation_in_progress');
       if (JSON.stringify(beforeStamp.frames) !== JSON.stringify(afterStamp.frames)) changed.push('frame_identity_or_scroll');
       throw new Error(`browser screenshot became stale while the document, frame, scroll, or viewport changed (${changed.join(',') || 'stamp'}); take a fresh screenshot`);
     }
@@ -4077,7 +4174,10 @@ class BrowserManager {
     if (method === 'browser.open') {
       const entry = this.openConversation(params);
       if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
-      if (params.url) await this.serialize(entry, () => this.command(entry.chatId, 'navigate', params.url));
+      if (params.url) {
+        await this.serialize(entry, () => this.command(entry.chatId, 'navigate', params.url));
+        return this.navigationResult(entry);
+      }
       return this.tabInfo(entry);
     }
     const entry = await this.controlEntry(params);
@@ -4095,12 +4195,12 @@ class BrowserManager {
     if (method === 'browser.resetViewport') return this.resetViewport(entry);
     if (method === 'browser.navigate') {
       await this.command(entry.chatId, 'navigate', params.url);
-      return this.tabInfo(entry);
+      return this.navigationResult(entry);
     }
     if (method === 'browser.back') { await this.command(entry.chatId, 'back'); return this.tabInfo(entry); }
     if (method === 'browser.forward') { await this.command(entry.chatId, 'forward'); return this.tabInfo(entry); }
     if (method === 'browser.reload') { await this.command(entry.chatId, 'reload'); return this.tabInfo(entry); }
-    if (method === 'browser.snapshot') return this.browserSnapshot(entry);
+    if (method === 'browser.snapshot') return this.browserSnapshotSettled(entry);
     if (method === 'browser.click') return this.browserClick(entry, params);
     if (method === 'browser.type') {
       const target = await this.observationTarget(entry, params);
