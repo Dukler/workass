@@ -51,10 +51,31 @@ export interface WorkassBrowserState {
   visible?: boolean;
   // The page sits in its own always-on-top window (popOut).
   poppedOut?: boolean;
+  // Newer shells: 'webview' when the page is the guest of a <webview> this
+  // renderer mounts (BrowserSurfaceHost), with the key that names it.
+  host?: 'webview' | 'view';
+  hostKey?: string;
+  tabId?: number | null;
+}
+
+// One page the webview host asks this renderer to mount.
+export interface WorkassBrowserHost {
+  hostKey: string;
+  chatId: string;
+  tabId: number | null;
+  viewport: { width: number; height: number; deviceScaleFactor?: number };
+  visible: boolean;
+  poppedOut: boolean;
 }
 
 export interface WorkassBrowserApi {
   supported: boolean;
+  // 'webview': this renderer mounts the pages (newer shells); absent or
+  // 'view': the shell stacks native views over the window.
+  hostMode?(): 'webview' | 'view';
+  registerGuest?(hostKey: string, webContentsId: number): Promise<{ ok: boolean; reason?: string; tabId?: number }>;
+  hosts?(): Promise<WorkassBrowserHost[]>;
+  onHosts?(callback: (hosts: WorkassBrowserHost[]) => void): () => void;
   // radius: the page's corner radius where it is shown (the floating frame's);
   // a newer shell also clips the page to it.
   activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; url?: string; radius?: number }): Promise<WorkassBrowserState>;
@@ -80,4 +101,9 @@ declare global {
 
 export function browserApi(): WorkassBrowserApi | undefined {
   return typeof window !== 'undefined' ? window.workassBrowser : undefined;
+}
+
+// The page is drawn by this renderer, in a <webview>.
+export function browserHostedInRenderer(api: WorkassBrowserApi | undefined = browserApi()): boolean {
+  return typeof api?.hostMode === 'function' && typeof api.registerGuest === 'function' && api.hostMode() === 'webview';
 }

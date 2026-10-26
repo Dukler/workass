@@ -2513,6 +2513,13 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 /* While it is dragged or resized only the page itself shows (it follows the
    pointer natively); the HTML around it would trail it by a frame. */
 .fbrw.is-moving { opacity: 0; }
+/* The webview host (browser-surface.ts): each page in a fixed box of its own,
+   placed over the slot that shows it, or at the window's origin behind the
+   app while no slot does (still painting, for the agent's captures). */
+.wbs-page { position: fixed; left: 0; top: 0; overflow: hidden; background: #fff; z-index: -1; pointer-events: none; }
+.wbs-viewport { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.wbs-webview { display: flex; width: 100%; height: 100%; border: 0; }
+:root.wbs-gesture .wbs-page { pointer-events: none !important; }
 /* Full screen: the page fills the window under one slim bar. */
 .fbrw-full { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--bg); }
 .fbrw-fullbar { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 10px 0 calc(var(--side-toggle-x) + 8px);
@@ -2521,6 +2528,10 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 :root.electron .fbrw-fullbar button { -webkit-app-region: no-drag; }
 .fbrw-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .fbrw-fullview { flex: 1; position: relative; }
+/* A hosted page is drawn under this layer (same stacking order, earlier in
+   the DOM): only the bar is opaque, the page shows through the view area. */
+.fbrw-full.hosted { background: transparent; }
+.fbrw-full.hosted .fbrw-fullbar { background: var(--bg); }
 
 /* ============ Fork subsessions (approved mock forks/sidebar-nested.html) ============
    Children of a fork point live in the sidebar, nested under their parent chat;

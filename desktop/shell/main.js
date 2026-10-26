@@ -1,13 +1,14 @@
 // workass shell — minimal Electron window over the always-on Go daemon.
 // The daemon owns state/agents; the shell-owned loopback view server owns only
 // renderer bytes so Electron can rebuild/restart without touching ACP turns.
-const { app, BrowserWindow, WebContentsView, session, net, ipcMain, shell, nativeImage, clipboard, dialog, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, webContents, session, net, ipcMain, shell, nativeImage, clipboard, dialog, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
 const { createConnectedArtifactBridge, shouldInjectArtifactHeader } = require('./connected-artifacts');
 const { BrowserManager, DEFAULT_PARTITION: BROWSER_PARTITION } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
+const { hardenWebviewAttach, resolveBrowserHost } = require('./browser-webview-policy');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
@@ -224,6 +225,8 @@ function createWindow(url, browserReporter, isController) {
   const isUpdateRelaunch = revealUpdateRelaunch;
   revealUpdateRelaunch = false;
   const showOnCreate = shouldShowWindowOnCreate({ platform: process.platform, updateRelaunch: isUpdateRelaunch });
+  const browserHost = resolveBrowserHost({ env: process.env, platform: process.platform, dataRoot: RUNTIME.dataRoot });
+  console.error(`[shell] browser host ${browserHost.host} (${browserHost.source})`);
   const windowIcon = resolveWindowIconPath({
     platform: process.platform,
     isPackaged: app.isPackaged,
@@ -244,6 +247,10 @@ function createWindow(url, browserReporter, isController) {
       contextIsolation: true,
       sandbox: true,
       preload: path.join(__dirname, 'preload.js'),
+      // The browser page's <webview>: the app window only, and only when the
+      // webview host is selected. will-attach-webview below decides what a
+      // guest may be.
+      webviewTag: browserHost.host === 'webview',
     },
   });
   browserManager = new BrowserManager({
@@ -252,6 +259,12 @@ function createWindow(url, browserReporter, isController) {
     BrowserWindow,
     nativeImage,
     session,
+    host: browserHost.host,
+    webContentsFromId: (id) => webContents.fromId(id),
+    onHosts: (hosts) => {
+      if (!win.isDestroyed()) win.webContents.send('workass-browser:hosts', hosts);
+    },
+    pipPreload: path.join(__dirname, 'browser-pip-preload.js'),
     chromeVersion: process.versions.chrome,
     requestOpen: (chatId) => {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:open-request', chatId || null);
@@ -318,6 +331,21 @@ function createWindow(url, browserReporter, isController) {
   win.webContents.on('render-process-gone', () => {
     if (browserManager) void browserManager.hideAll().catch(() => {});
   });
+  // The browser page's <webview> (webview host only): no preload, no Node,
+  // sandboxed, isolated, the browser's own persistent profile, blank until
+  // main loads it. Anything else the renderer asks for is refused.
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const decision = browserManager && browserManager.hostMode === 'webview'
+      ? hardenWebviewAttach(webPreferences, params, { partition: BROWSER_PARTITION })
+      : { allow: false, reason: 'host' };
+    if (!decision.allow) {
+      event.preventDefault();
+      console.error(`[shell] refused a webview (${decision.reason})`);
+    }
+  });
+  win.webContents.on('did-attach-webview', (_event, contents) => {
+    if (browserManager) browserManager.noteAttachedGuest(contents);
+  });
   // HTML pages in the chat are sandboxed srcdoc frames with no network; this
   // cancels any navigation of them (and of frames nested inside them) and keeps
   // WebRTC off direct UDP. It is attached before the first load, and the
@@ -338,6 +366,13 @@ function createWindow(url, browserReporter, isController) {
     if (own(event) && payload) browserManager.place(payload.chatId, payload.bounds);
   });
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
+  ipcMain.handle('workass-browser:register-guest', (event, payload) => own(event) && payload
+    ? browserManager.registerGuest(payload.hostKey, payload.webContentsId)
+    : { ok: false, reason: 'untrusted renderer' });
+  ipcMain.handle('workass-browser:hosts', (event) => own(event) ? browserManager.hostList() : []);
+  ipcMain.on('workass-browser:host-mode', (event) => {
+    event.returnValue = own(event) && browserManager ? browserManager.hostMode : 'view';
+  });
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
   ipcMain.handle('workass-browser:set-viewport', (event, payload) => own(event) && payload
     ? browserManager.browserControl('browser.setViewport', { chatId: payload.chatId, width: payload.width, height: payload.height })
@@ -379,10 +414,11 @@ function createWindow(url, browserReporter, isController) {
     for (const requestSession of artifactRequestSessions) {
       try { requestSession.webRequest.onBeforeSendHeaders(null); } catch { /* older Electron */ }
     }
-    for (const channel of ['activate', 'resize', 'hide', 'pop-out', 'pop-in', 'close', 'command', 'set-viewport', 'reset-viewport']) {
+    for (const channel of ['activate', 'resize', 'hide', 'pop-out', 'pop-in', 'close', 'command', 'set-viewport', 'reset-viewport', 'register-guest', 'hosts']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
     ipcMain.removeAllListeners('workass-browser:place');
+    ipcMain.removeAllListeners('workass-browser:host-mode');
     for (const channel of ['copy-text', 'copy-image-at']) {
       try { ipcMain.removeHandler(`workass-clipboard:${channel}`); } catch { /* ignore */ }
     }
