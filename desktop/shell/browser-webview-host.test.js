@@ -379,6 +379,7 @@ test('a page an agent drives copies frames only while the app window is hidden o
     win: { isDestroyed: () => false, isVisible: () => state.visible, isMinimized: () => state.minimized },
     addFrameSubscriber: (_entry, _callback, options) => { assert.equal(options.full, false); state.subscribed += 1; return () => { state.ended += 1; }; },
     hostWindowShowing: BrowserManager.prototype.hostWindowShowing,
+    isHosted: () => true,
   };
   const sync = (entry) => BrowserManager.prototype.syncPaintSource.call(self, entry);
   const entry = { painting: true };

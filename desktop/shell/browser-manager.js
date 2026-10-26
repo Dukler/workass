@@ -2263,13 +2263,16 @@ class BrowserManager {
     return bounded;
   }
 
-  // Webview host: a guest that is not on screen paints no frames, so a
-  // capture would wait for one forever and focus() would fire nothing. While
-  // an agent drives a page it is emulated focused, which Chromium treats like
-  // a captured page and keeps painting; a few seconds after the last call it
-  // goes back to ordinary throttling (after t3code's DesktopBrowserHost).
+  // A page that is not on screen paints no frames, so a capture would wait
+  // for one forever, focus() would fire nothing, and a protocol mouse move
+  // (handed to the page on its next frame) would never be taken. While an
+  // agent drives such a page it is emulated focused, which Chromium treats
+  // like a captured page and keeps painting; a few seconds after the last
+  // call it goes back to ordinary throttling (after t3code's
+  // DesktopBrowserHost). Every hosted page is held; a native view only while
+  // it is off screen (in its hidden host, or in a window that is not shown).
   async withPainting(entry, operation, hold = {}) {
-    if (!this.isHosted(entry)) return operation();
+    if (!this.isHosted(entry) && !this.viewOffScreen(entry)) return operation();
     this.holdPainting(entry);
     // Released once: when the operation ends, or at its deadline.
     hold.release = () => { if (hold.released) return; hold.released = true; this.releasePainting(entry); };
@@ -2304,6 +2307,17 @@ class BrowserManager {
     if (typeof entry.paintIdleTimer?.unref === 'function') entry.paintIdleTimer.unref();
   }
 
+  // Whether a native view paints on its own: it is in a window that is on
+  // screen (the app window, its pop-out window, a popup's window).
+  viewOffScreen(entry) {
+    const showing = (win) => {
+      try { return !!win && !win.isDestroyed?.() && win.isVisible?.() === true && win.isMinimized?.() !== true; } catch { return false; }
+    };
+    if (this.attachedView === entry.view) return !showing(this.win);
+    const own = entry.popupWindow || entry.pipWindow;
+    return !(own && showing(own));
+  }
+
   // Whether the app window is on screen: its <webview> guests then produce
   // frames on their own.
   hostWindowShowing() {
@@ -2317,7 +2331,7 @@ class BrowserManager {
   // producing frames while an agent drives it, only then (it costs a frame
   // copy per frame), and copies out only each frame's damaged region.
   syncPaintSource(entry) {
-    const want = entry.painting === true && !entry.closed && !this.hostWindowShowing();
+    const want = entry.painting === true && !entry.closed && (this.isHosted(entry) ? !this.hostWindowShowing() : this.viewOffScreen(entry));
     if (want && !entry.paintSubscription) entry.paintSubscription = this.addFrameSubscriber(entry, () => {}, { full: false });
     else if (!want && entry.paintSubscription) { entry.paintSubscription(); entry.paintSubscription = null; }
   }
