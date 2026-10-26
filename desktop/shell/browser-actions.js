@@ -70,7 +70,9 @@ function markAgentActive(entry) {
 // The page is the agent's to drive right now: not shown to the person, or an
 // agent call touched it moments ago.
 function agentDriven(entry) {
-  return entry.visible !== true || Date.now() - (entry.agentActiveAt || 0) < AGENT_RECENT_MS;
+  // A page in its separate window is in front of the person too.
+  const poppedOut = !!(entry.pip || (entry.pipWindow && !entry.pipWindow.isDestroyed?.()));
+  return (entry.visible !== true && !poppedOut) || Date.now() - (entry.agentActiveAt || 0) < AGENT_RECENT_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,8 +558,36 @@ function pickTarget(params, end) {
 // Uploads: only files the agent names, never credential-like ones, links or
 // more than UPLOAD_MAX_BYTES in all.
 
-const CREDENTIAL_SEGMENTS = new Set(['.ssh', '.aws', '.gnupg', '.gpg', '.kube', '.docker', '.azure', '.config/gcloud', 'keychains', '.password-store', '.vault-token']);
-const CREDENTIAL_NAME = /(^|[^a-z])(token|secret|credential|passw(or)?d|private[-_. ]?key|api[-_]?key)s?([^a-z]|$)|^id_(rsa|dsa|ecdsa|ed25519)|\.(pem|key|p12|pfx|jks|keystore|keychain(-db)?|kdbx|ovpn|asc|gpg)$|^\.env(\.|$)|^\.netrc$|^\.npmrc$|^\.pypirc$|^\.git-credentials$/iu;
+// Folders that hold sign-ins, keys, tokens or browser profiles (matched on
+// the real path, lower case).
+const CREDENTIAL_SEGMENTS = new Set([
+  '.ssh', '.aws', '.gnupg', '.gpg', '.kube', '.docker', '.azure', '.oci', '.config/gcloud', 'keychains', '.password-store',
+  '.vault-token', '.config/gh', '.config/glab-cli', '.config/hub', '.config/op', '.config/rclone', '.config/heroku',
+  '.config/configstore', '.terraform.d', '.cargo/credentials', '.local/share/keyrings', '.mozilla', '.config/google-chrome',
+  '.config/chromium', '.config/bravesoftware', 'library/cookies', 'library/application support/google/chrome',
+  'library/application support/firefox', 'library/application support/bravesoftware', 'library/application support/workass',
+  '.claude', '.codex',
+]);
+const CREDENTIAL_NAME = /(^|[^a-z])(token|secret|credential|passw(or)?d|private[-_. ]?key|api[-_]?key)s?([^a-z]|$)|^id_(rsa|dsa|ecdsa|ed25519)|\.(pem|key|p12|pfx|jks|keystore|keychain(-db)?|kdbx|ovpn|asc|gpg)$|^\.env(\.|$)|^\.netrc$|^\.npmrc$|^\.pypirc$|^\.git-credentials$|^cookies(\.sqlite)?$|^login data$|_history$/iu;
+// macOS's own top-level aliases: a path under them is not a link the agent
+// chose.
+const SYSTEM_ALIASES = [['/tmp', '/private/tmp'], ['/var', '/private/var'], ['/etc', '/private/etc']];
+
+function withSystemAliases(file) {
+  for (const [alias, real] of SYSTEM_ALIASES) {
+    if (file === alias || file.startsWith(alias + path.sep)) return real + file.slice(alias.length);
+  }
+  return file;
+}
+
+function credentialProblem(file) {
+  const lowered = file.toLowerCase().split(path.sep).join('/');
+  for (const segment of CREDENTIAL_SEGMENTS) {
+    if (lowered.includes(`/${segment}/`) || lowered.endsWith(`/${segment}`)) return `refused: ${path.basename(file)} is in a credentials folder`;
+  }
+  if (CREDENTIAL_NAME.test(path.basename(file))) return `refused: ${path.basename(file)} looks like a credential file`;
+  return null;
+}
 
 function checkUploadPaths(paths, { fsModule = fs } = {}) {
   if (!Array.isArray(paths) || !paths.length) throw new Error('paths must list 1 to 10 absolute file paths');
@@ -567,14 +597,18 @@ function checkUploadPaths(paths, { fsModule = fs } = {}) {
   for (const raw of paths) {
     if (typeof raw !== 'string' || !path.isAbsolute(raw)) throw new Error('each path must be an absolute file path');
     const file = path.normalize(raw);
-    const lowered = file.toLowerCase().split(path.sep).join('/');
-    for (const segment of CREDENTIAL_SEGMENTS) {
-      if (lowered.includes(`/${segment}/`) || lowered.endsWith(`/${segment}`)) throw new Error(`refused: ${path.basename(file)} is in a credentials folder`);
-    }
-    if (CREDENTIAL_NAME.test(path.basename(file))) throw new Error(`refused: ${path.basename(file)} looks like a credential file`);
+    const named = credentialProblem(file);
+    if (named) throw new Error(named);
     let stat;
     try { stat = fsModule.lstatSync(file); } catch { throw new Error(`no such file: ${path.basename(file)}`); }
     if (stat.isSymbolicLink()) throw new Error(`refused: ${path.basename(file)} is a symbolic link`);
+    // A link anywhere on the way (a linked folder) is refused too: the file
+    // must be where its path says.
+    let real;
+    try { real = fsModule.realpathSync(file); } catch { throw new Error(`no such file: ${path.basename(file)}`); }
+    if (real !== withSystemAliases(file) && real !== file) throw new Error(`refused: ${path.basename(file)} is reached through a linked folder`);
+    const realProblem = credentialProblem(real);
+    if (realProblem) throw new Error(realProblem);
     if (!stat.isFile()) throw new Error(`refused: ${path.basename(file)} is not a regular file`);
     if (stat.nlink > 1) throw new Error(`refused: ${path.basename(file)} has other hard links`);
     total += stat.size;

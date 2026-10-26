@@ -22,10 +22,21 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
   let nextObject = 0;
   let nextBackend = 100;
   const commands = [];
-  // Workass's isolated world per frame (the fake runs it in the frame's own
-  // context: what is tested here is which frame a script reaches).
+  // Workass's isolated world per frame: the same DOM, its own globals, so a
+  // global the page defines (monaco) is invisible there, as in Chromium.
   const isolated = new Map();
   let nextIsolated = 5000;
+  const worldOf = (frame, contextId) => {
+    if (!isolated.has(contextId)) return frame.context;
+    if (!frame.isolatedContext) {
+      // The DOM's own globals as the frame was made, before the page added
+      // any of its own.
+      const globals = { ...frame.domGlobals };
+      globals.globalThis = globals;
+      frame.isolatedContext = vm.createContext(globals);
+    }
+    return frame.isolatedContext;
+  };
 
   const contextFor = (sessionId, contextId) => {
     for (const frame of frames.values()) {
@@ -67,7 +78,30 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
         const frame = isolated.has(params.contextId) ? frames.get(isolated.get(params.contextId)) : contextFor(sessionId, params.contextId);
         if (!frame) throw new Error('no such context');
         if (frame.hang) return new Promise(() => {});
-        return { result: { value: roundtrip(vm.runInContext(params.expression, frame.context)) } };
+        const value = vm.runInContext(params.expression, worldOf(frame, params.contextId));
+        if (params.returnByValue === false && value && typeof value === 'object') {
+          nextObject += 1;
+          const objectId = 'obj-' + nextObject;
+          objects.set(objectId, { element: value, frame, world: worldOf(frame, params.contextId) });
+          return { result: { type: 'object', objectId } };
+        }
+        if (params.returnByValue === false && value == null) return { result: { type: 'object', subtype: 'null', value: null } };
+        return { result: { value: roundtrip(value) } };
+      }
+      if (method === 'DOM.describeNode') {
+        const found = params.objectId ? objects.get(params.objectId) : elementByBackend.get(Number(params.backendNodeId));
+        if (!found) throw new Error('No node with given id found');
+        if (!backendByElement.has(found.element)) {
+          nextBackend += 1;
+          backendByElement.set(found.element, nextBackend);
+          elementByBackend.set(nextBackend, { element: found.element, frame: found.frame });
+        }
+        const attributes = [];
+        for (const name of ['type', 'autocomplete', 'name', 'id']) {
+          const value = typeof found.element.getAttribute === 'function' ? found.element.getAttribute(name) : null;
+          if (value != null) attributes.push(name, String(value));
+        }
+        return { node: { backendNodeId: backendByElement.get(found.element), attributes } };
       }
       if (method === 'DOM.getFrameOwner') {
         const frame = frames.get(params.frameId);
@@ -84,13 +118,13 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
         if (!found) throw new Error('no node');
         nextObject += 1;
         const objectId = 'obj-' + nextObject;
-        objects.set(objectId, found);
+        objects.set(objectId, { ...found, world: worldOf(found.frame, params.executionContextId) });
         return { object: { objectId } };
       }
       if (method === 'Runtime.callFunctionOn') {
         const found = objects.get(params.objectId);
         if (!found) throw new Error('no object');
-        const fn = vm.runInContext('(' + params.functionDeclaration + ')', found.frame.context);
+        const fn = vm.runInContext('(' + params.functionDeclaration + ')', found.world || found.frame.context);
         const args = (params.arguments || []).map((arg) => arg.value);
         return { result: { value: roundtrip(fn.apply(found.element, args)) } };
       }
@@ -123,8 +157,9 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
   const setFrame = ({ id, parentId = null, frameUrl, build, kind = 'same-process', owner = null, loaderId = 'L1' }) => {
     const dom = makeDOM({ url: frameUrl });
     if (build) build(dom);
+    const domGlobals = { ...dom.context };
     const context = vm.createContext(dom.context);
-    const frame = { id, parentId, url: frameUrl, loaderId, dom, context, owner, kind, sessionId: null, contextId: null };
+    const frame = { id, parentId, url: frameUrl, loaderId, dom, context, domGlobals, owner, kind, sessionId: null, contextId: null };
     if (kind === 'same-process') {
       frame.contextId = 1000 + frames.size;
       entry.executionContexts.set(entry.rootTargetId + ':' + id, frame.contextId);

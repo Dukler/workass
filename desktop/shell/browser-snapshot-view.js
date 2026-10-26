@@ -418,10 +418,15 @@ function compactBase(raw, format) {
   };
 }
 
+// Compact refs (c12) are their own namespace, apart from the outline's (e12):
+// a compact ref always needs its snapshot_id and never reaches an outline's
+// element of the same number.
+const COMPACT_REF_PREFIX = 'c';
+
 function fullCompact(manager, entry, raw, candidates, incremental = null) {
   const record = { documentGeneration: raw.document_generation, lines: [], text: '', frameLabels: new Map(), nextRef: 0, nextFrame: 0 };
   let nextRef = 0;
-  for (const line of candidates.lines) { nextRef += 1; line.ref = 'e' + nextRef; }
+  for (const line of candidates.lines) { nextRef += 1; line.ref = COMPACT_REF_PREFIX + nextRef; }
   record.nextRef = nextRef;
   const shortByFullRef = new Map(candidates.lines.map((line) => [line.fullRef, line.ref]));
   const frames = compactFrames(raw, candidates.frameRefs, record, shortByFullRef);
@@ -538,7 +543,7 @@ function incrementalCompact(manager, entry, raw, candidates, base, since) {
       status[newIndex] = '~';
     } else {
       record.nextRef += 1;
-      line.ref = 'e' + record.nextRef;
+      line.ref = COMPACT_REF_PREFIX + record.nextRef;
       status[newIndex] = '+';
     }
   }

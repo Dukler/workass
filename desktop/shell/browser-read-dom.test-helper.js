@@ -101,6 +101,7 @@ function makeDOM({ url = 'https://shop.example/items/1', title = 'Fixture page' 
       hasAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name); },
       setAttribute(name, value) { attrs[name] = String(value); },
       matches(selector) { return matchesSelector(this, selector); },
+      classList: { contains: (name) => String(attrs.class || '').split(/\s+/).includes(name) },
       closest(selector) { for (let node = this; node && node.nodeType === 1; node = node.parentElement) if (node.matches(selector)) return node; return null; },
       contains(other) { for (let node = other; node; node = node.parentElement) if (node === this) return true; return false; },
       querySelectorAll(selector) {

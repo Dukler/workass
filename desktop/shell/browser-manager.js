@@ -15,7 +15,7 @@ const {
 } = require('./browser-snapshot-view');
 const { browserRead } = require('./browser-read');
 const { openGuestPip } = require('./browser-pip');
-const { buildOutline, diffOutlines, pageLines } = require('./browser-outline');
+const { buildOutline, diffOutlines, outlineSecretField, pageLines } = require('./browser-outline');
 const {
   POPUP_TAB_LIMIT, agentDriven, browserDialog, browserDrag, browserEvaluate, browserHover, browserSelect, browserUpload,
   dialogBlockedError, dialogClosed, dialogOpened, hasChildFrames, markAgentActive, noteActivity, pushEvent, readActivity,
@@ -84,14 +84,81 @@ const INPUT_COMMAND_TIMEOUT_MS = 5000;
 const INPUT_RELEASE_TIMEOUT_MS = 1000;
 // A one-line <select> opens a native menu: agent input cannot operate it,
 // and on macOS it holds the window's input until it closes.
+// Calls that only look at a page: they do not make it agent-driven (which
+// changes who gets its popups and downloads).
+const READ_ONLY_METHODS = new Set(['browser.list', 'browser.snapshot', 'browser.read', 'browser.screenshot', 'browser.diagnostics',
+  'browser.controlStatus', 'browser.receipt', 'browser.wait']);
 const NATIVE_MENU_REFUSAL = Object.freeze({ ok: false, status: 'native_menu',
   reason: 'a select list opens a native menu that agent input cannot operate; choose its option with workass_browser_select' });
 const MENU_OPENING_KEYS = new Set(['Space', ' ', 'Enter', 'ArrowDown', 'ArrowUp']);
+// The page world's part of editing a code editor: the editor objects
+// (Monaco's, CodeMirror's) exist only there. Runs on the element the agent
+// world found (this), finds its editor, and does one thing to it.
+const EDITOR_PAGE_FUNCTION = `function (op) {
+  const root = this && this.closest ? this.closest('.monaco-editor,.CodeMirror') : null;
+  if (!root) return { editor: null };
+  let monaco = null;
+  let cm = null;
+  try {
+    if (root.classList.contains('monaco-editor')) {
+      const api = globalThis.monaco && globalThis.monaco.editor;
+      const list = api && typeof api.getEditors === 'function' ? api.getEditors() : [];
+      monaco = list.find((candidate) => candidate && candidate.getDomNode && candidate.getDomNode() === root) || null;
+    } else if (root.CodeMirror && typeof root.CodeMirror.getValue === 'function') {
+      cm = root.CodeMirror;
+    }
+  } catch (_) { return { editor: null }; }
+  if (!monaco && !cm) return { editor: null };
+  const kind = monaco ? 'monaco' : 'codemirror';
+  try {
+    const model = monaco ? monaco.getModel() : null;
+    const value = () => (monaco ? String(model ? model.getValue() : '') : String(cm.getValue()));
+    if (op === 'inspect') {
+      const readOnly = monaco ? !!(monaco.getRawOptions && monaco.getRawOptions().readOnly) : cm.getOption && cm.getOption('readOnly') === true;
+      return { editor: kind, readOnly, value: value(), length: value().length };
+    }
+    if (op === 'value') return { editor: kind, value: value(), length: value().length };
+    if (op === 'focus') { (monaco || cm).focus(); return { editor: kind, done: true }; }
+    if (op === 'selectAll') {
+      if (monaco) {
+        const range = model && model.getFullModelRange ? model.getFullModelRange() : null;
+        if (!range) return { editor: kind, done: false };
+        monaco.focus();
+        monaco.setSelection(range);
+        return { editor: kind, done: true, strategy: 'monaco-model' };
+      }
+      cm.execCommand('selectAll');
+      return { editor: kind, done: true, strategy: 'codemirror-command' };
+    }
+    if (op === 'deleteSelection') {
+      if (monaco) {
+        const selection = monaco.getSelection ? monaco.getSelection() : null;
+        if (!model || !selection || selection.isEmpty()) return { editor: kind, done: false };
+        const before = model.getValueLength();
+        monaco.executeEdits('workass-browser-key', [{ range: selection, text: '', forceMoveMarkers: true }]);
+        return { editor: kind, done: model.getValueLength() < before, strategy: 'monaco-model' };
+      }
+      if (!cm.somethingSelected || !cm.somethingSelected()) return { editor: kind, done: false };
+      const before = String(cm.getValue()).length;
+      cm.replaceSelection('');
+      return { editor: kind, done: String(cm.getValue()).length < before, strategy: 'codemirror-selection' };
+    }
+  } catch (_) { return { editor: kind, error: true }; }
+  return { editor: kind };
+}`;
+// The focused element (through open shadow roots), in the agent world.
+const ACTIVE_ELEMENT_EXPRESSION = `(() => {
+  let el = document.activeElement;
+  const seen = new Set();
+  while (el && !seen.has(el)) { seen.add(el); const nested = el.shadowRoot && el.shadowRoot.activeElement; if (!nested || nested === el) break; el = nested; }
+  return el && el !== document.body && el !== document.documentElement ? el : null;
+})()`;
 const STALE_CONTEXT = /Cannot find context|context with specified id|Execution context was destroyed|Cannot find default execution context|No frame with given id/u;
 const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // How long a call waits for the app renderer to mount (or, after a reload,
 // mount again) a page's <webview> before it reports that the page is not up.
 const GUEST_ATTACH_TIMEOUT_MS = 20000;
+const EDITOR_PAGE_CALL_TIMEOUT_MS = 3000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
 // The page outline: frames read per outline, their shared time budget, how
@@ -103,6 +170,7 @@ const OUTLINE_READ_CONCURRENCY = 8;
 const OUTLINE_REF_LIMIT = 20000;
 const OUTLINE_HISTORY = 6;
 const OUTLINE_PAGE_BYTES = 20000;
+const OUTLINE_SECRET_CHECK_LIMIT = 400;
 // How long an unchanged page's newest outline is reused (reusableOutline).
 const OUTLINE_REUSE_MS = 30000;
 const OUTLINE_REUSE_FRAMED_MS = 2000;
@@ -450,8 +518,8 @@ class BrowserManager {
       presentationBounds: entry.presentationBounds ? { ...entry.presentationBounds } : null,
       presentationScale: entry.presentationScale,
       poppedOut: !!(entry.pipWindow && !entry.pipWindow.isDestroyed()),
-      host: this.hostMode,
-      ...(this.hostMode === 'webview' ? { hostKey: entry.hostKey, tabId: entry.tabId ?? null, attached: live } : {}),
+      host: this.isHosted(entry) ? 'webview' : 'view',
+      ...(this.isHosted(entry) ? { hostKey: entry.hostKey, tabId: entry.tabId ?? null, attached: live } : {}),
     };
   }
 
@@ -568,7 +636,7 @@ class BrowserManager {
     });
     // A guest follows the app's zoom (and a pinch or a zoom shortcut while it
     // has focus); the page itself always lays out at 1:1.
-    if (this.hostMode === 'webview') on('zoom-changed', () => this.pinGuestZoom(entry));
+    if (this.isHosted(entry)) on('zoom-changed', () => this.pinGuestZoom(entry));
     on('did-navigate-in-page', (event, url, isMainFrame) => {
       syncURL(event, url);
       if (isMainFrame !== false) pushEvent(entry, { type: 'url_changed', url: redactPageMessage(String(url || ''), 1024) });
@@ -604,7 +672,7 @@ class BrowserManager {
       this.publish(entry);
       // A hosted page's renderer that died is brought back in place (same tab,
       // same URL), a few times a minute at most.
-      if (this.hostMode === 'webview' && String(details && details.reason || '') !== 'clean-exit') {
+      if (this.isHosted(entry) && String(details && details.reason || '') !== 'clean-exit') {
         const now = Date.now();
         entry.crashReloads = (entry.crashReloads || []).filter((at) => now - at < 60000);
         if (entry.crashReloads.length < 3) {
@@ -621,9 +689,16 @@ class BrowserManager {
       const url = String(details && details.url || '');
       // A page an agent is driving opens links and popups as tabs of the
       // same chat, which the agent can list and drive.
+      // The popup keeps its opener (window.opener, postMessage: sign-in and
+      // payment popups) and its request (a form's POST): Chromium creates
+      // its webContents, Workass only hosts it.
       if (current() && agentDriven(entry) && /^https?:\/\//i.test(url)) {
-        this.openPopupTab(entry, url, String(details.disposition || ''));
-        return { action: 'deny' };
+        if (!this.popupTabAllowed(entry, url)) return { action: 'deny' };
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: { show: false, webPreferences: this.popupWebPreferences() },
+          createWindow: (options) => this.adoptPopup(entry, url, String(details.disposition || ''), options),
+        };
       }
       return this.windowOpenPolicy(url);
     });
@@ -1480,6 +1555,14 @@ class BrowserManager {
     return false;
   }
 
+  // Whether a page is the guest of a <webview> in the app window (the
+  // webview host's own pages) rather than a native view (the view host's
+  // pages, and in either host the popups pages open, whose webContents
+  // Chromium makes with their opener).
+  isHosted(entry) {
+    return this.hostMode === 'webview' && !!(entry && entry.hostKey);
+  }
+
   create(chatId) {
     if (this.hostMode === 'webview') return this.createHosted(chatId);
     const view = new this.WebContentsView({
@@ -1673,7 +1756,7 @@ class BrowserManager {
   // The page lays out at 1:1 whatever the app's zoom is (a guest follows the
   // app's zoom unless told otherwise).
   pinGuestZoom(entry) {
-    if (this.hostMode !== 'webview') return;
+    if (!this.isHosted(entry)) return;
     const wc = this.liveContents(entry);
     if (!wc || wc.isDestroyed?.() || typeof wc.getZoomFactor !== 'function') return;
     try { if (Math.abs(wc.getZoomFactor() - 1) > 1e-6) wc.setZoomFactor(1); } catch { /* closing */ }
@@ -1805,38 +1888,62 @@ class BrowserManager {
   // (Monaco's models, CodeMirror's instance), which exist only in the page's
   // world. This one read-only call asks the editor API for it, and only on a
   // page that has such an editor; the agent world reads everything else.
-  async readEditorModels(entry, frame, editors) {
-    const selectors = editors.map((editor) => (editor && typeof editor.selector === 'string' ? editor.selector : null));
-    if (!selectors.some(Boolean)) return;
-    const expression = `(() => ${JSON.stringify(selectors)}.map((selector) => {
-      try {
-        const root = selector ? document.querySelector(selector) : null;
-        if (!root) return null;
-        if (root.matches('.monaco-editor')) {
-          const editor = (globalThis.monaco?.editor?.getEditors?.() || []).find((candidate) => candidate?.getDomNode?.() === root);
-          const model = editor?.getModel?.();
-          return model ? { value: String(model.getValue()), readOnly: editor?.getRawOptions?.()?.readOnly === true } : null;
-        }
-        if (root.CodeMirror?.getValue) return { value: String(root.CodeMirror.getValue()), readOnly: root.CodeMirror.getOption?.('readOnly') === true };
-      } catch (_) { /* the rendered lines stay */ }
-      return null;
-    }))()`;
-    const target = frame || this.frameForSession(entry, null);
-    let values = null;
-    try {
-      values = unwrapCDPValue(await this.ownedSessionCommand(entry, 'Runtime.evaluate', {
-        expression, returnByValue: true, ...(target && target.contextId != null ? { contextId: target.contextId } : {}),
-      }, target?.sessionId || null, 2000));
-    } catch { return; }
-    if (!Array.isArray(values)) return;
-    values.forEach((model, index) => {
-      const editor = editors[index];
-      if (!editor || !model || typeof model.value !== 'string') return;
+  async readEditorModels(entry, frame, editors, rowLists = []) {
+    for (const editor of editors) {
+      if (!editor || typeof editor.selector !== 'string' || !editor.selector) continue;
+      const model = await this.editorPageCall(entry, frame ? frame.id : null, `document.querySelector(${JSON.stringify(editor.selector)})`, 'inspect');
+      if (!model || !model.editor || typeof model.value !== 'string') continue;
       editor.text = model.value.slice(0, 12000);
       editor.valueLength = model.value.length;
       editor.truncated = model.value.length > 12000;
       editor.readOnly = editor.readOnly === true || model.readOnly === true;
-    });
+      // The element rows for the same editor say the same.
+      for (const rows of rowLists) {
+        for (const row of Array.isArray(rows) ? rows : []) {
+          if (!row || !row.editor || row.selector !== editor.selector) continue;
+          row.text = model.value.trim().replace(/\s+/gu, ' ').slice(0, 240);
+          row.readOnly = row.readOnly === true || model.readOnly === true;
+        }
+      }
+    }
+  }
+
+  // One call into the page's own world for a code editor's API: the agent
+  // world finds the element (elementExpression); only EDITOR_PAGE_FUNCTION
+  // runs in the page world, on that element. Returns null when there is no
+  // such editor or the call cannot be made.
+  async editorPageCall(entry, frameId, elementExpression, op) {
+    const frame = frameId != null ? entry.frames.get(String(frameId)) : this.frameForSession(entry, null);
+    if (!frame) return null;
+    const sessionId = frame.sessionId || null;
+    const release = (objectId) => this.ownedSessionCommand(entry, 'Runtime.releaseObject', { objectId }, sessionId).catch(() => {});
+    let agentObject = null;
+    let pageObject = null;
+    try {
+      const handle = await this.withAgentContext(entry, frame, (contextId) => this.ownedSessionCommand(entry, 'Runtime.evaluate', {
+        expression: String(elementExpression), contextId, returnByValue: false,
+      }, sessionId, EDITOR_PAGE_CALL_TIMEOUT_MS));
+      agentObject = handle && handle.result && handle.result.objectId;
+      if (!agentObject) return null;
+      const described = await this.ownedSessionCommand(entry, 'DOM.describeNode', { objectId: agentObject }, sessionId, EDITOR_PAGE_CALL_TIMEOUT_MS);
+      const backendNodeId = Number(described && described.node && described.node.backendNodeId);
+      if (!(backendNodeId > 0)) return null;
+      const resolved = await this.ownedSessionCommand(entry, 'DOM.resolveNode', {
+        backendNodeId, ...(frame.contextId != null ? { executionContextId: frame.contextId } : {}),
+      }, sessionId, EDITOR_PAGE_CALL_TIMEOUT_MS);
+      pageObject = resolved && resolved.object && resolved.object.objectId;
+      if (!pageObject) return null;
+      const called = await this.ownedSessionCommand(entry, 'Runtime.callFunctionOn', {
+        objectId: pageObject, functionDeclaration: EDITOR_PAGE_FUNCTION, arguments: [{ value: String(op) }], returnByValue: true,
+      }, sessionId, EDITOR_PAGE_CALL_TIMEOUT_MS);
+      const value = called && called.result && called.result.value;
+      return value && typeof value === 'object' ? value : null;
+    } catch {
+      return null;
+    } finally {
+      if (agentObject) await release(agentObject);
+      if (pageObject) await release(pageObject);
+    }
   }
 
   // Script on the top document, in the agent world. Over the root CDP
@@ -1936,11 +2043,11 @@ class BrowserManager {
   hideAll() {
     this.presentationEpoch += 1;
     if (this.hostMode === 'webview') {
-      // The page is drawn by the renderer that is going away; nothing to take
-      // off screen. Its guest goes with it and is replaced on the next mount.
-      this.activeId = null;
-      for (const entry of this.entries.values()) entry.visible = false;
-      return Promise.resolve();
+      // A hosted page is drawn by the renderer that is going away; nothing to
+      // take off screen. Its guest goes with it and is replaced on the next
+      // mount.
+      for (const entry of this.entries.values()) if (this.isHosted(entry)) entry.visible = false;
+      if (!this.attachedView) { this.activeId = null; return Promise.resolve(); }
     }
     const shown = this.attachedView;
     const entry = shown ? this.browserEntries().find((candidate) => candidate.view === shown) : null;
@@ -1963,7 +2070,7 @@ class BrowserManager {
   // same bounds is a no-op, so the size is stepped and put back in one task;
   // only the final bounds are ever composited.
   resyncViewSize(entry) {
-    if (this.hostMode === 'webview') return;
+    if (this.isHosted(entry)) return;
     try {
       const bounds = entry.view.getBounds();
       if (!bounds || bounds.width < 2 || bounds.height < 2) return;
@@ -2091,7 +2198,7 @@ class BrowserManager {
   // a captured page and keeps painting; a few seconds after the last call it
   // goes back to ordinary throttling (after t3code's DesktopBrowserHost).
   async withPainting(entry, operation, hold = {}) {
-    if (this.hostMode !== 'webview') return operation();
+    if (!this.isHosted(entry)) return operation();
     this.holdPainting(entry);
     // Released once: when the operation ends, or at its deadline.
     hold.release = () => { if (hold.released) return; hold.released = true; this.releasePainting(entry); };
@@ -2361,7 +2468,7 @@ class BrowserManager {
 
   async ensureCaptureHost(entry) {
     this.assertCurrentEntry(entry);
-    if (this.hostMode === 'webview') throw new Error('a hosted page has no separate capture surface');
+    if (this.isHosted(entry)) throw new Error('a hosted page has no separate capture surface');
     if (entry.captureHost && !entry.captureHost.isDestroyed()) return entry.captureHost;
     if (!this.BrowserWindow) throw new Error('hidden browser capture host is unavailable in this shell');
     const host = new this.BrowserWindow({
@@ -2444,7 +2551,7 @@ class BrowserManager {
   async attach(entry) {
     this.assertCurrentEntry(entry);
     const epoch = this.presentationEpoch;
-    if (this.hostMode === 'webview') {
+    if (this.isHosted(entry)) {
       // The renderer places and scales the page itself; the page keeps its
       // logical viewport at 1:1.
       entry.presentationScale = 1;
@@ -2573,7 +2680,7 @@ class BrowserManager {
     entry.presentationBounds = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
     if (viewport) await this.setViewportSerialized(entry, viewport, false);
-    if (this.attachedView === entry.view || (this.hostMode === 'webview' && entry.visible)) await this.attach(entry);
+    if (this.attachedView === entry.view || (this.isHosted(entry) && entry.visible)) await this.attach(entry);
     return true;
   }
 
@@ -2585,9 +2692,9 @@ class BrowserManager {
   // scale, so the page never paints past its bounds. Scale changes are
   // coalesced: one is in flight at a time and the latest one wins.
   place(chatId, bounds) {
-    // A hosted page moves with its frame in the renderer itself.
-    if (this.hostMode === 'webview') return true;
     const entry = this.entries.get(safeChatId(chatId));
+    // A hosted page moves with its frame in the renderer itself.
+    if (this.hostMode === 'webview' && (!entry || this.isHosted(entry))) return true;
     if (!entry || this.attachedView !== entry.view || this.activeId !== entry.chatId || !entry.presentationBounds) return false;
     const next = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.presentationBounds = next;
@@ -2642,7 +2749,7 @@ class BrowserManager {
       return this.publish(entry);
     }
     if (!this.BrowserWindow) throw new Error('a separate browser window is unavailable in this shell');
-    if (this.hostMode === 'webview') return this.popOutHosted(entry);
+    if (this.isHosted(entry)) return this.popOutHosted(entry);
     if (this.attachedView === entry.view) {
       try { this.win.contentView.removeChildView(entry.view); } catch { /* window is already closing */ }
       this.attachedView = null;
@@ -2764,7 +2871,7 @@ class BrowserManager {
   async hideSerialized(chatId) {
     const id = safeChatId(chatId);
     const entry = this.entries.get(id);
-    if (entry && this.hostMode === 'webview') {
+    if (entry && this.isHosted(entry)) {
       entry.visible = false;
       if (this.activeId === id) this.activeId = null;
       return true;
@@ -2938,6 +3045,7 @@ class BrowserManager {
       try {
         const tree = await this.ownedSessionCommand(entry, 'Accessibility.getFullAXTree', { frameId: frame.id }, frame.sessionId || null, remaining());
         record.nodes = Array.isArray(tree?.nodes) ? tree.nodes : [];
+        record.secretBackendIds = await this.outlineSecretFields(entry, frame, record.nodes, remaining);
       } catch (error) {
         record.unavailable = /did not answer/u.test(String(error && error.message)) ? 'the frame did not answer in time' : 'the frame could not be read';
       }
@@ -2953,6 +3061,38 @@ class BrowserManager {
     };
     await Promise.all(Array.from({ length: Math.min(OUTLINE_READ_CONCURRENCY, order.length) }, worker));
     return { frames: frames.filter(Boolean), framesTotal: live.length };
+  }
+
+  // Which valued fields of a frame are secret, by their element's type,
+  // autocomplete, name and id (the rule json snapshots and read apply). A
+  // field whose element cannot be described is treated as secret.
+  async outlineSecretFields(entry, frame, nodes, remaining) {
+    const secret = new Set();
+    const candidates = [];
+    for (const node of nodes) {
+      const backend = Number(node && node.backendDOMNodeId);
+      const value = node && node.value && node.value.value;
+      if (!(backend > 0) || value == null || String(value) === '' || node.ignored === true) continue;
+      candidates.push(backend);
+      if (candidates.length >= OUTLINE_SECRET_CHECK_LIMIT) break;
+    }
+    let next = 0;
+    const worker = async () => {
+      while (next < candidates.length) {
+        const backend = candidates[next++];
+        try {
+          const described = await this.ownedSessionCommand(entry, 'DOM.describeNode', { backendNodeId: backend, depth: 0 }, frame.sessionId || null, remaining());
+          if (outlineSecretField(described && described.node && described.node.attributes)) secret.add(backend);
+        } catch { secret.add(backend); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(OUTLINE_READ_CONCURRENCY, candidates.length) }, worker));
+    // Fields past the check limit are not shown with values at all.
+    for (const node of nodes) {
+      const backend = Number(node && node.backendDOMNodeId);
+      if (backend > 0 && node.value && node.value.value != null && String(node.value.value) !== '' && !candidates.includes(backend)) secret.add(backend);
+    }
+    return secret;
   }
 
   async takeOutline(entry, { budgetMs, activity } = {}) {
@@ -3148,41 +3288,79 @@ class BrowserManager {
 
   // A link or popup an agent's page opened becomes a tab of the same chat,
   // in the background, that the agent lists and drives by its tab id.
-  openPopupTab(opener, url, disposition) {
+  popupWebPreferences() {
+    return { partition: this.partition, nodeIntegration: false, nodeIntegrationInSubFrames: false, contextIsolation: true, sandbox: true, navigateOnDragDrop: false };
+  }
+
+  popupTabAllowed(opener, url) {
     const owner = opener.extraTab ? (this.entries.get(opener.ownerChatId) || opener) : opener;
     const siblings = this.browserEntries().filter((entry) => entry.extraTab && entry.ownerChatId === owner.chatId);
-    if (siblings.length >= POPUP_TAB_LIMIT) {
-      pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: `this chat already has ${POPUP_TAB_LIMIT} extra tabs; close one with workass_browser_close` });
-      return null;
-    }
-    // The action that opened it reports the new tab: it waits while the tab
-    // is being made (browser-actions.js, settle).
-    opener.pendingTabs = (opener.pendingTabs || 0) + 1;
-    touchActivity(opener);
-    let pending = true;
-    const settled = () => { if (pending) { pending = false; opener.pendingTabs = Math.max(0, (opener.pendingTabs || 1) - 1); touchActivity(opener); } };
+    if (siblings.length < POPUP_TAB_LIMIT) return true;
+    pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: `this chat already has ${POPUP_TAB_LIMIT} extra tabs; close one with workass_browser_close` });
+    return false;
+  }
+
+  // Electron's createWindow for a popup an agent-driven page opened: a native
+  // view around the webContents Chromium made (opener and request intact),
+  // registered as another tab of the chat. Chromium loads it.
+  adoptPopup(opener, url, disposition, options = {}) {
+    const owner = opener.extraTab ? (this.entries.get(opener.ownerChatId) || opener) : opener;
+    const view = new this.WebContentsView({
+      webPreferences: { ...(options.webPreferences || {}), ...this.popupWebPreferences() },
+      ...(options.webContents ? { webContents: options.webContents } : {}),
+    });
     this.extraTabSeq = (this.extraTabSeq || 0) + 1;
     const key = `${owner.chatId}#tab${this.extraTabSeq}`;
-    const tab = this.create(key);
+    const tab = this.newEntry(key, view);
+    tab.tabId = Number(view.webContents.id);
+    tab.url = url;
+    tab.loading = true;
+    tab.popup = true;
     tab.extraTab = true;
     tab.ownerChatId = owner.chatId;
     tab.ownerConversationId = owner.conversationId || owner.chatId;
     tab.openerTabId = this.tabIdOf(opener);
     tab.agentActiveAt = Date.now();
-    const announce = () => pushEvent(opener, {
-      type: 'tab_opened', tab_id: this.tabIdOf(tab), url: redactPageMessage(url, 1024),
-      how: disposition === 'new-window' ? 'window_open' : 'link_new_tab',
-    });
-    void Promise.resolve(tab.ready).then((ready) => {
-      if (!ready || !this.isCurrentEntry(tab)) { settled(); return; }
-      announce();
+    try { view.setBackgroundColor('#ffffff'); } catch { /* older Electron */ }
+    try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
+    this.entries.set(key, tab);
+    this.bind(tab);
+    opener.pendingTabs = (opener.pendingTabs || 0) + 1;
+    touchActivity(opener);
+    let pending = true;
+    const settled = () => { if (pending) { pending = false; opener.pendingTabs = Math.max(0, (opener.pendingTabs || 1) - 1); touchActivity(opener); } };
+    const lifecycleToken = tab.lifecycleToken;
+    tab.ready = this.initializePopup(tab, lifecycleToken).then(() => {
+      if (!this.isCurrentEntry(tab, lifecycleToken)) { settled(); return false; }
+      pushEvent(opener, {
+        type: 'tab_opened', tab_id: this.tabIdOf(tab), url: redactPageMessage(url, 1024),
+        how: disposition === 'new-window' ? 'window_open' : 'link_new_tab', opener: true,
+      });
       settled();
-      return this.serialize(tab, () => this.command(tab.chatId, 'navigate', url), { deadlineMs: LONG_OPERATION_DEADLINE_MS });
-    }).catch((error) => {
+      return true;
+    }, (error) => {
       pushEvent(opener, { type: 'tab_failed', url: redactPageMessage(url, 1024), reason: redactPageMessage(String(error && error.message || error), 300) });
       settled();
+      if (this.isCurrentEntry(tab, lifecycleToken)) { tab.error = redactPageMessage(error && error.message || error); this.publish(tab); }
+      return false;
     });
-    return tab;
+    return view.webContents;
+  }
+
+  // A popup's first document is Chromium's to load (with its opener and
+  // request); it gets a capture surface, CDP and the chat's viewport.
+  async initializePopup(tab, lifecycleToken) {
+    await this.ensureCaptureHost(tab);
+    this.assertCurrentEntry(tab, lifecycleToken);
+    await this.attachToCaptureHost(tab, false);
+    this.assertCurrentEntry(tab, lifecycleToken);
+    tab.initialDocumentReady = true;
+    if (!await this.ensureCDP(tab)) throw new Error('browser page debugger is unavailable');
+    this.assertCurrentEntry(tab, lifecycleToken);
+    tab.effectiveViewport = await this.applyAndReadDeviceEmulation(tab, tab.viewport, 1);
+    tab.viewportGeneration = 1;
+    try { await tab.view.webContents.debugger.sendCommand('Runtime.enable'); } catch { /* basic control remains */ }
+    return true;
   }
 
   // workass_browser_close: a tab a page opened goes away; the chat's own page
@@ -3465,6 +3643,8 @@ class BrowserManager {
   }
 
   async focusedTextLength(entry, frameId = null) {
+    const editor = await this.editorPageCall(entry, frameId, ACTIVE_ELEMENT_EXPRESSION, 'value');
+    if (editor && editor.editor && Number.isFinite(editor.length)) return { found: true, length: editor.length };
     return this.evaluateFrame(entry, frameId, `(/* workass-browser-key-text-length */ () => {
       let el = document.activeElement;
       const seen = new Set();
@@ -3477,16 +3657,6 @@ class BrowserManager {
       if (!el || el === document.body || el === document.documentElement) return { found: false };
       const editorRoot = el.closest?.('.monaco-editor,.CodeMirror,.cm-editor') || null;
       try {
-        if (editorRoot?.classList.contains('monaco-editor')) {
-          const api = globalThis.monaco?.editor;
-          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
-          const value = editor?.getModel?.()?.getValue?.();
-          if (typeof value === 'string') return { found: true, length: value.length };
-        }
-        if (editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror) {
-          return { found: true, length: String(editorRoot.CodeMirror.getValue() || '').length };
-        }
         const view = el.ownerDocument.defaultView;
         if (!editorRoot && (el instanceof view.HTMLInputElement || el instanceof view.HTMLTextAreaElement)) {
           if (String(el.type || '').toLowerCase() === 'password') return { found: false };
@@ -3499,6 +3669,8 @@ class BrowserManager {
   }
 
   async selectAllBrowserTarget(entry, frameId = null) {
+    const editor = await this.editorPageCall(entry, frameId, ACTIVE_ELEMENT_EXPRESSION, 'selectAll');
+    if (editor && editor.editor && editor.done === true) return { found: true, selectionVerified: true, strategy: editor.strategy };
     return this.evaluateFrame(entry, frameId, `(/* workass-browser-select-all */ () => {
       const document = globalThis.document;
       const view = document.defaultView;
@@ -3509,22 +3681,6 @@ class BrowserManager {
       }
       const editorRoot = el.closest?.('.monaco-editor,.CodeMirror,.cm-editor') || null;
       try {
-        if (editorRoot?.classList.contains('monaco-editor')) {
-          const api = globalThis.monaco?.editor;
-          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
-          const model = editor?.getModel?.();
-          const range = model?.getFullModelRange?.();
-          if (editor && range) {
-            editor.focus();
-            editor.setSelection(range);
-            return { found: true, selectionVerified: true, strategy: 'monaco-model' };
-          }
-        }
-        if (editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror) {
-          editorRoot.CodeMirror.execCommand('selectAll');
-          return { found: true, selectionVerified: true, strategy: 'codemirror-command' };
-        }
         if (el.isContentEditable) {
           const selection = view.getSelection();
           const range = document.createRange();
@@ -3552,6 +3708,8 @@ class BrowserManager {
   }
 
   async deleteSelectedBrowserText(entry, frameId, keyCode) {
+    const editor = await this.editorPageCall(entry, frameId, ACTIVE_ELEMENT_EXPRESSION, 'deleteSelection');
+    if (editor && editor.editor && editor.done === true) return { found: true, deletionVerified: true, strategy: editor.strategy };
     const command = JSON.stringify(keyCode === 'Delete' ? 'forwardDelete' : 'delete');
     return this.evaluateFrame(entry, frameId, `(/* workass-browser-delete-selection */ () => {
       const document = globalThis.document;
@@ -3563,27 +3721,6 @@ class BrowserManager {
       }
       const editorRoot = el.closest?.('.monaco-editor,.CodeMirror,.cm-editor') || null;
       try {
-        if (editorRoot?.classList.contains('monaco-editor')) {
-          const api = globalThis.monaco?.editor;
-          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
-          const model = editor?.getModel?.();
-          const selection = editor?.getSelection?.();
-          if (editor && model && selection && !selection.isEmpty()) {
-            const before = model.getValueLength();
-            editor.executeEdits('workass-browser-key', [{ range: selection, text: '', forceMoveMarkers: true }]);
-            return { found: true, deletionVerified: model.getValueLength() < before, strategy: 'monaco-model' };
-          }
-        }
-        if (editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror?.somethingSelected?.()) {
-          const before = String(editorRoot.CodeMirror.getValue()).length;
-          editorRoot.CodeMirror.replaceSelection('');
-          return {
-            found: true,
-            deletionVerified: String(editorRoot.CodeMirror.getValue()).length < before,
-            strategy: 'codemirror-selection',
-          };
-        }
         if (el.isContentEditable) {
           const selection = view.getSelection();
           if (selection?.rangeCount && !selection.getRangeAt(0).collapsed) {
@@ -3661,6 +3798,11 @@ class BrowserManager {
     const evaluate = (script) => this.evaluateFrame(entry, locator.frameId ?? null, script);
     const probeKey = `__workassBrowserTypeProbe${++this.typeProbeSeq}`;
     const encodedProbeKey = JSON.stringify(probeKey);
+    // A code editor (Monaco, CodeMirror) is read, focused and selected through
+    // its own API, which only the page world has.
+    let pageEditor = await this.editorPageCall(entry, locator.frameId ?? null, selector, 'inspect');
+    if (pageEditor && !pageEditor.editor) pageEditor = null;
+    if (pageEditor && pageEditor.readOnly !== true) await this.editorPageCall(entry, locator.frameId ?? null, selector, 'focus');
 
     // Text fields are typed into as a person types: focus, select what they
     // hold, then the text arrives as trusted input (the page's own input
@@ -3706,17 +3848,12 @@ class BrowserManager {
       const editorRoot = el.matches?.('.monaco-editor,.CodeMirror,.cm-editor')
         ? el
         : el.closest('.monaco-editor,.CodeMirror,.cm-editor');
-      const monacoEditor = (() => {
-        if (!editorRoot?.classList.contains('monaco-editor')) return null;
-        try {
-          const api = globalThis.monaco?.editor;
-          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          return editors.find((candidate) => candidate?.getDomNode?.() === editorRoot) || null;
-        } catch { return null; }
-      })();
+      // The code editor's own state, read through its API in the page world
+      // before this script (editorPageCall); null when there is none.
+      const pageEditor = ${JSON.stringify(pageEditor)};
       const nativeEditor = !!editorRoot || el.isContentEditable || (!formControl && el.getAttribute('role') === 'textbox');
       el.scrollIntoView({ block: 'center', inline: 'center' });
-      if (monacoEditor) monacoEditor.focus();
+      if (pageEditor) { /* focused through the editor's own API */ }
       else if (editorRoot && el === editorRoot) {
         const editorInput = editorRoot.querySelector('textarea:not([readonly]),[contenteditable]:not([contenteditable="false"])');
         if (editorInput) editorInput.focus();
@@ -3728,7 +3865,7 @@ class BrowserManager {
         return active;
       };
       const focused = () => activeElement() === el || (!!editorRoot && editorRoot.contains(activeElement()));
-      const editorReadOnly = monacoEditor?.getRawOptions?.()?.readOnly === true;
+      const editorReadOnly = pageEditor?.readOnly === true;
       if (editorReadOnly || (!editorRoot && (el.disabled || el.readOnly))) {
         return { found: true, editable: false, focused: focused(), reason: 'disabled or read-only' };
       }
@@ -3745,21 +3882,7 @@ class BrowserManager {
         ${valueSetter}
       }
 
-      const readModel = () => {
-        try {
-          const api = globalThis.monaco?.editor;
-          if (!api) return null;
-          if (typeof api.getEditors === 'function' && editorRoot) {
-            const matches = api.getEditors().filter((editor) => editor?.getDomNode?.() === editorRoot);
-            if (matches.length === 1) return String(matches[0].getModel()?.getValue?.() ?? '');
-          }
-          if (typeof api.getModels === 'function') {
-            const models = api.getModels().filter((model) => !model?.isDisposed?.());
-            if (models.length === 1) return String(models[0].getValue());
-          }
-        } catch { /* optional Monaco readback */ }
-        return null;
-      };
+      const readModel = () => (pageEditor && typeof pageEditor.value === 'string' ? pageEditor.value : null);
       const readVisible = () => {
         const root = editorRoot || el;
         const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
@@ -3792,25 +3915,7 @@ class BrowserManager {
       let selectionVerified = false;
       let selectionStrategy = 'keyboard-fallback';
       try {
-        if (editorRoot?.classList.contains('monaco-editor')) {
-          const api = globalThis.monaco?.editor;
-          const editors = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = editors.find((candidate) => candidate?.getDomNode?.() === editorRoot);
-          const model = editor?.getModel?.();
-          const range = model?.getFullModelRange?.();
-          if (editor && range) {
-            editor.focus();
-            editor.setSelection(range);
-            selectionVerified = true;
-            selectionStrategy = 'monaco-model';
-          }
-        }
-        if (!selectionVerified && editorRoot?.classList.contains('CodeMirror') && editorRoot.CodeMirror) {
-          editorRoot.CodeMirror.execCommand('selectAll');
-          selectionVerified = true;
-          selectionStrategy = 'codemirror-command';
-        }
-        if (!selectionVerified && el.isContentEditable) {
+        if (!pageEditor && el.isContentEditable) {
           const selection = view.getSelection();
           const range = document.createRange();
           range.selectNodeContents(el);
@@ -3833,6 +3938,10 @@ class BrowserManager {
       throw new Error(`browser type target is not editable${prepared.reason ? `: ${prepared.reason}` : ''}`);
     }
     if (prepared.focused !== true) throw new Error('browser type target could not be focused');
+    if (pageEditor && prepared.strategy === 'native' && prepared.selectionVerified !== true) {
+      const selected = await this.editorPageCall(entry, locator.frameId ?? null, selector, 'selectAll');
+      if (selected && selected.done === true) { prepared.selectionVerified = true; prepared.selectionStrategy = selected.strategy; }
+    }
 
     if (prepared.strategy === 'keyboard') {
       const inputTarget = this.inputTargetForFrame(entry, locator.frameId ?? null);
@@ -3920,8 +4029,9 @@ class BrowserManager {
         await this.deleteSelectedBrowserText(entry, locator.frameId ?? null, 'Backspace');
       }
 
-      verification = await evaluate(`(/* workass-browser-type-verify */ async () => {
+      const verifyScript = (pageModel) => `(/* workass-browser-type-verify */ () => {
         const expected = ${value};
+        const pageModel = ${JSON.stringify(pageModel)};
         const normalize = (raw) => String(raw ?? '').replace(/\\r\\n?/gu, '\\n').replace(/\\u00a0/gu, ' ');
         const compact = (raw) => normalize(raw).replace(/\\s+/gu, ' ').trim();
         const visibleMatches = (visible) => {
@@ -3930,65 +4040,52 @@ class BrowserManager {
           if (!wanted) return !observed;
           return !!observed && wanted.includes(observed);
         };
-        const readState = () => {
-          const probe = globalThis[${encodedProbeKey}];
-          const el = ${selector};
-          if (!probe || !el) return { found: false };
-          const editorRoot = el.closest('.monaco-editor,.CodeMirror,.cm-editor');
-          let model = null;
-          try {
-            const api = globalThis.monaco?.editor;
-            if (api && typeof api.getEditors === 'function' && editorRoot) {
-              const matches = api.getEditors().filter((editor) => editor?.getDomNode?.() === editorRoot);
-              if (matches.length === 1) model = String(matches[0].getModel()?.getValue?.() ?? '');
-            }
-            if (model === null && api && typeof api.getModels === 'function') {
-              const models = api.getModels().filter((candidate) => !candidate?.isDisposed?.());
-              if (models.length === 1) model = String(models[0].getValue());
-            }
-          } catch { /* optional Monaco readback */ }
-          const root = editorRoot || el;
-          const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
-          const visible = lines.length
-            ? Array.from(lines).map((line) => String(line.textContent || '')).join('\\n')
-            : (el.isContentEditable ? String(el.innerText || el.textContent || '') : '');
-          const emptyContentEditable = el.isContentEditable && expected === ''
-            && String(el.textContent || '').replace(/\u200b/gu, '') === '';
-          const exact = model !== null
-            ? normalize(model) === normalize(expected)
-            : (el.isContentEditable
-              ? (expected === '' ? emptyContentEditable : normalize(visible) === normalize(expected))
-              : false);
-          const changed = model !== null
-            ? normalize(model) !== normalize(probe.beforeModel)
-            : normalize(visible) !== normalize(probe.beforeVisible);
-          const inputAccepted = probe.beforeInputEvents > 0 || probe.inputEvents > 0;
-          return {
-            found: true,
-            focused: document.activeElement === el || (!!editorRoot && editorRoot.contains(document.activeElement)),
-            changed,
-            inputAccepted,
-            exact,
-            visibleMatch: visibleMatches(visible),
-            beforeInputEvents: probe.beforeInputEvents,
-            inputEvents: probe.inputEvents,
-            valueLength: model !== null ? model.length : null,
-            verification: exact ? (model !== null ? 'model' : 'contenteditable') : (visibleMatches(visible) ? 'visible-fragment' : 'none'),
-          };
-        };
-        let state = readState();
-        for (let attempt = 0; attempt < 20 && state.found && !state.exact && !state.visibleMatch; attempt += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 25));
-          state = readState();
-        }
         const probe = globalThis[${encodedProbeKey}];
-        if (probe?.el) {
-          probe.el.removeEventListener('beforeinput', probe.onBeforeInput, true);
-          probe.el.removeEventListener('input', probe.onInput, true);
-        }
-        delete globalThis[${encodedProbeKey}];
-        return state;
-      })()`);
+        const el = ${selector};
+        if (!probe || !el) return { found: false };
+        const editorRoot = el.closest('.monaco-editor,.CodeMirror,.cm-editor');
+        const model = typeof pageModel === 'string' ? pageModel : null;
+        const root = editorRoot || el;
+        const lines = root.querySelectorAll('.view-lines .view-line,.CodeMirror-code pre,.cm-content .cm-line');
+        const visible = lines.length
+          ? Array.from(lines).map((line) => String(line.textContent || '')).join('\\n')
+          : (el.isContentEditable ? String(el.innerText || el.textContent || '') : '');
+        const emptyContentEditable = el.isContentEditable && expected === ''
+          && String(el.textContent || '').replace(/​/gu, '') === '';
+        const exact = model !== null
+          ? normalize(model) === normalize(expected)
+          : (el.isContentEditable
+            ? (expected === '' ? emptyContentEditable : normalize(visible) === normalize(expected))
+            : false);
+        const changed = model !== null
+          ? normalize(model) !== normalize(probe.beforeModel)
+          : normalize(visible) !== normalize(probe.beforeVisible);
+        const inputAccepted = probe.beforeInputEvents > 0 || probe.inputEvents > 0;
+        return {
+          found: true,
+          focused: document.activeElement === el || (!!editorRoot && editorRoot.contains(document.activeElement)),
+          changed,
+          inputAccepted,
+          exact,
+          visibleMatch: visibleMatches(visible),
+          beforeInputEvents: probe.beforeInputEvents,
+          inputEvents: probe.inputEvents,
+          valueLength: model !== null ? model.length : null,
+          verification: exact ? (model !== null ? 'model' : 'contenteditable') : (visibleMatches(visible) ? 'visible-fragment' : 'none'),
+        };
+      })()`;
+      const readPageModel = async () => {
+        if (!pageEditor) return null;
+        const read = await this.editorPageCall(entry, locator.frameId ?? null, selector, 'value');
+        return read && typeof read.value === 'string' ? read.value : null;
+      };
+      let state = await evaluate(verifyScript(await readPageModel()));
+      for (let attempt = 0; attempt < 20 && state && state.found && !state.exact && !state.visibleMatch; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        state = await evaluate(verifyScript(await readPageModel()));
+      }
+      await cleanupProbe();
+      verification = state;
     } catch (error) {
       await cleanupProbe();
       throw error;
@@ -4117,7 +4214,7 @@ class BrowserManager {
         source.semantic = Array.isArray(raw.semantic) ? raw.semantic : [];
         source.interactive = Array.isArray(raw.interactive) ? raw.interactive : [];
         source.editors = Array.isArray(raw.editors) ? raw.editors : [];
-        if (source.editors.length) await this.readEditorModels(entry, frame, source.editors);
+        if (source.editors.length) await this.readEditorModels(entry, frame, source.editors, [source.semantic, source.interactive]);
         source.frames = Array.isArray(raw.frames) ? raw.frames : [];
         const isRootObservation = !frame || frame.id === rootFrame?.id;
         if (isRootObservation) textSource = raw;
@@ -5008,7 +5105,7 @@ class BrowserManager {
       return { result, png, dimensions };
     };
 
-    if (this.hostMode === 'webview') return this.captureHostedPng(entry, captureParams, decode);
+    if (this.isHosted(entry)) return this.captureHostedPng(entry, captureParams, decode);
     const expandedExtent = options.expandedExtent;
     if (expandedExtent && (expandedExtent.width > entry.viewport.width || expandedExtent.height > entry.viewport.height)) {
       const original = {
@@ -5257,7 +5354,7 @@ class BrowserManager {
     if (mode === 'viewport') {
       cssRect = { x: effective.scrollX, y: effective.scrollY, width: entry.viewport.width, height: entry.viewport.height };
       captureParams.clip = { ...cssRect, scale: 1 };
-    } else if (mode === 'full_page' && this.hostMode === 'webview') {
+    } else if (mode === 'full_page' && this.isHosted(entry)) {
       // A hosted page is captured from its own surface, one viewport at a
       // time (captureHostedPng); the page's width is the viewport's.
       const metrics = await wc.debugger.sendCommand('Page.getLayoutMetrics');
@@ -5290,7 +5387,7 @@ class BrowserManager {
     const expectedSize = fullPageRasterExtent
       ? { minWidth: fullPageRasterExtent.width, maxWidth: fullPageRasterExtent.width, minHeight: fullPageRasterExtent.height, maxHeight: fullPageRasterExtent.height }
       : captureRasterBounds(cssRect);
-    const captureSurfaceOptions = mode === 'full_page' && this.hostMode !== 'webview'
+    const captureSurfaceOptions = mode === 'full_page' && !this.isHosted(entry)
       ? {
         expandedExtent: {
           width: Math.max(entry.viewport.width, Math.ceil(cssRect.x + fullPageRasterExtent.width)),
@@ -5579,7 +5676,7 @@ class BrowserManager {
     }
     const entry = await this.controlEntry(params);
     if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
-    if (!internal.serialized) markAgentActive(entry);
+    if (!internal.serialized && !READ_ONLY_METHODS.has(method)) markAgentActive(entry);
     if (method === 'browser.close') return this.closeForAgent(entry);
     // A JavaScript dialog pauses the page: only answering it (or reading what
     // does not need the page) goes through.
@@ -5797,7 +5894,14 @@ class BrowserManager {
     entry.frames.clear();
     this.releasePipWindow(entry);
     if (entry.guestWaiter) entry.guestWaiter.settle(false);
-    if (this.hostMode === 'webview') {
+    // The tabs this page opened go with it (they hold renderers and count
+    // against the chat's tab limit).
+    if (!entry.extraTab) {
+      for (const [otherId, other] of Array.from(this.entries.entries())) {
+        if (other !== entry && other.extraTab && other.ownerChatId === entry.chatId) this.close(otherId);
+      }
+    }
+    if (this.isHosted(entry)) {
       // The renderer drops the page's <webview> (its guest goes with it); a
       // renderer that is gone or busy does not keep the page alive.
       entry.visible = false;

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const { BrowserManager, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds } = require('./browser-manager');
+const { agentDriven } = require('./browser-actions');
 
 class FakeDebugger extends EventEmitter {
   constructor() { super(); this.attached = false; this.commands = []; this.commandCalls = []; }
@@ -117,7 +118,7 @@ class FakeView {
   constructor(options) {
     this.options = options;
     this.attached = false;
-    this.webContents = new FakeWebContents(FakeView.profile);
+    this.webContents = options?.webContents || new FakeWebContents(FakeView.profile);
     this.webContents.view = this;
   }
   setBounds(bounds) { this.bounds = bounds; }
@@ -2121,4 +2122,76 @@ test('a request the gone renderer queued before the reload never brings the page
   assert.equal(win.contentView.children.includes(entry.view), false, 'the stale requests did not put it back');
   await manager.activate({ chatId: 'chat-stale', bounds: { x: 20, y: 20, width: 344, height: 215 }, radius: 12 });
   assert.equal(win.contentView.children.includes(entry.view), true, 'the reloaded renderer presents it again');
+});
+
+test('the outline asks each valued field\'s element whether it is secret, and redacts when it cannot tell', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'outline-secret', visible: false });
+  const entry = manager.entries.get('outline-secret');
+  const wc = entry.view.webContents;
+  const base = wc.debugger.sendCommand.bind(wc.debugger);
+  const field = (nodeId, name, value, backend) => ({ nodeId, parentId: '1', role: { value: 'textbox' }, name: { value: name }, value: { value }, backendDOMNodeId: backend, properties: [{ name: 'focusable', value: { value: true } }] });
+  wc.debugger.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2', '3', '4'] }, field('2', 'Code', '482913', 71), field('3', 'City', 'Lima', 72), field('4', 'Note', 'opaque-77', 73)] };
+    if (method === 'DOM.describeNode') {
+      if (params.backendNodeId === 71) return { node: { attributes: ['autocomplete', 'one-time-code'] } };
+      if (params.backendNodeId === 72) return { node: { attributes: ['name', 'city'] } };
+      throw new Error('No node with given id found');
+    }
+    return base(method, params, sessionId);
+  };
+  const result = await manager.browserControl('browser.snapshot', { chatId: 'outline-secret', format: 'outline' });
+  assert.doesNotMatch(result.outline, /482913/, 'a one-time code is redacted');
+  assert.doesNotMatch(result.outline, /opaque-77/, 'a field that cannot be described is redacted');
+  assert.match(result.outline, /textbox "City" \[e\d+\] value="Lima"/);
+  manager.destroy();
+});
+
+test('a popup an agent-driven page opens keeps its opener and request, becomes a tab, and goes with its owner', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'popup-owner', visible: false });
+  const owner = manager.entries.get('popup-owner');
+  const open = (url) => {
+    const decision = owner.view.webContents.windowOpenHandler({ url, disposition: 'new-window' });
+    assert.equal(decision.action, 'allow');
+    // Chromium's own webContents for the popup: it has the opener and the request.
+    const made = new FakeWebContents(FakeView.profile);
+    return { made, returned: decision.createWindow({ webContents: made, webPreferences: { nodeIntegration: true, sandbox: false } }) };
+  };
+  const { made, returned } = open('https://pay.example/3ds');
+  assert.equal(returned, made, 'the popup is the webContents Chromium made, not a new GET');
+  const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.ownerChatId === 'popup-owner');
+  assert.equal(tab.view.webContents, made);
+  assert.equal(tab.view.options.webPreferences.nodeIntegration, false, 'hardened');
+  assert.equal(tab.view.options.webPreferences.sandbox, true);
+  assert.equal(await tab.ready, true);
+  assert.ok(!made.startupSequence.some((step) => step.startsWith('load:')), 'Workass loads nothing into it: Chromium does');
+  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.opener === true));
+  // A page's tabs go with it: on a reset of the page, and when it closes.
+  await manager.browserControl('browser.close', { chatId: 'popup-owner' });
+  assert.equal(manager.entries.has(tab.chatId), false, 'reset closes the tabs it had opened');
+  const fresh = manager.entries.get('popup-owner');
+  fresh.agentActiveAt = Date.now();
+  const second = open.call(null, 'https://login.example/oauth');
+  void second;
+  const other = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.ownerChatId === 'popup-owner');
+  manager.close('popup-owner');
+  assert.equal(manager.entries.has(other.chatId), false, 'closing the page closes its tabs');
+  manager.destroy();
+});
+
+test('only calls that act on a page make it agent-driven, and a popped-out page counts as in front of the person', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'driven', visible: false });
+  const entry = manager.entries.get('driven');
+  entry.visible = true;
+  entry.agentActiveAt = 0;
+  await manager.browserControl('browser.snapshot', { chatId: 'driven' });
+  await manager.browserControl('browser.read', { chatId: 'driven' }).catch(() => {});
+  assert.equal(entry.agentActiveAt, 0, 'reading does not take the page over');
+  assert.equal(agentDriven(entry), false);
+  await manager.browserControl('browser.navigate', { chatId: 'driven', url: 'https://example.test/' });
+  assert.ok(entry.agentActiveAt > 0, 'acting does');
+  assert.equal(agentDriven({ visible: false, agentActiveAt: 0, pip: {} }), false, 'a page in its separate window is in front of the person');
+  manager.destroy();
 });
