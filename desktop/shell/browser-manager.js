@@ -413,7 +413,6 @@ class BrowserManager {
     wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (inPlace || isMainFrame === false) return;
       entry.mainNavigationPending = true;
-      entry.mainDocumentReady = false;
       entry.documentGeneration += 1;
       entry.interactionGeneration += 1;
       entry.frameTreeGeneration += 1;
@@ -424,6 +423,9 @@ class BrowserManager {
     });
     // A page whose subframes never finish keeps loading forever; its main
     // document is still ready to observe once DOMContentLoaded has fired.
+    wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+      if (!inPlace && isMainFrame !== false) entry.mainDocumentReady = false;
+    });
     wc.on('dom-ready', () => { entry.mainDocumentReady = true; });
     wc.on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
     wc.on('did-stop-loading', () => {
