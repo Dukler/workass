@@ -156,6 +156,9 @@ type imageStoreReport struct {
 	ReclaimAllowed   bool      `json:"reclaimAllowed"`
 	Retired          int64     `json:"retired"`
 	RetiredBytes     int64     `json:"retiredBytes"`
+	// RetireSkipped: legacy files kept because their raw twin could not be
+	// made durable this pass (the next pass tries again).
+	RetireSkipped int64 `json:"retireSkipped"`
 
 	DeletedChatsEligible int    `json:"deletedChatsEligible"`
 	Collected            int64  `json:"collected"`
@@ -961,6 +964,10 @@ func (m *imageStoreMaintenance) migrateOne(ctx context.Context, entry imageStore
 // covers during reclaim.
 const imageStoreRetireBatch = 256
 
+// sessionImageRetireSync hands a verified raw twin's data to the device
+// before its legacy file goes; tests replace it.
+var sessionImageRetireSync = syncSessionImageDataToDevice
+
 type retireCandidate struct {
 	name string
 	raw  os.FileInfo
@@ -987,10 +994,14 @@ func (m *imageStoreMaintenance) prepareRetire(ctx context.Context, entry imageSt
 	if err != nil {
 		return retireCandidate{}, false, nil
 	}
-	syncErr := syncSessionImageDataToDevice(file)
+	syncErr := sessionImageRetireSync(file)
 	_ = file.Close()
 	if syncErr != nil {
-		return retireCandidate{}, false, syncErr
+		// Not provably durable: this legacy file stays, the rest of the
+		// reclaim (and the collection after it) goes on.
+		report.RetireSkipped++
+		m.logf("[image-store] %s raw could not be synced; its legacy file stays: %v", name, syncErr)
+		return retireCandidate{}, false, nil
 	}
 	return retireCandidate{name: name, raw: info}, true, nil
 }
