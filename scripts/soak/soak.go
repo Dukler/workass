@@ -1802,7 +1802,7 @@ func dialWS(ctx context.Context, name string, port int, deviceName, token string
 func (c *wsClient) readLoop() {
 	defer c.close()
 	for {
-		payload, err := readServerFrame(c.reader)
+		payload, err := c.readDataFrame()
 		if err != nil {
 			return
 		}
@@ -1971,38 +1971,60 @@ func (c *wsClient) close() {
 	})
 }
 
-func readServerFrame(reader *bufio.Reader) ([]byte, error) {
+// readDataFrame returns the next text or continuation payload. The daemon
+// pings an idle socket and drops one that never answers, so a ping gets a pong
+// and a pong is skipped.
+func (c *wsClient) readDataFrame() ([]byte, error) {
+	for {
+		opcode, payload, err := readServerFrame(c.reader)
+		if err != nil {
+			return nil, err
+		}
+		switch opcode {
+		case 0x1, 0x0:
+			return payload, nil
+		case 0x9:
+			pong := maskedFrame(payload)
+			pong[0] = 0x8A // FIN | pong; a control payload is under 126 bytes
+			if err := c.writeFrame(pong); err != nil {
+				return nil, err
+			}
+		case 0xA:
+		default:
+			return nil, fmt.Errorf("unexpected websocket opcode %d", opcode)
+		}
+	}
+}
+
+func readServerFrame(reader *bufio.Reader) (byte, []byte, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(reader, header); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	opcode := header[0] & 0x0f
 	if opcode == 0x8 {
-		return nil, io.EOF
+		return 0, nil, io.EOF
 	}
 	length := uint64(header[1] & 0x7f)
 	switch length {
 	case 126:
 		var b [2]byte
 		if _, err := io.ReadFull(reader, b[:]); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		length = uint64(binary.BigEndian.Uint16(b[:]))
 	case 127:
 		var b [8]byte
 		if _, err := io.ReadFull(reader, b[:]); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		length = binary.BigEndian.Uint64(b[:])
 	}
 	payload := make([]byte, int(length))
 	if _, err := io.ReadFull(reader, payload); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	if opcode != 0x1 && opcode != 0x0 {
-		return nil, fmt.Errorf("unexpected websocket opcode %d", opcode)
-	}
-	return payload, nil
+	return opcode, payload, nil
 }
 
 func maskedFrame(payload []byte) []byte {

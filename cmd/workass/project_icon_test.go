@@ -105,3 +105,37 @@ func TestProjectIconWireReadDegradesToMissing(t *testing.T) {
 		t.Fatalf("missing project icon reply = %#v", raw)
 	}
 }
+
+// A reload asks for an icon by etag. The plain read is unchanged; the
+// conditional one names the same icon by its content hash and answers a
+// client that holds it with a receipt.
+func TestProjectIconConditionalRead(t *testing.T) {
+	root := t.TempDir()
+	writeProjectIconFixture(t, root, "public/favicon.png", tinyProjectPNG)
+	hub := wire.NewHub()
+	registerDaemonHandlers(hub, root, nil)
+	read := func(arg map[string]any) map[string]any {
+		t.Helper()
+		reply, err := hub.Invoke("project:icon", []any{arg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return roundTripJSON(t, reply)
+	}
+	plain := read(map[string]any{"chatId": "chat-1", "cwd": root})
+	if plain["found"] != true || plain["etag"] != nil {
+		t.Fatalf("plain icon read = %#v", plain)
+	}
+	named := read(map[string]any{"chatId": "chat-1", "cwd": root, "ifNoneMatch": ""})
+	etag, _ := named["etag"].(string)
+	if len(etag) != 64 || named["base64"] != plain["base64"] || named["mimeType"] != plain["mimeType"] {
+		t.Fatalf("conditional icon read = %#v", named)
+	}
+	if receipt := read(map[string]any{"chatId": "chat-1", "cwd": root, "ifNoneMatch": etag}); receipt["unchanged"] != true || receipt["etag"] != etag || len(receipt) != 2 {
+		t.Fatalf("unchanged icon = %#v", receipt)
+	}
+	writeProjectIconFixture(t, root, "public/favicon.png", append(append([]byte{}, tinyProjectPNG...), 'x'))
+	if changed := read(map[string]any{"chatId": "chat-1", "cwd": root, "ifNoneMatch": etag}); changed["unchanged"] == true || changed["etag"] == etag {
+		t.Fatalf("a changed icon answered %#v", changed)
+	}
+}

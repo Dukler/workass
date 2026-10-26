@@ -104,10 +104,18 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 	}
 	root := r.sessions.GlobalSnapshot()
 	activeID := strings.TrimSpace(fieldString(root, "activeId"))
+	// A shell read carries no selected tail: the client opens the selected
+	// chat with its own bounded archive read. Only a running chat keeps its
+	// tail, which is what shows it as running.
+	tailTabID := activeID
+	shell := sessionShellRead(opts)
+	if shell {
+		tailTabID = ""
+	}
 	states := make([]chat.State, 0, len(known))
 	windows := make(map[string]actorLedgerWindow, len(known))
 	for _, chatID := range known {
-		snapshot, err := r.sessionSnapshot(chatID, activeID, sessionProjectionMessageTail, opts)
+		snapshot, err := r.sessionSnapshot(chatID, tailTabID, sessionProjectionMessageTail, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -131,6 +139,9 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 	}
 	if !activeExists {
 		activeID = firstTabID
+	}
+	if !activeExists && !shell {
+		tailTabID = activeID
 		// The fallback selection was not known when idle snapshots were taken.
 		// Fetch its bounded tail once, without copying any other idle history.
 		for i, state := range states {
@@ -155,7 +166,7 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 	projectedChats := make([]any, 0, len(states))
 	for _, state := range states {
 		projected := map[string]any{}
-		history := sessionHistoryProjection(state, activeID)
+		history := sessionHistoryProjection(state, tailTabID)
 		window := windows[state.ChatID]
 		if err := projectActorChatWithHistoryWindow(projected, state, history, sessionProjectionMessageTail, window); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
@@ -309,6 +320,21 @@ type archiveReadOptions struct {
 	// it titles) while its row shows one line. A separate option, because a
 	// renderer that asked only for leanTools reads titles whole.
 	leanTitles bool
+	// sessionShell (session:get {shell}) leaves every settled chat
+	// metadata-only, the selected one included; running chats keep their tail.
+	// A connect paid for the selected chat's tail twice: once here (up to
+	// 17 MB for a big chat) and once more through the bounded first-screen
+	// archive read the renderer opens a chat with. Archive reads ignore it.
+	sessionShell bool
+}
+
+func sessionShellRead(opts []archiveReadOptions) bool {
+	for _, opt := range opts {
+		if opt.sessionShell {
+			return true
+		}
+	}
+	return false
 }
 
 // archiveReadOptionsFrom reads the additive read options of session:get and
@@ -318,6 +344,7 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 		deferMessageImages: options["deferImages"] == true,
 		leanTools:          options["leanTools"] == true,
 		leanTitles:         options["leanTitles"] == true,
+		sessionShell:       options["shell"] == true,
 	}
 }
 
