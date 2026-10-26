@@ -428,7 +428,7 @@ function cdpBrowserKey(parsed) {
 class BrowserManager {
   constructor({
     win, WebContentsView, BrowserWindow, nativeImage, session, partition = DEFAULT_PARTITION, chromeVersion, platform,
-    onState, requestOpen, onLifecycle, host = 'view', webContentsFromId = null, onHosts = null, pipPreload = '',
+    onState, requestOpen, onLifecycle, host = 'view', preferredHost = null, webContentsFromId = null, onHosts = null, pipPreload = '',
     downloadsDir = '',
   }) {
     if (!win || !WebContentsView || !session) throw new Error('browser manager dependencies missing');
@@ -441,6 +441,10 @@ class BrowserManager {
     // mounts, so it moves and resizes with the HTML around it. 'view': the
     // page is a WebContentsView stacked over the window (the escape hatch).
     this.hostMode = host === 'webview' ? 'webview' : 'view';
+    // The host this shell would use if the app renderer can host pages; a
+    // renderer says it can by asking (rendererHostMode). Until then, and for
+    // a renderer that never asks (an older one), pages are native views.
+    this.preferredHost = preferredHost === 'webview' || preferredHost === 'view' ? preferredHost : this.hostMode;
     this.webContentsFromId = typeof webContentsFromId === 'function' ? webContentsFromId : () => null;
     this.onHosts = typeof onHosts === 'function' ? onHosts : () => {};
     this.pipPreload = String(pipPreload || '');
@@ -475,7 +479,7 @@ class BrowserManager {
     this.downloadsRoot = String(downloadsDir || '');
     // A page an agent drives keeps producing frames through a frame
     // subscription only while the app window is not on screen (holdPainting).
-    if (this.hostMode === 'webview' && typeof win.on === 'function') {
+    if (typeof win.on === 'function') {
       for (const event of ['hide', 'show', 'minimize', 'restore']) {
         win.on(event, () => { for (const entry of this.entries.values()) this.syncPaintSource(entry); });
       }
@@ -1629,6 +1633,17 @@ class BrowserManager {
         poppedOut: !!(entry.pipWindow && !entry.pipWindow.isDestroyed()),
       }))
       .sort((a, b) => a.hostKey.localeCompare(b.hostKey));
+  }
+
+  // The app renderer asks which host to use; a renderer that asks can host
+  // pages, so a shell that prefers the webview host switches to it now.
+  // Pages made before stay native views until they are replaced.
+  rendererHostMode() {
+    if (this.preferredHost === 'webview' && this.hostMode !== 'webview') {
+      this.hostMode = 'webview';
+      this.lifecycle({ chatId: '__shell__' }, 'browser-host-webview', {});
+    }
+    return this.hostMode;
   }
 
   publishHosts() {
