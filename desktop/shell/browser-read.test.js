@@ -94,9 +94,8 @@ test('a long article is read completely across pages that each stay within max_b
     }
     body.append(article);
   });
-  let evaluations = 0;
-  const original = fake.webContents.executeJavaScript;
-  fake.webContents.executeJavaScript = async (script) => { if (script.includes('pageReadDocument')) evaluations += 1; return original(script); };
+  // Reads run in Workass's own world over CDP.
+  const evaluations = () => fake.commands.filter((command) => command.method === 'Runtime.evaluate' && String(command.params.expression).includes('pageReadDocument')).length;
   const pages = [];
   let offset = 0;
   for (let guard = 0; guard < 100; guard += 1) {
@@ -117,7 +116,7 @@ test('a long article is read completely across pages that each stay within max_b
   for (const index of [1, 300, 600]) assert.match(whole, new RegExp(`Paragraph ${index}: naïve café résumé`));
   assert.match(whole, /\[link 600\]\(https:\/\/news\.example\/n\/600\)/);
   assert.ok(pages.length > 10);
-  assert.equal(evaluations, 1, 'continuations come from the same extraction');
+  assert.equal(evaluations(), 1, 'continuations come from the same extraction');
   // Pages end on line boundaries when one is near.
   assert.ok(pages.slice(0, -1).every((page) => page.content.endsWith('\n')));
 
@@ -125,7 +124,7 @@ test('a long article is read completely across pages that each stay within max_b
   fake.entry.interactionGeneration += 1;
   const after = await readPage(fake, { offset: pages[1].offset, maxBytes: 4096 });
   assert.match(after.note, /new read/);
-  assert.equal(evaluations, 2);
+  assert.equal(evaluations(), 2);
 });
 
 test('frames are read through their own contexts and placed where the iframe sits', async () => {

@@ -188,7 +188,8 @@ Through the agent tools every action (open with a URL, navigate, history,
 click, type, key, scroll, select, hover, drag, upload, evaluate, batch) returns
 `page` (url, title, loading), `events` that happened during it (`navigated`,
 `url_changed`, `dialog_opened`/`dialog_closed`, `download_started`/
-`download_finished`, `tab_opened`, `popup_blocked`, `beforeunload_accepted`)
+`download_finished`, `tab_opened`, `popup_blocked`, `beforeunload_accepted`,
+`file_chooser_opened`)
 and `changes`: a bounded outline diff, or after a navigation the new page's
 outline (first part, with `next_cursor`). The page is settled first, for as
 long as something is happening and no longer: a navigation reaches a usable
@@ -202,6 +203,23 @@ again. A batch reports once, for all of its actions. Each tab
 operation has a deadline (25 s; navigation and batch 28.5 s): one that does not
 finish is reported and the tab's queue moves on, and `workass_browser_list`
 shows `stuck_since_ms` for it.
+
+Nothing Workass runs in a page runs in the page's own JavaScript world: every
+script, observer, listener and timer of the browser tools lives in an isolated
+world of its own (CDP `Page.createIsolatedWorld`, one per frame and document),
+so a page can neither see that an agent is reading it nor change what the agent
+reads. The one exception is reading a code editor's full text through its own
+API (Monaco, CodeMirror) on a page that has one, a read-only call. Input is
+bounded the same way: an input event the page does not take within 5 s fails
+the call; a press an action left down is released when the action ends, at
+its deadline, or when the app loses focus; a drag that did not finish is
+cancelled (`Input.cancelDragging`); while an operation is past its deadline the
+tab is no longer held focused and painting for it. A click or a menu key on a
+one-line `<select>` is refused with `native_menu` (its native menu would hold
+the window's input; choose with `workass_browser_select`), and while an agent
+action runs a file chooser the page opens is intercepted
+(`Page.setInterceptFileChooserDialog`) and reported as `file_chooser_opened`
+instead of opening a native panel.
 
 `workass_browser_select` chooses options of a native `<select>` by values,
 labels or indexes (input and change events); a custom dropdown is clicked
@@ -217,9 +235,10 @@ or folders (`.ssh`, `.aws`, private keys, tokens, `.env` and the like).
 (`Page.handleJavaScriptDialog`); while one is open other page tools fail with
 its message. Electron answers `prompt()` itself with null. An agent's
 navigation leaves a page whose beforeunload asks to stay. `workass_browser_evaluate`
-runs page JavaScript (8 KiB source, 10 s, JSON result up to 16 KiB as
-`page_data`, redacted); it can change the page, so it is a mutation with an
-`operation_id`, never labelled read-only. `workass_browser_close` closes a tab
+runs page JavaScript in the page's own world, where the page can see it (8 KiB
+source, 10 s, JSON result up to 16 KiB as `page_data`, redacted); it can change
+the page, so it is a mutation with an `operation_id`, never labelled
+read-only. `workass_browser_close` closes a tab
 one of the chat's pages opened, or resets the chat's own page to a fresh blank
 page in the same profile (a new tab id).
 

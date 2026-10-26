@@ -664,7 +664,8 @@ function observedTargetGeometryScript(locator, { mapFrames = true } = {}) {
     ] : []),
     'const xs = points.map((point) => point.x); const ys = points.map((point) => point.y);',
     'const left = Math.min(...xs); const top = Math.min(...ys);',
-    'return { status: \"ready\", tag: String(el.tagName || \"\").toLowerCase(), name: String(el.getAttribute(\"aria-label\") || el.innerText || el.textContent || \"\").trim().slice(0, 160), x: localPoint.x, y: localPoint.y, bounds: { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top } };',
+    'const pick = el.closest ? el.closest(\"select\") : null;',
+    'return { status: \"ready\", tag: String(el.tagName || \"\").toLowerCase(), name: String(el.getAttribute(\"aria-label\") || el.innerText || el.textContent || \"\").trim().slice(0, 160), x: localPoint.x, y: localPoint.y, bounds: { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top }, nativeMenu: !!pick && !pick.multiple && !(pick.size > 1) };',
     '})()',
   ].join('\n');
 }

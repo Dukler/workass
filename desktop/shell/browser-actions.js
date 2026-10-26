@@ -144,6 +144,15 @@ function noteActivity(entry, method, params, sessionId) {
     case 'Network.loadingFailed':
       if (!sessionId && entry.netInflight && entry.netInflight.delete(String(params && params.requestId || ''))) touchActivity(entry);
       return;
+    case 'Page.fileChooserOpened':
+      // Intercepted while an agent action runs (watchFileChooser): no native
+      // panel opens, the agent is told instead.
+      if (!sessionId && entry.fileChooserWatched) {
+        pushEvent(entry, { type: 'file_chooser_opened', multiple: params && params.mode === 'selectMultiple',
+          note: 'the page asked for a file: give it one with workass_browser_upload' });
+        touchActivity(entry);
+      }
+      return;
     case 'Page.frameAttached':
     case 'Page.frameDetached':
     case 'Page.frameNavigated':
@@ -158,7 +167,7 @@ function noteActivity(entry, method, params, sessionId) {
 async function readActivity(manager, entry) {
   let probe = null;
   try {
-    probe = await Promise.race([manager.evaluateMainWorld(entry, ACTIVITY_PROBE), sleep(ACTIVITY_READ_TIMEOUT_MS).then(() => null)]);
+    probe = await Promise.race([manager.evaluateAgentWorld(entry, ACTIVITY_PROBE), sleep(ACTIVITY_READ_TIMEOUT_MS).then(() => null)]);
   } catch { probe = null; }
   return { n: probe && Number.isFinite(probe.n) ? probe.n : null, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) };
 }
@@ -179,6 +188,19 @@ async function watchNetwork(manager, entry) {
   }
   if (!enabled) entry.netInflight = null;
   return true;
+}
+
+// While an agent action runs, a file chooser the page opens is intercepted
+// (Page.setInterceptFileChooserDialog): a native panel would hold the window
+// until a person closes it. A person's own clicks between agent actions
+// still open the panel.
+async function watchFileChooser(manager, entry, enabled) {
+  const wc = manager.liveContents(entry);
+  if ((enabled && entry.dialog) || !wc || !wc.debugger || wc.debugger.isAttached?.() !== true) return false;
+  entry.fileChooserWatched = enabled;
+  const command = Promise.resolve().then(() => wc.debugger.sendCommand('Page.setInterceptFileChooserDialog', { enabled })).then(() => true, () => false);
+  if (!enabled) { void command; return true; }
+  return Promise.race([command, sleep(ACTIVITY_READ_TIMEOUT_MS).then(() => false)]);
 }
 
 function unwatchNetwork(manager, entry) {
@@ -222,7 +244,7 @@ async function settleAfterAction(manager, entry, start) {
     const script = active ? quietScript(SETTLE_QUIET_MS, 0, remaining) : quietScript(SETTLE_IDLE_MS, SETTLE_IDLE_MS, remaining);
     let result = null;
     try {
-      result = await Promise.race([manager.evaluateMainWorld(entry, script), sleep(remaining + 200).then(() => null)]);
+      result = await Promise.race([manager.evaluateAgentWorld(entry, script), sleep(remaining + 200).then(() => null)]);
     } catch { return outcome; /* a page that navigated meanwhile is outlined below */ }
     if (entry.closed || entry.dialog) return outcome;
     // A document that was replaced while this phase ran: settle the new one.
@@ -274,10 +296,12 @@ async function runAction(manager, entry, action, { before: knownBefore = undefin
   const start = entry.dialog ? { n: null, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) } : await readActivity(manager, entry);
   const before = knownBefore === undefined ? await outlineBefore(manager, entry, start) : knownBefore;
   const watching = await watchNetwork(manager, entry);
+  const choosing = await watchFileChooser(manager, entry, true);
   try {
     return await runWatchedAction(manager, entry, action, { before, start, startSeq, method });
   } finally {
     if (watching) unwatchNetwork(manager, entry);
+    if (choosing) void watchFileChooser(manager, entry, false);
   }
 }
 
@@ -482,7 +506,11 @@ async function browserDrag(manager, entry, params = {}) {
     if (method === 'Input.dragIntercepted' && (sessionId || null) === (target.sessionId || null)) intercepted = eventParams && eventParams.data;
   };
   wc.debugger.on('message', onMessage);
+  let completed = false;
   try {
+    // An HTML drag started by protocol input would otherwise become an OS
+    // drag session, which only a real mouse release ends: interception keeps
+    // it inside Chromium, driven by Input.dispatchDragEvent below.
     try { await manager.executeCDP(target, 'Input.setInterceptDrags', { enabled: true }); } catch { /* pointer drags still work */ }
     await manager.executeCDP(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: a.x, y: a.y });
     await manager.executeCDP(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: a.x, y: a.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -501,11 +529,15 @@ async function browserDrag(manager, entry, params = {}) {
       }
     }
     await manager.executeCDP(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: b.x, y: b.y, button: 'left', buttons: 0, clickCount: 1 });
+    completed = true;
     entry.interactionGeneration += 1;
     return { ok: true, status: 'dragged', trusted: true, html_drag: html, from: fromAgain.reportedTarget, ...(to ? { to: to.reportedTarget } : { offset: delta }) };
   } finally {
     wc.debugger.removeListener('message', onMessage);
+    // Interception is never left on, and a drag that did not finish is put
+    // back to rest (the press released, the intercepted drag cancelled).
     try { await manager.executeCDP(target, 'Input.setInterceptDrags', { enabled: false }); } catch { /* the page went away */ }
+    if (!completed || entry.pointerDown) await manager.releaseStuckInput(entry);
   }
 }
 
@@ -576,10 +608,9 @@ async function browserUpload(manager, entry, params = {}) {
     if (files.length > 1 && !found.multiple) return { ok: false, status: 'not_multiple', reason: 'this file input takes one file' };
     const frame = target.frameId ? entry.frames.get(target.frameId) : manager.frameForSession(entry, null);
     const sessionId = frame?.sessionId || null;
-    const handle = await manager.ownedSessionCommand(entry, 'Runtime.evaluate', {
-      expression: "globalThis[Symbol.for('workass.browser.upload-input')]",
-      ...(frame?.contextId != null ? { contextId: frame.contextId } : {}),
-    }, sessionId);
+    const handle = await manager.withAgentContext(entry, frame, (contextId) => manager.ownedSessionCommand(entry, 'Runtime.evaluate', {
+      expression: "globalThis[Symbol.for('workass.browser.upload-input')]", contextId,
+    }, sessionId));
     const objectId = handle?.result?.objectId;
     if (!objectId) return { ok: false, status: 'stale', reason: 'the file input is gone' };
     try {

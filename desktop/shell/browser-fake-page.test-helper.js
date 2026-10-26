@@ -22,6 +22,10 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
   let nextObject = 0;
   let nextBackend = 100;
   const commands = [];
+  // Workass's isolated world per frame (the fake runs it in the frame's own
+  // context: what is tested here is which frame a script reaches).
+  const isolated = new Map();
+  let nextIsolated = 5000;
 
   const contextFor = (sessionId, contextId) => {
     for (const frame of frames.values()) {
@@ -52,8 +56,15 @@ function fakeBrowser({ url = 'https://shop.example/', chatId = 'chat-fake' } = {
         const frame = params.frameId ? frames.get(params.frameId) : null;
         return { nodes: frame && frame.axNodes ? frame.axNodes : [] };
       }
+      if (method === 'Page.createIsolatedWorld') {
+        const frame = frames.get(params.frameId);
+        if (!frame) throw new Error('No frame with given id found');
+        nextIsolated += 1;
+        isolated.set(nextIsolated, frame.id);
+        return { executionContextId: nextIsolated };
+      }
       if (method === 'Runtime.evaluate') {
-        const frame = contextFor(sessionId, params.contextId);
+        const frame = isolated.has(params.contextId) ? frames.get(isolated.get(params.contextId)) : contextFor(sessionId, params.contextId);
         if (!frame) throw new Error('no such context');
         if (frame.hang) return new Promise(() => {});
         return { result: { value: roundtrip(vm.runInContext(params.expression, frame.context)) } };
