@@ -305,6 +305,19 @@ function createWindow(url, browserReporter, isController) {
     console.error(`[shell] provider-neutral browser control unavailable: ${err.message}`);
   });
   const own = (event) => event.sender === win.webContents;
+  // A reload (a recovery, an update, the cache-first reload) or a crash of the
+  // renderer unmounts the browser without its cleanup ever running, which left
+  // the native page on screen at its last bounds with no controls around it
+  // (user report, 2026-10-25). The shell takes it down the moment the reload
+  // starts; the reloaded renderer presents it again with its controls.
+  win.webContents.on('did-start-navigation', (event, _url, isInPlace, isMainFrame) => {
+    const mainFrame = event && typeof event.isMainFrame === 'boolean' ? event.isMainFrame : isMainFrame !== false;
+    const sameDocument = event && typeof event.isSameDocument === 'boolean' ? event.isSameDocument : !!isInPlace;
+    if (mainFrame && !sameDocument && browserManager) void browserManager.hideAll().catch(() => {});
+  });
+  win.webContents.on('render-process-gone', () => {
+    if (browserManager) void browserManager.hideAll().catch(() => {});
+  });
   // HTML pages in the chat are sandboxed srcdoc frames with no network; this
   // cancels any navigation of them (and of frames nested inside them) and keeps
   // WebRTC off direct UDP. It is attached before the first load, and the
@@ -317,10 +330,13 @@ function createWindow(url, browserReporter, isController) {
   });
   const removeImageCopyMenu = installImageCopyMenu({ win, Menu });
   ipcMain.handle('workass-browser:activate', (event, payload) => own(event) ? browserManager.activate(payload || {}) : null);
-  ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds, payload && payload.viewport) : false);
+  ipcMain.handle('workass-browser:resize', (event, payload) => own(event) ? browserManager.resize(payload && payload.chatId, payload && payload.bounds, payload && payload.viewport, payload && payload.radius) : false);
   ipcMain.handle('workass-browser:hide', (event, chatId) => own(event) ? browserManager.hide(chatId) : false);
   ipcMain.handle('workass-browser:pop-out', (event, chatId) => own(event) ? browserManager.popOut(chatId) : null);
   ipcMain.handle('workass-browser:pop-in', (event, chatId) => own(event) ? browserManager.popIn(chatId) : false);
+  ipcMain.on('workass-browser:place', (event, payload) => {
+    if (own(event) && payload) browserManager.place(payload.chatId, payload.bounds);
+  });
   ipcMain.handle('workass-browser:close', (event, chatId) => own(event) ? browserManager.close(chatId) : false);
   ipcMain.handle('workass-browser:command', (event, payload) => own(event) ? browserManager.command(payload && payload.chatId, payload && payload.command, payload && payload.value) : null);
   ipcMain.handle('workass-browser:set-viewport', (event, payload) => own(event) && payload
@@ -363,9 +379,10 @@ function createWindow(url, browserReporter, isController) {
     for (const requestSession of artifactRequestSessions) {
       try { requestSession.webRequest.onBeforeSendHeaders(null); } catch { /* older Electron */ }
     }
-    for (const channel of ['activate', 'resize', 'hide', 'close', 'command', 'set-viewport', 'reset-viewport']) {
+    for (const channel of ['activate', 'resize', 'hide', 'pop-out', 'pop-in', 'close', 'command', 'set-viewport', 'reset-viewport']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
+    ipcMain.removeAllListeners('workass-browser:place');
     for (const channel of ['copy-text', 'copy-image-at']) {
       try { ipcMain.removeHandler(`workass-clipboard:${channel}`); } catch { /* ignore */ }
     }

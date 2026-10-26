@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('workassBrowser', {
   hide: (chatId) => ipcRenderer.invoke('workass-browser:hide', chatId),
   popOut: (chatId) => ipcRenderer.invoke('workass-browser:pop-out', chatId),
   popIn: (chatId) => ipcRenderer.invoke('workass-browser:pop-in', chatId),
+  place: (chatId, bounds) => ipcRenderer.send('workass-browser:place', { chatId, bounds }),
   close: (chatId) => ipcRenderer.invoke('workass-browser:close', chatId),
   command: (chatId, command, value) => ipcRenderer.invoke('workass-browser:command', { chatId, command, value }),
   setViewport: (chatId, width, height) => ipcRenderer.invoke('workass-browser:set-viewport', { chatId, width, height }),

@@ -112,6 +112,7 @@ class FakeView {
   setBounds(bounds) { this.bounds = bounds; }
   getBounds() { return this.bounds; }
   setBackgroundColor(color) { this.backgroundColor = color; }
+  setBorderRadius(radius) { this.radius = radius; }
 }
 
 class FakeBrowserWindow extends EventEmitter {
@@ -1956,4 +1957,120 @@ test('a page pops out into an always-on-top window and comes back when it closes
   assert.equal(entry.pipWindow, null);
   assert.equal(win.contentView.children.includes(entry.view), true);
   assert.equal(manager.close('chat-pip'), true);
+});
+
+// The floating browser in the real app (2026-10-25): every drag step went
+// through resize, which re-applied the page's device metrics; Chromium then
+// painted the page for a frame or two at its unscaled viewport size, past the
+// view's bounds, so the page flickered and ballooned while it moved.
+const emulations = (entry) => entry.view.webContents.debugger.commands.filter((method) => method === 'Emulation.setDeviceMetricsOverride').length;
+
+test('moving the page re-applies no metrics; only a new size does', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-move', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-move');
+  const before = emulations(entry);
+  for (let step = 1; step <= 20; step += 1) {
+    await manager.resize('chat-move', { x: 800 - step * 10, y: 400 - step * 5, width: 344, height: 215 });
+  }
+  assert.equal(emulations(entry), before, 'twenty moves, no re-applied metrics');
+  assert.deepEqual(entry.view.bounds, { x: 600, y: 300, width: 344, height: 215 });
+  await manager.resize('chat-move', { x: 600, y: 300, width: 400, height: 250 });
+  assert.equal(emulations(entry), before + 1, 'a new size is a new scale');
+  assert.equal(entry.view.bounds.width, 400);
+  entry.view.webContents.emit('did-start-navigation', {}, 'https://example.com/next', false, true);
+  await manager.resize('chat-move', { x: 610, y: 300, width: 400, height: 250 });
+  assert.equal(emulations(entry), before + 2, 'a new document gets its metrics again');
+});
+
+test('a drag places the page synchronously, and only the page on screen', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-drag', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-drag');
+  const before = emulations(entry);
+  assert.equal(manager.place('chat-drag', { x: 500, y: 120, width: 344, height: 215 }), true);
+  assert.deepEqual(entry.view.bounds, { x: 500, y: 120, width: 344, height: 215 }, 'placed before place() returns, filling the frame exactly');
+  assert.equal(emulations(entry), before, 'a move sends no metrics');
+  assert.equal(manager.place('chat-other', { x: 0, y: 0, width: 344, height: 215 }), false);
+  await manager.hide('chat-drag');
+  assert.equal(manager.place('chat-drag', { x: 10, y: 10, width: 344, height: 215 }), false, 'a hidden page is never placed on screen');
+});
+
+test('a live resize sets the bounds first, then one coalesced scale, never resizing the view to the emulated size', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-size', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-size');
+  const dbg = entry.view.webContents.debugger;
+  const before = emulations(entry);
+  for (let step = 1; step <= 10; step += 1) {
+    manager.place('chat-size', { x: 800 - step * 8, y: 400 - step * 5, width: 344 + step * 8, height: 215 + step * 5 });
+    assert.equal(entry.view.bounds.width, 344 + step * 8, 'the bounds land at once');
+  }
+  await entry.rescaling;
+  const sent = emulations(entry) - before;
+  assert.ok(sent >= 1 && sent <= 3, `ten steps coalesce into a few scale changes (${sent})`);
+  const last = dbg.commandCalls.filter((call) => call.method === 'Emulation.setDeviceMetricsOverride').at(-1).params;
+  assert.equal(last.scale, 424 / 1440, 'the latest scale wins');
+  assert.equal(last.dontSetVisibleSize, true, 'Chromium never resizes the view to the emulated 1440 × 900');
+  await manager.resize('chat-size', { x: 720, y: 350, width: 424, height: 265 });
+  assert.equal(emulations(entry) - before, sent, 'settling at the same size sends nothing more');
+  assert.deepEqual(entry.view.bounds, { x: 720, y: 350, width: 424, height: 265 });
+});
+
+test('bounds from a zoomed app are placed in window coordinates', async () => {
+  const { manager } = fixture({ shellZoom: 1.25 });
+  await manager.activate({ chatId: 'chat-zoom', bounds: { x: 400, y: 200, width: 320, height: 200 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-zoom');
+  assert.deepEqual(entry.presentationBounds, { x: 500, y: 250, width: 400, height: 250 });
+  manager.place('chat-zoom', { x: 300, y: 100, width: 320, height: 200 });
+  assert.deepEqual(entry.view.bounds, { x: 375, y: 125, width: 400, height: 250 });
+  assert.deepEqual(entry.presentationBounds, { x: 375, y: 125, width: 400, height: 250 });
+});
+
+// User report (2026-10-25): after a renderer reload the native page stayed on
+// screen at its last bounds with no controls. The reload never runs the
+// renderer's cleanup, so the shell takes the page down itself.
+test('a renderer that goes away takes the page off screen, and the page keeps running', async () => {
+  const { manager, win } = fixture();
+  await manager.activate({ chatId: 'chat-reload', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-reload');
+  assert.ok(win.contentView.children.includes(entry.view));
+  await manager.hideAll();
+  assert.equal(win.contentView.children.includes(entry.view), false, 'nothing stays on screen without its controls');
+  assert.equal(manager.place('chat-reload', { x: 10, y: 10, width: 344, height: 215 }), false, 'a late drag message cannot bring it back');
+  assert.equal(entry.captureHostAttached, true, 'the page lives on in its hidden host');
+  await manager.hideAll();
+});
+
+test('the floating page is rounded and clipped like its frame; the pane and the hidden host are square', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-round', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-round');
+  assert.equal(entry.view.radius, 12);
+  await manager.hide('chat-round');
+  assert.equal(entry.view.radius, 0, 'square in its hidden host');
+  await manager.activate({ chatId: 'chat-round', bounds: { x: 900, y: 48, width: 300, height: 700 } });
+  assert.equal(entry.view.radius, 0, 'the docked pane is square');
+  await manager.resize('chat-round', { x: 600, y: 300, width: 344, height: 215 }, undefined, 999);
+  assert.equal(entry.view.radius, 32, 'bounded');
+});
+
+test('a request the gone renderer queued before the reload never brings the page back', async () => {
+  const { manager, win } = fixture();
+  await manager.activate({ chatId: 'chat-stale', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-stale');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  void manager.serializePresentation(() => gate);
+  const late = manager.activate({ chatId: 'chat-stale', bounds: { x: 20, y: 20, width: 344, height: 215 }, radius: 12 });
+  const lateResize = manager.resize('chat-stale', { x: 30, y: 30, width: 344, height: 215 });
+  const hidden = manager.hideAll();
+  assert.equal(win.contentView.children.includes(entry.view), false, 'off the window at once, before the queue drains');
+  release();
+  await late;
+  assert.equal(await lateResize, false);
+  await hidden;
+  assert.equal(win.contentView.children.includes(entry.view), false, 'the stale requests did not put it back');
+  await manager.activate({ chatId: 'chat-stale', bounds: { x: 20, y: 20, width: 344, height: 215 }, radius: 12 });
+  assert.equal(win.contentView.children.includes(entry.view), true, 'the reloaded renderer presents it again');
 });
