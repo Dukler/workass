@@ -155,9 +155,11 @@ credential-shape redaction (provider keys, JWTs, private keys, URL userinfo).
 In the default `json` format these facts are added only after the legacy 64
 KiB budget has run, so every legacy field is byte-identical to before; facts
 that do not fit are counted in `truncation.element_facts_omitted`.
-`format:"compact"` renders one line per element with short refs (`e12`, frames
+`format:"compact"` renders one line per element with short refs (`c12`, frames
 `f1`) aliased in the same observation, so they work with that `snapshot_id`
-for click, type, scroll and read. Compact output folds an image into its link,
+for click, type, scroll and read; they are kept apart from outline refs, and a
+compact ref without its `snapshot_id` is refused instead of reaching an
+outline element. Compact output folds an image into its link,
 drops rows that only repeat text (list items, paragraphs, static text), and
 budgets interactive lines first, then page text, then the outline.
 `since_snapshot_id` diffs against an earlier compact snapshot of the same
@@ -167,8 +169,10 @@ and falls back to a full compact snapshot with `incremental.reason`
 
 `format:"outline"` is the page as nested lines built from Chromium's
 accessibility tree of every frame the tab owns, cross-site frames included and
-placed under their `<iframe>`: role, name, current value (passwords and other
-secret fields `[redacted]`), state (checked, expanded, selected, disabled,
+placed under their `<iframe>`: role, name, current value (every password,
+one-time-code, card or secret-named field `[redacted]` by the json snapshot's
+rule — type, autocomplete, name and id, read with `DOM.describeNode`; a field
+that cannot be described counts as secret; diffs inherit it), state (checked, expanded, selected, disabled,
 required, focused, level), link and frame URLs, and a short ref (`e12`) on
 everything an action can target. A frame that cannot be read says why in
 place; a canvas is reported as pixels only. Refs stay the same for an element
@@ -188,8 +192,8 @@ Through the agent tools every action (open with a URL, navigate, history,
 click, type, key, scroll, select, hover, drag, upload, evaluate, batch) returns
 `page` (url, title, loading), `events` that happened during it (`navigated`,
 `url_changed`, `dialog_opened`/`dialog_closed`, `download_started`/
-`download_finished`, `tab_opened`, `popup_blocked`, `beforeunload_accepted`,
-`file_chooser_opened`)
+`download_finished`, `download_blocked`, `tab_opened`, `popup_blocked`,
+`beforeunload_accepted`, `file_chooser_opened`)
 and `changes`: a bounded outline diff, or after a navigation the new page's
 outline (first part, with `next_cursor`). The page is settled first, for as
 long as something is happening and no longer: a navigation reaches a usable
@@ -197,19 +201,29 @@ document; then, if nothing happened, two frames (32 ms) of quiet; once
 something happened (DOM mutations, input/change/focus/toggle events, requests
 the action started, frames attaching or loading), 80 ms of quiet after the
 last of it; at most 1.5 s. Requests are watched only while an action settles
-(WebSockets, event streams and document loads excepted). On a page without
-frames where nothing happened, `changes` says `none` without reading the page
-again. A batch reports once, for all of its actions. Each tab
-operation has a deadline (25 s; navigation and batch 28.5 s): one that does not
-finish is reported and the tab's queue moves on, and `workass_browser_list`
-shows `stuck_since_ms` for it.
+(WebSockets, event streams and document loads excepted). The page is always
+read again after an action, so `changes.none` comes only from comparing two
+reads; the read before is reused only when it is under a second old and
+nothing has happened since, and an explicit snapshot always reads the page as
+it is now. A batch reports once, for all of its actions; a dialog stops it
+where it opened (`batch.completed_indexes`, `dialog_index`,
+`unexecuted_indexes`) and nothing after it runs. Each tab operation has a
+deadline (25 s; navigation and batch 28.5 s): one that does not finish is
+reported and the tab's queue moves on, and `workass_browser_list` shows
+`stuck_since_ms` for it. An action's waits and reads fit in what is left of its
+deadline: a navigation that runs out reports `changes.loading` (with
+`loadingNote`) instead of failing. A navigation whose page has not committed
+within 20 s fails and says so; back and forward with nowhere to go do
+nothing. Commands on the top frame are bounded like a frame's.
 
 Nothing Workass runs in a page runs in the page's own JavaScript world: every
 script, observer, listener and timer of the browser tools lives in an isolated
 world of its own (CDP `Page.createIsolatedWorld`, one per frame and document),
 so a page can neither see that an agent is reading it nor change what the agent
-reads. The one exception is reading a code editor's full text through its own
-API (Monaco, CodeMirror) on a page that has one, a read-only call. Input is
+reads. The one exception is a code editor (Monaco, CodeMirror): one fixed
+function, called in the page's world on the element the agent world found,
+reads its text for snapshots and, for `workass_browser_type`, focuses it and
+selects or deletes its text through the editor's own API. Input is
 bounded the same way: an input event the page does not take within 5 s fails
 the call; a press an action left down is released when the action ends, at
 its deadline, or when the app loses focus; a drag that did not finish is
@@ -227,27 +241,44 @@ instead. `workass_browser_hover` moves the pointer with trusted input.
 `workass_browser_drag` drags to an element or by `delta_x`/`delta_y` with a
 trusted press, moves and release; an HTML drag and drop goes through
 Chromium's drag events (`Input.setInterceptDrags`), never an OS drag session;
-both ends must be in one frame. `workass_browser_upload` sets a file input's
-files (`DOM.setFileInputFiles`) from absolute paths the agent passes: at most
-10 files and 10 MB, never symbolic or hard links, never credential-like names
-or folders (`.ssh`, `.aws`, private keys, tokens, `.env` and the like).
+both ends must be in one frame (`unsupported` otherwise); a target that cannot
+be hovered or dragged is reported by status like a click's. A scroll target
+with nothing to scroll fails with `not_scrollable`. `workass_browser_upload`
+sets a file input's files (`DOM.setFileInputFiles`) from absolute paths the
+agent passes: at most 10 files and 10 MB, never a symbolic link, a path reached
+through a linked folder (the real path must be the path given, apart from
+macOS's `/tmp`, `/var` and `/etc`) or a file with other hard links, and never a
+credential-like name or folder, checked on the real path (`.ssh`, `.aws`,
+cloud and git CLI sign-ins, browser profiles and cookies, Claude, Codex and
+Workass data, private keys, tokens, `.env` and the like).
 `workass_browser_dialog` answers the open alert, confirm or beforeunload
 (`Page.handleJavaScriptDialog`); while one is open other page tools fail with
-its message. Electron answers `prompt()` itself with null. An agent's
+its message, and with none open it fails with `no_dialog`. Electron answers `prompt()` itself with null. An agent's
 navigation leaves a page whose beforeunload asks to stay. `workass_browser_evaluate`
 runs page JavaScript in the page's own world, where the page can see it (8 KiB
-source, 10 s, JSON result up to 16 KiB as `page_data`, redacted); it can change
+source; script that runs without pausing is stopped after 10 s and the call
+stops waiting for a promise after 12 s, though work it started can go on; JSON
+result up to 16 KiB as `page_data`, redacted); a frame with no script context
+yet fails with `unavailable` rather than running in its parent. It can change
 the page, so it is a mutation with an `operation_id`, never labelled
 read-only. `workass_browser_close` closes a tab
 one of the chat's pages opened, or resets the chat's own page to a fresh blank
-page in the same profile (a new tab id).
+page in the same profile (a new tab id), shown in place when the person was
+looking at it; a page's popup tabs close with it. It fails for a tab id that
+is not the chat's.
 
 Links (`target=_blank`) and `window.open` popups of a page an agent is driving
-(not shown to the person, or touched by an agent call in the last 15 s) open as
-background tabs of the same chat, listed with `opened_by_tab_id` (at most 8).
-Their downloads save into a folder of the chat's own under the profile's data
-directory (`browser-downloads/chat-<hash>/`) and are listed per tab; a download
-the person starts in a page they are looking at keeps Electron's save dialog.
+(not in front of the person — a popped-out page is in front — or acted on by an
+agent call in the last 15 s; reads do not count) open as background tabs of the
+same chat, listed with `opened_by_tab_id` (at most 8). Chromium creates the
+popup itself (`createWindow`) and its own webContents becomes the tab, so
+`window.opener`, `postMessage` and POST targets keep working (sign-in, payment
+and 3-D Secure windows). A page's popup tabs close with it and when it is
+reset. Their downloads save into a folder of the chat's own under the
+profile's data directory (`browser-downloads/chat-<hash>/`) and are listed per
+tab, at most 10 a minute, 200 files and 2 GB per chat folder (beyond that a
+download is cancelled and reported as `download_blocked`); a download the
+person starts in a page they are looking at keeps Electron's save dialog.
 
 `workass_browser_read` renders the page, a frame (`frame_ref`), an element
 (`element_ref`) or CSS selector matches as markdown: links and images with
