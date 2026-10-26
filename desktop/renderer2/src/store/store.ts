@@ -836,6 +836,17 @@ export class Store {
     // machines'). This window's order is then partial too, and its saves say
     // so: the daemon folds them into the whole order (session_page.go).
     this.localChatOrderPartial = mirror.chatOrderPartial === true;
+    if (this.localChatOrderPartial) {
+      // The daemon's order of what it sent is the order: a row a search or an
+      // open just brought is not a new chat, it has its place in it. Ids only
+      // this window holds (a chat it is creating, another machine's row the
+      // daemon has not stored) stay in front, as new rows do.
+      const incoming = normalizeChatOrder(mirror.chatOrder);
+      const known = new Set(incoming);
+      const extra = this.manualChatOrder.filter((id) => !known.has(id) && (ownerMachineId({ id }) || localIDs.has(id)));
+      this.manualChatOrder = normalizeChatOrder([...extra, ...incoming]);
+      return;
+    }
     // This daemon is authoritative for untagged membership. Tagged ids name
     // another machine and may be absent from the snapshot while that link is
     // reconnecting, so they remain anchored.

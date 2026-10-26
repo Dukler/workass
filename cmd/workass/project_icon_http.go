@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"image"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"workass/internal/httpserve"
 	"workass/internal/wire"
@@ -62,6 +65,63 @@ func projectIconWireReply(cwd, ifNoneMatch string, byURL bool) (any, error) {
 	return wire.EncodedResult(encoded), nil
 }
 
+// The sidebar draws a project icon 16 CSS px wide, so the URL serves a PNG or
+// JPEG icon at most projectIconRenditionWidth px wide (enough for a 4x screen),
+// area-averaged like a chat image rendition: a 512 px favicon was 11 KB for 16
+// px on screen. The rendition is derived from the icon its etag names, so it
+// stays immutable under that etag; a few are kept in memory.
+const (
+	projectIconRenditionWidth = 64
+	projectIconRenditionsKept = 64
+)
+
+var projectIconRenditions = struct {
+	sync.Mutex
+	byEtag map[string]projectIconRenditionEntry
+	order  []string
+}{byEtag: map[string]projectIconRenditionEntry{}}
+
+type projectIconRenditionEntry struct {
+	data        []byte
+	contentType string
+}
+
+func projectIconRendition(etag string, data []byte, mimeType string) ([]byte, string) {
+	format := ""
+	switch mimeType {
+	case "image/png":
+		format = "png"
+	case "image/jpeg":
+		format = "jpeg"
+	default:
+		return data, mimeType
+	}
+	projectIconRenditions.Lock()
+	if kept, ok := projectIconRenditions.byEtag[etag]; ok {
+		projectIconRenditions.Unlock()
+		return kept.data, kept.contentType
+	}
+	projectIconRenditions.Unlock()
+	out, contentType := data, mimeType
+	if config, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil && config.Width > projectIconRenditionWidth &&
+		config.Width*config.Height <= chatImageThumbMaxPixels {
+		if encoded, encodedType, ok := encodeChatImageRendition(data, format, projectIconRenditionWidth); ok && len(encoded) < len(data) {
+			out, contentType = encoded, encodedType
+		}
+	}
+	projectIconRenditions.Lock()
+	defer projectIconRenditions.Unlock()
+	if _, ok := projectIconRenditions.byEtag[etag]; !ok {
+		projectIconRenditions.byEtag[etag] = projectIconRenditionEntry{data: out, contentType: contentType}
+		projectIconRenditions.order = append(projectIconRenditions.order, etag)
+		for len(projectIconRenditions.order) > projectIconRenditionsKept {
+			delete(projectIconRenditions.byEtag, projectIconRenditions.order[0])
+			projectIconRenditions.order = projectIconRenditions.order[1:]
+		}
+	}
+	return out, contentType
+}
+
 // providersListReply answers providers:list. With {ifNoneMatch}, the etag a
 // client computes for the list it holds (wire.ReplayEtag, the same hash the
 // connect replay skips it by), the reply is a tiny {unchanged, etag} while the
@@ -94,6 +154,7 @@ func (projectIconHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project icon unavailable", http.StatusInternalServerError)
 		return
 	}
+	data, contentType := projectIconRendition(etag, data, icon.MIMEType)
 	quoted := `"` + etag + `"`
 	header.Set("ETag", quoted)
 	// The URL names one content; private, as a device's own.
@@ -104,7 +165,7 @@ func (projectIconHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	header.Set("Content-Type", icon.MIMEType)
+	header.Set("Content-Type", contentType)
 	header.Set("Content-Length", strconv.Itoa(len(data)))
 	if r.Method == http.MethodHead {
 		return

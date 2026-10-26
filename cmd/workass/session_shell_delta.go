@@ -21,11 +21,13 @@ import (
 //
 // The daemon keeps, for each of the last few shells it sent, the content hash
 // of every root key and of every field of every chat row. A client that names
-// one of them gets {etag, delta: {base, set, unset, patch, chats, ids}}: the
-// root keys whose value changed (set) or disappeared (unset), the changed
-// fields of rows it already holds (patch: [{id, set, unset}]), the rows it
-// does not hold yet (chats), and every listed row's id in order (ids, only
-// when that list changed). Rebuilt on the client from the shell it kept under
+// one of them gets {etag, delta: {base, set, unset, lists, patch, chats, ids}}:
+// the root keys whose value changed (set) or disappeared (unset), the chat
+// order as an edit of the kept one (lists: runs [start, count] of the kept
+// list and the ids it lacks), the changed fields of rows it already holds
+// (patch: [{id, set, unset}]), the rows it does not hold yet (chats), and
+// every listed row's id in order (ids, only when that list changed). Rebuilt
+// on the client (desktop/renderer2/src/store/session-page.ts) from the shell it kept under
 // base, that is exactly the shell named by etag. A client that names a shell
 // the daemon no longer remembers, or a delta that would not be smaller, gets
 // the whole shell as before; a client that does not ask for a delta never

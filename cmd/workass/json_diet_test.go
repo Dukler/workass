@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -116,6 +120,33 @@ func TestProjectIconByURLNamesTheIconAndServesItImmutably(t *testing.T) {
 	writeProjectIconFixture(t, svgRoot, "favicon.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
 	if svg := read(map[string]any{"chatId": "chat-1", "cwd": svgRoot, "ifNoneMatch": "", "byURL": true}); svg["byURL"] != nil || svg["base64"] == nil {
 		t.Fatalf("an SVG icon by URL = %#v, want its bytes", svg)
+	}
+}
+
+// A large raster icon is served at the width the sidebar can use.
+func TestProjectIconByURLServesASmallRendition(t *testing.T) {
+	root := t.TempDir()
+	source := image.NewRGBA(image.Rect(0, 0, 256, 256))
+	for y := 0; y < 256; y++ {
+		for x := 0; x < 256; x++ {
+			source.Set(x, y, color.RGBA{R: uint8(x * 7), G: uint8(y * 13), B: uint8((x ^ y) * 3), A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, source); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectIconFixture(t, root, "public/favicon.png", encoded.Bytes())
+	_, _, etag, err := projectIconReplyRaw(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, httpserve.ProjectIconPathPrefix+etag+"?cwd="+url.QueryEscape(root), nil)
+	recorder := httptest.NewRecorder()
+	projectIconHTTP{}.ServeHTTP(recorder, request)
+	config, err := png.DecodeConfig(bytes.NewReader(recorder.Body.Bytes()))
+	if recorder.Code != http.StatusOK || err != nil || config.Width != projectIconRenditionWidth || recorder.Body.Len() >= encoded.Len() {
+		t.Fatalf("rendition = %d, %v, %dx%d, %d bytes (source %d)", recorder.Code, err, config.Width, config.Height, recorder.Body.Len(), encoded.Len())
 	}
 }
 
