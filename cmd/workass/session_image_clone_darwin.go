@@ -19,41 +19,39 @@ import (
 const sessionImageClonesPossible = true
 
 // cloneRawSessionImage makes final an APFS clone of candidate when candidate
-// is, byte for byte, raw (the verified content of name). It reads nothing the
-// guard refuses, never crosses a volume, verifies the source before cloning
-// and the clone after, and only then renames the clone into place.
+// is, byte for byte, raw (the verified content of name).
+//
+// The candidate is opened once (openSessionImageSource) and everything after
+// that is about that descriptor: its kind, size and volume come from fstat,
+// its bytes are compared through it, and the clone is made from it
+// (fclonefileat). No second lookup by name can land on anything the walk did
+// not check: an intermediate directory swapped for a symlink, or the file for
+// a FIFO, after the check is never followed or opened.
 func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string, durability sessionImageDurability) (sessionImageCloneOutcome, error) {
-	guard := sessionImageSources()
-	resolved, err := guard.resolve(candidate, os.Lstat, os.Readlink)
+	source, outcome, err := openSessionImageSource(sessionImageSources(), candidate)
 	if err != nil {
-		if errors.Is(err, errSessionImageSourceProtected) {
-			return cloneProtected, err
-		}
+		return outcome, err
+	}
+	defer source.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(source.Fd()), &stat); err != nil {
 		return cloneUnavailable, err
 	}
-	info, err := os.Lstat(resolved)
-	if err != nil || !info.Mode().IsRegular() {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return cloneUnavailable, errors.New("clone source is not a regular file")
 	}
-	if info.Size() != int64(len(raw)) {
+	if stat.Size != int64(len(raw)) {
 		return cloneDifferent, errors.New("clone source has a different size")
 	}
-	dirInfo, err := os.Stat(dir)
-	if err != nil {
+	var dirStat unix.Stat_t
+	if err := unix.Stat(dir, &dirStat); err != nil {
 		return cloneUnavailable, err
 	}
-	sourceStat, ok := info.Sys().(*syscall.Stat_t)
-	dirStat, dirOK := dirInfo.Sys().(*syscall.Stat_t)
-	if !ok || !dirOK || sourceStat.Dev != dirStat.Dev {
+	if stat.Dev != dirStat.Dev {
 		return cloneOtherVolume, errors.New("clone source is on another volume")
 	}
 	// Before: the source must be exactly these bytes.
-	source, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return cloneUnavailable, err
-	}
 	same, err := sessionImageReaderEquals(io.LimitReader(source, int64(len(raw))+1), raw)
-	_ = source.Close()
 	if err != nil {
 		return cloneUnavailable, err
 	}
@@ -65,7 +63,7 @@ func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string,
 		return cloneFailed, err
 	}
 	tmpName := filepath.Join(dir, ".image-clone-"+hex.EncodeToString(suffix[:])+".tmp")
-	if err := unix.Clonefile(resolved, tmpName, unix.CLONE_NOFOLLOW|unix.CLONE_NOOWNERCOPY); err != nil {
+	if err := unix.Fclonefileat(int(source.Fd()), unix.AT_FDCWD, tmpName, unix.CLONE_NOOWNERCOPY); err != nil {
 		if errors.Is(err, unix.EXDEV) {
 			return cloneOtherVolume, err
 		}
@@ -90,6 +88,117 @@ func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string,
 		return cloneFailed, err
 	}
 	return cloneOK, nil
+}
+
+// openSessionImageSource opens candidate for reading without ever looking at
+// anything the guard refuses. It walks the path one component at a time from
+// a descriptor of the directory already reached: each step is classified as a
+// path first, then examined (fstatat without following) and opened relative
+// to that directory with O_NOFOLLOW, so a component that turns into a symlink
+// in between fails the open instead of redirecting it. A symlink is followed
+// only after its target is classified; the walk then restarts from the root.
+// The file itself is opened non-blocking (a FIFO swapped in never blocks the
+// caller, who holds the store's lock) and must be a regular file.
+func openSessionImageSource(guard sessionImageSourceGuard, candidate string) (*os.File, sessionImageCloneOutcome, error) {
+	refuse := func(err error) (*os.File, sessionImageCloneOutcome, error) {
+		if errors.Is(err, errSessionImageSourceProtected) {
+			return nil, cloneProtected, err
+		}
+		return nil, cloneUnavailable, err
+	}
+	if err := guard.check(candidate); err != nil {
+		return refuse(err)
+	}
+	remaining := splitSessionImagePath(filepath.Clean(candidate))
+	resolved := "/"
+	dirfd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return refuse(err)
+	}
+	closeDir := func() {
+		if dirfd >= 0 {
+			_ = unix.Close(dirfd)
+			dirfd = -1
+		}
+	}
+	defer closeDir()
+	for hops := 0; len(remaining) > 0; {
+		component := remaining[0]
+		remaining = remaining[1:]
+		if component == ".." {
+			// Unreachable: the path and every symlink target are cleaned
+			// first. The walk only ever descends from a checked directory.
+			return refuse(errors.New("clone source path climbs"))
+		}
+		next := filepath.Join(resolved, component)
+		if err := guard.check(next); err != nil {
+			return refuse(err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstatat(dirfd, component, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return refuse(err)
+		}
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFLNK:
+			if hops++; hops > 16 {
+				return refuse(errors.New("clone source has too many symlinks"))
+			}
+			buffer := make([]byte, 4096)
+			n, err := unix.Readlinkat(dirfd, component, buffer)
+			if err != nil {
+				return refuse(err)
+			}
+			target := string(buffer[:n])
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(resolved, target)
+			}
+			target = filepath.Clean(target)
+			if err := guard.check(target); err != nil {
+				return refuse(err)
+			}
+			remaining = append(splitSessionImagePath(target), remaining...)
+			resolved = "/"
+			closeDir()
+			if dirfd, err = openSessionImageDir("/"); err != nil {
+				return refuse(err)
+			}
+		case unix.S_IFDIR:
+			if len(remaining) == 0 {
+				return refuse(errors.New("clone source is a directory"))
+			}
+			fd, err := unix.Openat(dirfd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return refuse(err)
+			}
+			closeDir()
+			dirfd, resolved = fd, next
+		case unix.S_IFREG:
+			if len(remaining) != 0 {
+				return refuse(errors.New("clone source path runs through a file"))
+			}
+			fd, err := unix.Openat(dirfd, component, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return refuse(err)
+			}
+			var opened unix.Stat_t
+			if err := unix.Fstat(fd, &opened); err != nil || opened.Mode&unix.S_IFMT != unix.S_IFREG {
+				_ = unix.Close(fd)
+				return refuse(errors.New("clone source is not a regular file"))
+			}
+			if err := unix.SetNonblock(fd, false); err != nil {
+				_ = unix.Close(fd)
+				return refuse(err)
+			}
+			return os.NewFile(uintptr(fd), next), cloneOK, nil
+		default:
+			return refuse(errors.New("clone source is not a regular file"))
+		}
+	}
+	return refuse(errors.New("clone source path is empty"))
+}
+
+func openSessionImageDir(path string) (int, error) {
+	return unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
 }
 
 func syncSessionImageFile(path string, durability sessionImageDurability) error {

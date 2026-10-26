@@ -193,6 +193,9 @@ func (g sessionImageSourceGuard) check(path string) error {
 // resolve follows path to the file it names one component at a time,
 // classifying every intermediate path before it is looked at, so a symlink
 // into a protected location is refused before anything inside it is touched.
+// It is the path-level model of the walk; the clone itself walks by
+// descriptor (openSessionImageSource, darwin), where nothing checked can be
+// swapped before it is used. Tests drive this one over a virtual file system.
 func (g sessionImageSourceGuard) resolve(path string, lstat func(string) (os.FileInfo, error), readlink func(string) (string, error)) (string, error) {
 	if err := g.check(path); err != nil {
 		return "", err
