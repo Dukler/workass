@@ -122,7 +122,16 @@ resizing the human pane may then set its visible size.
 document-CSS `clip`. Its image is accompanied by `screenshot_id`, exact tab and
 generation identity, CSS capture rectangle, scroll origin, image dimensions,
 and pixel-to-CSS scale. Pass screenshot pixel `x`/`y` with that `screenshot_id`
-to click a visual target. Selector clicks remain supported; snapshot
+to click a visual target. In the webview host (the default on macOS and
+Windows; `WORKASS_BROWSER_HOST=view` or `{"browserHost":"view"}` in the data
+directory's `shell-settings.json` selects the older native-view host for one
+release) the page is the guest of a `<webview>` in the app window and captures
+come from the guest's own surface (`capture_surface:"webview"`): sharp at any
+shown size and while the app covers or hides it; a full page or a clip beyond
+the viewport is taken one viewport at a time, scrolling the page there and
+back. One capture runs at a time per page, bounded to 12 s. After an app
+reload the tab keeps its id and comes back at its URL in the same profile.
+Selector clicks remain supported; snapshot
 `element_ref` values must be paired with their `snapshot_id`. Refresh the
 snapshot after navigation or a stale-reference result. Ambiguous, disabled,
 covered, blocked, stale, and missing targets are not reported as successful
@@ -154,6 +163,61 @@ budgets interactive lines first, then page text, then the outline.
 document (`+` added, `~` changed, `-` removed, with unchanged refs still valid)
 and falls back to a full compact snapshot with `incremental.reason`
 (`document_changed`, `base_snapshot_unknown`, `too_many_changes`).
+
+`format:"outline"` is the page as nested lines built from Chromium's
+accessibility tree of every frame the tab owns, cross-site frames included and
+placed under their `<iframe>`: role, name, current value (passwords and other
+secret fields `[redacted]`), state (checked, expanded, selected, disabled,
+required, focused, level), link and frame URLs, and a short ref (`e12`) on
+everything an action can target. A frame that cannot be read says why in
+place; a canvas is reported as pixels only. Refs stay the same for an element
+while its document lives (a navigation that never commits, such as a download,
+keeps them) and work on their own as `element_ref` in click, type, scroll,
+select, hover, drag, upload and evaluate; a `snapshot_id` with them is
+optional and, when given, is the `outline_id`. Output is bounded (`max_bytes`
+2048–60000, default 20000) on whole lines, with `next_cursor` to continue the
+same outline (`cursor`); `since_snapshot_id` with an `outline_id` returns only
+the lines added (`+`), changed (`~`) and removed (`-`).
+
+Through the agent tools every action (open with a URL, navigate, history,
+click, type, key, scroll, select, hover, drag, upload, evaluate, batch) returns
+`page` (url, title, loading), `events` that happened during it (`navigated`,
+`url_changed`, `dialog_opened`/`dialog_closed`, `download_started`/
+`download_finished`, `tab_opened`, `popup_blocked`, `beforeunload_accepted`)
+and `changes`: a bounded outline diff, or after a navigation the new page's
+outline (first part, with `next_cursor`). The page is settled first: a
+navigation reaches a usable document, otherwise the top document is quiet for
+150 ms (at most 1.5 s). A batch reports once, for all of its actions. Each tab
+operation has a deadline (25 s; navigation and batch 28.5 s): one that does not
+finish is reported and the tab's queue moves on, and `workass_browser_list`
+shows `stuck_since_ms` for it.
+
+`workass_browser_select` chooses options of a native `<select>` by values,
+labels or indexes (input and change events); a custom dropdown is clicked
+instead. `workass_browser_hover` moves the pointer with trusted input.
+`workass_browser_drag` drags to an element or by `delta_x`/`delta_y` with a
+trusted press, moves and release; an HTML drag and drop goes through
+Chromium's drag events (`Input.setInterceptDrags`), never an OS drag session;
+both ends must be in one frame. `workass_browser_upload` sets a file input's
+files (`DOM.setFileInputFiles`) from absolute paths the agent passes: at most
+10 files and 10 MB, never symbolic or hard links, never credential-like names
+or folders (`.ssh`, `.aws`, private keys, tokens, `.env` and the like).
+`workass_browser_dialog` answers the open alert, confirm or beforeunload
+(`Page.handleJavaScriptDialog`); while one is open other page tools fail with
+its message. Electron answers `prompt()` itself with null. An agent's
+navigation leaves a page whose beforeunload asks to stay. `workass_browser_evaluate`
+runs page JavaScript (8 KiB source, 10 s, JSON result up to 16 KiB as
+`page_data`, redacted); it can change the page, so it is a mutation with an
+`operation_id`, never labelled read-only. `workass_browser_close` closes a tab
+one of the chat's pages opened, or resets the chat's own page to a fresh blank
+page in the same profile (a new tab id).
+
+Links (`target=_blank`) and `window.open` popups of a page an agent is driving
+(not shown to the person, or touched by an agent call in the last 15 s) open as
+background tabs of the same chat, listed with `opened_by_tab_id` (at most 8).
+Their downloads save into a folder of the chat's own under the profile's data
+directory (`browser-downloads/chat-<hash>/`) and are listed per tab; a download
+the person starts in a page they are looking at keeps Electron's save dialog.
 
 `workass_browser_read` renders the page, a frame (`frame_ref`), an element
 (`element_ref`) or CSS selector matches as markdown: links and images with
