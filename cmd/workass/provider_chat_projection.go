@@ -28,6 +28,14 @@ const (
 // daemon-global UI preferences only, and using it here would manufacture a
 // permanent session:get refresh loop for every real actor-owned chat.
 func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, settingsRevision, procHash string) (map[string]any, error) {
+	return r.StateDigestPage(catalogHashes, settingsRevision, procHash, nil)
+}
+
+// StateDigestPage is StateDigest restricted to the chats a session:get with
+// the same {page} lists (session_page.go): a renderer that read a paged shell
+// compares the digest only with the rows it holds. Without a page it is the
+// whole digest.
+func (r *providerChatRuntime) StateDigestPage(catalogHashes map[string]string, settingsRevision, procHash string, page *sessionPage) (map[string]any, error) {
 	if r == nil {
 		return nil, errors.New("provider chat digest is unavailable")
 	}
@@ -35,8 +43,21 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 	if err != nil {
 		return nil, err
 	}
+	var selection *sessionPageSelection
+	if page != nil {
+		activeID := ""
+		if r.sessions != nil {
+			activeID = strings.TrimSpace(fieldString(r.sessions.GlobalSnapshot(), "activeId"))
+		}
+		if selection, err = r.selectSessionPage(page, activeID); err != nil {
+			return nil, err
+		}
+	}
 	chats := make([]any, 0, len(ids))
 	for _, chatID := range ids {
+		if !selection.has(chatID) {
+			continue
+		}
 		actor, summary, err := r.residentOrClosed(chatID)
 		if err != nil {
 			return nil, err
@@ -74,10 +95,14 @@ func (r *providerChatRuntime) StateDigest(catalogHashes map[string]string, setti
 	if r.sessions != nil {
 		globalRevision = intValue(r.sessions.GlobalSnapshot()[globalPresentationRevisionField])
 	}
-	return map[string]any{
+	digest := map[string]any{
 		"chats": chats, globalPresentationRevisionField: globalRevision, "catalogHash": catalogHashes,
 		"settingsRevision": settingsRevision, "procHash": procHash,
-	}, nil
+	}
+	if selection != nil {
+		digest["deferredChats"] = selection.deferred
+	}
+	return digest, nil
 }
 
 // ProjectSession is the pure actor -> frozen Mirror-v1 boundary. The session
@@ -112,9 +137,20 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 	if shell {
 		tailTabID = ""
 	}
+	// A shell read with {page} lists only the chats a first screen can show
+	// (session_page.go); the rest are counted in deferredChats.
+	var selection *sessionPageSelection
+	if page := sessionPageRead(opts); shell && page != nil {
+		if selection, err = r.selectSessionPage(page, activeID); err != nil {
+			return nil, err
+		}
+	}
 	states := make([]chat.State, 0, len(known))
 	windows := make(map[string]actorLedgerWindow, len(known))
 	for _, chatID := range known {
+		if !selection.has(chatID) {
+			continue
+		}
 		snapshot, err := r.sessionSnapshot(chatID, tailTabID, sessionProjectionMessageTail, opts)
 		if err != nil {
 			return nil, err
@@ -184,9 +220,30 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 			projected["messages"] = page.messages
 		}
 		projected["historyComplete"] = len(page.messages) == intValue(projected["messageCount"])
+		if selection != nil {
+			// A paged shell leaves out a live session's command catalog (21 KB
+			// for one Claude chat): the renderer treats an absent catalog as
+			// unknown, keeps the one it has, and asks chat:commands-get for it
+			// when the chat opens.
+			if live, ok := projected["liveSession"].(map[string]any); ok {
+				delete(live, "commandCatalog")
+			}
+			// The legacy single-provider usage copy; renderer2 reads
+			// contextUsageByProvider, which carries the same numbers.
+			delete(projected, "usage")
+		}
 		projectedChats = append(projectedChats, projected)
 	}
 	root["chats"] = projectedChats
+	if selection != nil {
+		root["deferredChats"] = selection.deferredProjection()
+		listed := make(map[string]struct{}, len(states))
+		for _, state := range states {
+			listed[state.Presentation.TabID] = struct{}{}
+		}
+		root["chatOrder"] = partialChatOrder(root["chatOrder"], listed)
+		root["chatOrderPartial"] = true
+	}
 	// Every chat's rows are finished above; this covers the rest of the root.
 	if err := rehydrateExternalSessionImages(root, filepath.Dir(r.sessions.path)); err != nil {
 		return nil, err
@@ -326,6 +383,24 @@ type archiveReadOptions struct {
 	// 17 MB for a big chat) and once more through the bounded first-screen
 	// archive read the renderer opens a chat with. Archive reads ignore it.
 	sessionShell bool
+	// toolSummaries (provider_chat_history_lean.go) sends a settled turn's
+	// tool calls as what its folded Worked row and its call rows show: no
+	// input (which no row draws) and the head of the output, the rest read
+	// through toolDetail when a row opens. A chat's first screen asks for it.
+	toolSummaries bool
+	// page (session:get {shell, page}) lists only the chats a first screen
+	// can show; see session_page.go. Only session:get sets it: archive reads
+	// compare their options as cache keys.
+	page *sessionPage
+}
+
+func sessionPageRead(opts []archiveReadOptions) *sessionPage {
+	for _, opt := range opts {
+		if opt.page != nil {
+			return opt.page
+		}
+	}
+	return nil
 }
 
 func sessionShellRead(opts []archiveReadOptions) bool {
@@ -345,6 +420,7 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 		leanTools:          options["leanTools"] == true,
 		leanTitles:         options["leanTitles"] == true,
 		sessionShell:       options["shell"] == true,
+		toolSummaries:      options["toolSummaries"] == true,
 	}
 }
 
@@ -353,6 +429,9 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 func (o archiveReadOptions) beforeBudget(messages []any) {
 	if o.leanTools || o.leanTitles {
 		leanArchiveToolPayloads(messages, o.leanTools, o.leanTitles)
+	}
+	if o.toolSummaries {
+		leanArchiveToolSummaries(messages)
 	}
 }
 
@@ -744,7 +823,22 @@ func (r *providerChatRuntime) applyRendererSnapshot(snapshot any) (globalPresent
 	// Chat rows are deliberately ignored here. Each chat presentation and queue
 	// mutation, including deletion, has its own stable-id actor command;
 	// session:save persists daemon-global UI state only.
-	result, err := r.sessions.SaveActorGlobalSnapshot(detached)
+	var result globalPresentationSaveResult
+	var err error
+	if detached["chatOrderPartial"] == true {
+		// The renderer read a paged shell and holds only part of the order
+		// (session_page.go): fold it into the stored one.
+		delete(detached, "chatOrderPartial")
+		live, liveErr := r.liveTabIDs()
+		if liveErr != nil {
+			return globalPresentationSaveResult{}, liveErr
+		}
+		result, err = r.sessions.SaveActorGlobalSnapshotMergingOrder(detached, func(stored, incoming []any) []any {
+			return mergePartialChatOrder(stored, incoming, live)
+		})
+	} else {
+		result, err = r.sessions.SaveActorGlobalSnapshot(detached)
+	}
 	if err != nil {
 		return globalPresentationSaveResult{}, fmt.Errorf("persist daemon-global presentation state: %w", err)
 	}

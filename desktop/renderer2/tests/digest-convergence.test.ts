@@ -18,6 +18,16 @@ let vite: ViteDevServer;
 let StoreCtor: new () => any;
 let goJSON: (value: unknown) => string;
 const fixtureStores: any[] = [];
+// Paged reads (store/session-page.ts) add {page} to every local read; these
+// tests are about the rest of the arguments.
+function withoutPage(calls: unknown[][]): unknown[][] {
+  return calls.map((args) => args.map((arg) => {
+    if (!arg || typeof arg !== 'object' || Array.isArray(arg)) return arg;
+    const { page: _page, ...rest } = arg as Record<string, unknown>;
+    return rest;
+  }));
+}
+
 
 before(async () => {
   vite = await createServer({
@@ -205,7 +215,8 @@ test('an unchanged digest is answered by its etag, and an older daemon still get
   assert.equal(await store.readStateDigest(bridge), full);
   assert.equal(await store.readStateDigest(bridge), full, 'the unchanged reply reuses the last full digest');
   assert.equal(await store.readStateDigest(bridge), full);
-  assert.deepEqual(sent, [[], [{ ifNoneMatch: 'etag-1' }], [{ ifNoneMatch: 'etag-1' }]]);
+  assert.deepEqual(withoutPage(sent), [[{}], [{ ifNoneMatch: 'etag-1' }], [{ ifNoneMatch: 'etag-1' }]]);
+  assert.ok(sent.every((args) => (args[0] as any)?.page?.include?.includes('tab-1')), 'every local digest names the page it holds');
   await assert.rejects(store.readStateDigest({ stateDigest: async () => ({ unchanged: true, etag: 'other' }) }));
 
   const plain = digestOf([digestChat(local)]);
@@ -213,6 +224,6 @@ test('an unchanged digest is answered by its etag, and an older daemon still get
   const older = subject([local], { stateDigest: async (...args: unknown[]) => { old.push(args); return plain; } });
   await older.readStateDigest((globalThis as any).window.api);
   await older.readStateDigest((globalThis as any).window.api);
-  assert.deepEqual(old, [[], []], 'a digest without an etag is never read conditionally');
+  assert.deepEqual(withoutPage(old), [[{}], [{}]], 'a digest without an etag is never read conditionally');
 });
 });

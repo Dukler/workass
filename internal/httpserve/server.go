@@ -39,6 +39,11 @@ const mocksPathPrefix = "/workass/mocks"
 // socket's archive image read stays for older renderers.
 const ChatImagePathPrefix = "/workass/chat-image/"
 
+// ProjectIconPathPrefix serves a project's icon by the hash project:icon
+// {byURL} named: GET /workass/project-icon/<etag>?cwd=<path>&k=<image key>.
+// Additive; the socket's base64 read stays for older renderers.
+const ProjectIconPathPrefix = "/workass/project-icon/"
+
 // AllowFunc decides whether a non-local client IP may access HTTP/WS.
 type AllowFunc func(ip string) bool
 
@@ -56,12 +61,15 @@ type Server struct {
 	// ChatImages answers an authorized chat-image request: the image key has
 	// already been checked here; it checks that the chat owns the image.
 	ChatImages http.Handler
-	Metrics    MetricsFunc
-	Allow      AllowFunc
-	Hub        *wire.Hub
-	Version    string
-	Name       string
-	Identity   IdentityFunc
+	// ProjectIcons answers an authorized project-icon request; the image key
+	// has already been checked here.
+	ProjectIcons http.Handler
+	Metrics      MetricsFunc
+	Allow        AllowFunc
+	Hub          *wire.Hub
+	Version      string
+	Name         string
+	Identity     IdentityFunc
 }
 
 // New creates an HTTP renderer server. With a nil Allow hook, clients may load
@@ -108,6 +116,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL != nil && strings.HasPrefix(r.URL.Path, ChatImagePathPrefix) {
 		s.serveChatImage(w, r)
+		return
+	}
+	if r.URL != nil && strings.HasPrefix(r.URL.Path, ProjectIconPathPrefix) {
+		s.serveKeyedImage(w, r, s.ProjectIcons)
 		return
 	}
 
@@ -183,12 +195,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // approved, from loopback as from the LAN, because any local page can point an
 // <img> at localhost. Ownership of the image is the handler's check.
 func (s *Server) serveChatImage(w http.ResponseWriter, r *http.Request) {
+	s.serveKeyedImage(w, r, s.ChatImages)
+}
+
+// serveKeyedImage is serveChatImage's authentication in front of any image
+// handler that takes the same read-only image key (chat images, project icons).
+func (s *Server) serveKeyedImage(w http.ResponseWriter, r *http.Request, images http.Handler) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.ChatImages == nil || s.Hub == nil {
+	if images == nil || s.Hub == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -197,7 +215,7 @@ func (s *Server) serveChatImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat image access requires an approved device", http.StatusForbidden)
 		return
 	}
-	s.ChatImages.ServeHTTP(w, r)
+	images.ServeHTTP(w, r)
 }
 
 func (s *Server) serveMocks(w http.ResponseWriter, r *http.Request, requestPath string) {

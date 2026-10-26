@@ -6,6 +6,7 @@ import type { ModelControlMemory } from '../model-controls';
 import type { ModelScores } from '../model-scores';
 import type { WorkassRuntimeProfile } from '../model-catalog';
 import type { ContextUsageByProvider } from '../context-usage';
+import type { DeferredChats } from './session-page';
 
 export type MsgStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 export type SteerState = 'sending' | 'accepted' | 'applied' | 'uncertain';
@@ -361,6 +362,12 @@ export type SettingsSection = 'agentes' | 'modelos' | 'maquinas' | 'dispositivos
 
 export interface AppState {
   chats: Chat[];
+  // This daemon's chats a paged session shell did not send (its filed-away
+  // archive), counted by folder; null when every chat was sent (an older
+  // daemon, or nothing filed away). Search and opening a chat read them.
+  deferredChats: DeferredChats | null;
+  // True while the daemon is still searching those for the sidebar's query.
+  sidebarSearchPending?: boolean;
   workspaces: Workspace[];
   // Workspace folder paths the user has collapsed in the sidebar. Persisted so a
   // reload keeps them folded. Paths (normalized); '' is the unassigned "Chats".
@@ -407,7 +414,7 @@ export interface AppState {
   // Drives the "sin conexión" banner and blocks sends while offline. Transient —
   // never persisted; a fresh load starts optimistically 'connected'.
   connection: ConnStatus;
-  meta?: { rootDir?: string; workspaceDir?: string; profile?: WorkassRuntimeProfile; daemon?: boolean; sessionSaveMode?: 'lean-payload-v2'; workspaceRebindMode?: 'transactional-v1' };
+  meta?: { rootDir?: string; workspaceDir?: string; profile?: WorkassRuntimeProfile; daemon?: boolean; sessionSaveMode?: 'lean-payload-v2'; workspaceRebindMode?: 'transactional-v1'; chatOrderMode?: 'partial-v1' };
   hasBrowserChannels: boolean;
   processes: ProcessSummary[];
   hasProcChannels: boolean;
@@ -445,6 +452,9 @@ export interface AppState {
   // Dispositivos (real, feature-detected against the daemon LAN channels).
   hasDeviceChannels: boolean;
   devices: LanDevice[];
+  // The device list is read when Settings opens; until its first reply the
+  // pane shows no rows rather than "no devices".
+  devicesLoaded?: boolean;
   accessRequests: AccessRequest[];
   // Daemon config snapshot (config:get) — powers Agentes + Engines honestly.
   daemonConfig?: DaemonConfig;

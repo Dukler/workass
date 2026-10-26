@@ -39,7 +39,7 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 	wantSlices := map[string][][]byte{}
 	for _, chatID := range ids {
 		wantSlices[chatID] = rendererSlice(t, eager, "tab-"+chatID, chats[chatID])
-		raw, found, err := eager.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmOptions)
+		raw, found, err := eager.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 		if err != nil || !found {
 			t.Fatalf("%s: %v %v", chatID, found, err)
 		}
@@ -62,11 +62,11 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 	}
 	for _, chatID := range ids {
 		summary, _ := lazy.closedSummary(chatID)
-		cached, ok := lazy.cachedFirstScreen(summary, firstScreenWarmLimit, firstScreenWarmOptions)
+		cached, ok := lazy.cachedFirstScreen(summary, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 		if ok != (chatID == "screen-a" || chatID == "screen-b" || chatID == "screen-big") {
 			t.Fatalf("%s kept=%v", chatID, ok)
 		}
-		raw, found, err := lazy.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmOptions)
+		raw, found, err := lazy.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 		if err != nil || !found || !bytes.Equal(raw, want[chatID]) {
 			t.Fatalf("%s: first screen differs from an open actor's (%v %v)", chatID, found, err)
 		}
@@ -77,7 +77,7 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 		for index := range raw {
 			raw[index] = 'x'
 		}
-		again, _, _ := lazy.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmOptions)
+		again, _, _ := lazy.ProjectLastExchangeByTabRaw("tab-"+chatID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 		if !bytes.Equal(again, want[chatID]) {
 			t.Fatalf("%s: a framed reply changed the kept first screen", chatID)
 		}
@@ -142,7 +142,7 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 	if err := actor.engine.Apply(chat.SavePresentation{OperationID: "screen-rename", Digest: "screen-rename", Presentation: next}); err != nil {
 		t.Fatal(err)
 	}
-	if raw, _, err := lazy.ProjectLastExchangeByTabRaw("tab-screen-a", firstScreenWarmLimit, firstScreenWarmOptions); err != nil || !bytes.Equal(raw, want["screen-a"]) {
+	if raw, _, err := lazy.ProjectLastExchangeByTabRaw("tab-screen-a", firstScreenWarmLimit, firstScreenWarmSummaryOptions); err != nil || !bytes.Equal(raw, want["screen-a"]) {
 		t.Fatalf("open chat first screen: %v", err)
 	}
 	lazy.mu.Lock()
@@ -162,7 +162,7 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 // still lacks. It returns every reply.
 func rendererSlice(t *testing.T, runtime *providerChatRuntime, tabID string, count int) [][]byte {
 	t.Helper()
-	first, found, err := runtime.ProjectLastExchangeByTabRaw(tabID, firstScreenWarmLimit, firstScreenWarmOptions)
+	first, found, err := runtime.ProjectLastExchangeByTabRaw(tabID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
 	if err != nil || !found {
 		t.Fatalf("%s first screen: %v %v", tabID, found, err)
 	}

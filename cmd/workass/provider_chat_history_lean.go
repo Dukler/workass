@@ -65,6 +65,65 @@ func leanArchiveToolPayloads(messages []any, payloads, titles bool) {
 	}
 }
 
+// toolSummaryOutputHead is how much of a settled call's output a summary
+// keeps: the row is clickable while it has any, and opening it reads the rest.
+const toolSummaryOutputHead = 160
+
+// leanArchiveToolSummaries is the {toolSummaries} read (a chat's first
+// screen). A settled turn's calls are folded into its Worked row, and a call
+// row, once that is open, draws its action, its command or path and, when
+// opened itself, its output: never its input. So a summary drops every input
+// and keeps only the head of each output; both stay readable through the
+// toolDetail read, which a row already uses when it opens (2026-10-25: tool
+// payloads were 40 of the 56 KB of a big chat's first screen). The calls that
+// show something outside the fold keep everything: a page the agent published
+// is found in its output, and a subagent header prints its summary.
+func leanArchiveToolSummaries(messages []any) {
+	for _, raw := range messages {
+		message := mapFromAnyMain(raw)
+		switch fieldString(message, "status") {
+		case "running", "pending":
+			continue
+		}
+		for _, rawEvent := range anySlice(message["events"]) {
+			event := mapFromAnyMain(rawEvent)
+			if fieldString(event, "kind") != "tool" || event["subagentHeader"] == true {
+				continue
+			}
+			if strings.Contains(fieldString(event, "title"), htmlRenderToolName) || strings.Contains(fieldString(event, "command"), htmlRenderToolName) ||
+				strings.Contains(fieldString(event, "input"), htmlRenderToolName) {
+				continue
+			}
+			if value, ok := event["input"].(string); ok && value != "" {
+				deferToolSummaryField(event, "input", value, 0)
+			}
+			if value, ok := event["output"].(string); ok && len(value) > toolSummaryOutputHead {
+				deferToolSummaryField(event, "output", value, toolSummaryOutputHead)
+			}
+		}
+	}
+}
+
+func deferToolSummaryField(event map[string]any, field, value string, head int) {
+	if event[field+"Deferred"] != true {
+		event[field+"Bytes"] = len(value)
+	}
+	event[field] = toolPayloadHead(value, head)
+	event[field+"Deferred"] = true
+}
+
+// toolPayloadHead is value's first limit bytes, never splitting a rune.
+func toolPayloadHead(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	head := value[:limit]
+	for !utf8.ValidString(head) && len(head) > 0 {
+		head = head[:len(head)-1]
+	}
+	return head
+}
+
 // leanToolHead keeps whole lines when it can, and never splits a rune.
 func leanToolHead(value string) string {
 	head := value[:leanToolPayloadHead]
