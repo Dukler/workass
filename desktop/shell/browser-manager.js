@@ -2884,11 +2884,14 @@ class BrowserManager {
       title,
       viewport: { ...entry.viewport },
       preload: this.pipPreload,
-      sendInput: (method, params) => this.executeCDP({ tabId: this.tabIdOf(entry) }, method, params),
+      sendInput: (method, params) => this.pipInput(entry, method, params),
       onClosed: () => {
         if (entry.pip !== pip) return;
         entry.pip = null;
         entry.pipWindow = null;
+        // A press held when the window went is let go, and drags are no
+        // longer intercepted.
+        if (entry.pipDrag) { void this.endPipDrag(entry); void this.releaseStuckInput(entry); }
         if (this.isCurrentEntry(entry)) { this.publish(entry); this.publishHosts(); }
       },
     });
@@ -2898,6 +2901,66 @@ class BrowserManager {
     if (this.activeId === entry.chatId) this.activeId = null;
     this.publishHosts();
     return this.publish(entry);
+  }
+
+  // The person's input from the pop-out window. A press-and-move on a link
+  // or an image (draggable by default) starts an HTML drag in the page, which
+  // protocol input would turn into an OS drag session that no mouse-up in
+  // the window ends: while a press is held drags are intercepted, and an
+  // intercepted drag is carried through Chromium's drag events to the
+  // release (as workass_browser_drag does).
+  async pipInput(entry, method, params = {}) {
+    const target = { tabId: this.tabIdOf(entry) };
+    const type = method === 'Input.dispatchMouseEvent' ? String(params.type || '') : '';
+    if (!type) return this.executeCDP(target, method, params);
+    const drag = entry.pipDrag;
+    if (type === 'mousePressed') {
+      if (drag) this.endPipDrag(entry);
+      const wc = this.liveContents(entry);
+      const state = { data: null, entered: false, wc, listener: null };
+      state.listener = (_event, name, eventParams, sessionId) => {
+        if (name === 'Input.dragIntercepted' && !sessionId && eventParams && eventParams.data) state.data = eventParams.data;
+      };
+      if (wc && wc.debugger && typeof wc.debugger.on === 'function') wc.debugger.on('message', state.listener);
+      entry.pipDrag = state;
+      try { await this.executeCDP(target, 'Input.setInterceptDrags', { enabled: true }); } catch { /* pointer input still works */ }
+      return this.executeCDP(target, method, params);
+    }
+    if (!drag || !drag.data) {
+      if (type !== 'mouseReleased' || !drag) return this.executeCDP(target, method, params);
+      try { return await this.executeCDP(target, method, params); } finally { await this.endPipDrag(entry); }
+    }
+    const at = { x: params.x, y: params.y, data: drag.data, modifiers: Number(params.modifiers) || 0 };
+    const enter = async () => {
+      if (drag.entered) return;
+      drag.entered = true;
+      await this.executeCDP(target, 'Input.dispatchDragEvent', { type: 'dragEnter', ...at });
+    };
+    if (type === 'mouseMoved') {
+      await enter();
+      return this.executeCDP(target, 'Input.dispatchDragEvent', { type: 'dragOver', ...at });
+    }
+    if (type === 'mouseReleased') {
+      try {
+        if (!drag.entered) {
+          await enter();
+          await this.executeCDP(target, 'Input.dispatchDragEvent', { type: 'dragOver', ...at });
+        }
+        await this.executeCDP(target, 'Input.dispatchDragEvent', { type: 'drop', ...at });
+      } catch {
+        try { await this.executeCDP(target, 'Input.cancelDragging', {}); } catch { /* the page went away */ }
+      }
+      try { return await this.executeCDP(target, method, params); } finally { await this.endPipDrag(entry); }
+    }
+    return this.executeCDP(target, method, params);
+  }
+
+  async endPipDrag(entry) {
+    const drag = entry.pipDrag;
+    if (!drag) return;
+    entry.pipDrag = null;
+    if (drag.wc && drag.wc.debugger && typeof drag.wc.debugger.removeListener === 'function') drag.wc.debugger.removeListener('message', drag.listener);
+    try { await this.executeCDP({ tabId: this.tabIdOf(entry) }, 'Input.setInterceptDrags', { enabled: false }); } catch { /* the page went away */ }
   }
 
   popIn(chatId) {
