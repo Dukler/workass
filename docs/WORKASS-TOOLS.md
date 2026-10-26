@@ -126,7 +126,10 @@ to click a visual target. In the webview host (the default on macOS; Windows
 keeps the native-view host by default until the webview host has run on real
 Windows hardware; `WORKASS_BROWSER_HOST=webview|view` or
 `{"browserHost":"webview"|"view"}` in the data directory's
-`shell-settings.json` selects either) the page is the guest of a `<webview>` in the app window and captures
+`shell-settings.json` selects either; the shell starts on the native-view host
+and switches to the webview host only when the app renderer asks for it, so an
+older renderer keeps working, and pages made before that stay native views
+until they are replaced) the page is the guest of a `<webview>` in the app window and captures
 come from the guest's own surface (`capture_surface:"webview"`): sharp at any
 shown size and while the app covers or hides it; a full page or a clip beyond
 the viewport is taken one viewport at a time, scrolling the page there and
