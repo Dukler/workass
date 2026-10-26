@@ -167,16 +167,31 @@ export function SpawnedWorkLive({ chat }: { chat: Chat }) {
   );
 }
 
-// The work one agent started, under that agent's row: running items are full
-// live rows (output, stop), finished ones the fold's flat lines. Rendered as a
-// sibling of the agent's <details>, so it shows without opening the agent.
+// The work one agent started, under that agent's row. RUNNING items are full
+// live rows (output, stop) rendered as a sibling of the agent's <details>, so
+// they show without opening the agent. Finished ones go INSIDE the fold
+// (SpawnedWorkDoneKids): Claude Code reports every command an agent runs as a
+// task, so a long agent left hundreds of flat lines outside its row that no
+// click could collapse (user, 2026-10-26).
 export function SpawnedWorkKids({ chat, items, nowMs }: { chat: Chat; items: readonly SpawnedWorkItem[] | undefined; nowMs: number }) {
-  if (!items?.length) return null;
-  const running = items.filter((item) => item.status === 'running');
-  const finished = items.filter((item) => item.status !== 'running');
+  const running = items?.filter((item) => item.status === 'running') ?? [];
+  if (running.length === 0) return null;
   return (
     <div className="r-sa-kids">
       {running.map((item) => <RunningRow key={item.id} chat={chat} item={item} nowMs={nowMs} />)}
+    </div>
+  );
+}
+
+// The agent's finished work, inside its fold. A task whose launching call is
+// already one of the agent's listed calls (a plain command) is that call:
+// drawn once, as the call.
+export function SpawnedWorkDoneKids({ items, nowMs, calls }: { items: readonly SpawnedWorkItem[] | undefined; nowMs: number; calls?: readonly ToolEvent[] }) {
+  const listed = new Set((calls ?? []).map((call) => call.id).filter(Boolean));
+  const finished = items?.filter((item) => item.status !== 'running' && !(item.toolCallId && listed.has(item.toolCallId))) ?? [];
+  if (finished.length === 0) return null;
+  return (
+    <div className="r-sa-kids">
       {finished.map((item) => (
         <div key={item.id} className="r-dline" data-status={item.status}>
           <span className="r-dt" title={item.label || item.taskId}>{item.label || item.taskId}</span>
@@ -219,8 +234,12 @@ export function SpawnedWorkCard({ chat }: { chat: Chat }) {
       </summary>
       <div className="r-meta-b">
         {finished.map((item) => isAgentWork(item)
-          ? <SubagentRow key={item.id} chat={chat} n={nodeForSpawnedWork(item, historicalNodes.get(subagentWorkId(item)))} nowMs={nowMs}
-              kids={<SpawnedWorkKids chat={chat} items={byParent.get(item.taskId)} nowMs={nowMs} />} />
+          ? (() => {
+            const n = nodeForSpawnedWork(item, historicalNodes.get(subagentWorkId(item)));
+            return <SubagentRow key={item.id} chat={chat} n={n} nowMs={nowMs}
+              kids={<SpawnedWorkKids chat={chat} items={byParent.get(item.taskId)} nowMs={nowMs} />}
+              doneKids={<SpawnedWorkDoneKids items={byParent.get(item.taskId)} nowMs={nowMs} calls={n.calls} />} />;
+          })()
           : (
           <div key={item.id} className="r-dline" data-status={item.status}>
             <span className="r-dt" title={item.label || item.taskId}>{item.label || item.taskId}</span>

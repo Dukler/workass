@@ -4,7 +4,7 @@ import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { toolState, fmtDur, extractSubagents, nodeState } from './messages';
 import { currentTurnMessages, nestSpawnedWork, reconcileSubagentWork, type SubagentNode } from '../subagent-layout';
 import { SubagentRow } from './SubagentRow';
-import { SpawnedWorkKids, SpawnedWorkLive } from './SpawnedWorkCard';
+import { SpawnedWorkDoneKids, SpawnedWorkKids, SpawnedWorkLive } from './SpawnedWorkCard';
 import { renderInline } from '../markdown/inline';
 import { IcActivity, ActionGlyph } from '../icons';
 import { toolPresentation } from '../tool-names';
@@ -128,6 +128,7 @@ export function TareasCard() {
   const { nodes } = reconcileSubagentWork(grouped.nodes, work);
   const { byParent } = nestSpawnedWork(work);
   const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
+  const doneKidsOf = (n: SubagentNode) => n.work ? <SpawnedWorkDoneKids items={byParent.get(n.work.taskId)} nowMs={nowMs} calls={n.calls} /> : null;
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
   const doneNodes = nodes.filter((n) => nodeState(n) !== 'running');
   const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');
@@ -226,8 +227,8 @@ export function TareasCard() {
           first, then settled; each still opens to its own calls. */}
       {(runningNodes.length > 0 || doneNodes.length > 0) && (
         <div className="r-subs">
-          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} />)}
-          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} />)}
+          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
+          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
         </div>
       )}
       {/* Running background processes live HERE — inline with the live call and

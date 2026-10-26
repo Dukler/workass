@@ -91,3 +91,55 @@ test('spawned-work rail CSS clamps titles and bounds output tails', () => {
   // No lingering styles from the removed nested-fold design.
   assert.doesNotMatch(css, /bgwdone|\.bgcard/);
 });
+
+// Claude Code reports every command an agent runs as a task under that agent.
+// A long agent left hundreds of finished lines OUTSIDE its row, which no click
+// could fold (user, 2026-10-26): only running work hangs outside the row; the
+// finished work folds with it, and a task that is one of the agent's own listed
+// calls is drawn once, as the call.
+test('an agent row folds its finished work; only running work hangs outside', async (t) => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  let store: { clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
+  const cards = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
+    SpawnedWorkKids: React.ComponentType<{ chat: unknown; items: unknown[]; nowMs: number }>;
+    SpawnedWorkDoneKids: React.ComponentType<{ items: unknown[]; nowMs: number; calls?: unknown[] }>;
+  };
+  const rows = await server.ssrLoadModule('/src/components/SubagentRow.tsx') as { SubagentRow: React.ComponentType<Record<string, unknown>> };
+  store = (await server.ssrLoadModule('/src/store/store.ts') as { store: { clearToastTimers(): void } }).store;
+  const chat = { id: 'tab-1', chatId: 'chat-1', messages: [] };
+  const now = Date.now();
+  const kid = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, taskId: id, tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'bash', status, parentTaskId: 'agent-1',
+    label: `label ${id}`, startedAt: new Date(now - 9000).toISOString(), updatedAt: new Date(now).toISOString(),
+    ...(status === 'running' ? {} : { finishedAt: new Date(now - 1000).toISOString() }), ...extra,
+  });
+  const items = [
+    kid('shell-live', 'running', { outputFile: '/tmp/shell-live.output', pid: 77 }),
+    kid('cmd-done', 'exited', { toolCallId: 'call-cmd' }),
+    kid('shell-done', 'exited', { toolCallId: 'call-shell', outputFile: '/tmp/shell-done.output' }),
+  ];
+  const outside = renderToStaticMarkup(React.createElement(cards.SpawnedWorkKids, { chat, items, nowMs: now }));
+  assert.match(outside, /label shell-live/);
+  assert.doesNotMatch(outside, /label cmd-done|label shell-done/);
+
+  const calls = [{ key: 'k1', at: now, kind: 'tool', id: 'call-cmd', toolKind: 'execute', title: 'Bash', status: 'completed', command: 'ls', terminalId: null, input: null, output: null, location: null, subagentId: 'agent-call' }];
+  const inside = renderToStaticMarkup(React.createElement(cards.SpawnedWorkDoneKids, { items, nowMs: now, calls }));
+  assert.match(inside, /label shell-done/);
+  assert.doesNotMatch(inside, /label cmd-done/); // it is the listed call
+  assert.doesNotMatch(inside, /label shell-live/);
+  assert.match(renderToStaticMarkup(React.createElement(cards.SpawnedWorkDoneKids, { items, nowMs: now })), /label cmd-done/);
+
+  const node = { id: 'agent-call', label: 'Fix floating browser movement', provider: 'claude', calls: [], header: null,
+    work: { ...kid('agent-1', 'exited'), kind: 'agent', parentTaskId: undefined } };
+  const row = renderToStaticMarkup(React.createElement(rows.SubagentRow, {
+    n: node, nowMs: now, chat,
+    kids: React.createElement(cards.SpawnedWorkKids, { chat, items, nowMs: now }),
+    doneKids: React.createElement(cards.SpawnedWorkDoneKids, { items, nowMs: now }),
+  }));
+  const close = row.indexOf('</details>');
+  assert.ok(row.indexOf('label shell-done') > 0 && row.indexOf('label shell-done') < close, 'finished work folds with the row');
+  assert.ok(row.indexOf('label cmd-done') < close, 'finished commands fold with the row');
+  assert.ok(row.indexOf('label shell-live') > close, 'running work stays visible outside the fold');
+});

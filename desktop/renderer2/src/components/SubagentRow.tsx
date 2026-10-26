@@ -10,9 +10,10 @@ import { ActionGlyph, IcFork, IcStopSquare, ModelIcon } from '../icons';
 // One subagent as a compact disclosure: model icon + label + elapsed on top, then
 // model id + a human live activity. Long labels and model ids ellipsize; the
 // elapsed is never pushed off. Exact calls stay one tap away in the body.
-// Work the agent started itself (`kids`) sits right under it, outside the
-// disclosure, so it is visible without opening the row.
-export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: number; chat?: Chat | null; kids?: ReactNode }) {
+// Work the agent started itself that is still running (`kids`) sits right under
+// it, outside the disclosure, so it is visible without opening the row; its
+// finished work (`doneKids`) folds away with the row's calls.
+export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNode; nowMs: number; chat?: Chat | null; kids?: ReactNode; doneKids?: ReactNode }) {
   const st = nodeState(n);
   const running = st === 'running';
   const failed = st === 'failed';
@@ -86,6 +87,7 @@ export function SubagentRow({ n, nowMs, chat, kids }: { n: SubagentNode; nowMs: 
           {(n.header?.output || n.work?.summary) && <pre className="bgr-tail">{n.header?.output || n.work?.summary}</pre>}
         </div>
       )}
+      {doneKids}
     </details>
     {kids}
   </>);
