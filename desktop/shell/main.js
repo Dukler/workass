@@ -265,6 +265,7 @@ function createWindow(url, browserReporter, isController) {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:hosts', hosts);
     },
     pipPreload: path.join(__dirname, 'browser-pip-preload.js'),
+    downloadsDir: path.join(RUNTIME.dataRoot, 'browser-downloads'),
     chromeVersion: process.versions.chrome,
     requestOpen: (chatId) => {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:open-request', chatId || null);

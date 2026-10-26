@@ -639,7 +639,8 @@ async function browserSnapshotForParams(manager, entry, params = {}) {
     throw new Error('since_snapshot_id must be a non-empty string');
   }
   const format = params.format == null ? (hasSince ? 'compact' : 'json') : String(params.format);
-  if (format !== 'json' && format !== 'compact') throw new Error('format must be json or compact');
+  if (format === 'outline') return manager.browserOutline(entry, params);
+  if (format !== 'json' && format !== 'compact') throw new Error('format must be outline, json or compact');
   if (format === 'json') {
     if (hasSince) throw new Error('since_snapshot_id requires format compact');
     return manager.browserSnapshotSettled(entry);
