@@ -55,12 +55,17 @@ export interface WorkassBrowserState {
 
 export interface WorkassBrowserApi {
   supported: boolean;
-  activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; url?: string }): Promise<WorkassBrowserState>;
-  resize(payload: { chatId: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number } }): Promise<boolean>;
+  // radius: the page's corner radius where it is shown (the floating frame's);
+  // a newer shell also clips the page to it.
+  activate(payload: { chatId: string; conversationId?: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; url?: string; radius?: number }): Promise<WorkassBrowserState>;
+  resize(payload: { chatId: string; bounds: WorkassBrowserBounds; viewport?: { width: number; height: number }; radius?: number }): Promise<boolean>;
   hide(chatId: string): Promise<boolean>;
   // Optional: an older shell has no separate window.
   popOut?(chatId: string): Promise<WorkassBrowserState>;
   popIn?(chatId: string): Promise<boolean>;
+  // Optional, newer shells: a drag or resize places the page synchronously,
+  // once per animation frame, without the awaited round trip of resize.
+  place?(chatId: string, bounds: WorkassBrowserBounds): void;
   close(chatId: string): Promise<boolean>;
   command(chatId: string, command: 'navigate' | 'back' | 'forward' | 'reload' | 'stop', value?: string): Promise<WorkassBrowserState>;
   setViewport(chatId: string, width: number, height: number): Promise<WorkassBrowserState>;
