@@ -28,6 +28,19 @@ test('the computed geometry uses the gallery CSS it stands in for', () => {
   assert.match(rule('.tool-images-pad'), /grid-column: 1 \/ -1;/);
 });
 
+test('a frame is its image\'s size, never a full-width box, and never shows a border', () => {
+  // The frame hugs its image inside the grid track (or a gallery cell), so a
+  // lone screenshot never stretches into a bordered, letterboxed box.
+  assert.match(rule('.ri-tool'), /width: min\(100%, calc\(var\(--iw\) \* 1px \+ 2px\), calc\(340px \* var\(--iw\) \/ var\(--ih\) \+ 2px\)\);/);
+  assert.match(rule('.ri-tool'), /justify-self: start;/);
+  assert.match(rule('.assistant-images .assistant-inline-image'), /width: min\(100%, calc\(var\(--iw\) \* 1px \+ 2px\), calc\(620px \* var\(--iw\) \/ var\(--ih\) \+ 2px\)\);/);
+  // The border keeps its width (the geometry counts it) but is never drawn.
+  assert.match(rule('.ri'), /border: 1px solid transparent;/);
+  // A small image keeps its natural height: a 200x100 screenshot in a 700px
+  // gallery is 100px tall, not stretched to the track's width.
+  assert.deepEqual(toolImageGridLayout(700, [[200, 100]]).rowHeights, [100 + TOOL_IMAGE_FRAME_BORDER]);
+});
+
 test('rows are as tall as their tallest frame, capped, with the grid gap between', () => {
   // 700px: four 150px tracks fit (4 * 150 + 3 * 7 = 621).
   const wide: [number, number] = [1920, 1080];
