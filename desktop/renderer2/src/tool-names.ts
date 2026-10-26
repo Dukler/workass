@@ -155,6 +155,7 @@ const WORKASS_MCP_LABEL: Record<string, [string, string]> = {
   workass_browser_navigate: ['Navegar en el navegador', 'web'],
   workass_browser_screenshot: ['Capturar el navegador', 'web'],
   workass_browser_snapshot: ['Leer la página abierta', 'web'],
+  workass_browser_read: ['Leer el texto de la página', 'read'],
   workass_browser_click: ['Hacer clic en la página', 'web'],
   workass_browser_type: ['Escribir en la página', 'web'],
   workass_browser_key: ['Pulsar una tecla en la página', 'web'],
