@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -433,8 +433,11 @@ func (m *imageStoreMaintenance) saveMarker(marker imageStoreMarker) error {
 // imageStoreReceipts is the append-only receipt journal. A torn last line
 // (a crash mid-append) is ignored when it is read back.
 type imageStoreReceipts struct {
-	file     *os.File
-	writer   *bufio.Writer
+	file *os.File
+	// records holds receipts until flush writes them, after the barrier: no
+	// receipt reaches the file before the raw writes it vouches for (a
+	// bufio.Writer would write a full buffer whenever it fills).
+	records  bytes.Buffer
 	pending  int
 	byDigest map[string]imageStoreReceipt
 	version  string
@@ -477,7 +480,6 @@ func openImageStoreReceipts(dir, version string) (*imageStoreReceipts, error) {
 		return nil, err
 	}
 	receipts.file = file
-	receipts.writer = bufio.NewWriterSize(file, 64<<10)
 	return receipts, nil
 }
 
@@ -495,9 +497,8 @@ func (r *imageStoreReceipts) record(receipt imageStoreReceipt) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.writer.Write(append(data, '\n')); err != nil {
-		return err
-	}
+	r.records.Write(data)
+	r.records.WriteByte('\n')
 	switch receipt.Outcome {
 	case imageReceiptCloned, imageReceiptWritten, imageReceiptVerified:
 		r.byDigest[receipt.Digest] = receipt
@@ -517,9 +518,13 @@ func (r *imageStoreReceipts) flush() error {
 			return err
 		}
 	}
-	if err := r.writer.Flush(); err != nil {
+	if r.records.Len() == 0 {
+		return nil
+	}
+	if _, err := r.file.Write(r.records.Bytes()); err != nil {
 		return err
 	}
+	r.records.Reset()
 	return r.file.Sync()
 }
 
