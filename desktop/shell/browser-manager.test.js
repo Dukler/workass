@@ -1718,6 +1718,119 @@ test('an owned-frame evaluation is released when its session goes away or stops 
   manager.destroy();
 });
 
+function fakePng(width, height) {
+  const png = Buffer.alloc(25);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(png);
+  png.writeUInt32BE(width, 16); png.writeUInt32BE(height, 20);
+  return png.toString('base64');
+}
+
+// A same-site frame nested inside cross-site frames makes the main frame's
+// devicePixelRatio report the native scale until the next visual sync.
+function staleScaleFixture(chatId, { rasterScale = 1 } = {}) {
+  const { manager } = fixture({ requestOpen: () => {} });
+  const events = [];
+  manager.onLifecycle = (event) => events.push(event);
+  const setup = async () => {
+    await manager.browserControl('browser.open', { chatId, visible: false });
+    const entry = manager.entries.get(chatId);
+    const wc = entry.view.webContents;
+    const state = { stale: false, rasterCaptures: 0 };
+    const executeJavaScript = wc.executeJavaScript.bind(wc);
+    wc.executeJavaScript = async (script, gesture) => {
+      const value = await executeJavaScript(script, gesture);
+      if (state.stale && script.includes('deviceScaleFactor: devicePixelRatio')) return { ...value, deviceScaleFactor: 2 };
+      return value;
+    };
+    const sendCommand = wc.debugger.sendCommand.bind(wc.debugger);
+    wc.debugger.sendCommand = async (method, params, sessionId) => {
+      if (method === 'Page.captureScreenshot' && params?.clip?.width === 10 && params?.clip?.height === 10) {
+        state.rasterCaptures += 1;
+        if (rasterScale === 1) state.stale = false; // the capture resyncs the main frame
+        return { data: fakePng(10 * rasterScale, 10 * rasterScale) };
+      }
+      return sendCommand(method, params, sessionId);
+    };
+    const realLoad = wc.loadURL.bind(wc);
+    wc.loadURL = async (url) => { await realLoad(url); if (url.includes('nested')) state.stale = true; };
+    return { entry, wc, state, tabId: Number(wc.id) };
+  };
+  return { manager, events, setup };
+}
+
+test('a stale native scale reported beside nested same-site frames is verified against the main-frame raster', async () => {
+  const { manager, events, setup } = staleScaleFixture('chat-stale-scale');
+  const { entry, state, tabId } = await setup();
+  const result = await manager.browserControl('browser.navigate', { tabId, url: 'https://fixture.invalid/nested' });
+  assert.equal(result.url, 'https://fixture.invalid/nested', 'the navigation is not reported as failed');
+  assert.equal(entry.effectiveViewport.deviceScaleFactor, 1);
+  assert.equal(state.rasterCaptures, 1);
+  assert.ok(events.some((event) => event.stage === 'viewport-scale-verified-by-raster' && event.reported === 2 && event.raster === 1));
+  // An ordinary page never pays for the raster check.
+  await manager.browserControl('browser.navigate', { tabId, url: 'https://fixture.invalid/plain' });
+  assert.equal(state.rasterCaptures, 1);
+  manager.destroy();
+});
+
+test('a main frame that really renders at another scale still fails the viewport check', async () => {
+  const { manager, events, setup } = staleScaleFixture('chat-real-scale-failure', { rasterScale: 2 });
+  const { tabId } = await setup();
+  await assert.rejects(
+    manager.browserControl('browser.navigate', { tabId, url: 'https://fixture.invalid/nested' }),
+    /viewport metrics did not take effect: requested 1440x900 DPR 1, observed 1440x900 DPR 2/,
+  );
+  assert.ok(events.some((event) => event.stage === 'viewport-scale-mismatch' && event.raster === 2));
+  manager.destroy();
+});
+
+test('a navigation that returns while frames still load says so in its result', async () => {
+  const { manager, tab, wc } = await ownedFrameSetupFixture('chat-loading-note');
+  manager.navigationLoadGraceMs = 20;
+  const loaded = await manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/loaded' });
+  assert.equal(loaded.loading, false);
+  assert.equal('loadingNote' in loaded, false, 'a finished load carries no note');
+  wc.loadURL = (url) => {
+    wc.emit('did-start-navigation', {}, url, false, true);
+    wc.emit('did-start-loading');
+    wc.url = url;
+    wc.emit('did-navigate', {}, url);
+    wc.emit('dom-ready');
+    return new Promise(() => {});
+  };
+  const pending = await manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/streaming' });
+  assert.equal(pending.loading, true);
+  assert.match(pending.loadingNote, /still loading: its document is ready.*Snapshot or screenshot it now, or navigate again/);
+  const shot = await manager.browserControl('browser.screenshot', { tabId: tab.id });
+  assert.ok(shot.base64, 'a ready document can be captured while a subframe keeps loading');
+  manager.destroy();
+});
+
+test('a snapshot that sees frames change retries once, then says what to do', async () => {
+  const { manager, tab } = await ownedFrameSetupFixture('chat-snapshot-retry');
+  manager.snapshotRetryDelayMs = 1;
+  const realSnapshot = manager.browserSnapshot.bind(manager);
+  let calls = 0;
+  manager.browserSnapshot = async (entry) => {
+    calls += 1;
+    if (calls === 1) throw new Error('browser document or frame changed during snapshot; refresh the snapshot');
+    return realSnapshot(entry);
+  };
+  const snapshot = await manager.browserControl('browser.snapshot', { tabId: tab.id });
+  assert.equal(calls, 2);
+  assert.ok(snapshot.snapshot_id || snapshot.snapshotId);
+  calls = 0;
+  manager.browserSnapshot = async () => {
+    calls += 1;
+    throw new Error('browser document or frame changed during snapshot; refresh the snapshot');
+  };
+  await assert.rejects(
+    manager.browserControl('browser.snapshot', { tabId: tab.id }),
+    /kept changing while it was observed .*take the snapshot again in a moment/,
+  );
+  assert.equal(calls, 2, 'only one internal retry');
+  manager.destroy();
+});
+
 test('a frame tree read for a retired child session never rebinds frames to the root target', async () => {
   const { manager, entry, rootFrameId } = await ownedFrameSetupFixture('chat-frame-retired');
   const before = entry.frames.get('frame-child');
