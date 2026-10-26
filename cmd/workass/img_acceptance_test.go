@@ -956,6 +956,52 @@ func TestAcceptCollectionKeepsEveryOtherReference(t *testing.T) {
 	}
 }
 
+// A live chat that commits a reference to the deleted chat's image while the
+// collector is reading it (after its ledger chunk was read) keeps the image.
+func TestAcceptCollectionSeesACommitDuringItsOwnScan(t *testing.T) {
+	stateDir := t.TempDir()
+	db, err := store.Open(store.Options{Path: filepath.Join(stateDir, store.FileName), BinaryVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	shared := writeRawTestImage(t, stateDir, testImageBytes(t, 1400))
+	old := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	sqlInsertChat(t, db, "chat-gone", "tab-gone", true, old, nil, userRow(shared))
+	sqlInsertChat(t, db, "chat-live", "tab-live", false, old, nil, userRow())
+	m := newImageStoreMaintenance(stateDir, "test", sqlImageReferences{actors: chat.NewSQLActors(db)}, t.Logf)
+	m.rate = 0
+	pauses := 0
+	committed := false
+	m.sleep = func(ctx context.Context, _ time.Duration) error {
+		pauses++
+		// Pauses 1-4 read chat-gone (candidates); 5 precedes chat-live's
+		// ledger chunk, 6 its journal chunk: commit between them.
+		if pauses == 6 {
+			committed = true
+			must(t, db.Write(ctx, func(tx *store.Tx) error {
+				if _, err := tx.Exec(`INSERT INTO messages(chat_id, seq, message_id, role, event_json) VALUES ('chat-live', 2, 'm-new', 'user', ?)`, string(userRow(shared))); err != nil {
+					return err
+				}
+				_, err := tx.Exec(`UPDATE chats SET revision = revision + 1, ledger_len = 2 WHERE chat_id = 'chat-live'`)
+				return err
+			}))
+		}
+		return ctx.Err()
+	}
+	report, err := m.runOnce(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 4 for chat-gone, 2 for chat-live's interrupted read, 4 for its re-read.
+	if !committed || pauses != 10 {
+		t.Fatalf("the commit was not injected mid-scan or the scan did not restart (%d pauses)", pauses)
+	}
+	if _, err := readChatImageBytes(sessionImageDirname+"/"+shared, stateDir); err != nil {
+		t.Fatalf("collected an image a live chat committed a reference to during the scan (report %+v)", report)
+	}
+}
+
 // A reference source or state file that cannot be read means nothing is
 // removed.
 func TestAcceptCollectionRemovesNothingWhenAnyScanFails(t *testing.T) {
@@ -1185,4 +1231,100 @@ func TestAcceptReceiptsNeverWrittenBeforeTheirBarrier(t *testing.T) {
 	if sizeAtFirstBarrier != 0 {
 		t.Fatalf("%d bytes of receipts reached the file before the first barrier ran (bufio auto-flush), so a receipt can outlive the raw write it vouches for", sizeAtFirstBarrier)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 5. The JSON chat backend (Windows production) and a platform without clones.
+
+func writeFileBackendChat(t testing.TB, stateDir, chatID string, mtime time.Time, journal string, ledger ...[]byte) {
+	t.Helper()
+	rows := make([]json.RawMessage, len(ledger))
+	for i, row := range ledger {
+		rows[i] = row
+	}
+	envelope, _ := json.Marshal(map[string]any{"v": 1, "state": map[string]any{"ChatID": chatID, "Ledger": rows}})
+	base := filepath.Join(stateDir, filepath.FromSlash(providerChatFileName(chatID)))
+	must(t, os.MkdirAll(filepath.Dir(base), 0o700))
+	must(t, os.WriteFile(base, envelope, 0o600))
+	must(t, os.Chtimes(base, mtime, mtime))
+	if journal != "" {
+		must(t, os.WriteFile(base+".events", []byte(journal), 0o600))
+	}
+}
+
+func TestAcceptFileBackendCollectionEndToEnd(t *testing.T) {
+	withLegacyShadow(t, true)
+	stateDir := t.TempDir()
+	labels := []string{"only", "shared", "liveJournal", "unknownChatFile", "recent"}
+	names := map[string]string{}
+	for i, label := range labels {
+		names[label] = writeLegacyTestImage(t, stateDir, testImageBytes(t, 1500+i))
+	}
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour)
+	writeFileBackendChat(t, stateDir, "chat-gone", old, "", userRow(names["only"], names["shared"], names["liveJournal"], names["unknownChatFile"], names["recent"]))
+	writeFileBackendChat(t, stateDir, "chat-live", now, `{"images":[{"ref":"images/`+names["liveJournal"]+`"}]}`, userRow(names["shared"]))
+	writeFileBackendChat(t, stateDir, "chat-recent", now.Add(-time.Hour), "", userRow(names["recent"]))
+	// An actor file the runtime does not know (quarantined, unreadable at
+	// boot) still names an image: it must keep it.
+	writeFileBackendChat(t, stateDir, "chat-unknown", old, "", userRow(names["unknownChatFile"]))
+	runtime := &providerChatRuntime{
+		known: map[string]struct{}{"chat-gone": {}, "chat-live": {}, "chat-recent": {}},
+		summaries: map[string]chat.ActorSummary{
+			"chat-gone":   {ChatID: "chat-gone", TabID: "tab-gone", Deleted: true},
+			"chat-live":   {ChatID: "chat-live", TabID: "tab-live"},
+			"chat-recent": {ChatID: "chat-recent", TabID: "tab-recent", Deleted: true},
+		},
+	}
+	m := newImageStoreMaintenance(stateDir, "test", fileImageReferences{stateDir: stateDir, runtime: runtime}, t.Logf)
+	m.rate, m.window = 0, 0
+	m.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	report, err := m.runOnce(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.CollectSkipped != "" || report.DeletedChatsEligible != 1 {
+		t.Fatalf("%+v", report)
+	}
+	for _, label := range labels {
+		_, err := readChatImageBytes(sessionImageDirname+"/"+names[label], stateDir)
+		if (label == "only") != (err != nil) {
+			t.Fatalf("%s: read err %v (collected %d)", label, err, report.Collected)
+		}
+	}
+	if _, err := os.Stat(sessionImageLegacyPath(stateDir, names["shared"])); err == nil {
+		t.Fatal("window 0: the legacy file should be retired")
+	}
+}
+
+// A volume or platform that cannot clone: everything is written from the bytes
+// in hand, no candidate is ever opened, and the store converges the same way.
+func TestAcceptNoClonePlatformLifecycle(t *testing.T) {
+	f := newMaintenanceFixture(t, 10)
+	tried := 0
+	stubImageClones(t, func(dir, final, name string, raw []byte, candidate string, durability sessionImageDurability) (sessionImageCloneOutcome, error) {
+		tried++
+		return cloneUnsupported, errors.New("not APFS")
+	})
+	report, err := f.m.runOnce(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Written != 10 || report.Cloned != 0 || report.WriteErrors != 0 {
+		t.Fatalf("%+v", report)
+	}
+	if tried > 10 {
+		t.Fatalf("tried %d candidates for 10 images; an unsupported volume must stop at the first", tried)
+	}
+	for name := range f.images {
+		if _, err := oldBinaryRead(f.stateDir, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.clock = f.clock.Add(imageStoreRollbackWindow)
+	report, err = f.m.runOnce(t.Context())
+	if err != nil || report.Retired != 10 {
+		t.Fatalf("%+v %v", report, err)
+	}
+	f.assertImagesIntact(t)
 }

@@ -123,7 +123,7 @@ func TestAcceptNewImageDurableWriteCost(t *testing.T) {
 		must(t, persistLegacySessionImagePlan(plan))
 	})
 	images = images[count:]
-	sessionImageLegacyShadow.Store(true)
+	withLegacyShadow(t, true)
 	window := measure("this build, window open", func(stateDir string, raw []byte) { persistThroughStaging(t, stateDir, raw) })
 	images = images[count:]
 	withLegacyShadow(t, false)
