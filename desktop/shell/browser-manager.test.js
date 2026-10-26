@@ -1407,6 +1407,42 @@ test('CDP adapter forwards root and child-target commands and events', async () 
   assert.equal(tab.cdpAttached, true);
 });
 
+// The real sequence on a page with cross-site frames (2026-10-26, 0 of 36
+// frames reached): the parent's tree lists the child with the document it had
+// before moving to its own renderer, then stops listing it, and announces the
+// move as Page.frameDetached with reason "swap".
+test('a cross-site frame that moved to its own renderer is bound and stays bound', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-swap', bounds: { x: 0, y: 0, width: 400, height: 300 } });
+  const entry = manager.entries.get('chat-swap');
+  const wc = entry.view.webContents;
+  const rootFrameId = 'frame-' + wc.id;
+  wc.frameTree = { frameTree: {
+    frame: { id: rootFrameId, loaderId: 'loader-root', url: 'about:blank' },
+    childFrames: [{ frame: { id: 'frame-xsite', parentId: rootFrameId, loaderId: 'loader-initial-empty', url: 'about:blank' }, childFrames: [] }],
+  } };
+  wc.childFrameTree = { frameTree: {
+    frame: { id: 'frame-xsite', parentId: rootFrameId, loaderId: 'loader-cross-site', url: 'http://other.invalid/frame' },
+  } };
+  await manager.refreshFrameTree(entry);
+  // From now on the parent no longer lists the frame: it runs elsewhere.
+  wc.frameTree = { frameTree: { frame: { id: rootFrameId, loaderId: 'loader-root', url: 'about:blank' }, childFrames: [] } };
+  assert.equal(await manager.acceptAttachedTarget(entry, {
+    sessionId: 'xsite-session', targetInfo: { targetId: 'xsite-target', type: 'iframe' },
+  }, null), true);
+  const bound = entry.frames.get('frame-xsite');
+  assert.equal(bound.targetId, 'xsite-target');
+  assert.equal(bound.loaderId, 'loader-cross-site');
+  await manager.handleCDPMessage(entry, 'Page.frameDetached', { frameId: 'frame-xsite', reason: 'swap' }, null);
+  await manager.refreshFrameTree(entry);
+  assert.equal(entry.targetSessions.get('xsite-session')?.frameId, 'frame-xsite');
+  assert.equal(entry.frames.get('frame-xsite')?.detached, false);
+  // A real removal still retires it.
+  await manager.handleCDPMessage(entry, 'Page.frameDetached', { frameId: 'frame-xsite', reason: 'remove' }, null);
+  assert.equal(entry.targetSessions.has('xsite-session'), false);
+  manager.destroy();
+});
+
 test('browser navigation waits for an owned iframe target to finish binding', async () => {
   const { manager } = fixture();
   const tab = await manager.activate({ chatId: 'chat-frame-bind', bounds: { x: 0, y: 0, width: 400, height: 300 } });

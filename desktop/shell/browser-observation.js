@@ -486,7 +486,9 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
           let shown = true;
           while (parent && parentDepth < maxWalkDepth) {
             const tag = String(parent.tagName || '').toLowerCase();
-            if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template') { shown = false; break; }
+            // A textarea's child text is its initial value, not what it holds
+            // now; its current value is the field row's value.
+            if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template' || tag === 'textarea') { shown = false; break; }
             const style = parent.ownerDocument.defaultView.getComputedStyle(parent);
             if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) { shown = false; break; }
             parent = parent.parentElement;

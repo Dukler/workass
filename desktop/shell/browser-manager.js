@@ -1065,12 +1065,25 @@ class BrowserManager {
       entry.screenshots.clear();
     }
     const targetId = String(targetInfo.targetId || '');
-    for (let attempt = 0; frameId && targetId && root.loaderId && candidate?.loaderId &&
-      String(root.loaderId) !== String(candidate.loaderId) && attempt < 50; attempt += 1) {
-      await pause();
-      const refreshedTree = await step(() => this.readFrameTree(entry, parentSessionId || null));
-      this.recordFrameTree(entry, refreshedTree, parentSessionId || null);
-      candidate = entry.frames.get(frameId) || null;
+    // The parent's record of a cross-site child describes the document the
+    // child had in the parent's renderer (its initial empty document, or the
+    // page before it moved into its own target). Once the child runs in its
+    // own target the parent no longer lists it at all, so that record never
+    // catches up: waiting for it rejected every frame of a page whose parent
+    // was still busy when its children attached (2026-10-26: 36 of 36
+    // cross-site frames of one page). The child's own frame tree, whose
+    // parentId resolved above to a live frame of this exact parent target
+    // (the flattened session lineage proves which target announced it), is
+    // the authority for the child's current document.
+    if (frameId && targetId && candidate && root.loaderId && candidate.loaderId &&
+        String(root.loaderId) !== String(candidate.loaderId)) {
+      candidate.loaderId = String(root.loaderId);
+      candidate.url = String(root.url || candidate.url || '');
+      candidate.securityOrigin = String(root.securityOrigin || candidate.securityOrigin || '');
+      candidate.generation = ++entry.frameGenerationSequence;
+      entry.frameTreeGeneration += 1;
+      entry.interactionGeneration += 1;
+      entry.screenshots.clear();
     }
     if (!targetId || !candidate || (root.loaderId && candidate.loaderId && String(root.loaderId) !== String(candidate.loaderId))) {
       await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
@@ -1216,6 +1229,22 @@ class BrowserManager {
       const parent = frame?.parentFrameId ? entry.frames.get(frame.parentFrameId) : null;
       const sourceOwnsFrame = frame && (frame.targetId === targetId || target?.frameId === frameId || parent?.targetId === targetId);
       if (!sourceOwnsFrame) {
+        return;
+      }
+      // A frame swapped into another renderer (its cross-site document now
+      // runs in its own target, or back) is not removed: it keeps its frame
+      // id and its new target binds it. Only the emitting target's view of it
+      // is gone. Treating the swap as a removal retired 33 of 36 cross-site
+      // frames right after their targets were bound.
+      if (method === 'Page.frameDetached' && params && params.reason === 'swap') {
+        if (frame.targetId === targetId && !(target && target.frameId === frameId)) {
+          frame.contextId = null;
+          frame.generation = ++entry.frameGenerationSequence;
+          frame.unavailableReason = 'owned_frame_target_pending';
+          entry.frameTreeGeneration += 1;
+          entry.interactionGeneration += 1;
+          entry.screenshots.clear();
+        }
         return;
       }
       await this.retireFrameSubtree(entry, frameId, 'frame_detached');
@@ -2333,8 +2362,16 @@ class BrowserManager {
       throw new Error('browser frame execution context is unavailable');
     }
     const target = frame.sessionId ? entry.targetSessions.get(frame.sessionId) : null;
-    if (frame.sessionId && (!target || target.frameId !== frame.id || target.targetId !== frame.targetId)) {
+    if (frame.sessionId && (!target || target.targetId !== frame.targetId ||
+        (target.frameId !== frame.id && !this.isDescendantFrame(entry, frame.id, target.frameId)))) {
       throw new Error('browser frame target is no longer owned');
+    }
+    // A frame that shares its owned target's renderer (an about:blank,
+    // srcdoc or same-site child inside a cross-site frame) is evaluated in its
+    // own execution context only: without one the command would run in the
+    // target's own frame instead.
+    if (target && target.frameId !== frame.id && frame.contextId == null) {
+      throw new Error('browser frame execution context is unavailable');
     }
     const params = {
       expression: String(expression),
@@ -2344,6 +2381,18 @@ class BrowserManager {
     };
     const response = await this.ownedSessionCommand(entry, 'Runtime.evaluate', params, frame.sessionId || null, options.timeoutMs);
     return unwrapCDPValue(response);
+  }
+
+  // Text input for a frame goes to that frame's own owned target, so it
+  // reaches the frame's widget directly instead of depending on which widget
+  // the browser has focused at that moment. The top page (and a frame
+  // sharing its renderer) is addressed through the tab.
+  inputTargetForFrame(entry, frameId) {
+    const tabId = Number(entry.view.webContents.id);
+    const frame = frameId != null ? entry.frames.get(String(frameId)) : null;
+    const owned = frame && frame.sessionId ? entry.targetSessions.get(frame.sessionId) : null;
+    if (!owned || owned.targetId !== frame.targetId) return { tabId };
+    return { tabId, targetId: owned.targetId, sessionId: frame.sessionId };
   }
 
   async dispatchBrowserKey(entry, parsed, { commands } = {}) {
@@ -2383,7 +2432,7 @@ class BrowserManager {
 
   async frameOwnerIsDeepActive(entry, parent, child) {
     if (!parent || !child || child.parentFrameId !== parent.id || parent.detached || child.detached) return false;
-    if (child.sessionId) {
+    if (child.sessionId && child.sessionId !== parent.sessionId) {
       const owned = entry.targetSessions.get(child.sessionId);
       if (!owned || owned.frameId !== child.id || owned.targetId !== child.targetId) return false;
     } else if (child.targetId !== parent.targetId) {
@@ -2663,10 +2712,39 @@ class BrowserManager {
     const probeKey = `__workassBrowserTypeProbe${++this.typeProbeSeq}`;
     const encodedProbeKey = JSON.stringify(probeKey);
 
-    // Ordinary form controls keep the deterministic value-set path, but use
-    // the native prototype setter so React/Vue value trackers observe the
-    // input event. Hidden editor textareas and contenteditable surfaces must be
-    // driven like a user: focus, select all, then insert native text.
+    // Text fields are typed into as a person types: focus, select what they
+    // hold, then the text arrives as trusted input (the page's own input
+    // events, isTrusted true, in any frame). Fields that take no typed text
+    // (date, time and the like) and any field whose value does not come out
+    // exactly as typed (a length limit, an input mask) keep the deterministic
+    // value-set path, through the native prototype setter so React/Vue value
+    // trackers observe its input event. Hidden editor textareas and
+    // contenteditable surfaces are driven like a user too: focus, select all,
+    // then insert native text.
+    const valueSetter = `
+        const before = String(el.value ?? '');
+        const prototype = textarea ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+        if (typeof setter !== 'function') {
+          return { found: true, editable: false, focused: focused(), reason: 'value setter is unavailable' };
+        }
+        setter.call(el, ${value});
+        let inputEvent;
+        try {
+          inputEvent = new view.InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: ${value} });
+        } catch {
+          inputEvent = new view.Event('input', { bubbles: true });
+        }
+        el.dispatchEvent(inputEvent);
+        el.dispatchEvent(new view.Event('change', { bubbles: true }));
+        return new Promise((resolve) => setTimeout(() => {
+          const retained = String(el.value ?? '') === ${value};
+          resolve({
+            found: true, editable: true, strategy: 'value', focused: focused(),
+            changed: before !== String(el.value ?? ''), replacementVerified: retained,
+            valueLength: String(el.value ?? '').length,
+          });
+        }, 0));`;
     const prepared = await evaluate(`(/* workass-browser-type-prepare */ () => {
       const el = ${selector};
       if (!el) return { found: false };
@@ -2708,29 +2786,13 @@ class BrowserManager {
         return { found: true, editable: false, focused: focused(), reason: 'target is not editable' };
       }
       if (!nativeEditor) {
-        const before = String(el.value ?? '');
-        const prototype = textarea ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-        if (typeof setter !== 'function') {
-          return { found: true, editable: false, focused: focused(), reason: 'value setter is unavailable' };
+        const typeable = textarea || ['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(String(el.type || '').toLowerCase());
+        if (typeable && focused()) {
+          const before = String(el.value ?? '');
+          try { el.select(); } catch { /* the typed text is verified below either way */ }
+          return { found: true, editable: true, strategy: 'keyboard', focused: true, before };
         }
-        setter.call(el, ${value});
-        let inputEvent;
-        try {
-          inputEvent = new view.InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: ${value} });
-        } catch {
-          inputEvent = new view.Event('input', { bubbles: true });
-        }
-        el.dispatchEvent(inputEvent);
-        el.dispatchEvent(new view.Event('change', { bubbles: true }));
-        return new Promise((resolve) => setTimeout(() => {
-          const retained = String(el.value ?? '') === ${value};
-          resolve({
-            found: true, editable: true, strategy: 'value', focused: focused(),
-            changed: before !== String(el.value ?? ''), replacementVerified: retained,
-            valueLength: String(el.value ?? '').length,
-          });
-        }, 0));
+        ${valueSetter}
       }
 
       const readModel = () => {
@@ -2822,6 +2884,54 @@ class BrowserManager {
     }
     if (prepared.focused !== true) throw new Error('browser type target could not be focused');
 
+    if (prepared.strategy === 'keyboard') {
+      const inputTarget = this.inputTargetForFrame(entry, locator.frameId ?? null);
+      let typed = null;
+      try {
+        if (text) {
+          await this.executeCDP(inputTarget, 'Input.insertText', { text });
+        } else {
+          const key = cdpBrowserKey(parseBrowserKey('Backspace', this.platform));
+          await this.executeCDP(inputTarget, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', ...key });
+          await this.executeCDP(inputTarget, 'Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+        }
+        typed = await evaluate(`(/* workass-browser-type-keyboard-verify */ () => {
+          const el = ${selector};
+          if (!el) return { found: false };
+          let active = document.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          return { found: true, exact: String(el.value ?? '') === ${value}, focused: active === el, valueLength: String(el.value ?? '').length };
+        })()`);
+      } catch { typed = null; }
+      if (typed && typed.found === true && typed.exact === true) {
+        let submitted = false;
+        if (params.submit === true) submitted = (await this.submitBrowserType(entry, locator)).submitted === true;
+        entry.interactionGeneration += 1;
+        return {
+          found: true, editable: true, strategy: 'keyboard', focused: typed.focused === true,
+          changed: String(prepared.before) !== text, replacementVerified: true,
+          valueLength: typed.valueLength, trusted: true, submitted,
+        };
+      }
+      if (typed && typed.found !== true) return { found: false, status: locator.path ? 'stale' : 'missing', reason: locator.path ? 'observed element was replaced; refresh the snapshot' : 'selector target is missing' };
+      // The field did not take the typed text exactly: set the value instead.
+      const fallback = await evaluate(`(/* workass-browser-type-value-fallback */ () => {
+        const el = ${selector};
+        if (!el) return { found: false };
+        const view = el.ownerDocument.defaultView;
+        const textarea = el instanceof view.HTMLTextAreaElement;
+        const focused = () => { let active = document.activeElement; while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement; return active === el; };
+        if (!focused()) el.focus();
+        ${valueSetter}
+      })()`);
+      if (!fallback || fallback.found !== true) return { found: false, status: locator.path ? 'stale' : 'missing', reason: locator.path ? 'observed element was replaced; refresh the snapshot' : 'selector target is missing' };
+      if (fallback.editable !== true) throw new Error(`browser type target is not editable${fallback.reason ? `: ${fallback.reason}` : ''}`);
+      if (fallback.replacementVerified !== true) throw new Error('browser type target did not retain the replacement text');
+      let submitted = false;
+      if (params.submit === true) submitted = (await this.submitBrowserType(entry, locator)).submitted === true;
+      entry.interactionGeneration += 1;
+      return { ...fallback, changed: String(prepared.before) !== String(text), submitted };
+    }
     if (prepared.strategy === 'value') {
       if (prepared.replacementVerified !== true) throw new Error('browser type target did not retain the replacement text');
       let submitted = false;
@@ -2853,7 +2963,7 @@ class BrowserManager {
       // before the replacement text reaches its hidden input surface.
       await evaluate('(/* workass-browser-input-barrier */ () => new Promise((resolve) => setTimeout(resolve, 0)))()');
       if (text) {
-        await this.executeCDP({ tabId: this.tabInfo(entry).id }, 'Input.insertText', { text });
+        await this.executeCDP(this.inputTargetForFrame(entry, locator.frameId ?? null), 'Input.insertText', { text });
       } else {
         await this.dispatchBrowserKey(entry, parseBrowserKey('Backspace', this.platform));
         await evaluate('(/* workass-browser-delete-barrier */ () => new Promise((resolve) => setTimeout(resolve, 0)))()');
