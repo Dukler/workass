@@ -2,11 +2,13 @@
 
 // Which surface hosts the Workass browser page, and what a <webview> may be.
 //
-// 'webview' (default on macOS and Windows): the page is the guest of a
-// <webview> in the app window, so it moves, resizes and stacks with the HTML
-// around it in the same frame. 'view': the page is a WebContentsView stacked
-// over the window, the host before 2026-10-26, kept selectable for one release
-// as an escape hatch: WORKASS_BROWSER_HOST=view, or {"browserHost": "view"} in
+// 'webview' (default on macOS): the page is the guest of a <webview> in the
+// app window, so it moves, resizes and stacks with the HTML around it in the
+// same frame. 'view' (default on Windows and Linux): the page is a
+// WebContentsView stacked over the window, the host before 2026-10-26. Windows
+// keeps it until the webview host has been run on real Windows hardware (the
+// work laptop is short on memory). Either is selectable:
+// WORKASS_BROWSER_HOST=webview|view, or {"browserHost": "webview"|"view"} in
 // shell-settings.json in the profile's data directory.
 
 const path = require('node:path');
@@ -24,7 +26,7 @@ function resolveBrowserHost({ env = process.env, platform = process.platform, da
       if (HOSTS.has(value)) return { host: value, source: 'settings' };
     } catch { /* absent or unreadable: the default applies */ }
   }
-  return { host: platform === 'darwin' || platform === 'win32' ? 'webview' : 'view', source: 'default' };
+  return { host: platform === 'darwin' ? 'webview' : 'view', source: 'default' };
 }
 
 // will-attach-webview: the only <webview> the app window may create is a

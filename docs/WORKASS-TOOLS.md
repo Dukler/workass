@@ -122,10 +122,11 @@ resizing the human pane may then set its visible size.
 document-CSS `clip`. Its image is accompanied by `screenshot_id`, exact tab and
 generation identity, CSS capture rectangle, scroll origin, image dimensions,
 and pixel-to-CSS scale. Pass screenshot pixel `x`/`y` with that `screenshot_id`
-to click a visual target. In the webview host (the default on macOS and
-Windows; `WORKASS_BROWSER_HOST=view` or `{"browserHost":"view"}` in the data
-directory's `shell-settings.json` selects the older native-view host for one
-release) the page is the guest of a `<webview>` in the app window and captures
+to click a visual target. In the webview host (the default on macOS; Windows
+keeps the native-view host by default until the webview host has run on real
+Windows hardware; `WORKASS_BROWSER_HOST=webview|view` or
+`{"browserHost":"webview"|"view"}` in the data directory's
+`shell-settings.json` selects either) the page is the guest of a `<webview>` in the app window and captures
 come from the guest's own surface (`capture_surface:"webview"`): sharp at any
 shown size and while the app covers or hides it; a full page or a clip beyond
 the viewport is taken one viewport at a time, scrolling the page there and
@@ -177,7 +178,11 @@ select, hover, drag, upload and evaluate; a `snapshot_id` with them is
 optional and, when given, is the `outline_id`. Output is bounded (`max_bytes`
 2048–60000, default 20000) on whole lines, with `next_cursor` to continue the
 same outline (`cursor`); `since_snapshot_id` with an `outline_id` returns only
-the lines added (`+`), changed (`~`) and removed (`-`).
+the lines added (`+`), changed (`~`) and removed (`-`). Four or more sibling
+lines that differ only in counting numbers are folded into one line with
+`{first..last}` (or `{first..last..step}`) ranges: `- link "Item {1..2000}"
+[e{2..2001}]` is 2000 links, and every ref in the range targets its element. A
+plain list item around a single thing is shown as that thing.
 
 Through the agent tools every action (open with a URL, navigate, history,
 click, type, key, scroll, select, hover, drag, upload, evaluate, batch) returns
@@ -185,9 +190,15 @@ click, type, key, scroll, select, hover, drag, upload, evaluate, batch) returns
 `url_changed`, `dialog_opened`/`dialog_closed`, `download_started`/
 `download_finished`, `tab_opened`, `popup_blocked`, `beforeunload_accepted`)
 and `changes`: a bounded outline diff, or after a navigation the new page's
-outline (first part, with `next_cursor`). The page is settled first: a
-navigation reaches a usable document, otherwise the top document is quiet for
-150 ms (at most 1.5 s). A batch reports once, for all of its actions. Each tab
+outline (first part, with `next_cursor`). The page is settled first, for as
+long as something is happening and no longer: a navigation reaches a usable
+document; then, if nothing happened, two frames (32 ms) of quiet; once
+something happened (DOM mutations, input/change/focus/toggle events, requests
+the action started, frames attaching or loading), 80 ms of quiet after the
+last of it; at most 1.5 s. Requests are watched only while an action settles
+(WebSockets, event streams and document loads excepted). On a page without
+frames where nothing happened, `changes` says `none` without reading the page
+again. A batch reports once, for all of its actions. Each tab
 operation has a deadline (25 s; navigation and batch 28.5 s): one that does not
 finish is reported and the tab's queue moves on, and `workass_browser_list`
 shows `stuck_since_ms` for it.
