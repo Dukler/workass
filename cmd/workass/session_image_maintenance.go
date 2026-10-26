@@ -277,9 +277,47 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 
 // applyMarker sets whether new images also get a legacy file from the
 // recorded window, before any write happens.
+//
+// A closed window does not turn the legacy copy off by itself: if an older
+// build has written images since the window started, the user has rolled back
+// once and may again, so every image from this start on keeps its legacy file
+// (the pass then restarts the window).
 func (m *imageStoreMaintenance) applyMarker() {
-	marker, _ := m.loadMarker()
-	sessionImageLegacyShadow.Store(!marker.reclaimAllowed(m.now(), m.window))
+	marker, err := m.loadMarker()
+	shadow := err != nil || !marker.reclaimAllowed(m.now(), m.window) || m.olderBuildWroteSince(marker.WindowStartedAt)
+	sessionImageLegacyShadow.Store(shadow)
+}
+
+// olderBuildWroteSince reports a legacy-only canonical image newer than
+// start: only an older build writes one. It lists names, and looks at a file
+// only when it has no raw twin.
+func (m *imageStoreMaintenance) olderBuildWroteSince(start time.Time) bool {
+	if start.IsZero() {
+		return false
+	}
+	entries, err := os.ReadDir(m.imagesDir)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist) // unreadable: assume a rollback
+	}
+	raw := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if name, ok := strings.CutSuffix(entry.Name(), sessionImageRawSuffix); ok {
+			raw[name] = true
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if raw[name] {
+			continue
+		}
+		if _, ok := validSessionImageRef(sessionImageDirname + "/" + name); !ok {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() && info.ModTime().After(start) && m.canonicalLegacyImage(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // run is the daemon-lifetime loop.
@@ -639,6 +677,8 @@ func (m *imageStoreMaintenance) runOnce(ctx context.Context) (report imageStoreR
 			}
 		}
 		if report.OlderBuildWrites > 0 {
+			// From now on, not from the end of this pass: a rollback is live.
+			sessionImageLegacyShadow.Store(true)
 			m.logf("[image-store] %d images written by an older Workass since %s; the rollback window starts over",
 				report.OlderBuildWrites, marker.WindowStartedAt.Format(time.RFC3339))
 			marker.WindowStartedAt = time.Time{}
