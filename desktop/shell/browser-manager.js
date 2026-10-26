@@ -18,7 +18,8 @@ const { openGuestPip } = require('./browser-pip');
 const { buildOutline, diffOutlines, pageLines } = require('./browser-outline');
 const {
   POPUP_TAB_LIMIT, agentDriven, browserDialog, browserDrag, browserEvaluate, browserHover, browserSelect, browserUpload,
-  dialogBlockedError, dialogClosed, dialogOpened, markAgentActive, pushEvent, runAction, takeDownload,
+  dialogBlockedError, dialogClosed, dialogOpened, hasChildFrames, markAgentActive, noteActivity, pushEvent, readActivity,
+  runAction, takeDownload, touchActivity,
 } = require('./browser-actions');
 
 const MAX_BROWSER_SNAPSHOT_BYTES = 64 * 1024;
@@ -85,6 +86,9 @@ const OUTLINE_READ_CONCURRENCY = 8;
 const OUTLINE_REF_LIMIT = 20000;
 const OUTLINE_HISTORY = 6;
 const OUTLINE_PAGE_BYTES = 20000;
+// How long an unchanged page's newest outline is reused (reusableOutline).
+const OUTLINE_REUSE_MS = 30000;
+const OUTLINE_REUSE_FRAMED_MS = 2000;
 // No agent call may hold a tab's queue longer than this (the CLI gives up at
 // 30 s); navigation and batches get a little more.
 const OPERATION_DEADLINE_MS = 25000;
@@ -386,6 +390,13 @@ class BrowserManager {
     try { this.profile.setPermissionRequestHandler((_wc, _permission, callback) => callback(false)); } catch { /* older Electron */ }
     // Files an agent's page downloads go to a folder of the chat's own.
     this.downloadsRoot = String(downloadsDir || '');
+    // A page an agent drives keeps producing frames through a frame
+    // subscription only while the app window is not on screen (holdPainting).
+    if (this.hostMode === 'webview' && typeof win.on === 'function') {
+      for (const event of ['hide', 'show', 'minimize', 'restore']) {
+        win.on(event, () => { for (const entry of this.entries.values()) this.syncPaintSource(entry); });
+      }
+    }
     if (typeof this.profile.on === 'function') {
       this.profile.on('will-download', (_event, item, contents) => {
         const entry = Array.from(this.entries.values()).find((candidate) => candidate.view && candidate.view.webContents === contents);
@@ -509,8 +520,9 @@ class BrowserManager {
       if (!inPlace && isMainFrame !== false) { entry.mainDocumentReady = false; entry.mainCommitPending = true; }
     });
     on('dom-ready', () => { entry.mainDocumentReady = true; entry.mainCommitPending = false; });
-    on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
+    on('did-start-loading', () => { entry.loading = true; entry.error = null; touchActivity(entry); this.publish(entry); });
     on('did-stop-loading', () => {
+      touchActivity(entry);
       // A navigation that ended without a new document (a download, a 204,
       // a cancel) leaves the old one in place, still usable.
       if (entry.mainCommitPending) { entry.mainCommitPending = false; entry.mainDocumentReady = true; }
@@ -618,6 +630,7 @@ class BrowserManager {
       wc.debugger.on('message', (_event, method, params, sessionId) => {
         if (!current()) return;
         const currentSessionId = normalizeCDPSessionId(sessionId);
+        noteActivity(entry, method, params || {}, currentSessionId);
         const currentSession = currentSessionId == null || entry.targetSessions.has(currentSessionId);
         if (currentSession && !String(method || '').startsWith('Target.')) {
           this.emitCDP({ tabId: this.tabIdOf(entry), method, params: params || {}, sessionId: currentSessionId });
@@ -1991,11 +2004,9 @@ class BrowserManager {
     entry.paintHolds = (entry.paintHolds || 0) + 1;
     clearTimeout(entry.paintIdleTimer);
     entry.paintIdleTimer = null;
+    entry.painting = true;
     if (!entry.focusEmulated) this.setFocusEmulation(entry, true);
-    // A frame subscriber keeps the page producing frames even while Workass
-    // itself is hidden or minimized: without frames, pointer moves wait for
-    // a frame that never comes (about a second each) and captures stall.
-    if (!entry.paintSubscription) entry.paintSubscription = this.addFrameSubscriber(entry, () => {});
+    this.syncPaintSource(entry);
   }
 
   releasePainting(entry) {
@@ -2005,33 +2016,64 @@ class BrowserManager {
     entry.paintIdleTimer = setTimeout(() => {
       entry.paintIdleTimer = null;
       if (entry.paintHolds || entry.captureInFlight) return;
+      entry.painting = false;
       if (!entry.pip) this.setFocusEmulation(entry, false);
-      if (entry.paintSubscription) { entry.paintSubscription(); entry.paintSubscription = null; }
+      this.syncPaintSource(entry);
     }, this.paintIdleMs ?? PAINT_IDLE_MS);
     if (typeof entry.paintIdleTimer?.unref === 'function') entry.paintIdleTimer.unref();
   }
 
+  // Whether the app window is on screen: its <webview> guests then produce
+  // frames on their own.
+  hostWindowShowing() {
+    const win = this.win;
+    try { return !!win && !win.isDestroyed?.() && win.isVisible?.() === true && win.isMinimized?.() !== true; } catch { return false; }
+  }
+
+  // While Workass itself is hidden or minimized a page produces no frames:
+  // pointer moves then wait for a frame that never comes (about a second
+  // each), timers slow down and captures stall. A frame subscriber keeps it
+  // producing frames while an agent drives it, only then (it costs a frame
+  // copy per frame), and copies out only each frame's damaged region.
+  syncPaintSource(entry) {
+    const want = entry.painting === true && !entry.closed && !this.hostWindowShowing();
+    if (want && !entry.paintSubscription) entry.paintSubscription = this.addFrameSubscriber(entry, () => {}, { full: false });
+    else if (!want && entry.paintSubscription) { entry.paintSubscription(); entry.paintSubscription = null; }
+  }
+
   // One Electron frame subscription per page, shared by everyone who needs
-  // the page's frames (the separate window, an agent driving it).
-  addFrameSubscriber(entry, callback) {
+  // the page's frames (the separate window, an agent driving it). Whole
+  // frames are copied out only while a subscriber wants them (the separate
+  // window); otherwise only each frame's damaged region, which for a page
+  // that is not changing is next to nothing.
+  addFrameSubscriber(entry, callback, { full = true } = {}) {
     const wc = this.liveContents(entry);
     if (!wc || wc.isDestroyed?.() || typeof wc.beginFrameSubscription !== 'function') return () => {};
-    if (entry.frameSubscribers?.contents !== wc) entry.frameSubscribers = { contents: wc, callbacks: new Set(), active: false };
+    if (entry.frameSubscribers?.contents !== wc) entry.frameSubscribers = { contents: wc, callbacks: new Map(), active: false, full: false };
     const group = entry.frameSubscribers;
-    group.callbacks.add(callback);
-    if (!group.active) {
+    const sync = () => {
+      const wantFull = Array.from(group.callbacks.values()).some(Boolean);
+      if (!group.callbacks.size) {
+        if (!group.active) return;
+        group.active = false;
+        try { if (!wc.isDestroyed()) wc.endFrameSubscription(); } catch { /* already ended */ }
+        return;
+      }
+      if (group.active && group.full === wantFull) return;
       try {
-        wc.beginFrameSubscription(false, (image, dirty) => {
-          for (const each of Array.from(group.callbacks)) { try { each(image, dirty); } catch { /* one consumer cannot stop the others */ } }
+        if (group.active && !wc.isDestroyed()) wc.endFrameSubscription();
+        wc.beginFrameSubscription(!wantFull, (image, dirty) => {
+          for (const each of Array.from(group.callbacks.keys())) { try { each(image, dirty); } catch { /* one consumer cannot stop the others */ } }
         });
         group.active = true;
-      } catch { /* no frames for this page */ }
-    }
+        group.full = wantFull;
+      } catch { group.active = false; /* no frames for this page */ }
+    };
+    group.callbacks.set(callback, full);
+    sync();
     return () => {
       group.callbacks.delete(callback);
-      if (group.callbacks.size || !group.active) return;
-      group.active = false;
-      try { if (!wc.isDestroyed()) wc.endFrameSubscription(); } catch { /* already ended */ }
+      sync();
     };
   }
 
@@ -2810,9 +2852,12 @@ class BrowserManager {
     return { frames: frames.filter(Boolean), framesTotal: live.length };
   }
 
-  async takeOutline(entry, { budgetMs } = {}) {
+  async takeOutline(entry, { budgetMs, activity } = {}) {
     this.assertCurrentEntry(entry);
     if (entry.dialog) throw dialogBlockedError(entry);
+    // The page's activity count before reading it: an action can reuse this
+    // outline as its "before" only while the count has not moved.
+    const seen = activity && activity.documentKey === this.documentKey(entry) ? activity : await readActivity(this, entry);
     const documentGeneration = entry.documentGeneration;
     const { frames, framesTotal } = await this.collectOutlineFrames(entry, budgetMs);
     const wc = this.liveContents(entry);
@@ -2828,7 +2873,12 @@ class BrowserManager {
       url: redactPageMessage(url || entry.url || DEFAULT_URL, 2048),
       title: redactPageMessage(entry.title || '', 1024),
       frames: { total: framesTotal, read: frames.filter((frame) => frame.nodes).length, unreadable: frames.filter((frame) => frame.unavailable).length },
+      activityN: seen.n,
+      activitySeq: seen.activitySeq,
     };
+    // The frames' accessibility trees behind the newest outline, for a read
+    // of the unchanged page in another format (reusableOutline).
+    entry.axCache = { outlineId: outline.id, nodes: new Map(frames.filter((frame) => frame.nodes).map((frame) => [frame.frameKey, frame.nodes])) };
     entry.outlines = entry.outlines || new Map();
     entry.outlines.set(outline.id, outline);
     while (entry.outlines.size > OUTLINE_HISTORY) entry.outlines.delete(entry.outlines.keys().next().value);
@@ -2849,6 +2899,18 @@ class BrowserManager {
     };
   }
 
+  // The newest outline while the page has provably not changed since it was
+  // taken: same document, the page's activity count and the shell's frame and
+  // load activity unmoved, not loading. A page with frames is trusted for less
+  // long, because changes inside its frames are not counted.
+  async reusableOutline(entry) {
+    const last = entry.lastOutline;
+    if (!last || last.activityN == null || entry.loading || last.documentKey !== this.documentKey(entry)) return null;
+    if (Date.now() - (last.takenAt || 0) > (hasChildFrames(entry) ? OUTLINE_REUSE_FRAMED_MS : OUTLINE_REUSE_MS)) return null;
+    const now = await readActivity(this, entry);
+    return now.documentKey === last.documentKey && now.n === last.activityN && now.activitySeq === last.activitySeq ? last : null;
+  }
+
   async browserOutline(entry, params = {}) {
     const maxBytes = params.maxBytes == null ? OUTLINE_PAGE_BYTES : Number(params.maxBytes);
     if (!Number.isInteger(maxBytes) || maxBytes < 2048 || maxBytes > 60000) throw new Error('max_bytes must be an integer from 2048 to 60000');
@@ -2862,7 +2924,7 @@ class BrowserManager {
     }
     const since = params.sinceSnapshotId != null ? String(params.sinceSnapshotId) : null;
     const base = since && entry.outlines ? entry.outlines.get(since) : null;
-    const outline = await this.takeOutline(entry);
+    const outline = (await this.reusableOutline(entry)) || await this.takeOutline(entry);
     if (since) {
       if (base && base.documentKey === outline.documentKey) {
         const changes = diffOutlines(base.lines, outline.lines, { maxBytes });
@@ -2990,6 +3052,12 @@ class BrowserManager {
       pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: `this chat already has ${POPUP_TAB_LIMIT} extra tabs; close one with workass_browser_close` });
       return null;
     }
+    // The action that opened it reports the new tab: it waits while the tab
+    // is being made (browser-actions.js, settle).
+    opener.pendingTabs = (opener.pendingTabs || 0) + 1;
+    touchActivity(opener);
+    let pending = true;
+    const settled = () => { if (pending) { pending = false; opener.pendingTabs = Math.max(0, (opener.pendingTabs || 1) - 1); touchActivity(opener); } };
     this.extraTabSeq = (this.extraTabSeq || 0) + 1;
     const key = `${owner.chatId}#tab${this.extraTabSeq}`;
     const tab = this.create(key);
@@ -3003,11 +3071,13 @@ class BrowserManager {
       how: disposition === 'new-window' ? 'window_open' : 'link_new_tab',
     });
     void Promise.resolve(tab.ready).then((ready) => {
-      if (!ready || !this.isCurrentEntry(tab)) return;
+      if (!ready || !this.isCurrentEntry(tab)) { settled(); return; }
       announce();
+      settled();
       return this.serialize(tab, () => this.command(tab.chatId, 'navigate', url), { deadlineMs: LONG_OPERATION_DEADLINE_MS });
     }).catch((error) => {
       pushEvent(opener, { type: 'tab_failed', url: redactPageMessage(url, 1024), reason: redactPageMessage(String(error && error.message || error), 300) });
+      settled();
     });
     return tab;
   }
@@ -3962,6 +4032,9 @@ class BrowserManager {
     }
 
     const axByFrame = new Map();
+    // The page has not changed since the newest outline read these trees.
+    const reusable = await this.reusableOutline(entry);
+    const cachedAx = reusable && entry.axCache && entry.axCache.outlineId === reusable.id ? entry.axCache.nodes : null;
     for (const source of sources) {
       const frame = source.frame;
       if (!frame || !frame.id || !source.raw) continue;
@@ -3969,10 +4042,14 @@ class BrowserManager {
       const remainingMs = sessionId ? childFramesDeadline - Date.now() : null;
       let response;
       try {
-        if (remainingMs != null && remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
-        response = await this.ownedSessionCommand(entry,
-          'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId, remainingMs,
-        );
+        const cached = cachedAx && cachedAx.get(`${frame.id}:${frame.loaderId}`);
+        if (cached) response = { nodes: cached };
+        else {
+          if (remainingMs != null && remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
+          response = await this.ownedSessionCommand(entry,
+            'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId, remainingMs,
+          );
+        }
       } catch {
         frame.axAvailable = false;
         continue;
@@ -5342,7 +5419,7 @@ class BrowserManager {
           await this.command(entry.chatId, 'navigate', params.url);
           return this.navigationResult(entry);
         };
-        return this.serialize(entry, () => (internal.report ? runAction(this, entry, navigate) : navigate()),
+        return this.serialize(entry, () => (internal.report ? runAction(this, entry, navigate, { before: null, method }) : navigate()),
           { deadlineMs: LONG_OPERATION_DEADLINE_MS });
       }
       return this.tabInfo(entry);
@@ -5373,7 +5450,10 @@ class BrowserManager {
       'browser.upload', 'browser.evaluate',
     ]);
     if (actionMethods.has(method) && internal.report && !internal.bare) {
-      return runAction(this, entry, () => this.browserControl(method, params, { ...internal, bare: true }));
+      // A navigation replaces the document: no outline before it.
+      const navigation = ['browser.navigate', 'browser.back', 'browser.forward', 'browser.reload'].includes(method);
+      return runAction(this, entry, () => this.browserControl(method, params, { ...internal, bare: true }),
+        navigation ? { before: null, method } : { method });
     }
     if (method === 'browser.dialog') return browserDialog(this, entry, params);
     if (method === 'browser.select') return browserSelect(this, entry, params);
