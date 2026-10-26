@@ -158,6 +158,7 @@ const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // How long a call waits for the app renderer to mount (or, after a reload,
 // mount again) a page's <webview> before it reports that the page is not up.
 const GUEST_ATTACH_TIMEOUT_MS = 20000;
+const PRESENTATION_READY_SLACK_MS = 2000;
 const EDITOR_PAGE_CALL_TIMEOUT_MS = 3000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
@@ -1635,28 +1636,50 @@ class BrowserManager {
     try { this.onHosts(this.hostList()); } catch { /* renderer may be reloading */ }
   }
 
+  // One waiter per page: whoever waits for the page's next guest (a call
+  // made during setup, during a restore, after a renderer reload) is answered
+  // by the same settle, or by its bounded timeout. A second wait joins the
+  // first instead of replacing it.
   awaitGuest(entry) {
     const lifecycleToken = entry.lifecycleToken;
-    const generation = (entry.guestWaitGeneration || 0) + 1;
-    entry.guestWaitGeneration = generation;
     return new Promise((resolve) => {
+      if (entry.guestWaiter) { entry.guestWaiter.resolvers.push(resolve); return; }
+      const waiter = { resolvers: [resolve], settle: null };
+      const finish = (value) => {
+        if (entry.guestWaiter === waiter) entry.guestWaiter = null;
+        clearTimeout(timer);
+        for (const each of waiter.resolvers.splice(0)) each(value);
+      };
       const timeoutMs = this.guestAttachTimeoutMs ?? GUEST_ATTACH_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        if (entry.guestWaiter?.generation !== generation) return;
+        if (entry.guestWaiter !== waiter) return;
         entry.guestWaiter = null;
-        if (!this.isCurrentEntry(entry, lifecycleToken)) return resolve(false);
-        entry.error = 'the browser page did not come up in the Workass window; open the browser pane, or try again in a moment';
-        this.publish(entry);
-        // A later registration still brings the page up for the next call.
-        entry.ready = this.awaitGuest(entry);
-        resolve(false);
+        if (this.isCurrentEntry(entry, lifecycleToken)) {
+          entry.error = 'the browser page did not come up in the Workass window; open the browser pane, or try again in a moment';
+          this.publish(entry);
+          // A later registration still brings the page up for the next call.
+          entry.ready = this.awaitGuest(entry);
+        }
+        finish(false);
       }, timeoutMs);
       if (typeof timer?.unref === 'function') timer.unref();
-      entry.guestWaiter = {
-        generation,
-        settle: (value) => { clearTimeout(timer); entry.guestWaiter = null; resolve(value); },
-      };
+      waiter.settle = finish;
+      entry.guestWaiter = waiter;
     });
+  }
+
+  // Waiting for a page inside the presentation queue is bounded: a page that
+  // never comes up cannot hold every other page's activate, resize, hide,
+  // pop-out and screenshot behind it.
+  async readyForPresentation(entry) {
+    if (!entry.ready) return true;
+    const limitMs = (this.guestAttachTimeoutMs ?? GUEST_ATTACH_TIMEOUT_MS) + PRESENTATION_READY_SLACK_MS;
+    let timer = null;
+    try {
+      return await Promise.race([Promise.resolve(entry.ready), new Promise((resolve) => { timer = setTimeout(() => resolve(false), limitMs); })]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // main.js reports every guest the app window attached after hardening it.
@@ -2658,7 +2681,7 @@ class BrowserManager {
     entry.presentationRadius = safeRadius(radius);
     entry.presentationBounds = safeBounds(this.hostBounds(bounds), this.win.getContentSize());
     entry.bounds = entry.presentationBounds;
-    if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+    if (!await this.readyForPresentation(entry)) throw new Error(entry.error || 'browser page initialization failed');
     if (viewport) {
       validateViewport(viewport.width, viewport.height);
       try { await this.setViewportSerialized(entry, viewport, false); } catch { this.deferViewport(entry, viewport); }
@@ -2826,7 +2849,7 @@ class BrowserManager {
   // The webview host: the page stays in the app (out of sight, still
   // painting) and the window shows it live (browser-pip.js).
   async popOutHosted(entry) {
-    if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+    if (!await this.readyForPresentation(entry)) throw new Error(entry.error || 'browser page initialization failed');
     const guest = this.liveContents(entry);
     if (!guest || guest.isDestroyed?.()) throw new Error('the browser page is not up yet; try again in a moment');
     let title = 'Workass';
