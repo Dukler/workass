@@ -2181,6 +2181,53 @@ test('a popup an agent-driven page opens keeps its opener and request, becomes a
   manager.destroy();
 });
 
+test('a window.open popup of an agent-driven page is a window the person sees and a tab the agent drives; closing either ends both', async () => {
+  const { agentDriven } = require('./browser-actions');
+  const { manager } = fixture({ requestOpen: () => {} });
+  const ownerTab = await manager.browserControl('browser.open', { chatId: 'signin-owner', visible: false });
+  const owner = manager.entries.get('signin-owner');
+  const open = (url, disposition = 'new-window') => {
+    owner.agentActiveAt = Date.now();
+    const decision = owner.view.webContents.windowOpenHandler({ url, disposition });
+    const made = new FakeWebContents(FakeView.profile);
+    decision.createWindow({ webContents: made, webPreferences: {} });
+    const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.view.webContents === made);
+    return { made, tab, window: made.view.parentWindow };
+  };
+  // A sign-in popup (a second factor, a captcha, a passkey needs the person).
+  const first = open('https://accounts.example/approve');
+  assert.ok(first.window instanceof FakeBrowserWindow, 'shown in a window of its own');
+  assert.notEqual(first.window.options.show, false, 'that the person can see');
+  assert.deepEqual([first.window.options.width, first.window.options.height], [980, 760], 'as on main');
+  assert.equal(await first.tab.ready, true);
+  assert.deepEqual([first.tab.viewport.width, first.tab.viewport.height], [980, 760], 'the page is the window\'s size');
+  assert.ok(manager.browserTabs('signin-owner').some((tab) => tab.id === first.made.id && tab.opened_by_tab_id === ownerTab.id), 'and the agent still drives it');
+  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.in_window === true));
+  first.tab.agentActiveAt = 0;
+  assert.equal(agentDriven(first.tab), false, 'in front of the person');
+  // A link opened in a new tab stays a background tab.
+  const link = open('https://docs.example/page', 'foreground-tab');
+  assert.equal(await link.tab.ready, true);
+  assert.notEqual(link.window && link.window.options.show, true);
+  assert.equal(link.tab.popupWindow, undefined);
+  // The person closes the window: the tab goes.
+  first.window.destroy();
+  assert.equal(manager.entries.has(first.tab.chatId), false);
+  assert.equal(first.made.closed, true);
+  // The agent closes the tab: the window goes.
+  const second = open('https://pay.example/3ds');
+  await second.tab.ready;
+  await manager.browserControl('browser.close', { chatId: 'signin-owner', tabId: second.made.id });
+  assert.equal(second.window.destroyed, true);
+  // The page closes itself (window.close() at the end of a sign-in): both go.
+  const third = open('https://accounts.example/done');
+  await third.tab.ready;
+  third.made.emit('destroyed');
+  assert.equal(manager.entries.has(third.tab.chatId), false);
+  assert.equal(third.window.destroyed, true);
+  manager.destroy();
+});
+
 test('only calls that act on a page make it agent-driven, and a popped-out page counts as in front of the person', async () => {
   const { manager } = fixture({ requestOpen: () => {} });
   await manager.browserControl('browser.open', { chatId: 'driven', visible: false });
