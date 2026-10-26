@@ -1447,6 +1447,288 @@ test('browser navigation waits for an owned iframe target to finish binding', as
   manager.destroy();
 });
 
+// Owned iframe setup against a page whose child sessions can stop answering:
+// Chromium drops replies for a child session that goes away mid-command.
+async function ownedFrameSetupFixture(chatId) {
+  const { manager } = fixture({ requestOpen: () => {} });
+  const tab = await manager.activate({ chatId, bounds: { x: 0, y: 0, width: 400, height: 300 } });
+  const entry = manager.entries.get(chatId);
+  const wc = entry.view.webContents;
+  const rootFrameId = 'frame-' + wc.id;
+  wc.frameTree = { frameTree: {
+    frame: { id: rootFrameId, loaderId: 'loader-root', url: 'about:blank' },
+    childFrames: [{ frame: { id: 'frame-child', parentId: rootFrameId, loaderId: 'loader-child', url: 'http://fixture.invalid/frame' }, childFrames: [] }],
+  } };
+  wc.childFrameTree = { frameTree: {
+    frame: { id: 'frame-child', parentId: rootFrameId, loaderId: 'loader-child', url: 'http://fixture.invalid/frame' },
+  } };
+  await manager.refreshFrameTree(entry);
+  const events = [];
+  manager.onLifecycle = (event) => events.push(event);
+  const calls = [];
+  const hangs = new Set();
+  const sendCommand = wc.debugger.sendCommand.bind(wc.debugger);
+  wc.debugger.sendCommand = (method, params, sessionId) => {
+    calls.push({ method, params, sessionId });
+    if (hangs.has(method + '@' + sessionId)) return new Promise(() => {});
+    return sendCommand(method, params, sessionId);
+  };
+  const attach = (sessionId, targetId, extra = {}) => wc.debugger.emit('message', {}, 'Target.attachedToTarget', {
+    sessionId, targetInfo: { targetId, type: 'iframe' }, waitingForDebugger: false, ...extra,
+  }, null);
+  const abandoned = (reason) => events.filter((event) => event.stage === 'owned-frame-target-abandoned' && event.reason === reason);
+  const sentTo = (method, sessionId) => calls.filter((call) => call.method === method &&
+    (method === 'Target.detachFromTarget' ? call.params?.sessionId === sessionId : call.sessionId === sessionId));
+  return { manager, tab, entry, wc, events, calls, hangs, attach, abandoned, sentTo, rootFrameId };
+}
+
+const settleTurns = async (turns = 5) => { for (let i = 0; i < turns; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('owned iframe setup that never answers times out, releases its session and marks the frame', async () => {
+  const { manager, tab, entry, hangs, attach, abandoned, sentTo } = await ownedFrameSetupFixture('chat-frame-timeout');
+  manager.ownedTargetSetupTimeoutMs = 40;
+  hangs.add('Accessibility.enable@child-timeout');
+  attach('child-timeout', 'target-timeout');
+  assert.equal(entry.pendingTargetTasks.size, 1);
+  await settleTurns();
+  assert.equal(entry.targetSessions.get('child-timeout')?.targetId, 'target-timeout', 'the session was accepted before enable stalled');
+  await sleep(80);
+  assert.equal(entry.pendingTargetTasks.size, 0, 'a stuck attach task settles at its deadline');
+  assert.equal(entry.targetSessions.has('child-timeout'), false);
+  assert.equal(abandoned('setup_timeout').length, 1);
+  assert.equal(abandoned('setup_timeout')[0].accepted, true);
+  assert.equal(sentTo('Target.detachFromTarget', 'child-timeout').length, 1, 'a still-attached session is detached');
+  const frame = entry.frames.get('frame-child');
+  assert.equal(frame.unavailableReason, 'setup_timeout');
+  assert.equal(frame.sessionId, null);
+  assert.equal(frame.targetId, entry.rootTargetId, 'the frame stays bound to its parent so a new target can re-adopt it');
+  const snapshot = await manager.browserControl('browser.snapshot', { tabId: tab.id });
+  const row = snapshot.frames.find((candidate) => candidate.url === 'http://fixture.invalid/frame');
+  assert.equal(row?.accessible, false);
+  assert.equal(row?.limitation, 'setup_timeout', 'observations report the abandoned frame honestly');
+  manager.destroy();
+});
+
+test('owned iframe setup is cancelled when its target detaches, is destroyed or crashes', async () => {
+  const { manager, entry, wc, hangs, attach, abandoned, sentTo } = await ownedFrameSetupFixture('chat-frame-gone');
+  manager.ownedTargetSetupTimeoutMs = 60_000;
+  // Stalled before identity is known, and stalled after acceptance.
+  hangs.add('Page.getFrameTree@child-detached');
+  hangs.add('Page.enable@child-destroyed');
+  hangs.add('Page.getFrameTree@child-crashed');
+  attach('child-detached', 'target-detached');
+  attach('child-destroyed', 'target-destroyed');
+  attach('child-crashed', 'target-crashed');
+  await settleTurns();
+  assert.equal(entry.pendingTargetTasks.size, 3);
+  assert.equal(entry.targetSessions.has('child-destroyed'), true);
+
+  wc.debugger.emit('message', {}, 'Target.detachedFromTarget', { sessionId: 'child-detached', targetId: 'target-detached' }, null);
+  await settleTurns();
+  assert.equal(abandoned('target_gone').length, 1);
+  assert.equal(entry.pendingTargetTasks.size, 2);
+
+  wc.debugger.emit('message', {}, 'Target.targetDestroyed', { targetId: 'target-destroyed' }, null);
+  await settleTurns();
+  assert.equal(abandoned('target_gone').length, 2);
+  assert.equal(entry.targetSessions.has('child-destroyed'), false);
+  assert.equal(entry.frames.get('frame-child')?.sessionId === 'child-destroyed', false, 'a destroyed frame mid-setup is no longer reported as owned');
+
+  wc.debugger.emit('message', {}, 'Target.targetCrashed', { targetId: 'target-crashed', status: 'crashed' }, null);
+  await settleTurns();
+  assert.equal(abandoned('target_crashed').length, 1);
+  assert.equal(entry.pendingTargetTasks.size, 0);
+  for (const sessionId of ['child-detached', 'child-destroyed', 'child-crashed']) {
+    assert.equal(sentTo('Target.detachFromTarget', sessionId).length, 0, `no protocol command chases the gone session ${sessionId}`);
+  }
+  manager.destroy();
+});
+
+test('closing the browser settles pending iframe setup and releases its session', async () => {
+  const { manager, entry, hangs, attach, abandoned, sentTo } = await ownedFrameSetupFixture('chat-frame-close');
+  manager.ownedTargetSetupTimeoutMs = 60_000;
+  hangs.add('Page.getFrameTree@child-close');
+  attach('child-close', 'target-close');
+  await settleTurns();
+  const [task] = entry.pendingTargetTasks;
+  manager.close('chat-frame-close');
+  await task.promise;
+  assert.equal(entry.pendingTargetTasks.size, 0);
+  assert.equal(abandoned('entry_closed').length, 1);
+  assert.equal(sentTo('Target.detachFromTarget', 'child-close').length, 1);
+  manager.destroy();
+});
+
+test('navigation proceeds past stuck iframe setup and cannot be held open by new attaches', async () => {
+  const { manager, tab, entry, wc, hangs, attach, abandoned, sentTo } = await ownedFrameSetupFixture('chat-frame-navigate');
+  manager.ownedTargetSetupTimeoutMs = 60_000;
+  manager.navigationTargetSetupWaitMs = 60;
+  hangs.add('Page.getFrameTree@child-stuck');
+  attach('child-stuck', 'target-stuck');
+  // An ad slot that keeps attaching frames which never finish setup.
+  let churn = 0;
+  const interval = setInterval(() => {
+    const id = 'child-churn-' + (churn += 1);
+    hangs.add('Page.getFrameTree@' + id);
+    attach(id, 'target-' + id);
+  }, 10);
+  try {
+    for (const url of ['https://fixture.invalid/one', 'https://fixture.invalid/two', 'https://fixture.invalid/three']) {
+      const started = Date.now();
+      const result = await manager.browserControl('browser.navigate', { tabId: tab.id, url });
+      assert.equal(result.url, url);
+      assert.equal(wc.getURL(), url);
+      assert.ok(Date.now() - started < 1000, 'navigation waits only a bounded moment for frame setup');
+    }
+  } finally {
+    clearInterval(interval);
+  }
+  assert.ok(churn >= 3, 'new attaches kept arriving during the navigations');
+  assert.ok(abandoned('setup_abandoned_navigation').length >= 1);
+  assert.equal(sentTo('Target.detachFromTarget', 'child-stuck').length, 1, 'the abandoned session is released');
+  assert.ok(!entry.pendingTargetTasks.has(Array.from(entry.pendingTargetTasks).find((task) => task.sessionId === 'child-stuck')));
+  manager.destroy();
+  await settleTurns();
+  assert.equal(entry.pendingTargetTasks.size, 0, 'closing settles whatever setup is still pending');
+});
+
+test('a target paused at start is resumed on every setup outcome', async () => {
+  const { manager, entry, wc, hangs, attach, sentTo } = await ownedFrameSetupFixture('chat-frame-paused');
+  manager.ownedTargetSetupTimeoutMs = 40;
+  const paused = { waitingForDebugger: true };
+
+  attach('child-ok', 'target-ok', paused);
+  await Promise.all(Array.from(entry.pendingTargetTasks, (task) => task.promise));
+  assert.equal(entry.targetSessions.get('child-ok')?.targetId, 'target-ok');
+  assert.equal(sentTo('Runtime.runIfWaitingForDebugger', 'child-ok').length, 1, 'an accepted target resumes after its domains are enabled');
+
+  wc.debugger.emit('message', {}, 'Target.attachedToTarget', {
+    sessionId: 'child-worker', targetInfo: { targetId: 'target-worker', type: 'worker' }, ...paused,
+  }, null);
+  await Promise.all(Array.from(entry.pendingTargetTasks, (task) => task.promise));
+  assert.equal(sentTo('Runtime.runIfWaitingForDebugger', 'child-worker').length, 1, 'a rejected target is resumed');
+  assert.equal(sentTo('Target.detachFromTarget', 'child-worker').length, 1, 'and detached');
+
+  hangs.add('Page.enable@child-stalled');
+  attach('child-stalled', 'target-stalled', paused);
+  await sleep(80);
+  assert.equal(sentTo('Runtime.runIfWaitingForDebugger', 'child-stalled').length, 1, 'a timed-out target is resumed');
+  assert.equal(sentTo('Target.detachFromTarget', 'child-stalled').length, 1);
+
+  manager.ownedTargetSetupTimeoutMs = 60_000;
+  manager.navigationTargetSetupWaitMs = 20;
+  hangs.add('Page.getFrameTree@child-nav');
+  attach('child-nav', 'target-nav', paused);
+  await manager.browserControl('browser.navigate', { tabId: Number(wc.id), url: 'https://fixture.invalid/after-pause' });
+  assert.equal(sentTo('Runtime.runIfWaitingForDebugger', 'child-nav').length, 1, 'setup abandoned for navigation resumes its target');
+  assert.equal(entry.pendingTargetTasks.size, 0);
+  manager.destroy();
+});
+
+test('navigation returns once the document is ready when a subframe never finishes loading', async () => {
+  const { manager, tab, entry, wc, events } = await ownedFrameSetupFixture('chat-frame-load');
+  manager.navigationLoadGraceMs = 30;
+  manager.navigationCommitTimeoutMs = 120;
+  const realLoad = wc.loadURL.bind(wc);
+  const evaluate = wc.debugger.sendCommand;
+  wc.debugger.sendCommand = (method, params, sessionId) => {
+    if (method === 'Runtime.evaluate' && !sessionId && String(params?.expression).includes('innerWidth')) {
+      return Promise.resolve({ result: { type: 'object', value: { ...wc.metrics } } });
+    }
+    return evaluate(method, params, sessionId);
+  };
+  // Electron defers executeJavaScript until the page stops loading, and this
+  // page never does; the visible pane re-attach must not wait on it either.
+  wc.executeJavaScript = () => new Promise(() => {});
+  wc.isLoadingMainFrame = () => true;
+  wc.loadURL = (url) => {
+    wc.emit('did-start-navigation', {}, url, false, true);
+    wc.url = url;
+    wc.emit('did-navigate', {}, url);
+    wc.emit('dom-ready');
+    return new Promise(() => {}); // the load event never fires
+  };
+  const result = await manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/streaming-ad' });
+  assert.equal(result.url, 'https://fixture.invalid/streaming-ad');
+  assert.ok(events.some((event) => event.stage === 'user-navigation-load-pending' && event.committed === true));
+  assert.equal(entry.effectiveViewport.width, 1440);
+  // Main-world page actions on the still-loading page use the root CDP
+  // session too, so they cannot park the serialized queue either.
+  const viaCDP = wc.debugger.sendCommand;
+  wc.debugger.sendCommand = (method, params, sessionId) => {
+    if (method === 'Runtime.evaluate' && !sessionId && String(params?.expression).includes('window.scrollBy(')) {
+      return Promise.resolve({ result: { type: 'object', value: { changed: true, before: { x: 0, y: 0 }, after: { x: 0, y: 200 } } } });
+    }
+    return viaCDP(method, params, sessionId);
+  };
+  const scrolled = await manager.browserControl('browser.scroll', { tabId: tab.id, y: 200 });
+  assert.equal(scrolled.changed, true);
+  wc.debugger.sendCommand = viaCDP;
+
+  wc.loadURL = () => new Promise(() => {}); // the main document never commits
+  await assert.rejects(
+    manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/never-commits' }),
+    /did not commit within/,
+  );
+  wc.loadURL = realLoad;
+  delete wc.executeJavaScript;
+  wc.isLoadingMainFrame = () => false;
+  // The page is still loading: the old load is stopped (and its main-frame
+  // ERR_ABORTED reported) before the next one starts.
+  let loading = true;
+  wc.isLoading = () => loading;
+  wc.stop = () => {
+    loading = false;
+    wc.stopped = true;
+    wc.emit('did-fail-load', {}, -3, 'ERR_ABORTED', 'https://fixture.invalid/streaming-ad', true);
+  };
+  const after = await manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/ordinary' });
+  assert.equal(after.url, 'https://fixture.invalid/ordinary', 'the operation queue is never left holding a dead load');
+  assert.equal(wc.stopped, true);
+  manager.destroy();
+});
+
+test('an owned-frame evaluation is released when its session goes away or stops answering', async () => {
+  const { manager, entry, wc, hangs, attach } = await ownedFrameSetupFixture('chat-frame-eval');
+  attach('child-eval', 'target-eval');
+  await Promise.all(Array.from(entry.pendingTargetTasks, (task) => task.promise));
+  assert.equal(entry.targetSessions.get('child-eval')?.frameId, 'frame-child');
+  hangs.add('Runtime.evaluate@child-eval');
+  const removedMidEvaluate = manager.evaluateFrame(entry, 'frame-child', 'document.title');
+  wc.debugger.emit('message', {}, 'Target.detachedFromTarget', { sessionId: 'child-eval', targetId: 'target-eval' }, null);
+  await assert.rejects(removedMidEvaluate, /went away/);
+  assert.equal(entry.sessionCommandWaiters?.has('child-eval') || false, false);
+
+  attach('child-eval-2', 'target-eval-2');
+  await Promise.all(Array.from(entry.pendingTargetTasks, (task) => task.promise));
+  assert.equal(entry.targetSessions.get('child-eval-2')?.frameId, 'frame-child', 'the same frame is re-adopted by its new target');
+  hangs.add('Runtime.evaluate@child-eval-2');
+  manager.childSessionCommandTimeoutMs = 30;
+  await assert.rejects(manager.evaluateFrame(entry, 'frame-child', 'document.title'), /did not answer Runtime\.evaluate/);
+
+  // A snapshot shares one bounded budget across child frames that stopped
+  // answering instead of waiting the per-command cap for each of them.
+  manager.childSessionCommandTimeoutMs = 60_000;
+  manager.snapshotChildFramesBudgetMs = 50;
+  const started = Date.now();
+  const snapshot = await manager.browserControl('browser.snapshot', { tabId: Number(wc.id) });
+  assert.ok(Date.now() - started < 1000, 'the snapshot completes within its child-frame budget');
+  assert.ok(Array.isArray(snapshot.frames));
+  manager.destroy();
+});
+
+test('a frame tree read for a retired child session never rebinds frames to the root target', async () => {
+  const { manager, entry, rootFrameId } = await ownedFrameSetupFixture('chat-frame-retired');
+  const before = entry.frames.get('frame-child');
+  const recorded = manager.recordFrameTree(entry, { frame: { id: 'frame-from-gone-child', loaderId: 'l', url: 'x' }, childFrames: [] }, 'retired-session');
+  assert.equal(recorded, false);
+  assert.equal(entry.frames.has('frame-from-gone-child'), false);
+  assert.equal(entry.frames.get('frame-child'), before);
+  assert.ok(entry.frames.has(rootFrameId));
+  manager.destroy();
+});
+
 test('retiring an already detached frame session does not detach it twice', async () => {
   const { manager } = fixture();
   await manager.activate({ chatId: 'chat-frame-detach', bounds: { x: 0, y: 0, width: 400, height: 300 } });
