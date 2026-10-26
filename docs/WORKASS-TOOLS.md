@@ -136,6 +136,37 @@ conditions for at most 15 seconds and returns safe current state on timeout.
 final snapshot with `observe_after:true`. `workass_browser_diagnostics` reads a
 redacted in-memory warning/error cursor; page diagnostics are not persisted.
 
+Snapshot element rows also carry `href` (absolute, resolved against the
+document base), `src`/`alt`, `title`, and the current `value` of inputs,
+textareas and selects (a select reports its selected option labels). Password,
+one-time-code, card and secret-named fields report `valueRedacted:true` and
+never a value; every other value and URL passes the page redaction plus
+credential-shape redaction (provider keys, JWTs, private keys, URL userinfo).
+In the default `json` format these facts are added only after the legacy 64
+KiB budget has run, so every legacy field is byte-identical to before; facts
+that do not fit are counted in `truncation.element_facts_omitted`.
+`format:"compact"` renders one line per element with short refs (`e12`, frames
+`f1`) aliased in the same observation, so they work with that `snapshot_id`
+for click, type, scroll and read. Compact output folds an image into its link,
+drops rows that only repeat text (list items, paragraphs, static text), and
+budgets interactive lines first, then page text, then the outline.
+`since_snapshot_id` diffs against an earlier compact snapshot of the same
+document (`+` added, `~` changed, `-` removed, with unchanged refs still valid)
+and falls back to a full compact snapshot with `incremental.reason`
+(`document_changed`, `base_snapshot_unknown`, `too_many_changes`).
+
+`workass_browser_read` renders the page, a frame (`frame_ref`), an element
+(`element_ref`) or CSS selector matches as markdown: links and images with
+absolute URLs, markdown tables, summarized form fields, and JSON-LD, microdata
+and meta tags first (or after the content, with an offset pointer, when larger
+than 8 KiB). A page's `<main>` region comes before its chrome. Child frames,
+including cross-site owned frames, are read in their own documents and placed
+where their iframe is; frame reads share an 8 s budget and at most 40 frames.
+Output is paged by UTF-8 byte offset (`max_bytes` 2048–65536, default 32768,
+pages end on a line when one is near); continuations reuse the same extraction
+until the document or the agent's interaction generation changes. The read is
+non-mutating and needs no `operation_id`.
+
 Arguments are validated against the tool's input schema before any handler
 runs: unknown arguments, wrong types, out-of-range numbers and values outside an
 enum are rejected with an error naming the argument.

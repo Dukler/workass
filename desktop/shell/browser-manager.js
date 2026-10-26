@@ -10,6 +10,10 @@ const {
   addDiagnostic, diagnosticsAfter, mapFramePointThroughQuad, observationScript,
   observedTargetGeometryScript, redactPageMessage, targetExpression, truncateUtf8Bytes,
 } = require('./browser-observation');
+const {
+  attachNodeFacts, browserSnapshotForParams, detachNodeFacts, dropSecretFieldAxRows,
+} = require('./browser-snapshot-view');
+const { browserRead } = require('./browser-read');
 
 const MAX_BROWSER_SNAPSHOT_BYTES = 64 * 1024;
 const SNAPSHOT_FRAME_LIMIT = 100;
@@ -2002,10 +2006,10 @@ class BrowserManager {
 
   // The first snapshot of a page that is still attaching or loading frames
   // can see them change mid-observation. Retry once before reporting it.
-  async browserSnapshotSettled(entry) {
+  async browserSnapshotSettled(entry, extra = {}) {
     const changed = (error) => /changed during snapshot/.test(String(error && error.message));
     // Both attempts share one child-frame budget.
-    const options = { childFramesDeadline: Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS) };
+    const options = { ...extra, childFramesDeadline: Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS) };
     try {
       return await this.browserSnapshot(entry, options);
     } catch (error) {
@@ -2827,7 +2831,9 @@ class BrowserManager {
     }
   }
 
-  async browserSnapshot(entry, { childFramesDeadline: sharedDeadline = null } = {}) {
+  async browserSnapshot(entry, { childFramesDeadline: sharedDeadline = null, unbounded = false } = {}) {
+    // Compact views budget their own output, so they read the full result.
+    const snapshotByteLimit = unbounded ? Number.POSITIVE_INFINITY : MAX_BROWSER_SNAPSHOT_BYTES;
     this.assertCurrentEntry(entry);
     await this.ensureCDP(entry);
     await this.refreshFrameTree(entry);
@@ -2983,6 +2989,9 @@ class BrowserManager {
       for (const ref of combinedRefs) {
         if (ref.frameId === frame.id && ref.nodeKey) byNodeKey.set(ref.nodeKey, ref);
       }
+      // A secret field's own text (its value) must not come back as rows.
+      const secretFieldAxIds = new Set();
+      const axRowNodeIds = new Map();
       for (let axIndex = 0; axIndex < axNodes.length; axIndex += 1) {
         if (axNodesScanned >= AX_NODE_LIMIT) {
           axNodesTruncated = true;
@@ -3028,6 +3037,7 @@ class BrowserManager {
           focused: values.focused === true || existing?.focused === true,
           frameId: frame.id,
         };
+        if (existing && existing.valueRedacted === true) secretFieldAxIds.add(String(axNode.nodeId));
         if (existing) Object.assign(existing, axFields);
         else {
           const actionableRoles = new Set(['button', 'checkbox', 'combobox', 'link', 'menuitem', 'radio', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab', 'textbox']);
@@ -3039,6 +3049,7 @@ class BrowserManager {
             valueLength: null, ...axFields,
           });
           nodeCount += 1;
+          axRowNodeIds.set(refIndex, String(axNode.nodeId));
           if (actionableRoles.has(role)) interactive.push({
             refIndex, role: axFields.role, name: axFields.name, text: '', selector: '',
             ariaLabel: null, readOnly: values.readonly === true, editor: null,
@@ -3046,6 +3057,7 @@ class BrowserManager {
           });
         }
       }
+      nodeCount -= dropSecretFieldAxRows({ axNodes, secretFieldAxIds, axRowNodeIds, semantic, interactive });
       axByFrame.set(key, {
         scanned: Math.min(axNodes.length, AX_NODE_LIMIT),
         returned: frameNodes.length,
@@ -3185,6 +3197,8 @@ class BrowserManager {
       editor.frame_ref = frameRefById.get(editor.frameId) || null;
       delete editor.frameId;
     }
+    // Element facts (href, src, value...) join the rows after the legacy budget.
+    const nodeFacts = detachNodeFacts(semantic, interactive);
 
     const scroll = textSource && textSource.scroll || {};
     const metrics = {
@@ -3303,8 +3317,8 @@ class BrowserManager {
       return true;
     };
     let serializedBytes = byteSize();
-    while (serializedBytes > MAX_BROWSER_SNAPSHOT_BYTES - 16) {
-      let bytesToRemove = serializedBytes - (MAX_BROWSER_SNAPSHOT_BYTES - 16);
+    while (serializedBytes > snapshotByteLimit - 16) {
+      let bytesToRemove = serializedBytes - (snapshotByteLimit - 16);
       const fields = stringFields().sort((a, b) =>
         Buffer.byteLength(String(b[0][b[1]]), 'utf8') - Buffer.byteLength(String(a[0][a[1]]), 'utf8'));
       let removedBytes = 0;
@@ -3361,7 +3375,7 @@ class BrowserManager {
     result.truncation.total_bytes = 0;
     // Leave room for the byte-count value itself, whose decimal width is part
     // of the serialized response.
-    while (byteSize() > MAX_BROWSER_SNAPSHOT_BYTES) {
+    while (byteSize() > snapshotByteLimit) {
       if (removeAnyInteractiveRow()) {
         result.truncation.interactive_nodes = true;
       } else if (removeSemanticRow()) {
@@ -3391,7 +3405,7 @@ class BrowserManager {
     }
     result.truncation.total_bytes = byteSize();
     result.truncation.total_bytes = byteSize();
-    while (byteSize() > MAX_BROWSER_SNAPSHOT_BYTES && result.semantic.length) {
+    while (byteSize() > snapshotByteLimit && result.semantic.length) {
       removeSemanticRow();
       result.semantic_returned = result.semantic.length;
       result.truncation.semantic_rows_removed = budget.semanticRowsRemoved;
@@ -3406,7 +3420,8 @@ class BrowserManager {
         result.text_truncated_bytes = Math.max(0, Number(result.text_truncated_bytes));
       }
     }
-    if (byteSize() > MAX_BROWSER_SNAPSHOT_BYTES) throw new Error('browser snapshot metadata exceeds the 64 KiB response limit');
+    attachNodeFacts(result, nodeFacts, snapshotByteLimit);
+    if (byteSize() > snapshotByteLimit) throw new Error('browser snapshot metadata exceeds the 64 KiB response limit');
 
     const liveElementRefs = new Set();
     for (const node of result.semantic) if (node.element_ref) liveElementRefs.add(node.element_ref);
@@ -3428,6 +3443,7 @@ class BrowserManager {
     }
     entry.observations.set(snapshotId, {
       refs, documentGeneration, viewportGeneration,
+      frameRefs: new Map(Array.from(frameRefById, ([frameId, frameRef]) => [frameRef, frameId])),
       frameTreeGeneration, interactionGeneration,
       scroll: { x: result.scroll.x || 0, y: result.scroll.y || 0 },
     });
@@ -4190,7 +4206,7 @@ class BrowserManager {
     const serializedMethods = new Set([
       'browser.navigate', 'browser.back', 'browser.forward', 'browser.reload', 'browser.click',
       'browser.type', 'browser.scroll', 'browser.key', 'browser.setViewport', 'browser.resetViewport',
-      'browser.batch', 'browser.snapshot', 'browser.screenshot',
+      'browser.batch', 'browser.snapshot', 'browser.screenshot', 'browser.read',
     ]);
     if (!internal.serialized && serializedMethods.has(method)) {
       return this.serialize(entry, () => this.browserControl(method, params, { serialized: true }));
@@ -4204,7 +4220,8 @@ class BrowserManager {
     if (method === 'browser.back') { await this.command(entry.chatId, 'back'); return this.tabInfo(entry); }
     if (method === 'browser.forward') { await this.command(entry.chatId, 'forward'); return this.tabInfo(entry); }
     if (method === 'browser.reload') { await this.command(entry.chatId, 'reload'); return this.tabInfo(entry); }
-    if (method === 'browser.snapshot') return this.browserSnapshotSettled(entry);
+    if (method === 'browser.snapshot') return browserSnapshotForParams(this, entry, params);
+    if (method === 'browser.read') return browserRead(this, entry, params);
     if (method === 'browser.click') return this.browserClick(entry, params);
     if (method === 'browser.type') {
       const target = await this.observationTarget(entry, params);

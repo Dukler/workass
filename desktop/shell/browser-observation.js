@@ -51,6 +51,128 @@ function mapFramePointThroughQuad(point, viewport, quad) {
   };
 }
 
+// Page-side facts about one element. These functions run inside the page
+// (they are injected by source), so each uses only its arguments, the other
+// helpers below and standard page globals.
+const MAX_NODE_URL_CHARS = 2048;
+const MAX_NODE_VALUE_CHARS = 1000;
+const MAX_NODE_LABEL_CHARS = 240;
+
+function pageAbsoluteURL(raw, base) {
+  const value = String(raw == null ? '' : raw).trim();
+  if (!value) return '';
+  let resolved = value;
+  try {
+    if (typeof URL === 'function') resolved = base ? new URL(value, base).href : new URL(value).href;
+  } catch { resolved = value; }
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(resolved);
+  if (scheme) {
+    const name = scheme[1].toLowerCase();
+    // Script and inline-data URLs are never useful as targets and can be huge.
+    if (name === 'javascript' || name === 'vbscript' || name === 'data') return name + ':';
+  }
+  return resolved.length > 2048 ? resolved.slice(0, 2048) : resolved;
+}
+
+function pageSensitiveFieldName(key) {
+  const text = String(key || '');
+  if (!text) return false;
+  if (isSensitivePageKey(text)) return true;
+  const spaced = text.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+  return /(?:^|[^a-z])(?:pass(?:word|wd|code|phrase)?|pwd|pin|otp|cvv|cvc|csc|ssn)(?:[^a-z]|$)/i.test(spaced);
+}
+
+function pageSecretField(el) {
+  const type = String(el.getAttribute('type') || el.type || '').toLowerCase();
+  if (type === 'password') return true;
+  const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+  if (/(?:^|\s)(?:current-password|new-password|one-time-code|cc-number|cc-csc|cc-exp|cc-exp-month|cc-exp-year)(?:\s|$)/.test(autocomplete)) return true;
+  for (const key of [el.getAttribute('name'), el.getAttribute('id'), el.id]) {
+    if (key && pageSensitiveFieldName(key)) return true;
+  }
+  return false;
+}
+
+function pageFieldFacts(el) {
+  const tag = String(el.tagName || '').toLowerCase();
+  const type = String(el.getAttribute('type') || el.type || '').toLowerCase();
+  let kind = '';
+  if (tag === 'select') kind = 'select';
+  else if (tag === 'textarea') kind = 'text';
+  else if (tag === 'input' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'hidden'].includes(type)) kind = 'text';
+  if (!kind) return null;
+  if (pageSecretField(el)) return { valueRedacted: true };
+  let value = '';
+  if (kind === 'select') {
+    const chosen = [];
+    for (const option of Array.from(el.selectedOptions || [])) {
+      const label = String(option.label || option.textContent || option.value || '').trim().replace(/\s+/g, ' ');
+      if (label) chosen.push(label);
+    }
+    value = chosen.join(', ');
+  } else if (typeof el.value === 'string') value = el.value;
+  const facts = {};
+  if (value) {
+    facts.value = value.length > 1000 ? value.slice(0, 1000) : value;
+    if (value.length > 1000) facts.valueTruncated = true;
+  } else if (kind === 'text') {
+    const placeholder = String(el.getAttribute('placeholder') || '').trim();
+    if (placeholder) facts.placeholder = placeholder.slice(0, 240);
+  }
+  return facts;
+}
+
+function pageImageSource(el, base) {
+  let fallback = '';
+  for (const candidate of [el.currentSrc, el.getAttribute('src'), el.getAttribute('data-src'), el.getAttribute('data-lazy-src'), el.getAttribute('data-original')]) {
+    if (!candidate) continue;
+    const url = pageAbsoluteURL(candidate, base);
+    if (!url) continue;
+    // A lazy-loading placeholder stands in for the real image named elsewhere.
+    if (url === 'data:') { fallback = fallback || url; continue; }
+    return url;
+  }
+  return fallback;
+}
+
+function pageNodeFacts(el, name) {
+  const facts = {};
+  const tag = String(el.tagName || '').toLowerCase();
+  const type = String(el.getAttribute('type') || '').toLowerCase();
+  let base = '';
+  try { base = (el.ownerDocument && el.ownerDocument.baseURI) || (typeof location === 'object' && location ? location.href : ''); } catch { base = ''; }
+  if (tag === 'a' || tag === 'area') {
+    const raw = el.getAttribute('href') != null ? el.getAttribute('href') : el.getAttribute('xlink:href');
+    if (raw != null) {
+      const href = pageAbsoluteURL(raw, base);
+      if (href) facts.href = href;
+    }
+  }
+  if (tag === 'img' || (tag === 'input' && type === 'image')) {
+    const src = pageImageSource(el, base);
+    if (src) facts.src = src;
+    const alt = String(el.getAttribute('alt') || '').trim().replace(/\s+/g, ' ');
+    if (alt) facts.alt = alt.slice(0, 240);
+  } else if (!String(name || '').trim() && typeof el.querySelector === 'function') {
+    // An image-only link or button is named by its picture.
+    try {
+      const image = el.querySelector('img[alt]');
+      const alt = image ? String(image.getAttribute('alt') || '').trim().replace(/\s+/g, ' ') : '';
+      if (alt) facts.alt = alt.slice(0, 240);
+    } catch { /* the name stays empty */ }
+  }
+  const title = String(el.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+  if (title && title !== String(name || '').trim()) facts.title = title.slice(0, 240);
+  const field = pageFieldFacts(el);
+  if (field) Object.assign(facts, field);
+  return facts;
+}
+
+const PAGE_FACT_HELPERS = [
+  isSensitivePageKey, pageAbsoluteURL, pageSensitiveFieldName, pageSecretField,
+  pageFieldFacts, pageImageSource, pageNodeFacts,
+].map((fn) => `const ${fn.name} = (${fn.toString()});`).join('\n');
+
 function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, rootOnly = false } = {}) {
   const safeSnapshotId = JSON.stringify(String(snapshotId || ''));
   const nodes = Math.max(1, Math.min(500, Math.floor(Number(maxNodes) || 500)));
@@ -67,6 +189,7 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
     const maxTextScanNodes = ${MAX_OBSERVATION_TEXT_NODES};
     const maxSnapshotKeysPerNode = ${MAX_NODE_SNAPSHOT_KEYS};
     const observeChildDocuments = ${observeChildDocuments};
+    ${PAGE_FACT_HELPERS}
     const semantic = [];
     const frames = [];
     const refs = [];
@@ -268,8 +391,12 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
               const editorKind = editorRoot ? (editorRoot.matches('.monaco-editor') ? 'monaco' : 'code-editor') : null;
               const visibleText = String((editorState && editorState.text) || el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().replace(/\\s+/gu, ' ');
               const readOnly = !!el.readOnly || el.getAttribute('aria-readonly') === 'true' || !!(editorState && editorState.readOnly);
+              const nodeName = nameFor(el).slice(0, 240);
+              let nodeFacts = {};
+              try { nodeFacts = pageNodeFacts(el, nodeName); } catch (error) { recordTraversalError('facts', error); }
               semantic.push({
-                refIndex, role: role || el.tagName.toLowerCase(), name: nameFor(el).slice(0, 240),
+                ...nodeFacts,
+                refIndex, role: role || el.tagName.toLowerCase(), name: nodeName,
                 tag: el.tagName.toLowerCase(), selector, ariaLabel: el.getAttribute('aria-label') || null,
                 text: visibleText.slice(0, 240), type: type || null,
                 checked: typeof el.checked === 'boolean' ? el.checked : null,
@@ -717,7 +844,27 @@ function redactTextAssignments(source) {
 }
 
 function redactPageTextInner(source) {
-  return redactTextAssignments(String(source));
+  return redactSecretShapes(redactTextAssignments(String(source)));
+}
+
+// Well-known credential shapes that carry no key name: provider API keys,
+// cloud access keys, JWTs, private-key blocks and user:password@ in URLs.
+const SECRET_SHAPE_RE = /(\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b)|(:\/\/)[^\s/:@]+:[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
+
+function redactSecretShapes(value) {
+  return String(value == null ? '' : value).replace(SECRET_SHAPE_RE, (match, token, scheme) => {
+    if (scheme) return scheme + '[redacted]@';
+    return '[redacted]';
+  });
+}
+
+// Page values (field values, URLs, read output) get both the key-based page
+// redaction and the credential-shape redaction. Unlike redactPageMessage it is
+// not limited to the 64 KiB diagnostic scan; callers pass bounded strings or
+// one line at a time.
+function redactPageValue(value, maxBytes = Infinity) {
+  const text = redactPageTextInner(String(value == null ? '' : value));
+  return Number.isFinite(maxBytes) ? truncateUtf8Bytes(text, maxBytes) : text;
 }
 
 function redactPageMessage(value, maxBytes = MAX_DIAGNOSTIC_MESSAGE) {
@@ -762,12 +909,23 @@ module.exports = {
   MAX_OBSERVATION_FRAMES,
   MAX_OBSERVATION_TEXT_SCAN_BYTES,
   MAX_OBSERVATION_TEXT_NODES,
+  MAX_NODE_LABEL_CHARS,
+  MAX_NODE_URL_CHARS,
+  MAX_NODE_VALUE_CHARS,
+  PAGE_FACT_HELPERS,
   addDiagnostic,
   diagnosticsAfter,
+  isSensitivePageKey,
   mapFramePointThroughQuad,
   observationScript,
   observedTargetGeometryScript,
+  pageAbsoluteURL,
+  pageFieldFacts,
+  pageNodeFacts,
+  pageSecretField,
   redactPageMessage,
+  redactPageValue,
+  redactSecretShapes,
   resolvePathScript,
   targetExpression,
   truncateUtf8Bytes,
