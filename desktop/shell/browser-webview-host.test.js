@@ -255,6 +255,24 @@ test('the browser host is webview by default on macOS, view on Windows, and eith
   assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
 });
 
+test('a wait that joins a pending wait for the page gets its own full time', async () => {
+  const { manager, published, mount } = hostedFixture();
+  manager.guestAttachTimeoutMs = 150;
+  const entry = manager.get('chat-join');
+  const hostKey = published.at(-1).find((host) => host.chatId === 'chat-join').hostKey;
+  const outcomes = [];
+  void manager.awaitGuest(entry).then((value) => outcomes.push(['first', value]));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  void manager.awaitGuest(entry).then((value) => outcomes.push(['joined', value]));
+  // Past the first wait's own deadline, not past the joined one's.
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.deepEqual(outcomes, [], 'nobody is told "did not come up" while a later wait still has time');
+  mount(hostKey);
+  await settle();
+  assert.deepEqual(outcomes.map(([, value]) => value), [true, true]);
+  manager.destroy();
+});
+
 test('a press-and-move in the pop-out that starts an HTML drag goes through Chromium\'s drag events, never an OS drag', async () => {
   const { manager, published, mount } = hostedFixture();
   const entry = manager.get('chat-pipdrag');

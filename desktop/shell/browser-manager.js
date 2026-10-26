@@ -1658,19 +1658,24 @@ class BrowserManager {
   // One waiter per page: whoever waits for the page's next guest (a call
   // made during setup, during a restore, after a renderer reload) is answered
   // by the same settle, or by its bounded timeout. A second wait joins the
-  // first instead of replacing it.
+  // first instead of replacing it, and gets its own full time: the timeout
+  // runs from the latest wait.
   awaitGuest(entry) {
     const lifecycleToken = entry.lifecycleToken;
     return new Promise((resolve) => {
-      if (entry.guestWaiter) { entry.guestWaiter.resolvers.push(resolve); return; }
-      const waiter = { resolvers: [resolve], settle: null };
+      if (entry.guestWaiter) {
+        entry.guestWaiter.resolvers.push(resolve);
+        entry.guestWaiter.arm();
+        return;
+      }
+      const waiter = { resolvers: [resolve], settle: null, arm: null };
+      let timer = null;
       const finish = (value) => {
         if (entry.guestWaiter === waiter) entry.guestWaiter = null;
         clearTimeout(timer);
         for (const each of waiter.resolvers.splice(0)) each(value);
       };
-      const timeoutMs = this.guestAttachTimeoutMs ?? GUEST_ATTACH_TIMEOUT_MS;
-      const timer = setTimeout(() => {
+      const expire = () => {
         if (entry.guestWaiter !== waiter) return;
         entry.guestWaiter = null;
         if (this.isCurrentEntry(entry, lifecycleToken)) {
@@ -1680,8 +1685,13 @@ class BrowserManager {
           entry.ready = this.awaitGuest(entry);
         }
         finish(false);
-      }, timeoutMs);
-      if (typeof timer?.unref === 'function') timer.unref();
+      };
+      waiter.arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(expire, this.guestAttachTimeoutMs ?? GUEST_ATTACH_TIMEOUT_MS);
+        if (typeof timer?.unref === 'function') timer.unref();
+      };
+      waiter.arm();
       waiter.settle = finish;
       entry.guestWaiter = waiter;
     });
