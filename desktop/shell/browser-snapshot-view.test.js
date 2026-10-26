@@ -280,7 +280,7 @@ test('incremental compact snapshots report only changes and keep earlier refs va
   const unknown = await page.snapshot({ sinceSnapshotId: 'not-a-snapshot' });
   assert.equal(unknown.incremental.reason, 'base_snapshot_unknown');
   await assert.rejects(page.snapshot({ format: 'json', sinceSnapshotId: fourth.snapshot_id }), /requires format compact/);
-  await assert.rejects(page.snapshot({ format: 'yaml' }), /format must be json or compact/);
+  await assert.rejects(page.snapshot({ format: 'yaml' }), /format must be outline, json or compact/);
 });
 
 test('accessibility text inside a secret field never becomes a snapshot row', async () => {

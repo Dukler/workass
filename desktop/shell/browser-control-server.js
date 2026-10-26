@@ -15,6 +15,8 @@ const MUTATING_METHODS = new Set([
   'browser.open', 'browser.navigate', 'browser.back', 'browser.forward',
   'browser.reload', 'browser.click', 'browser.type',
   'browser.scroll', 'browser.key', 'browser.batch', 'browser.setViewport', 'browser.resetViewport',
+  'browser.select', 'browser.hover', 'browser.drag', 'browser.upload', 'browser.dialog', 'browser.close',
+  'browser.evaluate',
 ]);
 
 function mutationReceiptKey(operationId) {
@@ -263,7 +265,7 @@ class BrowserControlServer {
         };
       } else {
         try {
-          const result = await this.manager.browserControl(method, request.params || {});
+          const result = await this.manager.browserControl(method, request.params || {}, { report: true });
           response = { id: request.id ?? null, operationId, requestDigest, receipt: true, result };
         } catch (err) {
           response = {
@@ -374,7 +376,7 @@ class BrowserControlServer {
           }
           writeJSON(res, 200, await this.dispatchMutation(request));
         } else {
-          const result = await this.manager.browserControl(request.method, request.params || {});
+          const result = await this.manager.browserControl(request.method, request.params || {}, { report: true });
           writeJSON(res, 200, { id: request.id ?? null, result });
         }
       } catch (err) {

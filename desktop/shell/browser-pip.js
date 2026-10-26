@@ -72,7 +72,7 @@ function pipInputToPage(input, viewport) {
 
 // Opens the window; returns { window, close() }. sendInput(event) delivers a
 // CDP mouse event to the page; onClosed() runs once when the window goes.
-function openGuestPip({ BrowserWindow, guest, title, viewport, preload, sendInput, onClosed, embedder }) {
+function openGuestPip({ BrowserWindow, guest, title, viewport, preload, sendInput, onClosed, embedder, subscribe = null }) {
   const [width, height] = pipContentSize(viewport);
   const win = new BrowserWindow({
     width, height, useContentSize: true, minWidth: 240, minHeight: 160, show: false, title,
@@ -86,7 +86,7 @@ function openGuestPip({ BrowserWindow, guest, title, viewport, preload, sendInpu
   let lastSent = 0;
   let pending = null;
   let timer = null;
-  let subscribed = false;
+  let unsubscribe = null;
   const deliver = () => {
     timer = null;
     if (!pending || win.isDestroyed()) return;
@@ -126,7 +126,7 @@ function openGuestPip({ BrowserWindow, guest, title, viewport, preload, sendInpu
     if (closed) return;
     closed = true;
     clearTimeout(timer);
-    if (subscribed && !guest.isDestroyed()) { try { guest.endFrameSubscription(); } catch { /* already ended */ } }
+    if (unsubscribe) { try { unsubscribe(); } catch { /* already ended */ } unsubscribe = null; }
     for (const contents of throttling) {
       try { if (!contents.isDestroyed()) contents.setBackgroundThrottling(true); } catch { /* closing */ }
     }
@@ -135,7 +135,10 @@ function openGuestPip({ BrowserWindow, guest, title, viewport, preload, sendInpu
   win.on('closed', cleanup);
   win.webContents.once('did-finish-load', () => {
     if (win.isDestroyed() || guest.isDestroyed()) return;
-    try { guest.beginFrameSubscription(false, onFrame); subscribed = true; } catch { /* no live frames */ }
+    try {
+      if (typeof subscribe === 'function') unsubscribe = subscribe(onFrame);
+      else { guest.beginFrameSubscription(false, onFrame); unsubscribe = () => { if (!guest.isDestroyed()) guest.endFrameSubscription(); }; }
+    } catch { /* no live frames */ }
     // The first frame, even if the page does not paint again.
     void guest.capturePage().then((image) => { if (!image.isEmpty()) onFrame(image); }).catch(() => {});
   });

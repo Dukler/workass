@@ -15,6 +15,11 @@ const {
 } = require('./browser-snapshot-view');
 const { browserRead } = require('./browser-read');
 const { openGuestPip } = require('./browser-pip');
+const { buildOutline, diffOutlines, pageLines } = require('./browser-outline');
+const {
+  POPUP_TAB_LIMIT, agentDriven, browserDialog, browserDrag, browserEvaluate, browserHover, browserSelect, browserUpload,
+  dialogBlockedError, dialogClosed, dialogOpened, markAgentActive, pushEvent, runAction, takeDownload,
+} = require('./browser-actions');
 
 const MAX_BROWSER_SNAPSHOT_BYTES = 64 * 1024;
 const SNAPSHOT_FRAME_LIMIT = 100;
@@ -71,6 +76,19 @@ const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 const GUEST_ATTACH_TIMEOUT_MS = 20000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
+// The page outline: frames read per outline, their shared time budget, how
+// many read at once, refs per document, outlines kept for paging and diffs,
+// and the default page size.
+const OUTLINE_FRAME_LIMIT = 120;
+const OUTLINE_FRAMES_BUDGET_MS = 8000;
+const OUTLINE_READ_CONCURRENCY = 8;
+const OUTLINE_REF_LIMIT = 20000;
+const OUTLINE_HISTORY = 6;
+const OUTLINE_PAGE_BYTES = 20000;
+// No agent call may hold a tab's queue longer than this (the CLI gives up at
+// 30 s); navigation and batches get a little more.
+const OPERATION_DEADLINE_MS = 25000;
+const LONG_OPERATION_DEADLINE_MS = 28500;
 const CAPTURE_TIMEOUT_MS = 12000;
 // Reasons that mean the child session no longer exists, so no protocol
 // command may be sent to it (or to detach it) anymore.
@@ -324,6 +342,7 @@ class BrowserManager {
   constructor({
     win, WebContentsView, BrowserWindow, nativeImage, session, partition = DEFAULT_PARTITION, chromeVersion, platform,
     onState, requestOpen, onLifecycle, host = 'view', webContentsFromId = null, onHosts = null, pipPreload = '',
+    downloadsDir = '',
   }) {
     if (!win || !WebContentsView || !session) throw new Error('browser manager dependencies missing');
     this.win = win;
@@ -365,6 +384,14 @@ class BrowserManager {
     // later without silently granting camera/mic/location to arbitrary sites.
     try { this.profile.setPermissionCheckHandler(() => false); } catch { /* older Electron */ }
     try { this.profile.setPermissionRequestHandler((_wc, _permission, callback) => callback(false)); } catch { /* older Electron */ }
+    // Files an agent's page downloads go to a folder of the chat's own.
+    this.downloadsRoot = String(downloadsDir || '');
+    if (typeof this.profile.on === 'function') {
+      this.profile.on('will-download', (_event, item, contents) => {
+        const entry = Array.from(this.entries.values()).find((candidate) => candidate.view && candidate.view.webContents === contents);
+        if (entry && !entry.closed) takeDownload(this, entry, item);
+      });
+    }
   }
 
   publicState(entry) {
@@ -479,11 +506,14 @@ class BrowserManager {
     // A page whose subframes never finish keeps loading forever; its main
     // document is still ready to observe once DOMContentLoaded has fired.
     on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
-      if (!inPlace && isMainFrame !== false) entry.mainDocumentReady = false;
+      if (!inPlace && isMainFrame !== false) { entry.mainDocumentReady = false; entry.mainCommitPending = true; }
     });
-    on('dom-ready', () => { entry.mainDocumentReady = true; });
+    on('dom-ready', () => { entry.mainDocumentReady = true; entry.mainCommitPending = false; });
     on('did-start-loading', () => { entry.loading = true; entry.error = null; this.publish(entry); });
     on('did-stop-loading', () => {
+      // A navigation that ended without a new document (a download, a 204,
+      // a cancel) leaves the old one in place, still usable.
+      if (entry.mainCommitPending) { entry.mainCommitPending = false; entry.mainDocumentReady = true; }
       entry.loading = false;
       entry.url = wc.getURL() || entry.url || DEFAULT_URL;
       this.publish(entry);
@@ -491,13 +521,24 @@ class BrowserManager {
     });
     on('did-navigate', (event, url) => {
       syncURL(event, url);
+      pushEvent(entry, { type: 'navigated', url: redactPageMessage(String(url || ''), 1024) });
       this.pinGuestZoom(entry);
       this.resyncViewSize(entry);
+    });
+    // Leaving a page whose beforeunload asks to stay: an agent's navigation
+    // goes ahead (and says so); a person's keeps Electron's default.
+    on('will-prevent-unload', (event) => {
+      if (!agentDriven(entry)) return;
+      event.preventDefault();
+      pushEvent(entry, { type: 'beforeunload_accepted' });
     });
     // A guest follows the app's zoom (and a pinch or a zoom shortcut while it
     // has focus); the page itself always lays out at 1:1.
     if (this.hostMode === 'webview') on('zoom-changed', () => this.pinGuestZoom(entry));
-    on('did-navigate-in-page', syncURL);
+    on('did-navigate-in-page', (event, url, isMainFrame) => {
+      syncURL(event, url);
+      if (isMainFrame !== false) pushEvent(entry, { type: 'url_changed', url: redactPageMessage(String(url || ''), 1024) });
+    });
     on('did-finish-load', () => {
       if (!entry.initialDocumentReady || wc.isDestroyed?.() || this.entries.get(entry.chatId) !== entry) return;
       const scale = this.attachedView === entry.view ? entry.presentationScale : 1;
@@ -542,7 +583,21 @@ class BrowserManager {
         }
       }
     });
-    wc.setWindowOpenHandler(({ url }) => ({
+    wc.setWindowOpenHandler((details) => {
+      const url = String(details && details.url || '');
+      // A page an agent is driving opens links and popups as tabs of the
+      // same chat, which the agent can list and drive.
+      if (current() && agentDriven(entry) && /^https?:\/\//i.test(url)) {
+        this.openPopupTab(entry, url, String(details.disposition || ''));
+        return { action: 'deny' };
+      }
+      return this.windowOpenPolicy(url);
+    });
+    if (wc.debugger && typeof wc.debugger.on === 'function') this.bindDebugger(entry, wc, current);
+  }
+
+  windowOpenPolicy(url) {
+    return {
       action: /^https?:\/\//i.test(String(url || '')) ? 'allow' : 'deny',
       overrideBrowserWindowOptions: {
         width: 980,
@@ -555,8 +610,11 @@ class BrowserManager {
           sandbox: true,
         },
       },
-    }));
-    if (wc.debugger && typeof wc.debugger.on === 'function') {
+    };
+  }
+
+  bindDebugger(entry, wc, current) {
+    {
       wc.debugger.on('message', (_event, method, params, sessionId) => {
         if (!current()) return;
         const currentSessionId = normalizeCDPSessionId(sessionId);
@@ -1227,6 +1285,8 @@ class BrowserManager {
     const target = sessionId ? entry.targetSessions.get(sessionId) : null;
     if (sessionId && !target) return;
     const targetId = target ? target.targetId : entry.rootTargetId;
+    if (method === 'Page.javascriptDialogOpening') { dialogOpened(entry, params, sessionId); this.publish(entry); return; }
+    if (method === 'Page.javascriptDialogClosed') { dialogClosed(entry, params); this.publish(entry); return; }
     if (method === 'Page.frameAttached') {
       const frameId = String(params && params.frameId || '');
       const parentFrameId = String(params && params.parentFrameId || '');
@@ -1515,6 +1575,8 @@ class BrowserManager {
     entry.focusEmulated = false;
     entry.focusChange = null;
     entry.captureInFlight = null;
+    entry.paintSubscription = null;
+    entry.frameSubscribers = null;
     try { guest.setUserAgent(this.userAgent); } catch { /* best effort */ }
     this.pinGuestZoom(entry);
     this.bind(entry);
@@ -1883,13 +1945,30 @@ class BrowserManager {
     }
   }
 
-  serialize(entry, operation) {
-    const next = entry.operationChain.catch(() => {}).then(() => {
+  // One operation at a time per tab, each bounded: an operation that does not
+  // finish by its deadline is reported and the queue moves on without it (a
+  // wedged page cannot hold every later call).
+  serialize(entry, operation, { deadlineMs = null } = {}) {
+    const run = entry.operationChain.catch(() => {}).then(() => {
       this.assertCurrentEntry(entry);
       return this.withPainting(entry, operation);
     });
-    entry.operationChain = next.catch(() => {});
-    return next;
+    const limitMs = deadlineMs ?? this.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
+    let timer = null;
+    const bounded = Promise.race([
+      run,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          entry.wedgedAt = Date.now();
+          this.lifecycle(entry, 'operation-deadline', { limitMs });
+          reject(new Error(`the browser did not finish this within ${Math.round(limitMs / 1000)}s; the page may be stuck. Try again, or reset the tab with workass_browser_close`));
+        }, limitMs);
+        if (typeof timer?.unref === 'function') timer.unref();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    run.then(() => { entry.wedgedAt = null; }, () => {});
+    entry.operationChain = bounded.catch(() => {});
+    return bounded;
   }
 
   // Webview host: a guest that is not on screen paints no frames, so a
@@ -1913,6 +1992,10 @@ class BrowserManager {
     clearTimeout(entry.paintIdleTimer);
     entry.paintIdleTimer = null;
     if (!entry.focusEmulated) this.setFocusEmulation(entry, true);
+    // A frame subscriber keeps the page producing frames even while Workass
+    // itself is hidden or minimized: without frames, pointer moves wait for
+    // a frame that never comes (about a second each) and captures stall.
+    if (!entry.paintSubscription) entry.paintSubscription = this.addFrameSubscriber(entry, () => {});
   }
 
   releasePainting(entry) {
@@ -1921,9 +2004,35 @@ class BrowserManager {
     clearTimeout(entry.paintIdleTimer);
     entry.paintIdleTimer = setTimeout(() => {
       entry.paintIdleTimer = null;
-      if (!entry.paintHolds && !entry.captureInFlight && !entry.pip) this.setFocusEmulation(entry, false);
+      if (entry.paintHolds || entry.captureInFlight) return;
+      if (!entry.pip) this.setFocusEmulation(entry, false);
+      if (entry.paintSubscription) { entry.paintSubscription(); entry.paintSubscription = null; }
     }, this.paintIdleMs ?? PAINT_IDLE_MS);
     if (typeof entry.paintIdleTimer?.unref === 'function') entry.paintIdleTimer.unref();
+  }
+
+  // One Electron frame subscription per page, shared by everyone who needs
+  // the page's frames (the separate window, an agent driving it).
+  addFrameSubscriber(entry, callback) {
+    const wc = this.liveContents(entry);
+    if (!wc || wc.isDestroyed?.() || typeof wc.beginFrameSubscription !== 'function') return () => {};
+    if (entry.frameSubscribers?.contents !== wc) entry.frameSubscribers = { contents: wc, callbacks: new Set(), active: false };
+    const group = entry.frameSubscribers;
+    group.callbacks.add(callback);
+    if (!group.active) {
+      try {
+        wc.beginFrameSubscription(false, (image, dirty) => {
+          for (const each of Array.from(group.callbacks)) { try { each(image, dirty); } catch { /* one consumer cannot stop the others */ } }
+        });
+        group.active = true;
+      } catch { /* no frames for this page */ }
+    }
+    return () => {
+      group.callbacks.delete(callback);
+      if (group.callbacks.size || !group.active) return;
+      group.active = false;
+      try { if (!wc.isDestroyed()) wc.endFrameSubscription(); } catch { /* already ended */ }
+    };
   }
 
   setFocusEmulation(entry, enabled) {
@@ -2457,6 +2566,7 @@ class BrowserManager {
     const pip = openGuestPip({
       BrowserWindow: this.BrowserWindow,
       guest,
+      subscribe: (callback) => this.addFrameSubscriber(entry, callback),
       embedder: this.win && this.win.webContents,
       title,
       viewport: { ...entry.viewport },
@@ -2601,6 +2711,177 @@ class BrowserManager {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // The page outline (browser-outline.js) and its short refs.
+
+  // Refs stay the same for the same element while its document lives, so an
+  // agent can keep using e12 across actions; a new document starts over.
+  // The top document's identity: its frame and loader. A navigation that
+  // never commits (a download, a 204) leaves the same document.
+  documentKey(entry) {
+    const root = this.frameForSession(entry, null);
+    return root && root.loaderId ? `${root.id}:${root.loaderId}` : `g${entry.documentGeneration}`;
+  }
+
+  refAllocator(entry) {
+    const documentKey = this.documentKey(entry);
+    if (!entry.refMap || entry.refMap.documentKey !== documentKey) {
+      entry.refMap = { documentKey, byKey: new Map(), byRef: new Map(), next: 1 };
+    }
+    const map = entry.refMap;
+    return (frameKey, backendNodeId, role, name) => {
+      const key = `${frameKey}|${backendNodeId}`;
+      let ref = map.byKey.get(key);
+      if (!ref) {
+        if (map.byRef.size >= OUTLINE_REF_LIMIT) return null;
+        ref = `e${map.next++}`;
+        map.byKey.set(key, ref);
+        const separator = frameKey.lastIndexOf(':');
+        map.byRef.set(ref, { frameId: frameKey.slice(0, separator), loaderId: frameKey.slice(separator + 1), backendNodeId: Number(backendNodeId), role, name: String(name || '').slice(0, 120) });
+      }
+      return ref;
+    };
+  }
+
+  // A short ref (e12) as an action target, checked against the frame's
+  // current document.
+  shortRefTarget(entry, ref, snapshotId = null) {
+    const map = entry.refMap;
+    const info = map && map.documentKey === this.documentKey(entry) ? map.byRef.get(ref) : null;
+    if (!info) return { status: 'stale', reason: `${ref} is not on the current page; take a new outline` };
+    if (snapshotId && entry.outlines && !entry.outlines.has(snapshotId) && !entry.observations.has(snapshotId)) {
+      return { status: 'stale', reason: 'that outline is from an earlier page; take a new outline' };
+    }
+    const frame = entry.frames.get(info.frameId);
+    if (!frame || frame.detached || frame.loaderId !== info.loaderId) {
+      return { status: 'stale', reason: `the frame of ${ref} was replaced; take a new outline` };
+    }
+    return {
+      path: null, nodeKey: null, selector: '', backendDOMNodeId: info.backendNodeId,
+      frameId: frame.id,
+      frameGeneration: frame.generation, frameLoaderId: frame.loaderId, targetId: frame.targetId,
+      sessionId: frame.sessionId || null, contextId: frame.contextId ?? null, snapshotId, shortRef: ref,
+    };
+  }
+
+  // Every owned frame's accessibility tree, the top frame first; a child
+  // frame knows the <iframe> element that holds it.
+  async collectOutlineFrames(entry, budgetMs = OUTLINE_FRAMES_BUDGET_MS) {
+    await this.ensureCDP(entry);
+    await this.refreshFrameTree(entry);
+    const deadline = Date.now() + budgetMs;
+    const root = this.frameForSession(entry, null);
+    const live = Array.from(entry.frames.values()).filter((frame) => !frame.detached);
+    const order = (root ? [root, ...live.filter((frame) => frame !== root)] : live).slice(0, OUTLINE_FRAME_LIMIT);
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const keyOf = (frame) => `${frame.id}:${frame.loaderId}`;
+    const read = async (frame) => {
+      const parent = frame.parentFrameId ? entry.frames.get(frame.parentFrameId) : null;
+      const record = { frameKey: keyOf(frame), frameId: frame.id, url: frame.url || '', ownedBy: null, nodes: null, unavailable: null };
+      if (parent && !parent.detached) {
+        try {
+          const owner = await this.ownedSessionCommand(entry, 'DOM.getFrameOwner', { frameId: frame.id }, parent.sessionId || null, remaining());
+          if (Number(owner?.backendNodeId) > 0) record.ownedBy = { frameKey: keyOf(parent), backendNodeId: Number(owner.backendNodeId) };
+        } catch { /* placed as an orphan below its page */ }
+      }
+      const reachable = frame === root || frame.sessionId || frame.contextId != null || frame.targetId === entry.rootTargetId;
+      if (!reachable || (frame.unavailableReason && !frame.sessionId && frame.contextId == null && frame !== root)) {
+        record.unavailable = String(frame.unavailableReason || 'this frame is not owned by the tab');
+        return record;
+      }
+      if (Date.now() >= deadline) { record.unavailable = 'the page has more frames than one outline reads in time'; return record; }
+      try {
+        const tree = await this.ownedSessionCommand(entry, 'Accessibility.getFullAXTree', { frameId: frame.id }, frame.sessionId || null, remaining());
+        record.nodes = Array.isArray(tree?.nodes) ? tree.nodes : [];
+      } catch (error) {
+        record.unavailable = /did not answer/u.test(String(error && error.message)) ? 'the frame did not answer in time' : 'the frame could not be read';
+      }
+      return record;
+    };
+    const frames = new Array(order.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < order.length) {
+        const index = next++;
+        frames[index] = await read(order[index]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(OUTLINE_READ_CONCURRENCY, order.length) }, worker));
+    return { frames: frames.filter(Boolean), framesTotal: live.length };
+  }
+
+  async takeOutline(entry, { budgetMs } = {}) {
+    this.assertCurrentEntry(entry);
+    if (entry.dialog) throw dialogBlockedError(entry);
+    const documentGeneration = entry.documentGeneration;
+    const { frames, framesTotal } = await this.collectOutlineFrames(entry, budgetMs);
+    const wc = this.liveContents(entry);
+    const url = wc && !wc.isDestroyed?.() ? wc.getURL() : entry.url;
+    const built = buildOutline(frames, { refFor: this.refAllocator(entry), title: entry.title || '', url: url || entry.url || DEFAULT_URL });
+    const outline = {
+      id: 'o' + crypto.randomBytes(6).toString('base64url'),
+      documentKey: this.documentKey(entry),
+      takenAt: Date.now(),
+      lines: built.lines,
+      truncated: built.truncated,
+      documentGeneration,
+      url: redactPageMessage(url || entry.url || DEFAULT_URL, 2048),
+      title: redactPageMessage(entry.title || '', 1024),
+      frames: { total: framesTotal, read: frames.filter((frame) => frame.nodes).length, unreadable: frames.filter((frame) => frame.unavailable).length },
+    };
+    entry.outlines = entry.outlines || new Map();
+    entry.outlines.set(outline.id, outline);
+    while (entry.outlines.size > OUTLINE_HISTORY) entry.outlines.delete(entry.outlines.keys().next().value);
+    entry.lastOutline = outline;
+    return outline;
+  }
+
+  outlinePage(outline, start, maxBytes) {
+    const page = pageLines(outline.lines, start, maxBytes);
+    return {
+      outline: page.text,
+      outline_id: outline.id,
+      lines_total: outline.lines.length,
+      lines_from: Math.max(0, start),
+      lines_returned: page.text ? page.text.split('\n').length : 0,
+      next_cursor: page.next == null ? null : `${outline.id}:${page.next}`,
+      truncated: outline.truncated,
+    };
+  }
+
+  async browserOutline(entry, params = {}) {
+    const maxBytes = params.maxBytes == null ? OUTLINE_PAGE_BYTES : Number(params.maxBytes);
+    if (!Number.isInteger(maxBytes) || maxBytes < 2048 || maxBytes > 60000) throw new Error('max_bytes must be an integer from 2048 to 60000');
+    const tab = { id: this.tabIdOf(entry), url: redactPageMessage(entry.url || DEFAULT_URL, 2048), title: redactPageMessage(entry.title || '', 1024), loading: entry.loading === true };
+    if (params.cursor != null) {
+      const match = /^(o[\w-]+):(\d+)$/u.exec(String(params.cursor));
+      const outline = match && entry.outlines ? entry.outlines.get(match[1]) : null;
+      if (!outline) throw new Error('cursor is from an outline this tab no longer has; take a new outline');
+      if (outline.documentKey !== this.documentKey(entry)) throw new Error('the page changed since that outline; take a new outline');
+      return { format: 'outline', tab, ...this.outlinePage(outline, Number(match[2]), maxBytes), frames: outline.frames, ...this.pageNotes(entry) };
+    }
+    const since = params.sinceSnapshotId != null ? String(params.sinceSnapshotId) : null;
+    const base = since && entry.outlines ? entry.outlines.get(since) : null;
+    const outline = await this.takeOutline(entry);
+    if (since) {
+      if (base && base.documentKey === outline.documentKey) {
+        const changes = diffOutlines(base.lines, outline.lines, { maxBytes });
+        return { format: 'outline', tab, outline_id: outline.id, since_snapshot_id: since, changes, lines_total: outline.lines.length, frames: outline.frames, ...this.pageNotes(entry) };
+      }
+      return { format: 'outline', tab, since_snapshot_id: since, since_applied: false, since_reason: base ? 'the page navigated since then' : 'that outline is unknown', ...this.outlinePage(outline, 0, maxBytes), frames: outline.frames, ...this.pageNotes(entry) };
+    }
+    return { format: 'outline', tab, ...this.outlinePage(outline, 0, maxBytes), frames: outline.frames, ...this.pageNotes(entry) };
+  }
+
+  // What every page result carries besides its content: an open dialog,
+  // finished and running downloads, events since the last call.
+  pageNotes(entry) {
+    const notes = {};
+    if (entry.dialog) notes.dialog = { ...entry.dialog.public };
+    if (entry.loading) notes.loading = true;
+    return notes;
+  }
+
   tabInfo(entry) {
     const wc = this.liveContents(entry);
     const liveURL = wc && !wc.isDestroyed?.() ? wc.getURL() : '';
@@ -2618,12 +2899,17 @@ class BrowserManager {
       documentGeneration: entry.documentGeneration,
       visible: entry.visible === true,
       supportedCaptureModes: ['viewport', 'full_page', 'clip'],
+      ...(entry.extraTab ? { opened_by_tab_id: entry.openerTabId ?? null } : {}),
+      ...(entry.dialog ? { dialog: { ...entry.dialog.public } } : {}),
+      ...(entry.downloads && entry.downloads.length ? { downloads: entry.downloads.map((item) => ({ ...item })) } : {}),
+      ...(entry.wedgedAt ? { stuck_since_ms: Date.now() - entry.wedgedAt } : {}),
     };
   }
 
   entryBelongsToChat(entry, chatId) {
     const owner = String(chatId || '').trim();
-    return !owner || entry.chatId === owner || entry.conversationId === owner;
+    return !owner || entry.chatId === owner || entry.conversationId === owner || (!!entry.ownerChatId && entry.ownerChatId === owner) ||
+      (!!entry.ownerConversationId && entry.ownerConversationId === owner);
   }
 
   browserTabs(chatId = '') {
@@ -2656,7 +2942,7 @@ class BrowserManager {
   adoptBackground(tabId, conversationId) {
     if (this.entries.has(tabId)) return;
     for (const [key, entry] of this.entries) {
-      if (key === tabId || key === '__workass-health__') continue;
+      if (key === tabId || key === '__workass-health__' || entry.extraTab) continue;
       if (entry.conversationId === conversationId || entry.chatId === conversationId) {
         this.entries.delete(key);
         entry.chatId = tabId;
@@ -2683,18 +2969,71 @@ class BrowserManager {
       throw new Error('no Workass browser tab is available');
     }
     if (params.visible !== false) this.requestOpen(conversationId);
-    const matched = this.browserEntries().find((entry) => entry.conversationId === conversationId || entry.chatId === conversationId);
+    const matched = this.primaryEntryFor(conversationId);
     if (matched) return matched;
     const entry = this.create(conversationId);
     entry.conversationId = conversationId;
     return entry;
   }
 
+  // The chat's own page (not a tab one of its pages opened).
+  primaryEntryFor(conversationId) {
+    return this.browserEntries().find((entry) => !entry.extraTab && (entry.conversationId === conversationId || entry.chatId === conversationId)) || null;
+  }
+
+  // A link or popup an agent's page opened becomes a tab of the same chat,
+  // in the background, that the agent lists and drives by its tab id.
+  openPopupTab(opener, url, disposition) {
+    const owner = opener.extraTab ? (this.entries.get(opener.ownerChatId) || opener) : opener;
+    const siblings = this.browserEntries().filter((entry) => entry.extraTab && entry.ownerChatId === owner.chatId);
+    if (siblings.length >= POPUP_TAB_LIMIT) {
+      pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: `this chat already has ${POPUP_TAB_LIMIT} extra tabs; close one with workass_browser_close` });
+      return null;
+    }
+    this.extraTabSeq = (this.extraTabSeq || 0) + 1;
+    const key = `${owner.chatId}#tab${this.extraTabSeq}`;
+    const tab = this.create(key);
+    tab.extraTab = true;
+    tab.ownerChatId = owner.chatId;
+    tab.ownerConversationId = owner.conversationId || owner.chatId;
+    tab.openerTabId = this.tabIdOf(opener);
+    tab.agentActiveAt = Date.now();
+    const announce = () => pushEvent(opener, {
+      type: 'tab_opened', tab_id: this.tabIdOf(tab), url: redactPageMessage(url, 1024),
+      how: disposition === 'new-window' ? 'window_open' : 'link_new_tab',
+    });
+    void Promise.resolve(tab.ready).then((ready) => {
+      if (!ready || !this.isCurrentEntry(tab)) return;
+      announce();
+      return this.serialize(tab, () => this.command(tab.chatId, 'navigate', url), { deadlineMs: LONG_OPERATION_DEADLINE_MS });
+    }).catch((error) => {
+      pushEvent(opener, { type: 'tab_failed', url: redactPageMessage(url, 1024), reason: redactPageMessage(String(error && error.message || error), 300) });
+    });
+    return tab;
+  }
+
+  // workass_browser_close: a tab a page opened goes away; the chat's own page
+  // is reset to a fresh blank page in the same signed-in profile.
+  async closeForAgent(entry) {
+    const tabId = this.tabIdOf(entry);
+    if (entry.extraTab) {
+      this.close(entry.chatId);
+      return { ok: true, status: 'closed', tab_id: tabId };
+    }
+    const chatId = entry.chatId;
+    const conversationId = entry.conversationId;
+    this.close(chatId);
+    const fresh = this.create(chatId);
+    fresh.conversationId = conversationId;
+    if (fresh.ready && await fresh.ready !== true) throw new Error(fresh.error || 'the new browser page did not come up');
+    return { ok: true, status: 'reset', closed_tab_id: tabId, tab: this.tabInfo(fresh) };
+  }
+
   async controlEntry(params = {}) {
     const conversationId = String(params.chatId || '').trim();
     if (params.tabId != null) return this.ownedEntryForTab(params.tabId, conversationId);
     if (conversationId) {
-      const matched = this.browserEntries().find((entry) => entry.conversationId === conversationId || entry.chatId === conversationId);
+      const matched = this.primaryEntryFor(conversationId);
       if (matched) return matched;
       throw new Error(`no Workass browser tab belongs to chat ${conversationId}; call browser.open first`);
     }
@@ -4124,12 +4463,18 @@ class BrowserManager {
     if (snapshotPresent && (typeof params.snapshotId !== 'string' || !params.snapshotId.trim())) {
       throw new Error('snapshot_id must be a non-empty string');
     }
-    if (hasRef !== snapshotPresent) {
+    // An outline ref (e12) is used on its own, or with the outline_id it came
+    // from; a json/compact snapshot's element_ref needs its snapshot_id.
+    const outlineRef = hasRef && /^e\d+$/u.test(params.elementRef.trim()) &&
+      (!snapshotPresent || !entry.observations.has(String(params.snapshotId)));
+    if (hasRef !== snapshotPresent && !outlineRef) {
       throw new Error('element_ref and snapshot_id must be supplied together');
     }
+    if (!hasRef && snapshotPresent) throw new Error('snapshot_id is only used with element_ref');
     if (hasCoordinates && !coordinates) throw new Error('this browser action does not accept screenshot coordinates');
     const forms = Number(hasSelector) + Number(hasRef) + Number(coordinates && hasCoordinates);
-    if (forms !== 1) throw new Error('choose exactly one browser target: selector, element_ref with snapshot_id, or screenshot coordinates');
+    if (forms !== 1) throw new Error('choose exactly one browser target: an element_ref from the outline (e12), a selector, or screenshot coordinates');
+    if (outlineRef) return this.shortRefTarget(entry, params.elementRef.trim(), snapshotPresent ? String(params.snapshotId) : null);
     if (hasSelector) {
       const selector = params.selector.trim();
       let count;
@@ -4300,8 +4645,31 @@ class BrowserManager {
 
   async browserClick(entry, params = {}) {
     this.assertCurrentEntry(entry);
-    const target = await this.observationTarget(entry, params, { coordinates: true });
-    if (target.status) return { ok: false, status: target.status, reason: target.reason };
+    const button = params.button == null ? 'left' : String(params.button);
+    if (!['left', 'right', 'middle'].includes(button)) throw new Error('button must be left, right or middle');
+    const clickCount = params.clickCount == null ? 1 : Number(params.clickCount);
+    if (!Number.isInteger(clickCount) || clickCount < 1 || clickCount > 3) throw new Error('click_count must be 1, 2 or 3');
+    const aimed = await this.pointerTarget(entry, params, { coordinates: true });
+    if (aimed.failure) return aimed.failure;
+    const { inputTarget, inputPoint, point, reportedTarget } = aimed;
+    await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: inputPoint.x, y: inputPoint.y });
+    for (let count = 1; count <= clickCount; count += 1) {
+      await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: inputPoint.x, y: inputPoint.y, button, clickCount: count });
+      await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputPoint.x, y: inputPoint.y, button, clickCount: count });
+    }
+    entry.interactionGeneration += 1;
+    return {
+      ok: true, status: 'clicked', trusted: true, point: { x: point.x, y: point.y }, target: reportedTarget,
+      ...(button !== 'left' ? { button } : {}), ...(clickCount !== 1 ? { click_count: clickCount } : {}),
+    };
+  }
+
+  // Where trusted pointer input for a target goes: the widget that draws it
+  // (the tab, or a cross-site frame's own renderer) and the point there.
+  // Returns { failure } with a status when the target cannot take input.
+  async pointerTarget(entry, params, { coordinates = false } = {}) {
+    const target = await this.observationTarget(entry, params, { coordinates });
+    if (target.status) return { failure: { ok: false, status: target.status, reason: target.reason } };
     let point;
     let frameLocalPoint = null;
     if (target.coordinates) {
@@ -4311,7 +4679,7 @@ class BrowserManager {
         throw new Error('screenshot-coordinate click requires finite numeric x, y, and screenshot_id');
       }
       const image = entry.screenshots.get(params.screenshotId);
-      if (!image) return { ok: false, status: 'stale', reason: 'screenshot_id is unavailable; take a fresh screenshot' };
+      if (!image) return { failure: { ok: false, status: 'stale', reason: 'screenshot_id is unavailable; take a fresh screenshot' } };
       const currentStamp = await this.readInteractionStamp(entry);
       if (image.documentGeneration !== entry.documentGeneration ||
           image.viewportGeneration !== entry.viewportGeneration ||
@@ -4319,16 +4687,16 @@ class BrowserManager {
           image.interactionGeneration !== currentStamp.interactionGeneration ||
           JSON.stringify(image.frameStamp) !== JSON.stringify(currentStamp.frames) ||
           JSON.stringify(image.metricsStamp) !== JSON.stringify(screenshotMetricStamp(currentStamp.metrics, image.mode))) {
-        return { ok: false, status: 'stale', reason: 'screenshot observation changed; take a fresh screenshot' };
+        return { failure: { ok: false, status: 'stale', reason: 'screenshot observation changed; take a fresh screenshot' } };
       }
       if (params.x < 0 || params.y < 0 || params.x >= image.imageWidth || params.y >= image.imageHeight) {
-        return { ok: false, status: 'missing', reason: 'coordinates are outside the screenshot image' };
+        return { failure: { ok: false, status: 'missing', reason: 'coordinates are outside the screenshot image' } };
       }
       const docX = image.cssRect.x + params.x * image.pixelToCss.x;
       const docY = image.cssRect.y + params.y * image.pixelToCss.y;
       point = { x: docX - currentStamp.topScroll.x, y: docY - currentStamp.topScroll.y };
       if (point.x < 0 || point.y < 0 || point.x >= currentStamp.metrics.width || point.y >= currentStamp.metrics.height) {
-        return { ok: false, status: 'blocked', reason: 'screenshot point is outside the current visible viewport' };
+        return { failure: { ok: false, status: 'blocked', reason: 'screenshot point is outside the current visible viewport' } };
       }
       const inspected = await this.evaluateMainWorld(entry, '(() => {' +
         'const x=' + JSON.stringify(point.x) + ';const y=' + JSON.stringify(point.y) + ';' +
@@ -4338,7 +4706,7 @@ class BrowserManager {
         'return {status:"ready",tag:String(target.tagName||"").toLowerCase(),role:target.getAttribute("role")||null,name:String(target.getAttribute("aria-label")||target.innerText||target.textContent||"").trim().slice(0,160)};' +
         '})()');
       if (!inspected || inspected.status !== 'ready') {
-        return { ok: false, status: inspected?.status || 'blocked', reason: inspected?.status === 'disabled' ? 'the screenshot target is disabled' : 'no target is present at those screenshot coordinates' };
+        return { failure: { ok: false, status: inspected?.status || 'blocked', reason: inspected?.status === 'disabled' ? 'the screenshot target is disabled' : 'no target is present at those screenshot coordinates' } };
       }
       point.target = inspected;
     } else {
@@ -4352,23 +4720,23 @@ class BrowserManager {
             : status === 'blocked' ? 'target is covered or outside the visible viewport'
               : status === 'unavailable' ? 'target geometry is unavailable in its owned frame'
                 : 'target is missing or not visible');
-        return { ok: false, status, reason };
+        return { failure: { ok: false, status, reason } };
       }
       point = inspected;
       if (target.frameId) {
         frameLocalPoint = inspected;
         const mapped = await this.mapFramePointToRoot(entry, target.frameId, point);
-        if (mapped.status !== 'ready') return { ok: false, status: mapped.status, reason: mapped.reason };
+        if (mapped.status !== 'ready') return { failure: { ok: false, status: mapped.status, reason: mapped.reason } };
         point = { ...point, x: mapped.x, y: mapped.y };
         const currentFrame = entry.frames.get(target.frameId);
         if (!currentFrame || currentFrame.generation !== frameGeneration || currentFrame.detached) {
-          return { ok: false, status: 'stale', reason: 'observed frame changed during target validation; refresh the snapshot' };
+          return { failure: { ok: false, status: 'stale', reason: 'observed frame changed during target validation; refresh the snapshot' } };
         }
       }
       const effective = await this.readEffectiveViewport(entry);
       if (!Number.isFinite(point.x) || !Number.isFinite(point.y) ||
           point.x < 0 || point.y < 0 || point.x >= effective.width || point.y >= effective.height) {
-        return { ok: false, status: 'blocked', reason: 'target is outside the visible page viewport' };
+        return { failure: { ok: false, status: 'blocked', reason: 'target is outside the visible page viewport' } };
       }
     }
     const tabId = this.tabIdOf(entry);
@@ -4392,13 +4760,9 @@ class BrowserManager {
         inputPoint = { x: widgetPoint.x, y: widgetPoint.y };
       }
     }
-    await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: inputPoint.x, y: inputPoint.y });
-    await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
-    await this.executeCDP(inputTarget, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
-    entry.interactionGeneration += 1;
     const reportedTarget = point.target || { tag: point.tag, name: point.name };
     if (reportedTarget && typeof reportedTarget.name === 'string') reportedTarget.name = redactPageMessage(reportedTarget.name, 160);
-    return { ok: true, status: 'clicked', trusted: true, point: { x: point.x, y: point.y }, target: reportedTarget };
+    return { inputTarget, inputPoint, point, reportedTarget, target };
   }
 
   async capturePng(entry, captureParams, expectedSize, options = {}) {
@@ -4881,11 +5245,13 @@ class BrowserManager {
     if (!Array.isArray(actions) || actions.length < 1 || actions.length > 20) throw new Error('browser batch requires 1-20 actions');
     if (observeAfter != null && typeof observeAfter !== 'boolean') throw new Error('observe_after must be a boolean');
     const allowedFields = {
-      click: new Set(['action', 'selector', 'elementRef', 'snapshotId', 'x', 'y', 'screenshotId']),
+      click: new Set(['action', 'selector', 'elementRef', 'snapshotId', 'x', 'y', 'screenshotId', 'button', 'clickCount']),
       type: new Set(['action', 'selector', 'elementRef', 'snapshotId', 'text', 'submit']),
       scroll: new Set(['action', 'x', 'y', 'elementRef', 'snapshotId']),
       key: new Set(['action', 'key']),
       snapshot: new Set(['action']),
+      select: new Set(['action', 'selector', 'elementRef', 'snapshotId', 'values', 'labels', 'indexes']),
+      hover: new Set(['action', 'selector', 'elementRef', 'snapshotId']),
     };
     return actions.map((action, index) => {
       if (!action || typeof action !== 'object' || Array.isArray(action) ||
@@ -4902,10 +5268,12 @@ class BrowserManager {
       const selectorPresent = Object.prototype.hasOwnProperty.call(action, 'selector');
       const refPresent = Object.prototype.hasOwnProperty.call(action, 'elementRef');
       const snapshotPresent = Object.prototype.hasOwnProperty.call(action, 'snapshotId');
+      const outlineRef = refPresent && typeof action.elementRef === 'string' && /^e\d+$/u.test(action.elementRef.trim());
       const validateTargetPair = () => {
-        if (refPresent !== snapshotPresent) throw new Error('browser batch ' + name + ' ' + index + ' element_ref and snapshot_id must be supplied together');
+        if (refPresent !== snapshotPresent && !outlineRef) throw new Error('browser batch ' + name + ' ' + index + ' element_ref and snapshot_id must be supplied together');
+        if (snapshotPresent && !refPresent) throw new Error('browser batch ' + name + ' ' + index + ' snapshot_id is only used with element_ref');
         if (refPresent && (typeof action.elementRef !== 'string' || !action.elementRef.trim() ||
-            typeof action.snapshotId !== 'string' || !action.snapshotId.trim())) {
+            (snapshotPresent && (typeof action.snapshotId !== 'string' || !action.snapshotId.trim())))) {
           throw new Error('browser batch ' + name + ' ' + index + ' has an invalid observed target pair');
         }
         if (selectorPresent && (typeof action.selector !== 'string' || !action.selector.trim())) {
@@ -4947,6 +5315,9 @@ class BrowserManager {
       } else if (name === 'key') {
         if (typeof action.key !== 'string' || !action.key.trim()) throw new Error('browser batch key ' + index + ' requires key');
         parsedKey = parseBrowserKey(action.key, this.platform);
+      } else if (name === 'select' || name === 'hover') {
+        validateTargetPair();
+        if (Number(selectorPresent) + Number(refPresent) !== 1) throw new Error('browser batch ' + name + ' ' + index + ' requires exactly one target form');
       }
       const normalized = { ...action, action: name };
       if (parsedKey) Object.defineProperty(normalized, 'parsedKey', { value: parsedKey, enumerable: false });
@@ -4965,23 +5336,51 @@ class BrowserManager {
     if (method === 'browser.open') {
       const entry = this.openConversation(params);
       if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+      markAgentActive(entry);
       if (params.url) {
-        await this.serialize(entry, () => this.command(entry.chatId, 'navigate', params.url));
-        return this.navigationResult(entry);
+        const navigate = async () => {
+          await this.command(entry.chatId, 'navigate', params.url);
+          return this.navigationResult(entry);
+        };
+        return this.serialize(entry, () => (internal.report ? runAction(this, entry, navigate) : navigate()),
+          { deadlineMs: LONG_OPERATION_DEADLINE_MS });
       }
       return this.tabInfo(entry);
     }
     const entry = await this.controlEntry(params);
-    const wc = entry.view.webContents;
     if (entry.ready && await entry.ready !== true) throw new Error(entry.error || 'browser page initialization failed');
+    if (!internal.serialized) markAgentActive(entry);
+    if (method === 'browser.close') return this.closeForAgent(entry);
+    // A JavaScript dialog pauses the page: only answering it (or reading what
+    // does not need the page) goes through.
+    if (entry.dialog && !['browser.dialog', 'browser.screenshot', 'browser.diagnostics'].includes(method)) throw dialogBlockedError(entry);
     const serializedMethods = new Set([
       'browser.navigate', 'browser.back', 'browser.forward', 'browser.reload', 'browser.click',
       'browser.type', 'browser.scroll', 'browser.key', 'browser.setViewport', 'browser.resetViewport',
       'browser.batch', 'browser.snapshot', 'browser.screenshot', 'browser.read',
+      'browser.select', 'browser.hover', 'browser.drag', 'browser.upload', 'browser.evaluate',
     ]);
-    if (!internal.serialized && serializedMethods.has(method)) {
-      return this.serialize(entry, () => this.browserControl(method, params, { serialized: true }));
+      if (!internal.serialized && serializedMethods.has(method)) {
+      const long = method === 'browser.navigate' || method === 'browser.batch' || method === 'browser.reload';
+      return this.serialize(entry, () => this.browserControl(method, params, { serialized: true, report: internal.report === true }),
+        long ? { deadlineMs: LONG_OPERATION_DEADLINE_MS } : {});
     }
+    // Every action reports what it changed (browser-actions.js); a batch
+    // reports once, for all of its actions.
+    const actionMethods = new Set([
+      'browser.navigate', 'browser.back', 'browser.forward', 'browser.reload', 'browser.click', 'browser.type',
+      'browser.scroll', 'browser.key', 'browser.batch', 'browser.select', 'browser.hover', 'browser.drag',
+      'browser.upload', 'browser.evaluate',
+    ]);
+    if (actionMethods.has(method) && internal.report && !internal.bare) {
+      return runAction(this, entry, () => this.browserControl(method, params, { ...internal, bare: true }));
+    }
+    if (method === 'browser.dialog') return browserDialog(this, entry, params);
+    if (method === 'browser.select') return browserSelect(this, entry, params);
+    if (method === 'browser.hover') return browserHover(this, entry, params);
+    if (method === 'browser.drag') return browserDrag(this, entry, params);
+    if (method === 'browser.upload') return browserUpload(this, entry, params);
+    if (method === 'browser.evaluate') return browserEvaluate(this, entry, params);
     if (method === 'browser.setViewport') return this.setViewport(entry, params);
     if (method === 'browser.resetViewport') return this.resetViewport(entry);
     if (method === 'browser.navigate') {
@@ -5085,7 +5484,7 @@ class BrowserManager {
         const action = actions[index];
         const name = action.action;
         try {
-          const result = await this.browserControl(`browser.${name}`, { ...action, tabId: this.tabInfo(entry).id }, { serialized: true, parsedKey: action.parsedKey });
+          const result = await this.browserControl(`browser.${name}`, { ...action, tabId: this.tabInfo(entry).id }, { serialized: true, bare: true, parsedKey: action.parsedKey });
           results.push({ index, action: name, result });
           if (this.isFailedBatchAction(result)) {
             return { results, completed_indexes: completedIndexes, failed_index: index, unexecuted_indexes: actions.slice(index + 1).map((_item, offset) => index + offset + 1), observe_after: null, observe_after_error: null };
@@ -5099,7 +5498,7 @@ class BrowserManager {
       let observed = null;
       let observeAfterError = null;
       if (params.observeAfter === true) {
-        try { observed = await this.browserControl('browser.snapshot', { tabId: this.tabInfo(entry).id }, { serialized: true }); }
+        try { observed = await this.browserControl('browser.snapshot', { tabId: this.tabInfo(entry).id }, { serialized: true, bare: true }); }
         catch (error) { observeAfterError = redactPageMessage(String(error && error.message || error), 1024); }
       }
       return { results, completed_indexes: completedIndexes, failed_index: null, unexecuted_indexes: [], observe_after: observed, observe_after_error: observeAfterError };
