@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const { BrowserManager, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds } = require('./browser-manager');
+const { agentDriven } = require('./browser-actions');
 
 class FakeDebugger extends EventEmitter {
   constructor() { super(); this.attached = false; this.commands = []; this.commandCalls = []; }
@@ -15,6 +16,12 @@ class FakeDebugger extends EventEmitter {
     this.commandCalls.push({ method, params, sessionId });
     this.lastCommand = { method, params, sessionId };
     if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: `target-${this.owner.id}` } };
+    // The agent world: scripts there behave like the fake page's scripts.
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: sessionId ? 9200 : 9100 };
+    if (method === 'Runtime.evaluate' && !sessionId && params && params.contextId === 9100) {
+      const value = await this.owner.executeJavaScript(params.expression, params.userGesture);
+      return { result: value === undefined ? { type: 'undefined' } : { type: typeof value, value } };
+    }
     if (method === 'Page.getFrameTree') {
       if (sessionId && this.owner.childFrameTree) return this.owner.childFrameTree;
       return this.owner.frameTree || { frameTree: { frame: { id: `frame-${this.owner.id}`, loaderId: 'loader-root', url: this.owner.url, securityOrigin: 'http://fixture.invalid' }, childFrames: [] } };
@@ -89,6 +96,11 @@ class FakeWebContents extends EventEmitter {
     }
     return { ok: true };
   }
+  // Electron's isolated world for a page without a CDP session yet.
+  async executeJavaScriptInIsolatedWorld(worldId, scripts, userGesture) {
+    this.lastIsolatedWorld = worldId;
+    return this.executeJavaScript(scripts[0].code, userGesture);
+  }
   async insertText(text) { this.insertedTexts = [...(this.insertedTexts || []), text]; }
   // Electron resolves capturePage() with an EMPTY image for a view that is not
   // attached to the window, rather than rejecting. The fake has to model that
@@ -106,12 +118,13 @@ class FakeView {
   constructor(options) {
     this.options = options;
     this.attached = false;
-    this.webContents = new FakeWebContents(FakeView.profile);
+    this.webContents = options?.webContents || new FakeWebContents(FakeView.profile);
     this.webContents.view = this;
   }
   setBounds(bounds) { this.bounds = bounds; }
   getBounds() { return this.bounds; }
   setBackgroundColor(color) { this.backgroundColor = color; }
+  setBorderRadius(radius) { this.radius = radius; }
 }
 
 class FakeBrowserWindow extends EventEmitter {
@@ -164,6 +177,7 @@ function fixture(overrides = {}) {
   const manager = new BrowserManager({
     win, WebContentsView: FakeView, BrowserWindow: overrides.BrowserWindow || FakeBrowserWindow, nativeImage: overrides.nativeImage,
     session, chromeVersion: '140.0.7339.1', platform: 'darwin',
+    ...(overrides.preferredHost ? { host: 'view', preferredHost: overrides.preferredHost } : {}),
     onState: (state) => states.push(state),
     requestOpen: overrides.requestOpen,
   });
@@ -873,6 +887,7 @@ test('an explicit missing frame stays stale and cannot fall back into the root d
   entry.frames.clear();
   assert.equal(await manager.evaluateFrame(entry, null, 'root startup fallback'), 'root-result');
   assert.deepEqual(executed, ['root startup fallback'], 'the no-registry root startup path remains available');
+  assert.equal(wc.lastIsolatedWorld, 1999, 'and runs in Workass\'s own world, not the page\'s');
   executed.length = 0;
 
   const rootId = `frame-${wc.id}`;
@@ -1404,6 +1419,42 @@ test('CDP adapter forwards root and child-target commands and events', async () 
     tabId: entry.view.webContents.id, method: 'Page.loadEventFired', params: { value: 1 }, sessionId: 'child-session-1',
   });
   assert.equal(tab.cdpAttached, true);
+});
+
+// The real sequence on a page with cross-site frames (2026-10-26, 0 of 36
+// frames reached): the parent's tree lists the child with the document it had
+// before moving to its own renderer, then stops listing it, and announces the
+// move as Page.frameDetached with reason "swap".
+test('a cross-site frame that moved to its own renderer is bound and stays bound', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-swap', bounds: { x: 0, y: 0, width: 400, height: 300 } });
+  const entry = manager.entries.get('chat-swap');
+  const wc = entry.view.webContents;
+  const rootFrameId = 'frame-' + wc.id;
+  wc.frameTree = { frameTree: {
+    frame: { id: rootFrameId, loaderId: 'loader-root', url: 'about:blank' },
+    childFrames: [{ frame: { id: 'frame-xsite', parentId: rootFrameId, loaderId: 'loader-initial-empty', url: 'about:blank' }, childFrames: [] }],
+  } };
+  wc.childFrameTree = { frameTree: {
+    frame: { id: 'frame-xsite', parentId: rootFrameId, loaderId: 'loader-cross-site', url: 'http://other.invalid/frame' },
+  } };
+  await manager.refreshFrameTree(entry);
+  // From now on the parent no longer lists the frame: it runs elsewhere.
+  wc.frameTree = { frameTree: { frame: { id: rootFrameId, loaderId: 'loader-root', url: 'about:blank' }, childFrames: [] } };
+  assert.equal(await manager.acceptAttachedTarget(entry, {
+    sessionId: 'xsite-session', targetInfo: { targetId: 'xsite-target', type: 'iframe' },
+  }, null), true);
+  const bound = entry.frames.get('frame-xsite');
+  assert.equal(bound.targetId, 'xsite-target');
+  assert.equal(bound.loaderId, 'loader-cross-site');
+  await manager.handleCDPMessage(entry, 'Page.frameDetached', { frameId: 'frame-xsite', reason: 'swap' }, null);
+  await manager.refreshFrameTree(entry);
+  assert.equal(entry.targetSessions.get('xsite-session')?.frameId, 'frame-xsite');
+  assert.equal(entry.frames.get('frame-xsite')?.detached, false);
+  // A real removal still retires it.
+  await manager.handleCDPMessage(entry, 'Page.frameDetached', { frameId: 'frame-xsite', reason: 'remove' }, null);
+  assert.equal(entry.targetSessions.has('xsite-session'), false);
+  manager.destroy();
 });
 
 test('browser navigation waits for an owned iframe target to finish binding', async () => {
@@ -1956,4 +2007,335 @@ test('a page pops out into an always-on-top window and comes back when it closes
   assert.equal(entry.pipWindow, null);
   assert.equal(win.contentView.children.includes(entry.view), true);
   assert.equal(manager.close('chat-pip'), true);
+});
+
+// The floating browser in the real app (2026-10-25): every drag step went
+// through resize, which re-applied the page's device metrics; Chromium then
+// painted the page for a frame or two at its unscaled viewport size, past the
+// view's bounds, so the page flickered and ballooned while it moved.
+const emulations = (entry) => entry.view.webContents.debugger.commands.filter((method) => method === 'Emulation.setDeviceMetricsOverride').length;
+
+test('moving the page re-applies no metrics; only a new size does', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-move', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-move');
+  const before = emulations(entry);
+  for (let step = 1; step <= 20; step += 1) {
+    await manager.resize('chat-move', { x: 800 - step * 10, y: 400 - step * 5, width: 344, height: 215 });
+  }
+  assert.equal(emulations(entry), before, 'twenty moves, no re-applied metrics');
+  assert.deepEqual(entry.view.bounds, { x: 600, y: 300, width: 344, height: 215 });
+  await manager.resize('chat-move', { x: 600, y: 300, width: 400, height: 250 });
+  assert.equal(emulations(entry), before + 1, 'a new size is a new scale');
+  assert.equal(entry.view.bounds.width, 400);
+  entry.view.webContents.emit('did-start-navigation', {}, 'https://example.com/next', false, true);
+  await manager.resize('chat-move', { x: 610, y: 300, width: 400, height: 250 });
+  assert.equal(emulations(entry), before + 2, 'a new document gets its metrics again');
+});
+
+test('a drag places the page synchronously, and only the page on screen', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-drag', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-drag');
+  const before = emulations(entry);
+  assert.equal(manager.place('chat-drag', { x: 500, y: 120, width: 344, height: 215 }), true);
+  assert.deepEqual(entry.view.bounds, { x: 500, y: 120, width: 344, height: 215 }, 'placed before place() returns, filling the frame exactly');
+  assert.equal(emulations(entry), before, 'a move sends no metrics');
+  assert.equal(manager.place('chat-other', { x: 0, y: 0, width: 344, height: 215 }), false);
+  await manager.hide('chat-drag');
+  assert.equal(manager.place('chat-drag', { x: 10, y: 10, width: 344, height: 215 }), false, 'a hidden page is never placed on screen');
+});
+
+test('a live resize sets the bounds first, then one coalesced scale, never resizing the view to the emulated size', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-size', bounds: { x: 800, y: 400, width: 344, height: 215 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-size');
+  const dbg = entry.view.webContents.debugger;
+  const before = emulations(entry);
+  for (let step = 1; step <= 10; step += 1) {
+    manager.place('chat-size', { x: 800 - step * 8, y: 400 - step * 5, width: 344 + step * 8, height: 215 + step * 5 });
+    assert.equal(entry.view.bounds.width, 344 + step * 8, 'the bounds land at once');
+  }
+  await entry.rescaling;
+  const sent = emulations(entry) - before;
+  assert.ok(sent >= 1 && sent <= 3, `ten steps coalesce into a few scale changes (${sent})`);
+  const last = dbg.commandCalls.filter((call) => call.method === 'Emulation.setDeviceMetricsOverride').at(-1).params;
+  assert.equal(last.scale, 424 / 1440, 'the latest scale wins');
+  assert.equal(last.dontSetVisibleSize, true, 'Chromium never resizes the view to the emulated 1440 × 900');
+  await manager.resize('chat-size', { x: 720, y: 350, width: 424, height: 265 });
+  assert.equal(emulations(entry) - before, sent, 'settling at the same size sends nothing more');
+  assert.deepEqual(entry.view.bounds, { x: 720, y: 350, width: 424, height: 265 });
+});
+
+test('bounds from a zoomed app are placed in window coordinates', async () => {
+  const { manager } = fixture({ shellZoom: 1.25 });
+  await manager.activate({ chatId: 'chat-zoom', bounds: { x: 400, y: 200, width: 320, height: 200 }, url: 'example.com' });
+  const entry = manager.entries.get('chat-zoom');
+  assert.deepEqual(entry.presentationBounds, { x: 500, y: 250, width: 400, height: 250 });
+  manager.place('chat-zoom', { x: 300, y: 100, width: 320, height: 200 });
+  assert.deepEqual(entry.view.bounds, { x: 375, y: 125, width: 400, height: 250 });
+  assert.deepEqual(entry.presentationBounds, { x: 375, y: 125, width: 400, height: 250 });
+});
+
+// User report (2026-10-25): after a renderer reload the native page stayed on
+// screen at its last bounds with no controls. The reload never runs the
+// renderer's cleanup, so the shell takes the page down itself.
+test('a renderer that goes away takes the page off screen, and the page keeps running', async () => {
+  const { manager, win } = fixture();
+  await manager.activate({ chatId: 'chat-reload', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-reload');
+  assert.ok(win.contentView.children.includes(entry.view));
+  await manager.hideAll();
+  assert.equal(win.contentView.children.includes(entry.view), false, 'nothing stays on screen without its controls');
+  assert.equal(manager.place('chat-reload', { x: 10, y: 10, width: 344, height: 215 }), false, 'a late drag message cannot bring it back');
+  assert.equal(entry.captureHostAttached, true, 'the page lives on in its hidden host');
+  await manager.hideAll();
+});
+
+test('the floating page is rounded and clipped like its frame; the pane and the hidden host are square', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-round', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-round');
+  assert.equal(entry.view.radius, 12);
+  await manager.hide('chat-round');
+  assert.equal(entry.view.radius, 0, 'square in its hidden host');
+  await manager.activate({ chatId: 'chat-round', bounds: { x: 900, y: 48, width: 300, height: 700 } });
+  assert.equal(entry.view.radius, 0, 'the docked pane is square');
+  await manager.resize('chat-round', { x: 600, y: 300, width: 344, height: 215 }, undefined, 999);
+  assert.equal(entry.view.radius, 32, 'bounded');
+});
+
+test('a request the gone renderer queued before the reload never brings the page back', async () => {
+  const { manager, win } = fixture();
+  await manager.activate({ chatId: 'chat-stale', bounds: { x: 600, y: 300, width: 344, height: 215 }, url: 'example.com', radius: 12 });
+  const entry = manager.entries.get('chat-stale');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  void manager.serializePresentation(() => gate);
+  const late = manager.activate({ chatId: 'chat-stale', bounds: { x: 20, y: 20, width: 344, height: 215 }, radius: 12 });
+  const lateResize = manager.resize('chat-stale', { x: 30, y: 30, width: 344, height: 215 });
+  const hidden = manager.hideAll();
+  assert.equal(win.contentView.children.includes(entry.view), false, 'off the window at once, before the queue drains');
+  release();
+  await late;
+  assert.equal(await lateResize, false);
+  await hidden;
+  assert.equal(win.contentView.children.includes(entry.view), false, 'the stale requests did not put it back');
+  await manager.activate({ chatId: 'chat-stale', bounds: { x: 20, y: 20, width: 344, height: 215 }, radius: 12 });
+  assert.equal(win.contentView.children.includes(entry.view), true, 'the reloaded renderer presents it again');
+});
+
+test('the outline asks each valued field\'s element whether it is secret, and redacts when it cannot tell', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'outline-secret', visible: false });
+  const entry = manager.entries.get('outline-secret');
+  const wc = entry.view.webContents;
+  const base = wc.debugger.sendCommand.bind(wc.debugger);
+  const field = (nodeId, name, value, backend) => ({ nodeId, parentId: '1', role: { value: 'textbox' }, name: { value: name }, value: { value }, backendDOMNodeId: backend, properties: [{ name: 'focusable', value: { value: true } }] });
+  wc.debugger.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2', '3', '4'] }, field('2', 'Code', '482913', 71), field('3', 'City', 'Lima', 72), field('4', 'Note', 'opaque-77', 73)] };
+    if (method === 'DOM.describeNode') {
+      if (params.backendNodeId === 71) return { node: { attributes: ['autocomplete', 'one-time-code'] } };
+      if (params.backendNodeId === 72) return { node: { attributes: ['name', 'city'] } };
+      throw new Error('No node with given id found');
+    }
+    return base(method, params, sessionId);
+  };
+  const result = await manager.browserControl('browser.snapshot', { chatId: 'outline-secret', format: 'outline' });
+  assert.doesNotMatch(result.outline, /482913/, 'a one-time code is redacted');
+  assert.doesNotMatch(result.outline, /opaque-77/, 'a field that cannot be described is redacted');
+  assert.match(result.outline, /textbox "City" \[e\d+\] value="Lima"/);
+  manager.destroy();
+});
+
+test('a popup an agent-driven page opens keeps its opener and request, becomes a tab, and goes with its owner', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'popup-owner', visible: false });
+  const owner = manager.entries.get('popup-owner');
+  const open = (url) => {
+    const decision = owner.view.webContents.windowOpenHandler({ url, disposition: 'new-window' });
+    assert.equal(decision.action, 'allow');
+    // Chromium's own webContents for the popup: it has the opener and the request.
+    const made = new FakeWebContents(FakeView.profile);
+    return { made, returned: decision.createWindow({ webContents: made, webPreferences: { nodeIntegration: true, sandbox: false } }) };
+  };
+  const { made, returned } = open('https://pay.example/3ds');
+  assert.equal(returned, made, 'the popup is the webContents Chromium made, not a new GET');
+  const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.ownerChatId === 'popup-owner');
+  assert.equal(tab.view.webContents, made);
+  assert.equal(tab.view.options.webPreferences.nodeIntegration, false, 'hardened');
+  assert.equal(tab.view.options.webPreferences.sandbox, true);
+  assert.equal(await tab.ready, true);
+  assert.ok(!made.startupSequence.some((step) => step.startsWith('load:')), 'Workass loads nothing into it: Chromium does');
+  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.opener === true));
+  // A page's tabs go with it: on a reset of the page, and when it closes.
+  await manager.browserControl('browser.close', { chatId: 'popup-owner' });
+  assert.equal(manager.entries.has(tab.chatId), false, 'reset closes the tabs it had opened');
+  const fresh = manager.entries.get('popup-owner');
+  fresh.agentActiveAt = Date.now();
+  const second = open.call(null, 'https://login.example/oauth');
+  void second;
+  const other = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.ownerChatId === 'popup-owner');
+  manager.close('popup-owner');
+  assert.equal(manager.entries.has(other.chatId), false, 'closing the page closes its tabs');
+  manager.destroy();
+});
+
+test('a native-view page off screen is held painting while an agent drives it, so its input is taken', async () => {
+  // Chromium hands mouse moves to a page on its next frame; a page in its
+  // hidden host paints none, and a protocol click there never completes.
+  const { manager } = fixture({ requestOpen: () => {} });
+  manager.paintIdleMs = 20;
+  await manager.browserControl('browser.open', { chatId: 'hidden-input', visible: false });
+  const entry = manager.entries.get('hidden-input');
+  const focus = () => entry.view.webContents.debugger.commandCalls.filter((call) => call.method === 'Emulation.setFocusEmulationEnabled').map((call) => call.params.enabled);
+  await manager.browserControl('browser.click', { chatId: 'hidden-input', selector: '#save' });
+  assert.deepEqual(focus().slice(0, 1), [true], 'held painting while the agent drives it');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(focus().at(-1), false, 'and let go shortly after');
+  manager.destroy();
+});
+
+test('a window.open popup of an agent-driven page is a window the person sees and a tab the agent drives; closing either ends both', async () => {
+  const { agentDriven } = require('./browser-actions');
+  const { manager } = fixture({ requestOpen: () => {} });
+  const ownerTab = await manager.browserControl('browser.open', { chatId: 'signin-owner', visible: false });
+  const owner = manager.entries.get('signin-owner');
+  const open = (url, disposition = 'new-window') => {
+    owner.agentActiveAt = Date.now();
+    const decision = owner.view.webContents.windowOpenHandler({ url, disposition });
+    const made = new FakeWebContents(FakeView.profile);
+    decision.createWindow({ webContents: made, webPreferences: {} });
+    const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.view.webContents === made);
+    return { made, tab, window: made.view.parentWindow };
+  };
+  // A sign-in popup (a second factor, a captcha, a passkey needs the person).
+  const first = open('https://accounts.example/approve');
+  assert.ok(first.window instanceof FakeBrowserWindow, 'shown in a window of its own');
+  assert.notEqual(first.window.options.show, false, 'that the person can see');
+  assert.deepEqual([first.window.options.width, first.window.options.height], [980, 760], 'as on main');
+  assert.equal(await first.tab.ready, true);
+  assert.deepEqual([first.tab.viewport.width, first.tab.viewport.height], [980, 760], 'the page is the window\'s size');
+  assert.ok(manager.browserTabs('signin-owner').some((tab) => tab.id === first.made.id && tab.opened_by_tab_id === ownerTab.id), 'and the agent still drives it');
+  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.in_window === true));
+  first.tab.agentActiveAt = 0;
+  assert.equal(agentDriven(first.tab), false, 'in front of the person');
+  // A link opened in a new tab stays a background tab.
+  const link = open('https://docs.example/page', 'foreground-tab');
+  assert.equal(await link.tab.ready, true);
+  assert.notEqual(link.window && link.window.options.show, true);
+  assert.equal(link.tab.popupWindow, undefined);
+  // The person closes the window: the tab goes.
+  first.window.destroy();
+  assert.equal(manager.entries.has(first.tab.chatId), false);
+  assert.equal(first.made.closed, true);
+  // The agent closes the tab: the window goes.
+  const second = open('https://pay.example/3ds');
+  await second.tab.ready;
+  await manager.browserControl('browser.close', { chatId: 'signin-owner', tabId: second.made.id });
+  assert.equal(second.window.destroyed, true);
+  // The page closes itself (window.close() at the end of a sign-in): both go.
+  const third = open('https://accounts.example/done');
+  await third.tab.ready;
+  third.made.emit('destroyed');
+  assert.equal(manager.entries.has(third.tab.chatId), false);
+  assert.equal(third.window.destroyed, true);
+  manager.destroy();
+});
+
+test('only calls that act on a page make it agent-driven, and a popped-out page counts as in front of the person', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'driven', visible: false });
+  const entry = manager.entries.get('driven');
+  entry.visible = true;
+  entry.agentActiveAt = 0;
+  await manager.browserControl('browser.snapshot', { chatId: 'driven' });
+  await manager.browserControl('browser.read', { chatId: 'driven' }).catch(() => {});
+  assert.equal(entry.agentActiveAt, 0, 'reading does not take the page over');
+  assert.equal(agentDriven(entry), false);
+  await manager.browserControl('browser.navigate', { chatId: 'driven', url: 'https://example.test/' });
+  assert.ok(entry.agentActiveAt > 0, 'acting does');
+  assert.equal(agentDriven({ visible: false, agentActiveAt: 0, pip: {} }), false, 'a page in its separate window is in front of the person');
+  manager.destroy();
+});
+
+test('resetting the page a person is looking at puts the fresh page in the same place', async () => {
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  await manager.activate({ chatId: 'chat-reset', bounds: { x: 900, y: 80, width: 280, height: 640 }, url: 'example.com', radius: 12 });
+  const old = manager.entries.get('chat-reset');
+  const bounds = { ...old.presentationBounds };
+  const result = await manager.browserControl('browser.close', { chatId: 'chat-reset' });
+  assert.equal(result.status, 'reset');
+  const fresh = manager.entries.get('chat-reset');
+  assert.notEqual(fresh, old);
+  assert.equal(fresh.visible, true, 'the pane is not left without a page');
+  assert.ok(win.contentView.children.includes(fresh.view), 'the fresh page is on screen');
+  assert.deepEqual(fresh.presentationBounds, bounds, 'where the old one was');
+  assert.equal(manager.activeId, 'chat-reset');
+  manager.destroy();
+});
+
+test('a shell that prefers the webview host uses native views until the app renderer asks for the host', async () => {
+  const { manager } = fixture({ requestOpen: () => {}, preferredHost: 'webview' });
+  // An older renderer never asks: pages are native views, up at once.
+  const before = manager.get('before-opt-in');
+  assert.equal(manager.isHosted(before), false);
+  assert.equal(await before.ready, true, 'no wait for a <webview> nobody will mount');
+  // A renderer that can host pages asks, and is answered with the webview host.
+  assert.equal(manager.rendererHostMode(), 'webview');
+  const after = manager.get('after-opt-in');
+  assert.equal(manager.isHosted(after), true);
+  assert.match(after.hostKey, /^wkb-/);
+  assert.equal(manager.isHosted(before), false, 'pages made before stay native until replaced');
+  manager.destroy();
+});
+
+test('a dialog in the middle of a batch stops the batch, reports what ran, and nothing runs after it', async () => {
+  const { dialogOpened } = require('./browser-actions');
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'batch-dialog', visible: false });
+  const entry = manager.entries.get('batch-dialog');
+  const ran = [];
+  manager.browserClick = async (target, params) => {
+    ran.push(params.selector);
+    if (params.selector === '#confirm') {
+      dialogOpened(target, { type: 'confirm', message: 'Sure?' });
+      await new Promise((resolve) => setTimeout(resolve, 80)); // the page is paused until it is answered
+    }
+    return { ok: true, status: 'clicked' };
+  };
+  const report = await manager.browserControl('browser.batch', { chatId: 'batch-dialog', actions: [
+    { action: 'click', selector: '#first' }, { action: 'click', selector: '#confirm' }, { action: 'click', selector: '#after' },
+  ] }, { report: true });
+  assert.equal(report.dialog.type, 'confirm');
+  assert.deepEqual(report.batch.completed_indexes, [0]);
+  assert.equal(report.batch.dialog_index, 1);
+  assert.deepEqual(report.batch.unexecuted_indexes, [2]);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(ran, ['#first', '#confirm'], 'nothing after the dialog ran, inside the queue or outside it');
+  manager.destroy();
+});
+
+test('an explicit snapshot always reads the page as it is now', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'fresh-read', visible: false });
+  const entry = manager.entries.get('fresh-read');
+  const wc = entry.view.webContents;
+  const original = wc.executeJavaScript.bind(wc);
+  // The page's activity count never moves (a script's property write).
+  wc.executeJavaScript = async (script, gesture) => (String(script).includes('workass.activity') ? { n: 5, quietFor: 1000 } : original(script, gesture));
+  let value = 'first';
+  const base = wc.debugger.sendCommand.bind(wc.debugger);
+  wc.debugger.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Accessibility.getFullAXTree') {
+      return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2'] }, { nodeId: '2', parentId: '1', role: { value: 'StaticText' }, name: { value } }] };
+    }
+    return base(method, params, sessionId);
+  };
+  const first = await manager.browserControl('browser.snapshot', { chatId: 'fresh-read', format: 'outline' });
+  assert.match(first.outline, /text: first/);
+  value = 'second';
+  const second = await manager.browserControl('browser.snapshot', { chatId: 'fresh-read', format: 'outline' });
+  assert.match(second.outline, /text: second/, 'not the earlier outline');
+  manager.destroy();
 });

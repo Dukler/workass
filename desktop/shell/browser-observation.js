@@ -486,7 +486,9 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
           let shown = true;
           while (parent && parentDepth < maxWalkDepth) {
             const tag = String(parent.tagName || '').toLowerCase();
-            if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template') { shown = false; break; }
+            // A textarea's child text is its initial value, not what it holds
+            // now; its current value is the field row's value.
+            if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template' || tag === 'textarea') { shown = false; break; }
             const style = parent.ownerDocument.defaultView.getComputedStyle(parent);
             if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) { shown = false; break; }
             parent = parent.parentElement;
@@ -525,19 +527,9 @@ function observationScript({ snapshotId, maxNodes = 500, maxText = 32 * 1024, ro
       let valueRead = false;
       let readOnly = root.getAttribute('aria-readonly') === 'true';
       const kind = root.matches('.monaco-editor') ? 'monaco' : 'code-editor';
-      try {
-        if (kind === 'monaco') {
-          const api = globalThis.monaco?.editor;
-          const candidates = typeof api?.getEditors === 'function' ? api.getEditors() : [];
-          const editor = candidates.find((candidate) => candidate?.getDomNode?.() === root);
-          const model = editor?.getModel?.();
-          if (model) { value = String(model.getValue()); valueRead = true; }
-          readOnly = readOnly || editor?.getRawOptions?.()?.readOnly === true;
-        } else if (root.CodeMirror?.getValue) {
-          value = String(root.CodeMirror.getValue()); valueRead = true;
-          readOnly = readOnly || root.CodeMirror.getOption?.('readOnly') === true;
-        }
-      } catch { /* the rendered editor lines remain available below */ }
+      // The editor's own model (Monaco, CodeMirror) is in the page's world,
+      // not this one: the shell reads it afterwards (readEditorModels); here
+      // the rendered lines stand in.
       let lineScanTruncated = false;
       if (!valueRead) {
         try {
@@ -662,7 +654,8 @@ function observedTargetGeometryScript(locator, { mapFrames = true } = {}) {
     ] : []),
     'const xs = points.map((point) => point.x); const ys = points.map((point) => point.y);',
     'const left = Math.min(...xs); const top = Math.min(...ys);',
-    'return { status: \"ready\", tag: String(el.tagName || \"\").toLowerCase(), name: String(el.getAttribute(\"aria-label\") || el.innerText || el.textContent || \"\").trim().slice(0, 160), x: localPoint.x, y: localPoint.y, bounds: { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top } };',
+    'const pick = el.closest ? el.closest(\"select\") : null;',
+    'return { status: \"ready\", tag: String(el.tagName || \"\").toLowerCase(), name: String(el.getAttribute(\"aria-label\") || el.innerText || el.textContent || \"\").trim().slice(0, 160), x: localPoint.x, y: localPoint.y, bounds: { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top }, nativeMenu: !!pick && !pick.multiple && !(pick.size > 1) };',
     '})()',
   ].join('\n');
 }

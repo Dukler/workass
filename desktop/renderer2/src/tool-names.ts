@@ -163,6 +163,13 @@ const WORKASS_MCP_LABEL: Record<string, [string, string]> = {
   workass_browser_list: ['Ver las pestañas', 'web'],
   workass_browser_history: ['Ver el historial', 'web'],
   workass_browser_batch: ['Operar en el navegador', 'web'],
+  workass_browser_select: ['Elegir una opción en la página', 'web'],
+  workass_browser_hover: ['Pasar el puntero por la página', 'web'],
+  workass_browser_drag: ['Arrastrar en la página', 'web'],
+  workass_browser_upload: ['Subir un archivo a la página', 'web'],
+  workass_browser_dialog: ['Responder un aviso de la página', 'web'],
+  workass_browser_close: ['Cerrar una pestaña del navegador', 'web'],
+  workass_browser_evaluate: ['Ejecutar código en la página', 'web'],
 };
 
 function iconFor(action: string): ActionIcon {

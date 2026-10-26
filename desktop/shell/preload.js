@@ -2,13 +2,33 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// 'webview' when this window hosts the browser page in a <webview> (main.js
+// decides; an older main answers nothing and the native view host applies).
+function browserHostMode() {
+  try {
+    return ipcRenderer.sendSync('workass-browser:host-mode') === 'webview' ? 'webview' : 'view';
+  } catch {
+    return 'view';
+  }
+}
+
 contextBridge.exposeInMainWorld('workassBrowser', {
   supported: true,
+  // Asked once, when the app first needs it (no IPC at preload time).
+  hostMode: (() => { let mode = null; return () => (mode ??= browserHostMode()); })(),
+  registerGuest: (hostKey, webContentsId) => ipcRenderer.invoke('workass-browser:register-guest', { hostKey, webContentsId }),
+  hosts: () => ipcRenderer.invoke('workass-browser:hosts'),
+  onHosts: (callback) => {
+    const listener = (_event, hosts) => callback(Array.isArray(hosts) ? hosts : []);
+    ipcRenderer.on('workass-browser:hosts', listener);
+    return () => ipcRenderer.removeListener('workass-browser:hosts', listener);
+  },
   activate: (payload) => ipcRenderer.invoke('workass-browser:activate', payload),
   resize: (payload) => ipcRenderer.invoke('workass-browser:resize', payload),
   hide: (chatId) => ipcRenderer.invoke('workass-browser:hide', chatId),
   popOut: (chatId) => ipcRenderer.invoke('workass-browser:pop-out', chatId),
   popIn: (chatId) => ipcRenderer.invoke('workass-browser:pop-in', chatId),
+  place: (chatId, bounds) => ipcRenderer.send('workass-browser:place', { chatId, bounds }),
   close: (chatId) => ipcRenderer.invoke('workass-browser:close', chatId),
   command: (chatId, command, value) => ipcRenderer.invoke('workass-browser:command', { chatId, command, value }),
   setViewport: (chatId, width, height) => ipcRenderer.invoke('workass-browser:set-viewport', { chatId, width, height }),

@@ -2479,28 +2479,47 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
    t3code): the page floats over the transcript, clear of the Working line.
    The native page view covers the frame, so its controls live in a pill just
    outside it: faint at rest, full on hover (the page itself cannot report a
-   hover). The resize handle sits on the frame's free corner. */
+   hover). The pill sits above the frame's top-right corner. */
 .fbrw-host { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
 .fbrw { position: absolute; pointer-events: none; }
-.fbrw-frame { position: absolute; inset: 0; border-radius: 12px; background: var(--panel);
+/* The background stops a pixel short of the edge: at a zoom other than 100%
+   the page can land a fraction of a pixel off, and the frame must not show. */
+.fbrw-frame { position: absolute; inset: 0; border-radius: 12px; background: var(--panel); padding: 1px; background-clip: content-box;
   box-shadow: 0 18px 40px rgba(0, 0, 0, .45), 0 0 0 1px var(--line2); }
 .fbrw-pill { position: absolute; right: 0; bottom: calc(100% + 6px); display: flex; align-items: center; gap: 2px; padding: 3px;
   border-radius: 9px; background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--line2);
   box-shadow: 0 8px 20px rgba(0, 0, 0, .3); pointer-events: auto; opacity: .72; transition: opacity .15s ease; }
 .fbrw-pill:hover, .fbrw-pill:focus-within { opacity: 1; }
-.fbrw-pill.left { right: auto; left: 0; }
-.fbrw-pill.below { bottom: auto; top: calc(100% + 6px); }
 .fbrw-btn { width: 26px; height: 26px; display: grid; place-items: center; flex: none; border: 0; border-radius: 6px;
   background: transparent; color: var(--muted); cursor: pointer; padding: 0; }
 .fbrw-btn:hover { background: var(--line); color: var(--ink); }
 .fbrw-btn svg { width: 15px; height: 15px; }
 .fbrw-grip { cursor: grab; touch-action: none; }
 .fbrw-grip:active { cursor: grabbing; }
-.fbrw-resize { position: absolute; width: 14px; height: 14px; pointer-events: auto; touch-action: none; }
-.fbrw-resize.at-br { left: -8px; top: -8px; cursor: nwse-resize; }
-.fbrw-resize.at-bl { right: -8px; top: -8px; cursor: nesw-resize; }
-.fbrw-resize.at-tr { left: -8px; bottom: -8px; cursor: nesw-resize; }
-.fbrw-resize.at-tl { right: -8px; bottom: -8px; cursor: nwse-resize; }
+/* Resize from any edge or corner: thin zones just outside the frame (the page
+   covers its inside), shown only by the cursor. */
+.fbrw-edge { position: absolute; pointer-events: auto; touch-action: none; }
+.fbrw-edge.e-n, .fbrw-edge.e-s { left: 8px; right: 8px; height: 7px; cursor: ns-resize; }
+.fbrw-edge.e-n { top: -7px; }
+.fbrw-edge.e-s { bottom: -7px; }
+.fbrw-edge.e-e, .fbrw-edge.e-w { top: 8px; bottom: 8px; width: 7px; cursor: ew-resize; }
+.fbrw-edge.e-e { right: -7px; }
+.fbrw-edge.e-w { left: -7px; }
+.fbrw-edge.e-nw, .fbrw-edge.e-ne, .fbrw-edge.e-sw, .fbrw-edge.e-se { width: 16px; height: 16px; }
+.fbrw-edge.e-nw { left: -9px; top: -9px; cursor: nwse-resize; }
+.fbrw-edge.e-se { right: -9px; bottom: -9px; cursor: nwse-resize; }
+.fbrw-edge.e-ne { right: -9px; top: -9px; cursor: nesw-resize; }
+.fbrw-edge.e-sw { left: -9px; bottom: -9px; cursor: nesw-resize; }
+/* While it is dragged or resized only the page itself shows (it follows the
+   pointer natively); the HTML around it would trail it by a frame. */
+.fbrw.is-moving { opacity: 0; }
+/* The webview host (browser-surface.ts): each page in a fixed box of its own,
+   placed over the slot that shows it, or at the window's origin behind the
+   app while no slot does (still painting, for the agent's captures). */
+.wbs-page { position: fixed; left: 0; top: 0; overflow: hidden; background: #fff; z-index: -1; pointer-events: none; }
+.wbs-viewport { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.wbs-webview { display: flex; width: 100%; height: 100%; border: 0; }
+:root.wbs-gesture .wbs-page { pointer-events: none !important; }
 /* Full screen: the page fills the window under one slim bar. */
 .fbrw-full { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--bg); }
 .fbrw-fullbar { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 10px 0 calc(var(--side-toggle-x) + 8px);
@@ -2509,6 +2528,10 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 :root.electron .fbrw-fullbar button { -webkit-app-region: no-drag; }
 .fbrw-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .fbrw-fullview { flex: 1; position: relative; }
+/* A hosted page is drawn under this layer (same stacking order, earlier in
+   the DOM): only the bar is opaque, the page shows through the view area. */
+.fbrw-full.hosted { background: transparent; pointer-events: none; }
+.fbrw-full.hosted .fbrw-fullbar { background: var(--bg); pointer-events: auto; }
 
 /* ============ Fork subsessions (approved mock forks/sidebar-nested.html) ============
    Children of a fork point live in the sidebar, nested under their parent chat;

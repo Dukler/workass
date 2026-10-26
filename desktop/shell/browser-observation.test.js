@@ -223,11 +223,14 @@ test('generated observation executes and preserves legacy interactive and editor
   assert.ok(interactive.some((node) => node.tag === 'div' && node.actionable && node.text === 'Focusable custom control'));
   assert.ok(interactive.some((node) => node.tag === 'section' && node.scrollable));
 
+  // The observation runs in Workass's own world, where the page's editor
+  // objects do not exist: it finds the editors and leaves their models to the
+  // page-world read (browser-editor.test.js), never reaching for them itself.
   const monaco = interactive.find((node) => node.editor === 'monaco');
-  assert.equal(monaco.text, 'Monaco model value');
-  assert.equal(monaco.readOnly, true);
-  const codeMirror = interactive.find((node) => node.editor === 'code-editor' && node.text === 'CodeMirror model value');
-  assert.equal(codeMirror.readOnly, true);
+  assert.ok(monaco, 'the Monaco editor is found');
+  assert.notEqual(monaco.text, 'Monaco model value');
+  assert.ok(interactive.some((node) => node.editor === 'code-editor'), 'the CodeMirror editor is found');
+  assert.ok(!interactive.some((node) => node.text === 'CodeMirror model value'));
   const cm6 = snapshot.result.editors.find((editor) => editor.text.includes('CodeMirror 6 line text'));
   assert.ok(cm6, 'rendered CodeMirror line extraction remains available when no CodeMirror.getValue exists');
   assert.ok(snapshot.result.interactive.every((node) => Number.isInteger(node.refIndex)));

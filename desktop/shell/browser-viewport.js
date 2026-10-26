@@ -26,8 +26,11 @@ function presentationFor(viewport, bounds) {
   const scale = width > 0 && height > 0
     ? Math.min(width / viewport.width, height / viewport.height)
     : 0;
-  const presentedWidth = Math.floor(viewport.width * scale);
-  const presentedHeight = Math.floor(viewport.height * scale);
+  // The epsilon keeps a frame that fits exactly (344 × 215 for 1440 × 900)
+  // from losing a pixel to floating point (1440 × 344 / 1440 = 343.99999…),
+  // which left a one-pixel line of the frame showing under the page.
+  const presentedWidth = Math.floor(viewport.width * scale + 1e-6);
+  const presentedHeight = Math.floor(viewport.height * scale + 1e-6);
   return {
     scale,
     bounds: {
