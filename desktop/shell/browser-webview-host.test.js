@@ -149,6 +149,34 @@ test('when the app renderer reloads, the tab waits for its next guest and comes 
   manager.destroy();
 });
 
+test('a renderer reload while a page is still being set up never hangs the presentation queue', async () => {
+  const { manager, published, guests, profile, win, mount } = hostedFixture();
+  manager.guestAttachTimeoutMs = 5000;
+  const entry = manager.get('chat-setup');
+  const hostKey = published.at(-1).find((host) => host.chatId === 'chat-setup').hostKey;
+  // The first guest's setup never finishes (its first script never answers).
+  const first = new FakeGuest(win.webContents, profile);
+  first.executeJavaScript = () => new Promise(() => {});
+  guests.set(first.id, first);
+  manager.noteAttachedGuest(first);
+  assert.equal(manager.registerGuest(hostKey, first.id).ok, true);
+  const shown = manager.activate({ chatId: 'chat-setup', bounds: { x: 0, y: 0, width: 400, height: 250 } });
+  await settle();
+  first.destroy(); // the app renderer reloads mid-setup
+  mount(hostKey); // and mounts the page again
+  const within = (promise, ms) => Promise.race([promise.then(() => 'settled', () => 'settled'), new Promise((resolve) => setTimeout(() => resolve('hung'), ms))]);
+  assert.equal(await within(shown, 1500), 'settled', 'the activation that waited on the lost setup ends');
+  const other = manager.get('chat-other');
+  mount(published.at(-1).find((host) => host.chatId === 'chat-other').hostKey);
+  await other.ready;
+  assert.equal(await within(manager.activate({ chatId: 'chat-other', bounds: { x: 0, y: 0, width: 400, height: 250 } }), 1500), 'settled',
+    'and every later presentation call still runs');
+  // Even a readiness that never settles cannot hold the queue past its bound.
+  manager.guestAttachTimeoutMs = 10;
+  assert.equal(await manager.readyForPresentation({ ready: new Promise(() => {}) }), false);
+  manager.destroy();
+});
+
 test('resetting a hosted page a person is looking at keeps the pane showing a page', async () => {
   const { manager, published, mount } = hostedFixture();
   const entry = manager.get('chat-reset');
