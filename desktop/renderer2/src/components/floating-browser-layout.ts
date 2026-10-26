@@ -51,11 +51,18 @@ function bounds(container: FloatContainer) {
 // The widest frame that fits, in whole steps (height = width × FLOAT_ASPECT).
 // A chat area too small for the chosen width shows it smaller without
 // forgetting the choice.
-export function clampFloatWidth(width: number, container: FloatContainer, limit = Number.POSITIVE_INFINITY): number {
+export function clampFloatWidth(width: number, container: FloatContainer, limit = Number.POSITIVE_INFINITY, step = WIDTH_STEP): number {
   const edge = bounds(container);
   const fits = Math.min(MAX_WIDTH, limit, edge.right - edge.left, (edge.bottom - edge.top) / FLOAT_ASPECT);
   const wanted = clamp(finite(width, DEFAULT_FLOAT_WIDTH), MIN_WIDTH, MAX_WIDTH);
-  return Math.max(WIDTH_STEP * 15, stepDown(Math.min(wanted, fits) + 1e-6));
+  const unit = step > 0 && Number.isFinite(step) ? step : WIDTH_STEP;
+  return Math.max(WIDTH_STEP * 15, unit === WIDTH_STEP ? stepDown(Math.min(wanted, fits) + 1e-6) : Math.floor((Math.min(wanted, fits) + 1e-6) / unit) * unit);
+}
+
+// The size step at the app's zoom: 8 window pixels, so a resize never skips
+// one (a CSS step wider than that would, now and then, once snapped).
+export function floatWidthStep(zoom: number): number {
+  return zoom > 0 && Math.abs(zoom - 1) >= 1e-6 ? WIDTH_STEP / zoom : WIDTH_STEP;
 }
 
 export function floatHeight(width: number): number {
@@ -99,8 +106,8 @@ export function positionOf(placement: FloatPlacement, size: { width: number; hei
 }
 
 // The frame's rectangle inside its container.
-export function floatFrame({ width, placement, container }: { width: number; placement: FloatPlacement; container: FloatContainer }): FloatRect {
-  const w = clampFloatWidth(width, container);
+export function floatFrame({ width, placement, container, step }: { width: number; placement: FloatPlacement; container: FloatContainer; step?: number }): FloatRect {
+  const w = clampFloatWidth(width, container, Number.POSITIVE_INFINITY, step);
   const size = { width: w, height: floatHeight(w) };
   return { ...positionOf(placement, size, container), ...size };
 }
@@ -117,7 +124,7 @@ export function moveFloatFrame(start: FloatRect, delta: FloatPoint, container: F
 // top-left stays. A corner projects the pointer's travel on the frame's
 // diagonal, so the two axes never fight. The frame stops growing at the edges
 // of the chat area rather than moving.
-export function resizeFloatFrame(start: FloatRect, edge: FloatEdge, delta: FloatPoint, container: FloatContainer): FloatRect {
+export function resizeFloatFrame(start: FloatRect, edge: FloatEdge, delta: FloatPoint, container: FloatContainer, step = WIDTH_STEP): FloatRect {
   const west = edge.includes('w');
   const east = edge.includes('e');
   const north = edge.includes('n');
@@ -132,16 +139,17 @@ export function resizeFloatFrame(start: FloatRect, edge: FloatEdge, delta: Float
     : east || west ? wantedWidth : wantedHeight / FLOAT_ASPECT;
   const maxWidth = west ? right - room.left : room.right - start.x;
   const maxHeight = north ? bottom - room.top : room.bottom - start.y;
-  const width = clampFloatWidth(desired, container, Math.min(maxWidth, maxHeight / FLOAT_ASPECT));
+  const width = clampFloatWidth(desired, container, Math.min(maxWidth, maxHeight / FLOAT_ASPECT), step);
   const height = floatHeight(width);
   const at = clampFloatPosition({ x: west ? right - width : start.x, y: north ? bottom - height : start.y }, { width, height }, container);
   return { ...at, width, height };
 }
 
 // The app's zoom (View > Zoom In, Cmd +) makes a CSS pixel a fraction of a
-// window pixel, while the native page sits only on whole window pixels and
-// fills a 1440 × 900 shape exactly only at multiples of 8 × 5. The frame is
-// snapped there, in CSS pixels, so page and frame land on the same pixels.
+// window pixel. The frame is snapped to whole window pixels, at a width that
+// is a multiple of 8 of them (so its 1440 × 900 shape is a whole number of
+// pixels tall too), so the page drawn in it has crisp edges that land on the
+// frame's own pixels at any zoom.
 export function snapFloatFrame(rect: FloatRect, origin: FloatPoint, zoom: number): FloatRect {
   if (!(zoom > 0) || Math.abs(zoom - 1) < 1e-6) return rect;
   const width = Math.max(WIDTH_STEP, Math.round((rect.width * zoom) / WIDTH_STEP) * WIDTH_STEP) / zoom;
