@@ -164,6 +164,12 @@ function buildOutline(frames, { refFor = () => null, title = '', url = '' } = {}
         parts.push(`-> ${clip(redactPageMessage(String(props.url), URL_LIMIT * 2), URL_LIMIT)}`);
       }
       if (shown === 'canvas') parts.push('(pixels only: text drawn on it cannot be read as text)');
+      // A plain list item around one thing is that thing: the list line
+      // above already says it is a list.
+      if (role === 'listitem' && !name && !ref && parts.length === 1) {
+        const inner = children.filter((child) => !SKIP_ROLES.has(String(axValue(child.role) || '')));
+        if (inner.length === 1) { renderChildren(inner, depthNow, parentKey, guard); return; }
+      }
       // A table row of plain cells is one line.
       if (role === 'row' && children.length && children.every((child) => ['cell', 'gridcell', 'columnheader', 'rowheader'].includes(String(axValue(child.role) || '')))) {
         const cells = children.map((child) => clip(redactPageMessage(String(axValue(child.name) || ''), 120), 120));
@@ -237,17 +243,82 @@ function renderLine(line) {
   return '  '.repeat(Math.max(0, line.depth)) + line.text;
 }
 
-// One page of lines, whole lines only, at most maxBytes.
+// Folding: a run of at least FOLD_MIN sibling leaf lines that differ only in
+// counting numbers (each number constant or stepping the same amount line
+// by line) is shown as one line with {first..last} ranges, or
+// {first..last..step}. Expanding the ranges gives back every line exactly,
+// refs included, so nothing is lost: `- link "Item {1..2000}" [e{2..2001}]`
+// is 2000 links, e2 to e2001.
+const FOLD_MIN = 4;
+const FOLD_NUMBER_DIGITS = 12;
+
+function numberTokens(text) {
+  if (text.includes('{') || text.includes('}')) return null;
+  const parts = text.split(/(\d+)/u);
+  for (let i = 1; i < parts.length; i += 2) if (parts[i].length > FOLD_NUMBER_DIGITS) return null;
+  return parts;
+}
+
+function isLeaf(lines, index) {
+  return index + 1 >= lines.length || lines[index + 1].depth <= lines[index].depth;
+}
+
+// The run of foldable lines starting at index: { end (exclusive), text }, or
+// null when fewer than FOLD_MIN lines fold.
+function foldRun(lines, index) {
+  const first = lines[index];
+  if (!isLeaf(lines, index)) return null;
+  const base = numberTokens(first.text);
+  if (!base || base.length < 3) return null;
+  const steps = new Array(base.length).fill(null);
+  const widthFixed = new Array(base.length).fill(true);
+  const values = (parts) => parts.map((part, i) => (i % 2 ? Number(part) : part));
+  let previous = values(base);
+  let end = index + 1;
+  for (; end < lines.length; end += 1) {
+    const line = lines[end];
+    if (line.depth !== first.depth || !isLeaf(lines, end)) break;
+    const parts = numberTokens(line.text);
+    if (!parts || parts.length !== base.length) break;
+    const current = values(parts);
+    let fits = true;
+    for (let i = 0; i < base.length && fits; i += 1) {
+      if (i % 2 === 0) { fits = parts[i] === base[i]; continue; }
+      const step = current[i] - previous[i];
+      if (steps[i] == null && end === index + 1) steps[i] = step;
+      fits = step === steps[i] && step >= 0 && (step === 0 ? parts[i] === base[i]
+        : parts[i].length === base[i].length || (String(current[i]) === parts[i] && String(Number(base[i])) === base[i]));
+      if (parts[i].length !== base[i].length) widthFixed[i] = false;
+    }
+    if (!fits) break;
+    previous = current;
+  }
+  if (end - index < FOLD_MIN || !steps.some((step) => step > 0)) return null;
+  const last = numberTokens(lines[end - 1].text);
+  const text = base.map((part, i) => {
+    if (i % 2 === 0 || !steps[i]) return part;
+    // Zero-padded numbers keep their width; others are plain integers.
+    const from = widthFixed[i] ? part : String(Number(part));
+    const to = widthFixed[i] ? last[i] : String(Number(last[i]));
+    return `{${from}..${to}${steps[i] === 1 ? '' : `..${steps[i]}`}}`;
+  }).join('');
+  return { end, text };
+}
+
+// One page of lines, whole lines (and whole folded runs) only, at most
+// maxBytes. `next` is the line index to continue from.
 function pageLines(lines, start, maxBytes) {
   const out = [];
   let bytes = 0;
   let index = Math.max(0, start);
-  for (; index < lines.length; index += 1) {
-    const text = renderLine(lines[index]);
+  while (index < lines.length) {
+    const run = foldRun(lines, index);
+    const text = '  '.repeat(Math.max(0, lines[index].depth)) + (run ? run.text : lines[index].text);
     const size = Buffer.byteLength(text, 'utf8') + 1;
     if (out.length && bytes + size > maxBytes) break;
     out.push(text);
     bytes += size;
+    index = run ? run.end : index + 1;
   }
   return { text: out.join('\n'), next: index < lines.length ? index : null, bytes };
 }

@@ -14,12 +14,31 @@ const { diffOutlines, pageLines } = require('./browser-outline');
 const { redactPageMessage, targetExpression } = require('./browser-observation');
 
 const EVENT_LIMIT = 64;
-const SETTLE_QUIET_MS = 150;
+// An action's consequences: when nothing at all happens, two frames of quiet
+// are enough; once something happens (DOM mutations, form or focus events,
+// requests, frames attaching or loading), the page must stay quiet this long
+// after the last of it. Never longer than SETTLE_MAX_MS.
+const SETTLE_IDLE_MS = 32;
+const SETTLE_QUIET_MS = 80;
 const SETTLE_MAX_MS = 1500;
+const SETTLE_POLL_MS = 15;
 const NAVIGATION_SETTLE_MS = 8000;
 const CHANGES_BYTES = 6000;
 const NAVIGATED_OUTLINE_BYTES = 6000;
-const BEFORE_OUTLINE_FRESH_MS = 10000;
+// The last outline is reused as the "before" only while the page has not
+// changed since it was taken; a page with frames is reused for less long,
+// because changes inside its frames are not counted.
+const BEFORE_OUTLINE_FRESH_MS = 30000;
+const BEFORE_OUTLINE_FRESH_FRAMED_MS = 10000;
+const ACTIVITY_READ_TIMEOUT_MS = 1000;
+// Long-lived connections never finish; waiting for them would hold every
+// action to SETTLE_MAX_MS. Document requests are navigations, followed by
+// the page's and frames' own load events instead (a cross-site frame's
+// document finishes in that frame's session, never in this one).
+const NETWORK_IGNORED_TYPES = new Set(['WebSocket', 'EventSource', 'Document']);
+// Actions whose effect can show without any DOM mutation or event (CSS
+// :hover, a drag's drop styling, script state): always outlined after.
+const ALWAYS_OUTLINE_AFTER = new Set(['browser.hover', 'browser.drag', 'browser.evaluate', 'browser.select', 'browser.upload', 'browser.batch']);
 const AGENT_RECENT_MS = 15000;
 const UPLOAD_MAX_FILES = 10;
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
@@ -57,30 +76,170 @@ function agentDriven(entry) {
 // ---------------------------------------------------------------------------
 // Running an action and reporting what changed
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Page-side activity counter, one per document: DOM mutations plus the form,
+// focus and disclosure events that change what the outline shows without
+// mutating the DOM. Installed on first use and kept for the document's life.
+const ACTIVITY_KEY = 'workass.activity';
+const ACTIVITY_PROBE = `(() => {
+  const key = Symbol.for(${JSON.stringify(ACTIVITY_KEY)});
+  let probe = document[key];
+  if (!probe) {
+    probe = { n: 0, last: 0 };
+    const bump = (count) => { probe.n += count; probe.last = performance.now(); };
+    try {
+      new MutationObserver((records) => bump(records.length))
+        .observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+      for (const type of ['input', 'change', 'focusin', 'focusout', 'toggle', 'reset', 'submit', 'invalid']) {
+        document.addEventListener(type, () => bump(1), { capture: true, passive: true });
+      }
+      // A new viewport size can change the page through media queries alone.
+      window.addEventListener('resize', () => bump(1), { passive: true });
+      Object.defineProperty(document, key, { value: probe });
+    } catch (_) { return null; }
+  }
+  return { n: probe.n };
+})()`;
+
+// Resolves once the document has had no activity for quietMs and at least
+// minWaitMs have passed (time for what the action scheduled to run), or at
+// capMs.
+function quietScript(quietMs, minWaitMs, capMs) {
+  return `(() => new Promise((resolve) => {
+    ${ACTIVITY_PROBE};
+    const probe = document[Symbol.for(${JSON.stringify(ACTIVITY_KEY)})];
+    const started = performance.now();
+    if (!probe) { setTimeout(() => resolve(null), ${Math.max(quietMs, minWaitMs)}); return; }
+    const check = () => {
+      const now = performance.now();
+      const since = probe.last ? now - probe.last : Infinity;
+      const waited = now - started;
+      if ((since >= ${quietMs} && waited >= ${minWaitMs}) || waited >= ${capMs}) {
+        resolve({ n: probe.n, quietFor: Math.min(since, 1e9) });
+        return;
+      }
+      const left = Math.max(${quietMs} - since, ${minWaitMs} - waited);
+      setTimeout(check, Math.max(4, Math.min(50, left)));
+    };
+    check();
+  }))()`;
+}
+
+function touchActivity(entry) {
+  entry.activityAt = Date.now();
+  entry.activitySeq = (entry.activitySeq || 0) + 1;
+}
+
+// Browser-side activity from the shell's CDP session (frames attaching,
+// navigating or loading; requests while an action is being watched).
+function noteActivity(entry, method, params, sessionId) {
+  switch (method) {
+    case 'Network.requestWillBeSent':
+      if (sessionId || !entry.netInflight || NETWORK_IGNORED_TYPES.has(params && params.type)) return;
+      entry.netInflight.add(String(params.requestId || ''));
+      touchActivity(entry);
+      return;
+    case 'Network.loadingFinished':
+    case 'Network.loadingFailed':
+      if (!sessionId && entry.netInflight && entry.netInflight.delete(String(params && params.requestId || ''))) touchActivity(entry);
+      return;
+    case 'Page.frameAttached':
+    case 'Page.frameDetached':
+    case 'Page.frameNavigated':
+    case 'Page.frameStartedLoading':
+    case 'Page.navigatedWithinDocument':
+      touchActivity(entry);
+      return;
+    default:
+  }
+}
+
+async function readActivity(manager, entry) {
+  let probe = null;
+  try {
+    probe = await Promise.race([manager.evaluateMainWorld(entry, ACTIVITY_PROBE), sleep(ACTIVITY_READ_TIMEOUT_MS).then(() => null)]);
+  } catch { probe = null; }
+  return { n: probe && Number.isFinite(probe.n) ? probe.n : null, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) };
+}
+
+// Requests are watched only while an action settles: Network events cost
+// something on every request, and only an action's own requests matter.
+// Never waited on for long: a page paused in a dialog can hold CDP commands
+// until the dialog is answered.
+async function watchNetwork(manager, entry) {
+  const wc = manager.liveContents(entry);
+  if (entry.dialog || !wc || !wc.debugger || wc.debugger.isAttached?.() !== true) return false;
+  entry.netInflight = new Set();
+  const enable = (params) => Promise.race([Promise.resolve(wc.debugger.sendCommand('Network.enable', params)).then(() => true),
+    sleep(ACTIVITY_READ_TIMEOUT_MS).then(() => false)]);
+  let enabled = false;
+  try { enabled = await enable({ maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 }); } catch {
+    try { enabled = await enable(undefined); } catch { enabled = false; }
+  }
+  if (!enabled) entry.netInflight = null;
+  return true;
+}
+
+function unwatchNetwork(manager, entry) {
+  entry.netInflight = null;
+  const wc = manager.liveContents(entry);
+  try {
+    if (wc && wc.debugger && wc.debugger.isAttached?.() === true) Promise.resolve(wc.debugger.sendCommand('Network.disable')).catch(() => {});
+  } catch { /* the page is gone */ }
+}
+
+function hasChildFrames(entry) {
+  for (const frame of (entry.frames || new Map()).values()) if (frame.parentFrameId != null && !frame.detached) return true;
+  return false;
+}
+
 // Waits until the page stops changing: a navigation reaches a usable
-// document, otherwise the top document is quiet for SETTLE_QUIET_MS (at most
-// SETTLE_MAX_MS).
-async function settleAfterAction(manager, entry) {
+// document; then, if nothing happened, SETTLE_IDLE_MS of quiet, otherwise
+// SETTLE_QUIET_MS after the last activity (requests in flight and loading
+// frames keep it waiting), never more than SETTLE_MAX_MS. Returns whether
+// anything happened since `start` and the activity count it ended on.
+async function settleAfterAction(manager, entry, start) {
   if (!entry.mainDocumentReady) {
     const deadline = Date.now() + NAVIGATION_SETTLE_MS;
     while (Date.now() < deadline && !entry.closed && !entry.dialog && !entry.mainDocumentReady && (entry.loading || entry.mainCommitPending)) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await sleep(SETTLE_POLL_MS);
     }
   }
-  if (entry.closed || entry.dialog) return;
-  try {
-    await Promise.race([
-      manager.evaluateMainWorld(entry, `(() => new Promise((resolve) => {
-        let timer = null;
-        const done = () => { observer.disconnect(); clearTimeout(timer); clearTimeout(cap); resolve(true); };
-        const observer = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(done, ${SETTLE_QUIET_MS}); });
-        observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-        timer = setTimeout(done, ${SETTLE_QUIET_MS});
-        const cap = setTimeout(done, ${SETTLE_MAX_MS});
-      }))()`),
-      new Promise((resolve) => setTimeout(resolve, SETTLE_MAX_MS + 500)),
-    ]);
-  } catch { /* a page that navigated meanwhile is outlined below */ }
+  const outcome = { changed: true, n: null };
+  if (entry.closed || entry.dialog) return outcome;
+  const deadline = Date.now() + SETTLE_MAX_MS;
+  const busy = () => (entry.netInflight && entry.netInflight.size > 0) || entry.loading === true || entry.mainCommitPending === true ||
+    (entry.pendingTabs || 0) > 0;
+  // Phase one (idle): did anything happen at all? Phase two (active): wait
+  // until it has stopped.
+  let active = false;
+  let documentKey = manager.documentKey(entry);
+  while (!entry.closed && !entry.dialog) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return outcome;
+    if (busy()) { active = true; await sleep(SETTLE_POLL_MS); continue; }
+    const script = active ? quietScript(SETTLE_QUIET_MS, 0, remaining) : quietScript(SETTLE_IDLE_MS, SETTLE_IDLE_MS, remaining);
+    let result = null;
+    try {
+      result = await Promise.race([manager.evaluateMainWorld(entry, script), sleep(remaining + 200).then(() => null)]);
+    } catch { return outcome; /* a page that navigated meanwhile is outlined below */ }
+    if (entry.closed || entry.dialog) return outcome;
+    // A document that was replaced while this phase ran: settle the new one.
+    const nowKey = manager.documentKey(entry);
+    if (nowKey !== documentKey) { documentKey = nowKey; active = true; continue; }
+    outcome.n = result && Number.isFinite(result.n) ? result.n : null;
+    outcome.changed = documentKey !== start.documentKey || start.n == null || outcome.n == null || outcome.n !== start.n ||
+      (entry.activitySeq || 0) !== start.activitySeq;
+    if (busy()) { active = true; continue; }
+    if (!outcome.changed) return outcome;
+    if (!active) { active = true; continue; }
+    // The document has been quiet for SETTLE_QUIET_MS; browser-side activity
+    // (a request, a frame) must be as old.
+    if (Date.now() - (entry.activityAt || 0) >= SETTLE_QUIET_MS) return outcome;
+    await sleep(Math.min(SETTLE_POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+  return outcome;
 }
 
 function pageState(manager, entry) {
@@ -93,21 +252,36 @@ function pageState(manager, entry) {
   };
 }
 
-// The outline to compare against: the agent's last view of this document if
-// it is recent, else a fresh one.
-async function outlineBefore(manager, entry) {
+// The outline to compare against: the last outline of this document while
+// nothing has changed since it was taken, else a fresh one.
+async function outlineBefore(manager, entry, start) {
   const last = entry.lastOutline;
-  if (last && last.documentKey === manager.documentKey(entry) && Date.now() - (last.takenAt || 0) < BEFORE_OUTLINE_FRESH_MS) return last;
-  try { return await manager.takeOutline(entry, { budgetMs: 1500 }); } catch { return null; }
+  const age = Date.now() - (last && last.takenAt || 0);
+  const clean = last && last.documentKey === start.documentKey && start.n != null && last.activityN === start.n &&
+    last.activitySeq === start.activitySeq && age < (hasChildFrames(entry) ? BEFORE_OUTLINE_FRESH_FRAMED_MS : BEFORE_OUTLINE_FRESH_MS);
+  if (clean) return last;
+  try { return await manager.takeOutline(entry, { budgetMs: 1500, activity: start }); } catch { return null; }
 }
 
 // Runs one action (or a batch) and returns its result with page, changes and
 // events. A dialog the action opens returns at once (the page is paused
-// until it is answered).
-async function runAction(manager, entry, action, { before: knownBefore = undefined } = {}) {
+// until it is answered). `before: null` (a navigation) skips the outline
+// before: the action replaces the document.
+async function runAction(manager, entry, action, { before: knownBefore = undefined, method = '' } = {}) {
   markAgentActive(entry);
   const startSeq = entry.eventSeq || 0;
-  const before = knownBefore === undefined ? await outlineBefore(manager, entry) : knownBefore;
+  // A page paused in a dialog cannot run script: nothing is read from it.
+  const start = entry.dialog ? { n: null, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) } : await readActivity(manager, entry);
+  const before = knownBefore === undefined ? await outlineBefore(manager, entry, start) : knownBefore;
+  const watching = await watchNetwork(manager, entry);
+  try {
+    return await runWatchedAction(manager, entry, action, { before, start, startSeq, method });
+  } finally {
+    if (watching) unwatchNetwork(manager, entry);
+  }
+}
+
+async function runWatchedAction(manager, entry, action, { before, start, startSeq, method }) {
   let opened;
   const dialogOpened = new Promise((resolve) => { opened = resolve; });
   entry.dialogWaiters = entry.dialogWaiters || new Set();
@@ -130,14 +304,24 @@ async function runAction(manager, entry, action, { before: knownBefore = undefin
     return { ...result, page: pageState(manager, entry), dialog: { ...entry.dialog.public }, events: eventsSince(entry, startSeq),
       note: 'The page is paused on this dialog: answer it with workass_browser_dialog before anything else.' };
   }
-  await settleAfterAction(manager, entry);
+  const settled = await settleAfterAction(manager, entry, start);
   if (entry.dialog) {
     return { ...result, page: pageState(manager, entry), dialog: { ...entry.dialog.public }, events: eventsSince(entry, startSeq),
       note: 'The page is paused on this dialog: answer it with workass_browser_dialog before anything else.' };
   }
+  const events = eventsSince(entry, startSeq);
+  // Nothing happened in a page whose whole content the activity counter
+  // sees (no frames): the outline before is still the outline now.
+  if (!settled.changed && before && before.documentKey === manager.documentKey(entry) && !hasChildFrames(entry) &&
+      !events.length && !ALWAYS_OUTLINE_AFTER.has(method)) {
+    return { ...result, page: pageState(manager, entry), events, changes: { added: 0, removed: 0, changed: 0, text: '', outline_id: before.id, none: true } };
+  }
   let after = null;
-  try { after = await manager.takeOutline(entry, { budgetMs: 3000 }); } catch { /* reported as unknown */ }
-  const report = { ...result, page: pageState(manager, entry), events: eventsSince(entry, startSeq) };
+  try {
+    after = await manager.takeOutline(entry, { budgetMs: 3000,
+      activity: settled.n != null ? { n: settled.n, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) } : undefined });
+  } catch { /* reported as unknown */ }
+  const report = { ...result, page: pageState(manager, entry), events };
   if (!after) {
     report.changes = { unknown: true, reason: 'the page could not be read after the action; take workass_browser_snapshot' };
   } else if (!before || before.documentKey !== after.documentKey) {
@@ -504,9 +688,13 @@ module.exports = {
   dialogClosed,
   dialogOpened,
   downloadsDirFor,
+  hasChildFrames,
   eventsSince,
   markAgentActive,
+  noteActivity,
   pushEvent,
+  readActivity,
   runAction,
   takeDownload,
+  touchActivity,
 };
