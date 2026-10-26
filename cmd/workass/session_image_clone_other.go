@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os"
+	"runtime"
 )
 
 // sessionImageClonesPossible: no clone source is ever worth looking for here.
@@ -17,7 +18,21 @@ func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string,
 }
 
 // syncSessionImageDataToDevice: off darwin File.Sync is already per file
-// (fsync, FlushFileBuffers).
-func syncSessionImageDataToDevice(file *os.File) error { return file.Sync() }
+// (fsync, FlushFileBuffers). FlushFileBuffers needs a handle opened for
+// writing (GENERIC_WRITE) and fails with ERROR_ACCESS_DENIED on a read-only
+// one, so on Windows a read-only file is flushed through a second, writable
+// handle to the same file (no byte is written through it).
+func syncSessionImageDataToDevice(file *os.File) error {
+	err := file.Sync()
+	if err == nil || runtime.GOOS != "windows" {
+		return err
+	}
+	writable, openErr := os.OpenFile(file.Name(), os.O_RDWR, 0)
+	if openErr != nil {
+		return errors.Join(err, openErr)
+	}
+	syncErr := writable.Sync()
+	return errors.Join(syncErr, writable.Close())
+}
 
 func nonLocalMountPoints() []string { return nil }

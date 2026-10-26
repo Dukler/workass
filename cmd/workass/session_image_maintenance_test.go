@@ -503,6 +503,40 @@ func TestImageStoreCollectsOnlyImagesNoOtherReferenceUses(t *testing.T) {
 	}
 }
 
+func TestImageStoreReclaimSurvivesAnUnsyncableRawTwin(t *testing.T) {
+	// One raw twin that cannot be synced (the read-only-handle flush that
+	// Windows refuses) keeps its own legacy file; the reclaim, the collection
+	// after it, and the marker all still complete.
+	f, names := collectFixture(t)
+	f.m.window = 0
+	touchSessionImage(names["touched"])
+	t.Cleanup(func() { sessionImageTouches.Delete(names["touched"]) })
+	victim := names["shared"]
+	previous := sessionImageRetireSync
+	sessionImageRetireSync = func(file *os.File) error {
+		if strings.Contains(file.Name(), victim) {
+			return errors.New("access denied")
+		}
+		return previous(file)
+	}
+	t.Cleanup(func() { sessionImageRetireSync = previous })
+	report, err := f.m.runOnce(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RetireSkipped != 1 || report.Retired != int64(len(f.images)-1) || report.Collected != 1 {
+		t.Fatalf("%+v", report)
+	}
+	if _, err := os.Stat(sessionImageLegacyPath(f.stateDir, victim)); err != nil {
+		t.Fatal("the unsynced twin's legacy file must stay")
+	}
+	if marker, _ := f.m.loadMarker(); marker.LastReport == nil || marker.LastReport.Collected != 1 {
+		t.Fatal("the pass must reach its final marker")
+	}
+	delete(f.images, names["onlyDeleted"])
+	f.assertImagesIntact(t)
+}
+
 func TestImageStoreCollectsInARawOnlyStore(t *testing.T) {
 	// After reclaim no legacy file is left, so the pass opens its receipts
 	// for the first time in the collection phase.
