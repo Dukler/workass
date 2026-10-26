@@ -1831,6 +1831,24 @@ test('a snapshot that sees frames change retries once, then says what to do', as
   manager.destroy();
 });
 
+test('a cancelled iframe setup sends nothing more to its session', async () => {
+  const { manager, entry, hangs, attach, sentTo } = await ownedFrameSetupFixture('chat-frame-lazy-step');
+  manager.ownedTargetSetupTimeoutMs = 60_000;
+  hangs.add('Page.enable@child-lazy');
+  attach('child-lazy', 'target-lazy');
+  await settleTurns();
+  const [task] = entry.pendingTargetTasks;
+  manager.cancelOwnedTargetTask(entry, task, 'setup_timeout');
+  let started = false;
+  await assert.rejects(manager.ownedTargetStep(task, () => { started = true; return Promise.resolve(); }), /cancelled: setup_timeout/);
+  assert.equal(started, false, 'a step of a cancelled task never starts');
+  await task.promise;
+  for (const method of ['Runtime.enable', 'DOM.enable', 'Accessibility.enable', 'Target.setAutoAttach']) {
+    assert.equal(sentTo(method, 'child-lazy').length, 0, `${method} is never sent after cancellation`);
+  }
+  manager.destroy();
+});
+
 test('a frame tree read for a retired child session never rebinds frames to the root target', async () => {
   const { manager, entry, rootFrameId } = await ownedFrameSetupFixture('chat-frame-retired');
   const before = entry.frames.get('frame-child');
