@@ -2004,15 +2004,17 @@ class BrowserManager {
   // can see them change mid-observation. Retry once before reporting it.
   async browserSnapshotSettled(entry) {
     const changed = (error) => /changed during snapshot/.test(String(error && error.message));
+    // Both attempts share one child-frame budget.
+    const options = { childFramesDeadline: Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS) };
     try {
-      return await this.browserSnapshot(entry);
+      return await this.browserSnapshot(entry, options);
     } catch (error) {
       if (!changed(error)) throw error;
     }
     await new Promise((resolve) => setTimeout(resolve, this.snapshotRetryDelayMs ?? 250));
     this.assertCurrentEntry(entry);
     try {
-      return await this.browserSnapshot(entry);
+      return await this.browserSnapshot(entry, options);
     } catch (error) {
       if (!changed(error)) throw error;
       throw new Error('browser page kept changing while it was observed (frames are still loading or navigating); take the snapshot again in a moment');
@@ -2825,7 +2827,7 @@ class BrowserManager {
     }
   }
 
-  async browserSnapshot(entry) {
+  async browserSnapshot(entry, { childFramesDeadline: sharedDeadline = null } = {}) {
     this.assertCurrentEntry(entry);
     await this.ensureCDP(entry);
     await this.refreshFrameTree(entry);
@@ -2860,7 +2862,7 @@ class BrowserManager {
 
     // Child frames that stopped answering share one bounded budget, so a page
     // full of stuck ad frames cannot stretch one snapshot frame by frame.
-    const childFramesDeadline = Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS);
+    const childFramesDeadline = sharedDeadline ?? Date.now() + (this.snapshotChildFramesBudgetMs ?? SNAPSHOT_CHILD_FRAMES_BUDGET_MS);
     const observe = async (frame) => {
       const script = observationScript({ snapshotId, maxNodes: 500, maxText: 32 * 1024, rootOnly: true });
       if (frame && frame.sessionId) {
