@@ -25,20 +25,17 @@ const SETTLE_POLL_MS = 15;
 const NAVIGATION_SETTLE_MS = 8000;
 const CHANGES_BYTES = 6000;
 const NAVIGATED_OUTLINE_BYTES = 6000;
-// The last outline is reused as the "before" only while the page has not
-// changed since it was taken; a page with frames is reused for less long,
-// because changes inside its frames are not counted.
-const BEFORE_OUTLINE_FRESH_MS = 30000;
-const BEFORE_OUTLINE_FRESH_FRAMED_MS = 10000;
+// The last outline stands in for the "before" only when it is a moment old
+// and the page's activity count has not moved: the count cannot see a
+// script's property writes or changes inside shadow roots, so anything older
+// is read again.
+const BEFORE_OUTLINE_FRESH_MS = 1000;
 const ACTIVITY_READ_TIMEOUT_MS = 1000;
 // Long-lived connections never finish; waiting for them would hold every
 // action to SETTLE_MAX_MS. Document requests are navigations, followed by
 // the page's and frames' own load events instead (a cross-site frame's
 // document finishes in that frame's session, never in this one).
 const NETWORK_IGNORED_TYPES = new Set(['WebSocket', 'EventSource', 'Document']);
-// Actions whose effect can show without any DOM mutation or event (CSS
-// :hover, a drag's drop styling, script state): always outlined after.
-const ALWAYS_OUTLINE_AFTER = new Set(['browser.hover', 'browser.drag', 'browser.evaluate', 'browser.select', 'browser.upload', 'browser.batch']);
 const AGENT_RECENT_MS = 15000;
 const UPLOAD_MAX_FILES = 10;
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
@@ -213,11 +210,6 @@ function unwatchNetwork(manager, entry) {
   } catch { /* the page is gone */ }
 }
 
-function hasChildFrames(entry) {
-  for (const frame of (entry.frames || new Map()).values()) if (frame.parentFrameId != null && !frame.detached) return true;
-  return false;
-}
-
 // Waits until the page stops changing: a navigation reaches a usable
 // document; then, if nothing happened, SETTLE_IDLE_MS of quiet, otherwise
 // SETTLE_QUIET_MS after the last activity (requests in flight and loading
@@ -282,7 +274,7 @@ async function outlineBefore(manager, entry, start) {
   const last = entry.lastOutline;
   const age = Date.now() - (last && last.takenAt || 0);
   const clean = last && last.documentKey === start.documentKey && start.n != null && last.activityN === start.n &&
-    last.activitySeq === start.activitySeq && age < (hasChildFrames(entry) ? BEFORE_OUTLINE_FRESH_FRAMED_MS : BEFORE_OUTLINE_FRESH_MS);
+    last.activitySeq === start.activitySeq && age < BEFORE_OUTLINE_FRESH_MS;
   if (clean) return last;
   try { return await manager.takeOutline(entry, { budgetMs: 1500, activity: start }); } catch { return null; }
 }
@@ -300,14 +292,14 @@ async function runAction(manager, entry, action, { before: knownBefore = undefin
   const watching = await watchNetwork(manager, entry);
   const choosing = await watchFileChooser(manager, entry, true);
   try {
-    return await runWatchedAction(manager, entry, action, { before, start, startSeq, method });
+    return await runWatchedAction(manager, entry, action, { before, start, startSeq });
   } finally {
     if (watching) unwatchNetwork(manager, entry);
     if (choosing) void watchFileChooser(manager, entry, false);
   }
 }
 
-async function runWatchedAction(manager, entry, action, { before, start, startSeq, method }) {
+async function runWatchedAction(manager, entry, action, { before, start, startSeq }) {
   let opened;
   const dialogOpened = new Promise((resolve) => { opened = resolve; });
   entry.dialogWaiters = entry.dialogWaiters || new Set();
@@ -336,12 +328,8 @@ async function runWatchedAction(manager, entry, action, { before, start, startSe
       note: 'The page is paused on this dialog: answer it with workass_browser_dialog before anything else.' };
   }
   const events = eventsSince(entry, startSeq);
-  // Nothing happened in a page whose whole content the activity counter
-  // sees (no frames): the outline before is still the outline now.
-  if (!settled.changed && before && before.documentKey === manager.documentKey(entry) && !hasChildFrames(entry) &&
-      !events.length && !ALWAYS_OUTLINE_AFTER.has(method)) {
-    return { ...result, page: pageState(manager, entry), events, changes: { added: 0, removed: 0, changed: 0, text: '', outline_id: before.id, none: true } };
-  }
+  // The page is always read again after an action: "none" comes only from
+  // comparing two reads.
   let after = null;
   try {
     after = await manager.takeOutline(entry, { budgetMs: 3000,
@@ -753,7 +741,6 @@ module.exports = {
   dialogClosed,
   dialogOpened,
   downloadsDirFor,
-  hasChildFrames,
   eventsSince,
   markAgentActive,
   noteActivity,

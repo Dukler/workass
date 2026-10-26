@@ -2195,3 +2195,27 @@ test('only calls that act on a page make it agent-driven, and a popped-out page 
   assert.equal(agentDriven({ visible: false, agentActiveAt: 0, pip: {} }), false, 'a page in its separate window is in front of the person');
   manager.destroy();
 });
+
+test('an explicit snapshot always reads the page as it is now', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'fresh-read', visible: false });
+  const entry = manager.entries.get('fresh-read');
+  const wc = entry.view.webContents;
+  const original = wc.executeJavaScript.bind(wc);
+  // The page's activity count never moves (a script's property write).
+  wc.executeJavaScript = async (script, gesture) => (String(script).includes('workass.activity') ? { n: 5, quietFor: 1000 } : original(script, gesture));
+  let value = 'first';
+  const base = wc.debugger.sendCommand.bind(wc.debugger);
+  wc.debugger.sendCommand = async (method, params, sessionId) => {
+    if (method === 'Accessibility.getFullAXTree') {
+      return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2'] }, { nodeId: '2', parentId: '1', role: { value: 'StaticText' }, name: { value } }] };
+    }
+    return base(method, params, sessionId);
+  };
+  const first = await manager.browserControl('browser.snapshot', { chatId: 'fresh-read', format: 'outline' });
+  assert.match(first.outline, /text: first/);
+  value = 'second';
+  const second = await manager.browserControl('browser.snapshot', { chatId: 'fresh-read', format: 'outline' });
+  assert.match(second.outline, /text: second/, 'not the earlier outline');
+  manager.destroy();
+});

@@ -18,7 +18,7 @@ const { openGuestPip } = require('./browser-pip');
 const { buildOutline, diffOutlines, outlineSecretField, pageLines } = require('./browser-outline');
 const {
   POPUP_TAB_LIMIT, agentDriven, browserDialog, browserDrag, browserEvaluate, browserHover, browserSelect, browserUpload,
-  dialogBlockedError, dialogClosed, dialogOpened, hasChildFrames, markAgentActive, noteActivity, pushEvent, readActivity,
+  dialogBlockedError, dialogClosed, dialogOpened, markAgentActive, noteActivity, pushEvent, readActivity,
   runAction, takeDownload, touchActivity,
 } = require('./browser-actions');
 
@@ -171,9 +171,6 @@ const OUTLINE_REF_LIMIT = 20000;
 const OUTLINE_HISTORY = 6;
 const OUTLINE_PAGE_BYTES = 20000;
 const OUTLINE_SECRET_CHECK_LIMIT = 400;
-// How long an unchanged page's newest outline is reused (reusableOutline).
-const OUTLINE_REUSE_MS = 30000;
-const OUTLINE_REUSE_FRAMED_MS = 2000;
 // No agent call may hold a tab's queue longer than this (the CLI gives up at
 // 30 s); navigation and batches get a little more.
 const OPERATION_DEADLINE_MS = 25000;
@@ -3119,9 +3116,6 @@ class BrowserManager {
       activityN: seen.n,
       activitySeq: seen.activitySeq,
     };
-    // The frames' accessibility trees behind the newest outline, for a read
-    // of the unchanged page in another format (reusableOutline).
-    entry.axCache = { outlineId: outline.id, nodes: new Map(frames.filter((frame) => frame.nodes).map((frame) => [frame.frameKey, frame.nodes])) };
     entry.outlines = entry.outlines || new Map();
     entry.outlines.set(outline.id, outline);
     while (entry.outlines.size > OUTLINE_HISTORY) entry.outlines.delete(entry.outlines.keys().next().value);
@@ -3142,18 +3136,6 @@ class BrowserManager {
     };
   }
 
-  // The newest outline while the page has provably not changed since it was
-  // taken: same document, the page's activity count and the shell's frame and
-  // load activity unmoved, not loading. A page with frames is trusted for less
-  // long, because changes inside its frames are not counted.
-  async reusableOutline(entry) {
-    const last = entry.lastOutline;
-    if (!last || last.activityN == null || entry.loading || last.documentKey !== this.documentKey(entry)) return null;
-    if (Date.now() - (last.takenAt || 0) > (hasChildFrames(entry) ? OUTLINE_REUSE_FRAMED_MS : OUTLINE_REUSE_MS)) return null;
-    const now = await readActivity(this, entry);
-    return now.documentKey === last.documentKey && now.n === last.activityN && now.activitySeq === last.activitySeq ? last : null;
-  }
-
   async browserOutline(entry, params = {}) {
     const maxBytes = params.maxBytes == null ? OUTLINE_PAGE_BYTES : Number(params.maxBytes);
     if (!Number.isInteger(maxBytes) || maxBytes < 2048 || maxBytes > 60000) throw new Error('max_bytes must be an integer from 2048 to 60000');
@@ -3167,7 +3149,8 @@ class BrowserManager {
     }
     const since = params.sinceSnapshotId != null ? String(params.sinceSnapshotId) : null;
     const base = since && entry.outlines ? entry.outlines.get(since) : null;
-    const outline = (await this.reusableOutline(entry)) || await this.takeOutline(entry);
+    // An explicit snapshot always reads the page as it is now.
+    const outline = await this.takeOutline(entry);
     if (since) {
       if (base && base.documentKey === outline.documentKey) {
         const changes = diffOutlines(base.lines, outline.lines, { maxBytes });
@@ -4280,9 +4263,6 @@ class BrowserManager {
     }
 
     const axByFrame = new Map();
-    // The page has not changed since the newest outline read these trees.
-    const reusable = await this.reusableOutline(entry);
-    const cachedAx = reusable && entry.axCache && entry.axCache.outlineId === reusable.id ? entry.axCache.nodes : null;
     for (const source of sources) {
       const frame = source.frame;
       if (!frame || !frame.id || !source.raw) continue;
@@ -4290,14 +4270,10 @@ class BrowserManager {
       const remainingMs = sessionId ? childFramesDeadline - Date.now() : null;
       let response;
       try {
-        const cached = cachedAx && cachedAx.get(`${frame.id}:${frame.loaderId}`);
-        if (cached) response = { nodes: cached };
-        else {
-          if (remainingMs != null && remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
-          response = await this.ownedSessionCommand(entry,
-            'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId, remainingMs,
-          );
-        }
+        if (remainingMs != null && remainingMs <= 0) throw new Error('browser frame observation budget exhausted');
+        response = await this.ownedSessionCommand(entry,
+          'Accessibility.getFullAXTree', { frameId: frame.id }, sessionId, remainingMs,
+        );
       } catch {
         frame.axAvailable = false;
         continue;

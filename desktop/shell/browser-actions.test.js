@@ -30,13 +30,23 @@ function fixture({ count = () => 3, frames = false, lines = ['- button "Go" [e1]
   return { entry, manager, calls, setLines: (next) => { outlineLines = next; } };
 }
 
-test('an action that changes nothing on a page without frames reads no outline', async () => {
+test('a change the activity counter cannot see (a property write, a shadow root) is still reported', async () => {
+  const { entry, manager, setLines } = fixture();
+  await manager.takeOutline(entry, {});
+  // The count never moves: a script set a field's value, or a shadow root changed.
+  const report = await runAction(manager, entry, async () => { setLines(['- button "Go" [e1]', '- textbox "Name" [e2] value="Ada"']); return { ok: true }; }, { method: 'browser.click' });
+  assert.notEqual(report.changes.none, true, 'never a false "none"');
+  assert.equal(report.changes.added, 1);
+  assert.match(report.changes.text, /Ada/);
+});
+
+test('an action that changes nothing is reported as none from a fresh read', async () => {
   const { entry, manager, calls } = fixture();
   await manager.takeOutline(entry, {});
   calls.outlines.length = 0;
   const report = await runAction(manager, entry, async () => ({ ok: true }), { method: 'browser.click' });
   assert.equal(report.changes.none, true);
-  assert.deepEqual(calls.outlines, [], 'neither a before nor an after outline');
+  assert.equal(calls.outlines.length, 1, 'the page is read after every action');
   assert.deepEqual(calls.network, ['Network.enable', 'Page.setInterceptFileChooserDialog', 'Network.disable', 'Page.setInterceptFileChooserDialog'],
     'requests are watched, and a file chooser intercepted, only while the action runs');
 });
@@ -105,23 +115,14 @@ test('a page with frames, a hover and a navigation are always outlined after', a
   assert.equal(report.changes.navigated, true);
 });
 
-test('an unchanged page keeps its newest outline; a change, a load, or age on a page with frames makes a fresh one', async () => {
-  const { BrowserManager } = require('./browser-manager');
+test('the outline before an action is a fresh read unless the last one is only a moment old and nothing moved', async () => {
   let n = 3;
-  const entry = { lastOutline: { id: 'o1', documentKey: 'd', activityN: 3, activitySeq: 0, takenAt: Date.now() }, frames: new Map(), activitySeq: 0 };
-  const self = { documentKey: () => 'd', evaluateAgentWorld: async () => ({ n }) };
-  const reuse = () => BrowserManager.prototype.reusableOutline.call(self, entry);
-  assert.equal((await reuse())?.id, 'o1');
-  n = 4;
-  assert.equal(await reuse(), null, 'the page changed');
-  n = 3; entry.activitySeq = 1;
-  assert.equal(await reuse(), null, 'a frame or load event since');
-  entry.activitySeq = 0; entry.loading = true;
-  assert.equal(await reuse(), null, 'still loading');
-  entry.loading = false;
-  entry.frames.set('child', { id: 'child', parentFrameId: 'root' });
-  entry.lastOutline.takenAt = Date.now() - 2500;
-  assert.equal(await reuse(), null, 'frames are trusted for less long');
+  const { entry, manager, calls } = fixture({ count: () => n });
+  await manager.takeOutline(entry, {});
+  entry.lastOutline.takenAt = Date.now() - 5000;
+  calls.outlines.length = 0;
+  await runAction(manager, entry, async () => ({ ok: true }), { method: 'browser.click' });
+  assert.equal(calls.outlines.length, 2, 'a five-second-old outline is read again before the action');
 });
 
 test('an action that opens a dialog reports it at once, even while the paused page holds commands', async () => {
