@@ -3,7 +3,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import {
-  FLOAT_ASPECT, clampFloatWidth, floatFrame, floatPlacementFor, floatRoom, hostZoom, moveFloatFrame, parseFloatMemory,
+  FLOAT_ASPECT, clampFloatWidth, floatFrame, floatPlacementFor, floatRoom, floatWidthStep, hostZoom, moveFloatFrame, parseFloatMemory,
   placementOf, positionOf, rememberFloat, resizeFloatFrame, serializeFloatMemory, snapFloatFrame,
 } from '../src/components/floating-browser-layout.ts';
 import type { Chat } from '../src/store/types.ts';
@@ -119,7 +119,7 @@ test('a resize from any edge or corner keeps the opposite side put and the frame
   }
 });
 
-test('at any app zoom the frame lands on whole window pixels, at a shape the page fills exactly', () => {
+test('at any app zoom the frame lands on whole window pixels, so the page drawn in it has crisp edges', () => {
   assert.equal(hostZoom(1440, 1440), 1);
   assert.equal(hostZoom(1440, 1314), 1.2 ** 0.5, 'Cmd +');
   assert.equal(hostZoom(1440, 1577), 1.2 ** -0.5, 'Cmd −');
@@ -135,6 +135,26 @@ test('at any app zoom the frame lands on whole window pixels, at a shape the pag
     assert.ok(Math.abs(win.h - win.w * 5 / 8) < 1e-6);
     assert.ok(Math.abs(at.x - rect.x) < 1 && Math.abs(at.width - rect.width) < 8 / zoom);
   }
+});
+
+test('at the app zoom a slow resize grows 8 window pixels at a time, never skipping one', () => {
+  const container = { width: 1200, height: 800, reserve: 46 };
+  for (const zoom of [1.2 ** 0.5, 1.2, 1.2 ** -0.5]) {
+    const step = floatWidthStep(zoom);
+    const origin = { x: 288, y: 40 };
+    let start = floatFrame({ width: 344, placement: { fx: 0.2, fy: 0.2 }, container, step });
+    let last = Math.round(snapFloatFrame(start, origin, zoom).width * zoom);
+    for (let dx = 1; dx < 200; dx += 1) {
+      const next = resizeFloatFrame(start, 'e', { x: dx, y: 0 }, container, step);
+      const shown = Math.round(snapFloatFrame(next, origin, zoom).width * zoom);
+      assert.ok(shown - last === 0 || shown - last === 8, `zoom ${zoom}: ${last} -> ${shown}`);
+      last = shown;
+    }
+    // and the frame at rest keeps the size the resize ended on
+    const end = resizeFloatFrame(start, 'e', { x: 133, y: 0 }, container, step);
+    assert.equal(floatFrame({ width: end.width, placement: { fx: 0.2, fy: 0.2 }, container, step }).width, end.width);
+  }
+  assert.equal(floatWidthStep(1), 8);
 });
 
 test('positions are remembered per chat, with the width shared, and the v1 corner seeds new chats', () => {
