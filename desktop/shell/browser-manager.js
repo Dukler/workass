@@ -40,6 +40,37 @@ function normalizeCDPSessionId(value) {
   return value == null || value === '' ? null : String(value);
 }
 
+// Owned iframe (OOPIF) target setup. Chromium never answers a command that is
+// in flight on a flattened child session when that child goes away (its frame
+// is removed, navigates cross-site or its renderer stops), and Electron only
+// rejects pending commands when the ROOT debugger detaches. Every attach task
+// is therefore bounded and cancellable; nothing may wait on one forever.
+const OWNED_TARGET_SETUP_TIMEOUT_MS = 5000;
+// Navigation lets setup that is about to finish commit its binding instead of
+// cutting it mid-command, then abandons whatever is still pending: the new
+// document replaces those frames anyway.
+const NAVIGATION_TARGET_SETUP_WAIT_MS = 1000;
+const ABANDONED_TARGET_SETTLE_MS = 250;
+// A page whose subframe never finishes loading never fires its load event, so
+// Electron's loadURL() never resolves. Navigation returns once the main
+// document is usable instead of holding the browser's operation queue forever.
+const NAVIGATION_LOAD_GRACE_MS = 5000;
+const NAVIGATION_COMMIT_TIMEOUT_MS = 20000;
+// Observation commands on a child session: released as soon as the session
+// is retired, and capped so a renderer that stopped answering cannot hold the
+// browser's serialized operation queue (and every later navigation) forever.
+const CHILD_SESSION_COMMAND_TIMEOUT_MS = 30000;
+// Reasons that mean the child session no longer exists, so no protocol
+// command may be sent to it (or to detach it) anymore.
+const OWNED_TARGET_GONE_REASONS = new Set(['target_gone', 'target_crashed', 'debugger_lost']);
+
+class OwnedTargetSetupCancelled extends Error {
+  constructor(reason) {
+    super(`owned iframe setup cancelled: ${reason}`);
+    this.reason = reason;
+  }
+}
+
 function frameTreeRows(tree) {
   const rows = [];
   const visit = (node, parentFrameId = null) => {
@@ -422,6 +453,7 @@ class BrowserManager {
     wc.on('render-process-gone', (_event, details) => {
       entry.loading = false;
       this.interruptWaiters(entry, 'renderer_lost');
+      this.cancelOwnedTargetTasks(entry, () => true, 'renderer_lost');
       this.invalidateFrames(entry, null, 'renderer_lost');
       entry.error = `browser renderer stopped (${String(details && details.reason || 'unknown')})`;
       this.publish(entry);
@@ -478,6 +510,7 @@ class BrowserManager {
         this.emitCDP({ tabId: Number(wc.id), detach: true, reason: String(reason || 'detached') });
         entry.cdpReady = false;
         this.interruptWaiters(entry, 'debugger_lost');
+        this.cancelOwnedTargetTasks(entry, () => true, 'debugger_lost');
         this.invalidateFrames(entry, null, 'debugger_lost');
       });
     }
@@ -603,6 +636,7 @@ class BrowserManager {
     const accepted = entry.targetSessions.get(sessionId);
     if (!accepted) return false;
     entry.targetSessions.delete(sessionId);
+    this.releaseSessionCommands(entry, sessionId);
     this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + accepted.targetId);
     const explicitDetach = reason === 'explicit_detach';
     this.invalidateFrames(entry, accepted.frameId, explicitDetach ? 'target_detached' : reason);
@@ -620,6 +654,7 @@ class BrowserManager {
     const nested = Array.from(entry.targetSessions.entries()).filter(([, child]) => this.isDescendantFrame(entry, child.frameId, accepted.frameId));
     for (const [nestedId, nestedTarget] of nested) {
       entry.targetSessions.delete(nestedId);
+      this.releaseSessionCommands(entry, nestedId);
       this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + nestedTarget.targetId);
       for (const key of Array.from(entry.executionContexts.keys())) if (key.startsWith(nestedTarget.targetId + ':')) entry.executionContexts.delete(key);
       this.invalidateFrames(entry, nestedTarget.frameId, explicitDetach ? 'target_detached' : 'target_destroyed');
@@ -650,6 +685,9 @@ class BrowserManager {
   recordFrameTree(entry, tree, sessionId = null) {
     if (!this.isCurrentEntry(entry) || !tree) return false;
     const target = sessionId ? entry.targetSessions.get(sessionId) : null;
+    // A child session retired while its Page.getFrameTree was in flight must
+    // never have its frames recorded as the root target's.
+    if (sessionId && !target) return false;
     const targetId = target ? target.targetId : entry.rootTargetId;
     if (!targetId) return false;
     const rows = frameTreeRows(tree);
@@ -711,39 +749,210 @@ class BrowserManager {
     return this.recordFrameTree(entry, tree, sessionId);
   }
 
-  async enableOwnedSession(entry, sessionId = null) {
+  async enableOwnedSession(entry, sessionId = null, task = null) {
     const debug = entry.view.webContents.debugger;
+    const step = (promise) => this.ownedTargetStep(task, promise);
     for (const domain of ['Page', 'Runtime', 'DOM', 'Accessibility']) {
-      try { await debug.sendCommand(domain + '.enable', {}, sessionId || undefined); }
-      catch { /* an unavailable optional domain remains explicitly unavailable */ }
+      try { await step(debug.sendCommand(domain + '.enable', {}, sessionId || undefined)); }
+      catch (error) {
+        if (error instanceof OwnedTargetSetupCancelled) throw error;
+        /* an unavailable optional domain remains explicitly unavailable */
+      }
     }
-    await this.refreshFrameTree(entry, sessionId);
+    const tree = await step(this.readFrameTree(entry, sessionId));
+    this.recordFrameTree(entry, tree, sessionId);
     try {
-      await debug.sendCommand('Target.setAutoAttach', {
+      await step(debug.sendCommand('Target.setAutoAttach', {
         autoAttach: true,
         waitForDebuggerOnStart: false,
         flatten: true,
         filter: [{ type: 'iframe', exclude: false }, { type: '*', exclude: true }],
-      }, sessionId || undefined);
+      }, sessionId || undefined));
       if (!sessionId) entry.autoAttachAvailable = true;
-    } catch {
+    } catch (error) {
+      if (error instanceof OwnedTargetSetupCancelled) throw error;
       if (!sessionId) entry.autoAttachAvailable = false;
     }
   }
 
-  async rejectAttachedTarget(entry, parentSessionId, childSessionId) {
-    try {
-      await entry.view.webContents.debugger.sendCommand(
-        'Target.detachFromTarget', { sessionId: childSessionId }, parentSessionId || undefined,
-      );
-    } catch { /* unowned target is immediately abandoned */ }
+  // Races one setup step against its task's cancellation (timeout, target
+  // gone, navigation, entry closed). The abandoned protocol promise may never
+  // settle; nothing waits on it after this.
+  ownedTargetStep(task, promise) {
+    if (!task) return promise;
+    if (task.cancelled) return Promise.reject(new OwnedTargetSetupCancelled(task.cancelled));
+    return Promise.race([Promise.resolve(promise), task.cancelSignal]);
   }
 
-  async acceptAttachedTarget(entry, params, parentSessionId) {
+  // A target auto-attached with waitForDebuggerOnStart stays paused until its
+  // session says so; every outcome resumes it. Fire-and-forget: a renderer
+  // that stopped responding must not hold setup open, and a detach resumes it
+  // too.
+  resumeWaitingTarget(entry, task) {
+    if (!task || !task.waitingForDebugger || task.resumed || !task.sessionId) return;
+    task.resumed = true;
+    try {
+      void Promise.resolve(entry.view.webContents.debugger.sendCommand('Runtime.runIfWaitingForDebugger', {}, task.sessionId))
+        .catch(() => { /* the target is already gone or running */ });
+    } catch { /* debugger already closed */ }
+  }
+
+  // Chromium drops the reply to a command in flight on a child session that
+  // goes away, so an owned-frame observation must not await it unbounded.
+  ownedSessionCommand(entry, method, params, sessionId) {
+    if (sessionId && !entry.targetSessions.has(sessionId)) return Promise.reject(new Error('browser frame target is no longer owned'));
+    const command = Promise.resolve(entry.view.webContents.debugger.sendCommand(method, params, sessionId || undefined));
+    if (!sessionId) return command;
+    const waiters = entry.sessionCommandWaiters || (entry.sessionCommandWaiters = new Map());
+    const pending = waiters.get(sessionId) || new Set();
+    waiters.set(sessionId, pending);
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const finish = (settle, value) => {
+        clearTimeout(timer);
+        pending.delete(fail);
+        if (!pending.size && waiters.get(sessionId) === pending) waiters.delete(sessionId);
+        settle(value);
+      };
+      const fail = (message) => finish(reject, new Error(message));
+      pending.add(fail);
+      const timeoutMs = this.childSessionCommandTimeoutMs ?? CHILD_SESSION_COMMAND_TIMEOUT_MS;
+      timer = setTimeout(() => fail(`browser frame did not answer ${method} within ${Math.round(timeoutMs / 1000)}s`), timeoutMs);
+      command.then((value) => finish(resolve, value), (error) => finish(reject, error));
+    });
+  }
+
+  releaseSessionCommands(entry, sessionId) {
+    const pending = entry.sessionCommandWaiters?.get(sessionId);
+    if (!pending) return;
+    entry.sessionCommandWaiters.delete(sessionId);
+    for (const fail of Array.from(pending)) fail('browser frame target went away; refresh the snapshot');
+  }
+
+  detachChildSessionQuietly(entry, sessionId, parentSessionId) {
+    if (!sessionId) return;
+    try {
+      void Promise.resolve(entry.view.webContents.debugger.sendCommand(
+        'Target.detachFromTarget', { sessionId }, parentSessionId || undefined,
+      )).catch(() => { /* the session is already gone */ });
+    } catch { /* debugger already closed */ }
+  }
+
+  startOwnedTargetTask(entry, params, parentSessionId) {
+    const targetInfo = params && params.targetInfo || {};
+    const task = {
+      sessionId: String(params && params.sessionId || ''),
+      targetId: String(targetInfo.targetId || ''),
+      parentSessionId: parentSessionId || null,
+      waitingForDebugger: params && params.waitingForDebugger === true,
+      startedAt: Date.now(),
+      frameId: null,
+      accepted: false,
+      resumed: false,
+      cancelled: null,
+      settled: false,
+      timer: null,
+      rejectCancel: null,
+    };
+    task.cancelSignal = new Promise((_resolve, reject) => { task.rejectCancel = reject; });
+    task.cancelSignal.catch(() => { /* observed through ownedTargetStep */ });
+    task.timer = setTimeout(() => this.cancelOwnedTargetTask(entry, task, 'setup_timeout'),
+      this.ownedTargetSetupTimeoutMs ?? OWNED_TARGET_SETUP_TIMEOUT_MS);
+    if (typeof task.timer?.unref === 'function') task.timer.unref();
+    entry.pendingTargetTasks.add(task);
+    task.promise = Promise.resolve()
+      .then(() => this.acceptAttachedTarget(entry, params, parentSessionId, task))
+      .catch((error) => {
+        const reason = error instanceof OwnedTargetSetupCancelled ? error.reason : 'setup_failed';
+        if (!task.cancelled) task.cancelled = reason;
+        this.abandonOwnedTargetTask(entry, task, task.cancelled, error instanceof OwnedTargetSetupCancelled ? null : error);
+        return false;
+      })
+      .finally(() => {
+        clearTimeout(task.timer);
+        task.settled = true;
+        entry.pendingTargetTasks.delete(task);
+      });
+    return task;
+  }
+
+  cancelOwnedTargetTask(entry, task, reason) {
+    if (!task || task.settled || task.cancelled) return false;
+    task.cancelled = reason;
+    task.rejectCancel(new OwnedTargetSetupCancelled(reason));
+    return true;
+  }
+
+  cancelOwnedTargetTasks(entry, predicate, reason) {
+    let cancelled = 0;
+    for (const task of Array.from(entry.pendingTargetTasks || [])) {
+      if (predicate(task) && this.cancelOwnedTargetTask(entry, task, reason)) cancelled += 1;
+    }
+    return cancelled;
+  }
+
+  // Settles a cancelled setup without waiting on the page: resume a paused
+  // target, release a session that is still attached, and leave the frame
+  // explicitly unavailable for observations.
+  abandonOwnedTargetTask(entry, task, reason, error = null) {
+    const sessionGone = OWNED_TARGET_GONE_REASONS.has(reason);
+    if (!sessionGone) this.resumeWaitingTarget(entry, task);
+    const accepted = task.sessionId ? entry.targetSessions.get(task.sessionId) : null;
+    if (accepted) {
+      // Accepted mid-enable: retire the session subtree (synchronous before
+      // its first await, and no protocol command for a non-explicit reason).
+      void this.detachOwnedSession(entry, task.sessionId, reason);
+    }
+    // Setup of a child below this one cannot outlive its parent session.
+    this.cancelOwnedTargetTasks(entry, (child) => child !== task && child.parentSessionId === task.sessionId, 'target_gone');
+    if (!sessionGone) this.detachChildSessionQuietly(entry, task.sessionId, task.parentSessionId);
+    const frame = task.frameId ? entry.frames.get(task.frameId) : null;
+    const parent = frame?.parentFrameId ? entry.frames.get(frame.parentFrameId) : null;
+    // Never touch a frame another (newer) session has since bound.
+    const ownedByThisSetup = frame && (frame.sessionId === task.sessionId ||
+      (frame.sessionId || null) === task.parentSessionId);
+    if (ownedByThisSetup) {
+      this.invalidateFrames(entry, frame.id, reason);
+      if (parent && !parent.detached) {
+        frame.targetId = parent.targetId;
+        frame.sessionId = parent.sessionId || null;
+        frame.access = 'owned_cdp_frame';
+      } else {
+        frame.sessionId = null;
+      }
+      frame.contextId = null;
+      frame.unavailableReason = reason;
+    }
+    this.lifecycle(entry, 'owned-frame-target-abandoned', {
+      reason,
+      elapsedMs: Date.now() - task.startedAt,
+      accepted: task.accepted,
+      frameMarked: !!ownedByThisSetup,
+      sessionDetached: !sessionGone,
+      resumed: task.resumed,
+      ...(error ? { error: redactPageMessage(error && error.message || error, 256) } : {}),
+    });
+  }
+
+  async rejectAttachedTarget(entry, parentSessionId, childSessionId, task = null) {
+    this.resumeWaitingTarget(entry, task);
+    try {
+      await this.ownedTargetStep(task, entry.view.webContents.debugger.sendCommand(
+        'Target.detachFromTarget', { sessionId: childSessionId }, parentSessionId || undefined,
+      ));
+    } catch (error) {
+      if (error instanceof OwnedTargetSetupCancelled) throw error;
+      /* unowned target is immediately abandoned */
+    }
+  }
+
+  async acceptAttachedTarget(entry, params, parentSessionId, task = null) {
+    const step = (promise) => this.ownedTargetStep(task, promise);
+    const pause = () => step(new Promise((resolve) => setTimeout(resolve, 50)));
     const targetInfo = params && params.targetInfo;
     const childSessionId = params && params.sessionId;
     if (!this.isCurrentEntry(entry) || !targetInfo || !childSessionId || targetInfo.type !== 'iframe') {
-      if (childSessionId) await this.rejectAttachedTarget(entry, parentSessionId, childSessionId);
+      if (childSessionId) await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       if (this.isCurrentEntry(entry)) this.lifecycle(entry, 'owned-frame-target-rejected', { reason: 'target_type_or_entry_unavailable' });
       return false;
     }
@@ -751,23 +960,24 @@ class BrowserManager {
       ? entry.targetSessions.get(parentSessionId)?.targetId
       : entry.rootTargetId;
     if (!parentTargetId) {
-      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId);
+      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       this.lifecycle(entry, 'owned-frame-target-rejected', { reason: 'parent_target_unowned' });
       return false;
     }
     // TargetInfo does not provide a portable parentTargetId for iframe
     // targets. Bind the session only through the exact frame id in the
     // parent's authoritative Page.getFrameTree response.
-    const parentTree = await this.readFrameTree(entry, parentSessionId || null);
+    const parentTree = await step(this.readFrameTree(entry, parentSessionId || null));
     this.recordFrameTree(entry, parentTree, parentSessionId || null);
-    const response = await this.readFrameTree(entry, childSessionId);
+    const response = await step(this.readFrameTree(entry, childSessionId));
     if (!response) {
-      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId);
+      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       this.lifecycle(entry, 'owned-frame-target-rejected', { reason: 'child_frame_tree_unavailable' });
       return false;
     }
     const root = response.frame;
     const frameId = String(root && root.id || '');
+    if (task && frameId) task.frameId = frameId;
     let candidate = frameId && entry.frames.get(frameId);
     let parentTreeContainsChild = frameId
       ? frameTreeRows(parentTree).some(({ frame }) => String(frame.id) === frameId)
@@ -782,8 +992,8 @@ class BrowserManager {
     for (let attempt = 0; claimedParent && attempt < 50; attempt += 1) {
       const parentRecord = entry.frames.get(claimedParent);
       if (parentRecord && !parentRecord.detached && parentRecord.targetId === parentTargetId) break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const refreshedTree = await this.readFrameTree(entry, parentSessionId || null);
+      await pause();
+      const refreshedTree = await step(this.readFrameTree(entry, parentSessionId || null));
       this.recordFrameTree(entry, refreshedTree, parentSessionId || null);
       parentTreeContainsChild = frameTreeRows(refreshedTree).some(({ frame }) => String(frame.id) === frameId);
       candidate = entry.frames.get(frameId) || null;
@@ -792,7 +1002,7 @@ class BrowserManager {
     if (!frameId || !claimedParent || (root.parentId && targetParentFrame && String(root.parentId) !== targetParentFrame) ||
         !parentRecord || parentRecord.detached || parentRecord.targetId !== parentTargetId ||
         (candidate && (candidate.parentFrameId !== claimedParent || candidate.targetId !== parentTargetId))) {
-      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId);
+      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       if (candidate && candidate.targetId === parentTargetId) candidate.unavailableReason = 'owned_frame_target_identity_unverified';
       const parentSession = parentSessionId ? entry.targetSessions.get(parentSessionId) : null;
       this.lifecycle(entry, 'owned-frame-target-rejected', {
@@ -828,12 +1038,13 @@ class BrowserManager {
     const targetId = String(targetInfo.targetId || '');
     for (let attempt = 0; frameId && targetId && root.loaderId && candidate?.loaderId &&
       String(root.loaderId) !== String(candidate.loaderId) && attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      await this.refreshFrameTree(entry, parentSessionId || null);
+      await pause();
+      const refreshedTree = await step(this.readFrameTree(entry, parentSessionId || null));
+      this.recordFrameTree(entry, refreshedTree, parentSessionId || null);
       candidate = entry.frames.get(frameId) || null;
     }
     if (!targetId || !candidate || (root.loaderId && candidate.loaderId && String(root.loaderId) !== String(candidate.loaderId))) {
-      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId);
+      await this.rejectAttachedTarget(entry, parentSessionId, childSessionId, task);
       if (candidate) candidate.unavailableReason = 'owned_frame_target_identity_unverified';
       this.lifecycle(entry, 'owned-frame-target-rejected', {
         reason: 'target_or_loader_identity_unverified',
@@ -847,6 +1058,7 @@ class BrowserManager {
     }
     const accepted = { targetId, frameId, parentSessionId: parentSessionId || null, sessionId: childSessionId };
     entry.targetSessions.set(childSessionId, accepted);
+    if (task) task.accepted = true;
     this.childSessions.set(String(Number(entry.view.webContents.id)) + ':' + targetId, childSessionId);
     candidate.targetId = targetId;
     candidate.sessionId = childSessionId;
@@ -855,7 +1067,8 @@ class BrowserManager {
     candidate.unavailableReason = null;
     candidate.detached = false;
     this.lifecycle(entry, 'owned-frame-target-accepted', { access: 'owned_oopif' });
-    await this.enableOwnedSession(entry, childSessionId);
+    await this.enableOwnedSession(entry, childSessionId, task);
+    this.resumeWaitingTarget(entry, task);
     if (!this.isCurrentEntry(entry)) {
       await this.detachOwnedSession(entry, childSessionId, 'entry_closed');
       this.lifecycle(entry, 'owned-frame-target-rejected', { reason: 'entry_closed_during_session_enable' });
@@ -872,24 +1085,24 @@ class BrowserManager {
         parentSessionPresent: !!sessionId,
         parentSessionOwned: !sessionId || entry.targetSessions.has(sessionId),
       });
-      const task = this.acceptAttachedTarget(entry, params, sessionId);
-      entry.pendingTargetTasks.add(task);
-      try { await task; }
-      finally { entry.pendingTargetTasks.delete(task); }
+      await this.startOwnedTargetTask(entry, params, sessionId).promise;
       return;
     }
     if (method === 'Target.detachedFromTarget') {
       const detached = String(params && params.sessionId || '');
       if (detached) {
+        this.cancelOwnedTargetTasks(entry, (task) => task.sessionId === detached || task.parentSessionId === detached, 'target_gone');
         if (entry.targetSessions.has(detached)) void this.detachOwnedSession(entry, detached, 'target_detached');
       }
       return;
     }
     if (method === 'Target.targetDestroyed') {
       const targetId = String(params && params.targetId || '');
+      if (targetId) this.cancelOwnedTargetTasks(entry, (task) => task.targetId === targetId, 'target_gone');
       const sessions = Array.from(entry.targetSessions.entries()).filter(([, target]) => target.targetId === targetId);
       for (const [id, target] of sessions) {
         entry.targetSessions.delete(id);
+        this.releaseSessionCommands(entry, id);
         this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + target.targetId);
         this.invalidateFrames(entry, target.frameId, 'target_destroyed');
       }
@@ -897,9 +1110,11 @@ class BrowserManager {
     }
     if (method === 'Target.targetCrashed') {
       const targetId = String(params && params.targetId || '');
+      if (targetId) this.cancelOwnedTargetTasks(entry, (task) => task.targetId === targetId, 'target_crashed');
       for (const [id, target] of Array.from(entry.targetSessions.entries())) {
         if (target.targetId !== targetId) continue;
         entry.targetSessions.delete(id);
+        this.releaseSessionCommands(entry, id);
         this.childSessions.delete(String(Number(entry.view.webContents.id)) + ':' + target.targetId);
         this.invalidateFrames(entry, target.frameId, 'target_crashed');
       }
@@ -1133,7 +1348,17 @@ class BrowserManager {
   }
 
   async readEffectiveViewport(entry) {
-    const effective = await entry.view.webContents.executeJavaScript('({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })');
+    const wc = entry.view.webContents;
+    const expression = '({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio, scrollX, scrollY, documentWidth: document.documentElement?.scrollWidth || 0, documentHeight: document.documentElement?.scrollHeight || 0 })';
+    // Electron defers executeJavaScript() until the page stops loading, which
+    // a page with a never-finishing subframe never does; that would hold the
+    // navigation and presentation queues forever. Read over the root CDP
+    // session while the main frame is still loading.
+    const loading = typeof wc.isLoadingMainFrame === 'function' && (!wc.getURL() || wc.isLoadingMainFrame()) &&
+      wc.debugger?.isAttached?.() === true;
+    const effective = loading
+      ? unwrapCDPValue(await wc.debugger.sendCommand('Runtime.evaluate', { expression, returnByValue: true }))
+      : await wc.executeJavaScript(expression);
     if (!effective || !Number.isFinite(Number(effective.width)) || !Number.isFinite(Number(effective.height)) || !Number.isFinite(Number(effective.deviceScaleFactor))) {
       throw new Error('browser page did not report effective viewport metrics');
     }
@@ -1193,27 +1418,101 @@ class BrowserManager {
     return next;
   }
 
-  async waitForOwnedTargetTasks(entry) {
-    const deadline = Date.now() + 1000;
-    while (true) {
+  // Before a navigation: give owned iframe setup that is already running a
+  // bounded moment to commit, then abandon the rest and navigate anyway. Only
+  // tasks present now are awaited, so an ad slot that keeps attaching new
+  // frames cannot hold navigation open, and frame setup never refuses it.
+  async waitForOwnedTargetTasks(entry, budgetMs = this.navigationTargetSetupWaitMs ?? NAVIGATION_TARGET_SETUP_WAIT_MS) {
+    this.assertCurrentEntry(entry);
+    const waiting = Array.from(entry.pendingTargetTasks || []).filter((task) => !task.settled && !task.cancelled);
+    if (!waiting.length) return { waited: 0, abandoned: 0 };
+    const startedAt = Date.now();
+    const bounded = (promises, ms) => {
+      let timer;
+      return Promise.race([
+        Promise.allSettled(promises),
+        new Promise((resolve) => { timer = setTimeout(resolve, ms); }),
+      ]).finally(() => clearTimeout(timer));
+    };
+    await bounded(waiting.map((task) => task.promise), budgetMs);
+    this.assertCurrentEntry(entry);
+    const stuck = waiting.filter((task) => !task.settled);
+    for (const task of stuck) this.cancelOwnedTargetTask(entry, task, 'setup_abandoned_navigation');
+    if (stuck.length) {
+      this.lifecycle(entry, 'owned-frame-setup-abandoned-for-navigation', {
+        abandoned: stuck.length, waitedMs: Date.now() - startedAt,
+      });
+      // Cancellation settles each task on its next turn without touching the
+      // page; the bound only guards against a future unguarded await.
+      await bounded(stuck.map((task) => task.promise), ABANDONED_TARGET_SETTLE_MS);
       this.assertCurrentEntry(entry);
-      const pending = Array.from(entry.pendingTargetTasks || []);
-      if (!pending.length) {
-        await new Promise((resolve) => setImmediate(resolve));
-        if (!entry.pendingTargetTasks?.size) return;
-      } else {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new Error('owned iframe setup did not settle; browser navigation was not started');
-        let timer;
-        const finished = await Promise.race([
-          Promise.allSettled(pending).then(() => true),
-          new Promise((resolve) => { timer = setTimeout(() => resolve(false), Math.min(remaining, 50)); }),
-        ]);
+    }
+    return { waited: Date.now() - startedAt, abandoned: stuck.length };
+  }
+
+  // loadURL() over a page that is still loading rejects the NEW load with the
+  // replaced page's main-frame ERR_ABORTED. Stop the old load first and let
+  // that failure (or the stop) be reported before loading. Bounded: a subframe
+  // whose request never answers may never report a stop.
+  async stopLoadingBeforeNavigation(entry) {
+    const wc = entry.view.webContents;
+    if (typeof wc.isLoading !== 'function' || !wc.isLoading()) return;
+    await new Promise((resolve) => {
+      let timer = null;
+      const onFail = (_event, _code, _description, _url, isMainFrame) => { if (isMainFrame !== false) done(); };
+      const done = () => {
         clearTimeout(timer);
-        if (!finished && Date.now() >= deadline && entry.pendingTargetTasks.size) {
-          throw new Error('owned iframe setup did not settle; browser navigation was not started');
-        }
+        wc.removeListener('did-stop-loading', done);
+        wc.removeListener('did-fail-load', onFail);
+        resolve();
+      };
+      timer = setTimeout(done, 500);
+      wc.on('did-stop-loading', done);
+      wc.on('did-fail-load', onFail);
+      try { wc.stop(); } catch { done(); }
+    });
+    this.assertCurrentEntry(entry);
+  }
+
+  // Electron's loadURL() resolves on the main frame's load event, which a
+  // subframe that never finishes loading (a hung ad request) withholds
+  // forever. Wait for the load, but once the main document is ready give it
+  // only a short grace; a main document that never commits is reported.
+  async loadNavigationTarget(entry, target) {
+    const wc = entry.view.webContents;
+    const graceMs = this.navigationLoadGraceMs ?? NAVIGATION_LOAD_GRACE_MS;
+    const commitTimeoutMs = this.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
+    let committed = false;
+    let settle;
+    const outcome = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    const timers = [];
+    const onNavigate = () => { committed = true; };
+    const onDomReady = () => {
+      if (!committed) return; // a late DOMContentLoaded of the document being replaced
+      timers.push(setTimeout(() => settle.resolve('load_pending'), graceMs));
+    };
+    wc.on('did-navigate', onNavigate);
+    wc.on('dom-ready', onDomReady);
+    timers.push(setTimeout(() => {
+      if (committed) settle.resolve('load_pending');
+      else settle.reject(new Error(`browser navigation did not commit within ${Math.round(commitTimeoutMs / 1000)}s; the page is still loading`));
+    }, commitTimeoutMs));
+    let load;
+    try {
+      load = Promise.resolve(wc.loadURL(target));
+      load.then(() => settle.resolve('loaded'), (error) => settle.reject(error));
+      const result = await outcome;
+      if (result !== 'loaded') {
+        this.lifecycle(entry, 'user-navigation-load-pending', { committed });
       }
+      return result;
+    } finally {
+      for (const timer of timers) clearTimeout(timer);
+      wc.removeListener('did-navigate', onNavigate);
+      wc.removeListener('dom-ready', onDomReady);
+      // A load that finishes, fails or is replaced later is reported through
+      // the page events; it must not surface as an unhandled rejection.
+      if (load) load.catch(() => {});
     }
   }
 
@@ -1595,13 +1894,14 @@ class BrowserManager {
           });
         }
         await this.waitForOwnedTargetTasks(entry);
+        await this.stopLoadingBeforeNavigation(entry);
         entry.loading = true;
         entry.url = target;
         entry.error = null;
         this.publish(entry);
         this.artifactNavigations.set(wc, target);
         this.lifecycle(entry, 'before-user-navigation');
-        await wc.loadURL(target);
+        await this.loadNavigationTarget(entry, target);
         await this.refreshFrameTree(entry);
         const scale = this.attachedView === entry.view ? entry.presentationScale : 1;
         entry.effectiveViewport = await this.applyAndReadDeviceEmulation(entry, entry.viewport, scale);
@@ -1781,9 +2081,7 @@ class BrowserManager {
       awaitPromise: options.awaitPromise !== false,
       ...(frame.contextId != null ? { contextId: frame.contextId } : {}),
     };
-    const response = await entry.view.webContents.debugger.sendCommand(
-      'Runtime.evaluate', params, frame.sessionId || undefined,
-    );
+    const response = await this.ownedSessionCommand(entry, 'Runtime.evaluate', params, frame.sessionId || null);
     return unwrapCDPValue(response);
   }
 
@@ -3921,6 +4219,7 @@ class BrowserManager {
     entry.closed = true;
     entry.lifecycleToken = Symbol('closed-browser-entry');
     this.interruptWaiters(entry, 'tab_closed');
+    this.cancelOwnedTargetTasks(entry, () => true, 'entry_closed');
     this.invalidateFrames(entry, null, 'entry_closed');
     if (this.attachedView === entry.view) {
       try { this.win.contentView.removeChildView(entry.view); } catch { /* window is already closing */ }
@@ -3946,6 +4245,7 @@ class BrowserManager {
         void entry.view.webContents.debugger.sendCommand('Target.detachFromTarget', { sessionId }, target.parentSessionId || undefined).catch(() => {});
       } catch { /* debugger may already be gone */ }
       entry.targetSessions.delete(sessionId);
+      this.releaseSessionCommands(entry, sessionId);
     }
     entry.executionContexts.clear();
     entry.frames.clear();
