@@ -157,5 +157,9 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		}
 		result = map[string]any{"result": result, "images": images}
 	}
-	return json.NewEncoder(output).Encode(result)
+	// Agents copy URLs out of tool results, so & < > stay literal instead of
+	// &-style escapes, matching the Windows tools client.
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(result)
 }
