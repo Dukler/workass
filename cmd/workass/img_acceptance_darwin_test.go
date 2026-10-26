@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -190,4 +191,37 @@ func TestAcceptCloneCandidateSwappedForFIFOHangsTheWriter(t *testing.T) {
 	}
 	stop.Store(true)
 	<-done
+}
+
+// Legitimate paths through symlinks still clone: the /tmp and /var aliases of
+// /private, an absolute link and a relative link (with ..) inside home.
+func TestAcceptCloneFollowsLegitimateSymlinks(t *testing.T) {
+	home, storeDir, raw, name := cloneGuardHome(t)
+	work := filepath.Join(home, "work", "shots")
+	must(t, os.MkdirAll(work, 0o700))
+	real := filepath.Join(work, "shot.png")
+	must(t, os.WriteFile(real, raw, 0o600))
+	must(t, os.Symlink(work, filepath.Join(home, "abs-link")))
+	must(t, os.MkdirAll(filepath.Join(home, "other"), 0o700))
+	must(t, os.Symlink("../work/shots/shot.png", filepath.Join(home, "other", "rel-link.png")))
+	candidates := []string{
+		real,
+		filepath.Join(home, "abs-link", "shot.png"),
+		filepath.Join(home, "other", "rel-link.png"),
+	}
+	if alias, ok := strings.CutPrefix(real, "/private"); ok {
+		candidates = append(candidates, alias) // /tmp/... or /var/...
+	}
+	for _, candidate := range candidates {
+		final := filepath.Join(storeDir, name+sessionImageRawSuffix)
+		_ = os.Remove(final)
+		outcome, err := cloneRawSessionImage(storeDir, final, name, raw, candidate, sessionImageBatched)
+		if outcome != cloneOK {
+			t.Errorf("clone through %q = outcome %d (%v), want cloneOK", candidate, outcome, err)
+			continue
+		}
+		if err := verifyRawSessionImageFile(final, name, int64(len(raw))); err != nil {
+			t.Errorf("clone through %q does not verify: %v", candidate, err)
+		}
+	}
 }

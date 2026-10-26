@@ -322,6 +322,29 @@ func TestAcceptDamagedRawDoesNotChangeReportedMetadata(t *testing.T) {
 	}
 }
 
+// The other direction: a damaged legacy file never hides an intact raw twin,
+// for the bytes or for the metadata.
+func TestAcceptDamagedLegacyNeverHidesAnIntactRaw(t *testing.T) {
+	stateDir := t.TempDir()
+	raw := testPNG(t, 36, 24)
+	name := writeRawTestImage(t, stateDir, raw)
+	text := base64.StdEncoding.EncodeToString(raw)
+	for label, legacy := range map[string]string{"truncated": text[:len(text)/2], "same size, other bytes": strings.Repeat("A", len(text))} {
+		must(t, os.WriteFile(sessionImageLegacyPath(stateDir, name), []byte(legacy), 0o600))
+		resetImageCachesFor(name)
+		ref := sessionImageDirname + "/" + name
+		if got, err := readChatImageBytes(ref, stateDir); err != nil || !bytes.Equal(got, raw) {
+			t.Errorf("%s legacy: serving the image failed although its raw twin is intact: %v", label, err)
+		}
+		if got, err := readExternalSessionImage(ref, stateDir); err != nil || got != text {
+			t.Errorf("%s legacy: base64 read failed although its raw twin is intact: %v", label, err)
+		}
+		if w, h := sessionImageRefSize(ref, stateDir); w != 36 || h != 24 {
+			t.Errorf("%s legacy: dimensions %dx%d", label, w, h)
+		}
+	}
+}
+
 // The identity: a raw file stands for exactly one text, and only canonical
 // base64 ever becomes raw.
 func TestAcceptCanonicalDecodeNeverChangesIdentity(t *testing.T) {
