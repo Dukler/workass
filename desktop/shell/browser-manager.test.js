@@ -2196,6 +2196,22 @@ test('only calls that act on a page make it agent-driven, and a popped-out page 
   manager.destroy();
 });
 
+test('resetting the page a person is looking at puts the fresh page in the same place', async () => {
+  const { manager, win } = fixture({ requestOpen: () => {} });
+  await manager.activate({ chatId: 'chat-reset', bounds: { x: 900, y: 80, width: 280, height: 640 }, url: 'example.com', radius: 12 });
+  const old = manager.entries.get('chat-reset');
+  const bounds = { ...old.presentationBounds };
+  const result = await manager.browserControl('browser.close', { chatId: 'chat-reset' });
+  assert.equal(result.status, 'reset');
+  const fresh = manager.entries.get('chat-reset');
+  assert.notEqual(fresh, old);
+  assert.equal(fresh.visible, true, 'the pane is not left without a page');
+  assert.ok(win.contentView.children.includes(fresh.view), 'the fresh page is on screen');
+  assert.deepEqual(fresh.presentationBounds, bounds, 'where the old one was');
+  assert.equal(manager.activeId, 'chat-reset');
+  manager.destroy();
+});
+
 test('an explicit snapshot always reads the page as it is now', async () => {
   const { manager } = fixture({ requestOpen: () => {} });
   await manager.browserControl('browser.open', { chatId: 'fresh-read', visible: false });

@@ -147,6 +147,23 @@ test('when the app renderer reloads, the tab waits for its next guest and comes 
   manager.destroy();
 });
 
+test('resetting a hosted page a person is looking at keeps the pane showing a page', async () => {
+  const { manager, published, mount } = hostedFixture();
+  const entry = manager.get('chat-reset');
+  mount(published.at(-1).find((host) => host.chatId === 'chat-reset').hostKey);
+  await entry.ready;
+  await manager.activate({ chatId: 'chat-reset', bounds: { x: 10, y: 20, width: 344, height: 215 }, radius: 12 });
+  const closing = manager.browserControl('browser.close', { chatId: 'chat-reset' });
+  await settle();
+  const fresh = manager.entries.get('chat-reset');
+  mount(published.at(-1).find((host) => host.chatId === 'chat-reset').hostKey); // the renderer mounts the new page
+  const result = await closing;
+  assert.equal(result.status, 'reset');
+  assert.equal(fresh.visible, true, 'shown where the old page was');
+  assert.equal(manager.activeId, 'chat-reset');
+  manager.destroy();
+});
+
 test('hosted presentation never moves a native view; the renderer places the page', async () => {
   const { manager, published, mount } = hostedFixture();
   const entry = manager.get('chat-3');

@@ -3356,11 +3356,32 @@ class BrowserManager {
     }
     const chatId = entry.chatId;
     const conversationId = entry.conversationId;
+    // The page a person is looking at is replaced in place: same pane, same
+    // bounds and corners, so the pane is never left without a page.
+    const shown = this.activeId === chatId && entry.visible === true && entry.presentationBounds
+      ? { bounds: { ...entry.presentationBounds }, radius: entry.presentationRadius, viewport: { ...entry.viewport } } : null;
     this.close(chatId);
     const fresh = this.create(chatId);
     fresh.conversationId = conversationId;
     if (fresh.ready && await fresh.ready !== true) throw new Error(fresh.error || 'the new browser page did not come up');
+    if (shown) await this.serializePresentation(() => this.presentAgain(fresh, shown));
     return { ok: true, status: 'reset', closed_tab_id: tabId, tab: this.tabInfo(fresh) };
+  }
+
+  // Puts a page back where another one was shown (bounds already in window
+  // coordinates).
+  async presentAgain(entry, { bounds, radius, viewport }) {
+    if (!this.isCurrentEntry(entry)) return null;
+    this.activeId = entry.chatId;
+    entry.presentationRadius = radius;
+    entry.presentationBounds = bounds;
+    entry.bounds = bounds;
+    if (viewport && (viewport.width !== entry.viewport.width || viewport.height !== entry.viewport.height)) {
+      try { await this.setViewportSerialized(entry, viewport, false); } catch { this.deferViewport(entry, viewport); }
+    }
+    await this.attach(entry);
+    if (this.isHosted(entry)) entry.visible = true;
+    return this.publish(entry);
   }
 
   async controlEntry(params = {}) {
