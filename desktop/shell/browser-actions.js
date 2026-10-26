@@ -23,6 +23,9 @@ const SETTLE_QUIET_MS = 80;
 const SETTLE_MAX_MS = 1500;
 const SETTLE_POLL_MS = 15;
 const NAVIGATION_SETTLE_MS = 8000;
+const AFTER_OUTLINE_BUDGET_MS = 3000;
+const MIN_OUTLINE_BUDGET_MS = 400;
+const REPORT_MARGIN_MS = 1500;
 const CHANGES_BYTES = 6000;
 const NAVIGATED_OUTLINE_BYTES = 6000;
 // The last outline stands in for the "before" only when it is a moment old
@@ -44,6 +47,10 @@ const EVALUATE_MAX_RESULT = 16 * 1024;
 const EVALUATE_TIMEOUT_MS = 10000;
 const DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024;
 const DOWNLOAD_HISTORY = 20;
+const DOWNLOAD_BURST_LIMIT = 10;
+const DOWNLOAD_BURST_WINDOW_MS = 60000;
+const DOWNLOAD_FOLDER_MAX_FILES = 200;
+const DOWNLOAD_FOLDER_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const POPUP_TAB_LIMIT = 8;
 
 // ---------------------------------------------------------------------------
@@ -210,21 +217,28 @@ function unwatchNetwork(manager, entry) {
   } catch { /* the page is gone */ }
 }
 
+// What is left of the operation's deadline, less a margin to report in.
+function timeLeft(entry, wanted) {
+  if (!entry.operationDeadlineAt) return wanted;
+  return Math.max(0, Math.min(wanted, entry.operationDeadlineAt - Date.now() - REPORT_MARGIN_MS));
+}
+
 // Waits until the page stops changing: a navigation reaches a usable
 // document; then, if nothing happened, SETTLE_IDLE_MS of quiet, otherwise
 // SETTLE_QUIET_MS after the last activity (requests in flight and loading
-// frames keep it waiting), never more than SETTLE_MAX_MS. Returns whether
-// anything happened since `start` and the activity count it ended on.
+// frames keep it waiting), never more than SETTLE_MAX_MS (all within the
+// operation's deadline). Returns whether anything happened since `start` and
+// the activity count it ended on.
 async function settleAfterAction(manager, entry, start) {
   if (!entry.mainDocumentReady) {
-    const deadline = Date.now() + NAVIGATION_SETTLE_MS;
+    const deadline = Date.now() + timeLeft(entry, NAVIGATION_SETTLE_MS);
     while (Date.now() < deadline && !entry.closed && !entry.dialog && !entry.mainDocumentReady && (entry.loading || entry.mainCommitPending)) {
       await sleep(SETTLE_POLL_MS);
     }
   }
   const outcome = { changed: true, n: null };
   if (entry.closed || entry.dialog) return outcome;
-  const deadline = Date.now() + SETTLE_MAX_MS;
+  const deadline = Date.now() + timeLeft(entry, SETTLE_MAX_MS);
   const busy = () => (entry.netInflight && entry.netInflight.size > 0) || entry.loading === true || entry.mainCommitPending === true ||
     (entry.pendingTabs || 0) > 0;
   // Phase one (idle): did anything happen at all? Phase two (active): wait
@@ -304,6 +318,9 @@ async function runWatchedAction(manager, entry, action, { before, start, startSe
   const dialogOpened = new Promise((resolve) => { opened = resolve; });
   entry.dialogWaiters = entry.dialogWaiters || new Set();
   entry.dialogWaiters.add(opened);
+  // Shared with a batch running inside this action: a dialog stops it.
+  const control = { stopped: false, partial: null };
+  entry.actionControl = control;
   let outcome;
   try {
     const running = Promise.resolve().then(action);
@@ -311,12 +328,15 @@ async function runWatchedAction(manager, entry, action, { before, start, startSe
       running.then((result) => ({ result }), (error) => ({ error })),
       dialogOpened.then(() => ({ dialog: true })),
     ]);
-    if (outcome.dialog) running.catch(() => {});
+    if (outcome.dialog) { control.stopped = true; running.catch(() => {}); }
   } finally {
     entry.dialogWaiters.delete(opened);
+    if (entry.actionControl === control) entry.actionControl = null;
   }
   if (outcome.error) throw outcome.error;
-  const result = outcome.dialog ? { ok: true, status: 'dialog_opened' } : (outcome.result ?? {});
+  const result = outcome.dialog
+    ? { ok: true, status: 'dialog_opened', ...(control.partial ? { batch: { ...control.partial, stopped_by_dialog: true } } : {}) }
+    : (outcome.result ?? {});
   markAgentActive(entry);
   if (entry.dialog) {
     return { ...result, page: pageState(manager, entry), dialog: { ...entry.dialog.public }, events: eventsSince(entry, startSeq),
@@ -328,11 +348,17 @@ async function runWatchedAction(manager, entry, action, { before, start, startSe
       note: 'The page is paused on this dialog: answer it with workass_browser_dialog before anything else.' };
   }
   const events = eventsSince(entry, startSeq);
+  // Out of time (a slow navigation near its deadline): the page is reported
+  // as loading rather than the operation failing.
+  if (timeLeft(entry, AFTER_OUTLINE_BUDGET_MS) < MIN_OUTLINE_BUDGET_MS) {
+    return { ...result, page: pageState(manager, entry), events,
+      changes: { loading: true, reason: 'the page is still loading; take workass_browser_snapshot when it is ready' } };
+  }
   // The page is always read again after an action: "none" comes only from
   // comparing two reads.
   let after = null;
   try {
-    after = await manager.takeOutline(entry, { budgetMs: 3000,
+    after = await manager.takeOutline(entry, { budgetMs: timeLeft(entry, AFTER_OUTLINE_BUDGET_MS),
       activity: settled.n != null ? { n: settled.n, activitySeq: entry.activitySeq || 0, documentKey: manager.documentKey(entry) } : undefined });
   } catch { /* reported as unknown */ }
   const report = { ...result, page: pageState(manager, entry), events };
@@ -660,6 +686,11 @@ async function browserEvaluate(manager, entry, params = {}) {
     frameId = target.frameId ?? null;
   }
   const frame = frameId ? entry.frames.get(frameId) : manager.frameForSession(entry, null);
+  // A frame with neither its own session nor its own script context would
+  // have the expression run in its parent instead: refused.
+  if (frameId && (!frame || (frame.parentFrameId != null && !frame.sessionId && frame.contextId == null))) {
+    return { ok: false, status: 'unavailable', reason: 'that frame has no script context yet; take a new outline and try again' };
+  }
   const wrapped = `(async () => { const __value = await (async () => (${expression}))(); return __value === undefined ? { __workassUndefined: true } : __value; })()`;
   const response = await manager.ownedSessionCommand(entry, 'Runtime.evaluate', {
     expression: wrapped, returnByValue: true, awaitPromise: true, userGesture: true, timeout: EVALUATE_TIMEOUT_MS,
@@ -701,10 +732,36 @@ function uniqueDownloadPath(dir, name) {
 // item: Electron DownloadItem. Agent pages save into the chat's folder; a
 // download the person starts in a page they are looking at keeps Electron's
 // own save dialog.
+// What a chat's downloads folder may hold, and how fast a page may add to it.
+function downloadFolderUse(dir) {
+  let files = 0;
+  let bytes = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      try { const stat = fs.statSync(path.join(dir, name)); if (stat.isFile()) { files += 1; bytes += stat.size; } } catch { /* removed meanwhile */ }
+    }
+  } catch { /* a new folder */ }
+  return { files, bytes };
+}
+
 function takeDownload(manager, entry, item) {
   if (!manager.downloadsRoot || !agentDriven(entry)) return false;
   const dir = downloadsDirFor(manager.downloadsRoot, entry.ownerConversationId || entry.conversationId || entry.chatId);
   try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { return false; }
+  const now = Date.now();
+  entry.downloadTimes = (entry.downloadTimes || []).filter((at) => now - at < DOWNLOAD_BURST_WINDOW_MS);
+  const use = downloadFolderUse(dir);
+  const expected = Math.max(0, Number(item.getTotalBytes()) || 0);
+  const refusal = entry.downloadTimes.length >= DOWNLOAD_BURST_LIMIT ? `more than ${DOWNLOAD_BURST_LIMIT} downloads in a minute`
+    : use.files >= DOWNLOAD_FOLDER_MAX_FILES ? `the chat's downloads folder already holds ${DOWNLOAD_FOLDER_MAX_FILES} files`
+      : use.bytes + expected > DOWNLOAD_FOLDER_MAX_BYTES ? `the chat's downloads would pass ${DOWNLOAD_FOLDER_MAX_BYTES / (1024 * 1024 * 1024)} GB`
+        : null;
+  if (refusal) {
+    try { item.cancel(); } catch { /* finishing */ }
+    pushEvent(entry, { type: 'download_blocked', file_name: redactPageMessage(String(item.getFilename() || ''), 200), reason: refusal });
+    return true;
+  }
+  entry.downloadTimes.push(now);
   const file = uniqueDownloadPath(dir, item.getFilename());
   item.setSavePath(file);
   let host = '';

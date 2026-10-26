@@ -140,6 +140,8 @@ test('when the app renderer reloads, the tab waits for its next guest and comes 
   assert.equal(entry.view.webContents, second);
   assert.equal(manager.tabIdOf(entry), tabId, 'same tab id for the agent');
   assert.ok(second.loads.includes('https://example.test/signed-in'), 'the page is loaded back at its URL');
+  assert.equal(manager.consumeArtifactNavigation(second, 'https://example.test/signed-in'), false,
+    'a restore loads the page\'s own last URL without authorizing it the way a navigate command does');
   assert.equal(manager.browserTabs('chat-2')[0].id, tabId);
   // A late event from the replaced guest no longer touches the tab.
   first.emit('page-title-updated', {}, 'stale title');

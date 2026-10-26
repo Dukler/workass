@@ -1057,7 +1057,15 @@ class BrowserManager {
   ownedSessionCommand(entry, method, params, sessionId, timeoutMs = null) {
     if (sessionId && !entry.targetSessions.has(sessionId)) return Promise.reject(new Error('browser frame target is no longer owned'));
     const command = Promise.resolve(entry.view.webContents.debugger.sendCommand(method, params, sessionId || undefined));
-    if (!sessionId) return command;
+    if (!sessionId) {
+      // The top frame's commands are bounded too when the caller gives a
+      // limit (evaluate's 10 s, the outline's budget).
+      if (!(Number(timeoutMs) > 0)) return command;
+      let timer = null;
+      return Promise.race([command, new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`browser page did not answer ${method} within ${Math.max(1, Math.round(Number(timeoutMs) / 1000))}s`)), Number(timeoutMs));
+      })]).finally(() => clearTimeout(timer));
+    }
     const waiters = entry.sessionCommandWaiters || (entry.sessionCommandWaiters = new Map());
     const pending = waiters.get(sessionId) || new Set();
     waiters.set(sessionId, pending);
@@ -1706,7 +1714,8 @@ class BrowserManager {
         entry.restoreURL = null;
         entry.loading = true;
         entry.url = target;
-        this.artifactNavigations.set(guest, target);
+        // The page's own last URL: loaded again, never authorized the way a
+        // navigate command authorizes its target.
         this.publish(entry);
         try {
           await this.loadNavigationTarget(entry, target);
@@ -2157,22 +2166,32 @@ class BrowserManager {
   // wedged page cannot hold every later call).
   serialize(entry, operation, { deadlineMs = null } = {}) {
     const hold = {};
+    const deadlineLimitMs = deadlineMs ?? this.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
+    let deadlineAt = null;
     const run = entry.operationChain.catch(() => {}).then(() => {
       this.assertCurrentEntry(entry);
+      // The action report (browser-actions.js) fits its waits and reads in
+      // what is left of this; it ends with the operation.
+      deadlineAt = Date.now() + deadlineLimitMs;
+      entry.operationDeadlineAt = deadlineAt;
       return this.withPainting(entry, operation, hold);
+    });
+    run.then(() => {}, () => {}).then(() => {
+      if (deadlineAt && entry.operationDeadlineAt === deadlineAt) entry.operationDeadlineAt = null;
     });
     // Whatever the operation left pressed (it failed between a press and its
     // release) is released as soon as it ends.
     run.then(() => {}, () => {}).then(() => {
       if (entry.pointerDown || entry.inputTimedOut) void this.releaseStuckInput(entry);
     });
-    const limitMs = deadlineMs ?? this.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
+    const limitMs = deadlineLimitMs;
     let timer = null;
     const bounded = Promise.race([
       run,
       new Promise((_resolve, reject) => {
         timer = setTimeout(() => {
           entry.wedgedAt = Date.now();
+          if (deadlineAt && entry.operationDeadlineAt === deadlineAt) entry.operationDeadlineAt = null;
           this.lifecycle(entry, 'operation-deadline', { limitMs });
           // The tab moves on: it no longer stays emulated focused and
           // painting for an operation that may never end, and its input is
@@ -5814,9 +5833,17 @@ class BrowserManager {
       const actions = this.validateBatch(params.actions, params.observeAfter);
       const results = [];
       const completedIndexes = [];
+      // The action run this batch is part of (browser-actions.js): a dialog
+      // that opens stops it there, and the report says how far it got.
+      const control = internal.bare ? entry.actionControl : null;
       for (let index = 0; index < actions.length; index += 1) {
         const action = actions[index];
         const name = action.action;
+        if (control && control.stopped) break;
+        if (control) {
+          control.partial = { results: results.slice(), completed_indexes: completedIndexes.slice(), dialog_index: index,
+            unexecuted_indexes: actions.slice(index + 1).map((_item, offset) => index + offset + 1) };
+        }
         try {
           const result = await this.browserControl(`browser.${name}`, { ...action, tabId: this.tabInfo(entry).id }, { serialized: true, bare: true, parsedKey: action.parsedKey });
           results.push({ index, action: name, result });

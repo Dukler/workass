@@ -2212,6 +2212,32 @@ test('resetting the page a person is looking at puts the fresh page in the same 
   manager.destroy();
 });
 
+test('a dialog in the middle of a batch stops the batch, reports what ran, and nothing runs after it', async () => {
+  const { dialogOpened } = require('./browser-actions');
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'batch-dialog', visible: false });
+  const entry = manager.entries.get('batch-dialog');
+  const ran = [];
+  manager.browserClick = async (target, params) => {
+    ran.push(params.selector);
+    if (params.selector === '#confirm') {
+      dialogOpened(target, { type: 'confirm', message: 'Sure?' });
+      await new Promise((resolve) => setTimeout(resolve, 80)); // the page is paused until it is answered
+    }
+    return { ok: true, status: 'clicked' };
+  };
+  const report = await manager.browserControl('browser.batch', { chatId: 'batch-dialog', actions: [
+    { action: 'click', selector: '#first' }, { action: 'click', selector: '#confirm' }, { action: 'click', selector: '#after' },
+  ] }, { report: true });
+  assert.equal(report.dialog.type, 'confirm');
+  assert.deepEqual(report.batch.completed_indexes, [0]);
+  assert.equal(report.batch.dialog_index, 1);
+  assert.deepEqual(report.batch.unexecuted_indexes, [2]);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(ran, ['#first', '#confirm'], 'nothing after the dialog ran, inside the queue or outside it');
+  manager.destroy();
+});
+
 test('an explicit snapshot always reads the page as it is now', async () => {
   const { manager } = fixture({ requestOpen: () => {} });
   await manager.browserControl('browser.open', { chatId: 'fresh-read', visible: false });
