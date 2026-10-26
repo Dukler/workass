@@ -69,7 +69,7 @@ func TestBrowserMCPListsToolsAndRoutesProviderNeutralCalls(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 	})}
 	tools := browserMCPTools()
-	if len(tools) != 16 {
+	if len(tools) != 23 {
 		t.Fatalf("tool count = %d", len(tools))
 	}
 	snapshot, err := callBrowserMCPTool(browserMCPCallParams{

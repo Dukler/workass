@@ -221,7 +221,9 @@ func workassToolMutates(kind toolKind, name string) bool {
 		case "workass_browser_open", "workass_browser_navigate", "workass_browser_click",
 			"workass_browser_type", "workass_browser_scroll", "workass_browser_key",
 			"workass_browser_batch", "workass_browser_history", "workass_browser_set_viewport",
-			"workass_browser_reset_viewport":
+			"workass_browser_reset_viewport", "workass_browser_select", "workass_browser_hover",
+			"workass_browser_drag", "workass_browser_upload", "workass_browser_dialog",
+			"workass_browser_close", "workass_browser_evaluate":
 			return true
 		default:
 			return false

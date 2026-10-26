@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  browserApi, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
+  browserApi, browserPageHosted, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
   type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
 } from '../browser';
+import { presentBrowserPage, slotRect, SURFACE_Z_DOCKED, withdrawBrowserPage } from '../browser-surface';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { store, useApp } from '../store/store';
 import { IcBrowser, IcPip } from '../icons';
@@ -56,12 +57,15 @@ function LocalBrowserPanel({
   const viewport = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<WorkassBrowserState>(() => initialState(chatId));
   const [address, setAddress] = useState('');
+  const hosted = browserPageHosted(api, state.host);
+  const slot = useRef(Symbol('docked-pane'));
 
-  // The browser is a native WebContentsView that paints ABOVE all HTML, so an
-  // HTML overlay (the image lightbox) can't cover it — it would show through the
-  // right pane (user, 2026-07-23). No z-index fixes a native layer: detach the
-  // view while the lightbox is open, and re-attach it (same live page) on close.
-  const overlayOpen = !!app.imageLightbox;
+  // The native-view host paints the page ABOVE all HTML, so an HTML overlay
+  // (the image lightbox) can't cover it — it would show through the right
+  // pane (user, 2026-07-23). No z-index fixes a native layer: detach the view
+  // while the lightbox is open, and re-attach it (same live page) on close.
+  // A hosted page (<webview>) stacks under the lightbox like any HTML.
+  const overlayOpen = !!app.imageLightbox && !hosted;
   useEffect(() => {
     if (!api || !overlayOpen) return;
     void api.hide(chatId);
@@ -128,8 +132,15 @@ function LocalBrowserPanel({
         if (!disposed && pendingBounds) void flushBounds();
       }
     };
+    // A hosted page is placed over the pane here and now (inside its 1 px
+    // border, with its corners); the shell only hears the size.
+    const place = () => {
+      if (!hosted || disposed || !el.isConnected) return;
+      presentBrowserPage(chatId, slot.current, { rect: slotRect(el, 1), radius: 9, z: SURFACE_Z_DOCKED });
+    };
     const sync = () => {
       if (disposed || !el.isConnected) return;
+      place();
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
       const bounds = boundsFor(el);
@@ -163,6 +174,7 @@ function LocalBrowserPanel({
         if (attempt < 4) retryTimer = window.setTimeout(() => activate(attempt + 1), 250 * 2 ** attempt);
       });
     };
+    place();
     activate(0);
     return () => {
       disposed = true;
@@ -170,9 +182,10 @@ function LocalBrowserPanel({
       observer.disconnect();
       layoutObserver.disconnect();
       removeEventListener('resize', sync);
+      if (hosted) withdrawBrowserPage(chatId, slot.current);
       void api.hide(chatId);
     };
-  }, [api, chatId, machineId, conversationId]);
+  }, [api, chatId, machineId, conversationId, hosted]);
 
   const run = (command: 'back' | 'forward' | 'reload' | 'stop') => {
     if (!api) return;

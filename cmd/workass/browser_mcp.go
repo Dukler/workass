@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,12 +95,21 @@ func browserMCPTools() []map[string]any {
 	clip := object(map[string]any{
 		"x": coordinates, "y": coordinates, "width": coordinates, "height": coordinates,
 	}, "x", "y", "width", "height")
+	button := map[string]any{"type": "string", "enum": []string{"left", "right", "middle"}, "description": agenttext.Get("schema.browserClick.button")}
+	clickCount := map[string]any{"type": "integer", "minimum": 1, "maximum": 3, "description": agenttext.Get("schema.browserClick.click_count")}
+	stringList := func(description string) map[string]any {
+		return map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": map[string]any{"type": "string"}, "description": description}
+	}
+	optionValues := stringList(agenttext.Get("schema.browserSelect.values"))
+	optionLabels := stringList(agenttext.Get("schema.browserSelect.labels"))
+	optionIndexes := map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": map[string]any{"type": "integer", "minimum": 0}, "description": agenttext.Get("schema.browserSelect.indexes")}
 	actionItem := object(map[string]any{
-		"action":   map[string]any{"type": "string", "enum": []string{"click", "type", "scroll", "key", "snapshot"}},
+		"action":   map[string]any{"type": "string", "enum": []string{"click", "type", "scroll", "key", "select", "hover", "snapshot"}},
 		"selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
 		"x": coordinates, "y": coordinates, "screenshot_id": map[string]any{"type": "string"},
 		"text": map[string]any{"type": "string"}, "submit": map[string]any{"type": "boolean"},
-		"key": map[string]any{"type": "string"},
+		"key": map[string]any{"type": "string"}, "button": button, "click_count": clickCount,
+		"values": optionValues, "labels": optionLabels, "indexes": optionIndexes,
 	}, "action")
 	return []map[string]any{
 		tool("workass_browser_list", agenttext.Get("tools.workass_browser_list"), object(map[string]any{}), true, true),
@@ -107,8 +117,10 @@ func browserMCPTools() []map[string]any {
 		tool("workass_browser_navigate", agenttext.Get("tools.workass_browser_navigate"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
 		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{
 			"tab_id":            tabID,
-			"format":            map[string]any{"type": "string", "enum": []string{"json", "compact"}, "description": agenttext.Get("schema.browserSnapshot.format")},
+			"format":            map[string]any{"type": "string", "enum": []string{"outline", "json", "compact"}, "description": agenttext.Get("schema.browserSnapshot.format")},
 			"since_snapshot_id": map[string]any{"type": "string", "description": agenttext.Get("schema.browserSnapshot.since_snapshot_id")},
+			"cursor":            map[string]any{"type": "string", "description": agenttext.Get("schema.browserSnapshot.cursor")},
+			"max_bytes":         map[string]any{"type": "integer", "minimum": 2048, "maximum": 60000, "description": agenttext.Get("schema.browserSnapshot.max_bytes")},
 		}), true, true),
 		tool("workass_browser_read", agenttext.Get("tools.workass_browser_read"), object(map[string]any{
 			"tab_id":         tabID,
@@ -122,7 +134,8 @@ func browserMCPTools() []map[string]any {
 		}), true, true),
 		tool("workass_browser_click", agenttext.Get("tools.workass_browser_click"), object(map[string]any{
 			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
-			"x": coordinates, "y": coordinates, "screenshot_id": map[string]any{"type": "string"}, "operation_id": operationID,
+			"x": coordinates, "y": coordinates, "screenshot_id": map[string]any{"type": "string"},
+			"button": button, "click_count": clickCount, "operation_id": operationID,
 		}, "operation_id"), false, false),
 		tool("workass_browser_type", agenttext.Get("tools.workass_browser_type"), object(map[string]any{
 			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
@@ -153,6 +166,43 @@ func browserMCPTools() []map[string]any {
 			"tab_id": tabID, "after_sequence": map[string]any{"type": "integer", "minimum": 0},
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 		}), true, true),
+		tool("workass_browser_select", agenttext.Get("tools.workass_browser_select"), object(map[string]any{
+			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
+			"values": optionValues, "labels": optionLabels, "indexes": optionIndexes, "operation_id": operationID,
+		}, "operation_id"), false, false),
+		tool("workass_browser_hover", agenttext.Get("tools.workass_browser_hover"), object(map[string]any{
+			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID, "operation_id": operationID,
+		}, "operation_id"), false, false),
+		tool("workass_browser_drag", agenttext.Get("tools.workass_browser_drag"), object(map[string]any{
+			"tab_id":           tabID,
+			"from_element_ref": map[string]any{"type": "string", "description": agenttext.Get("schema.browserDrag.from_element_ref")},
+			"from_selector":    map[string]any{"type": "string", "description": agenttext.Get("schema.browserDrag.from_selector")},
+			"from_snapshot_id": snapshotID,
+			"to_element_ref":   map[string]any{"type": "string", "description": agenttext.Get("schema.browserDrag.to_element_ref")},
+			"to_selector":      map[string]any{"type": "string", "description": agenttext.Get("schema.browserDrag.to_selector")},
+			"to_snapshot_id":   snapshotID,
+			"delta_x":          map[string]any{"type": "number", "description": agenttext.Get("schema.browserDrag.delta")},
+			"delta_y":          map[string]any{"type": "number", "description": agenttext.Get("schema.browserDrag.delta")},
+			"operation_id":     operationID,
+		}, "operation_id"), false, false),
+		tool("workass_browser_upload", agenttext.Get("tools.workass_browser_upload"), object(map[string]any{
+			"tab_id": tabID, "selector": selector, "element_ref": elementRef, "snapshot_id": snapshotID,
+			"paths":        map[string]any{"type": "array", "minItems": 1, "maxItems": 10, "items": map[string]any{"type": "string"}, "description": agenttext.Get("schema.browserUpload.paths")},
+			"operation_id": operationID,
+		}, "paths", "operation_id"), false, false),
+		tool("workass_browser_dialog", agenttext.Get("tools.workass_browser_dialog"), object(map[string]any{
+			"tab_id":       tabID,
+			"accept":       map[string]any{"type": "boolean", "description": agenttext.Get("schema.browserDialog.accept")},
+			"prompt_text":  map[string]any{"type": "string", "description": agenttext.Get("schema.browserDialog.prompt_text")},
+			"operation_id": operationID,
+		}, "accept", "operation_id"), false, false),
+		tool("workass_browser_close", agenttext.Get("tools.workass_browser_close"), object(map[string]any{"tab_id": tabID, "operation_id": operationID}, "operation_id"), false, false),
+		tool("workass_browser_evaluate", agenttext.Get("tools.workass_browser_evaluate"), object(map[string]any{
+			"tab_id":     tabID,
+			"expression": map[string]any{"type": "string", "description": agenttext.Get("schema.browserEvaluate.expression")},
+			"selector":   selector, "element_ref": elementRef, "snapshot_id": snapshotID,
+			"operation_id": operationID,
+		}, "expression", "operation_id"), false, false),
 	}
 }
 
@@ -260,12 +310,12 @@ func browserMCPToolBoundary(name string) (string, bool, bool, map[string]string,
 	case "workass_browser_navigate":
 		return "browser.navigate", true, false, fields("tab_id", "tabId", "url", "url"), nil
 	case "workass_browser_snapshot":
-		return "browser.snapshot", false, false, fields("tab_id", "tabId", "format", "format", "since_snapshot_id", "sinceSnapshotId"), nil
+		return "browser.snapshot", false, false, fields("tab_id", "tabId", "format", "format", "since_snapshot_id", "sinceSnapshotId", "cursor", "cursor", "max_bytes", "maxBytes"), nil
 	case "workass_browser_read":
 		return "browser.read", false, false, fields("tab_id", "tabId", "offset", "offset", "max_bytes", "maxBytes", "selector", "selector",
 			"element_ref", "elementRef", "frame_ref", "frameRef", "snapshot_id", "snapshotId", "include_frames", "includeFrames"), nil
 	case "workass_browser_click":
-		return "browser.click", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "x", "x", "y", "y", "screenshot_id", "screenshotId"), nil
+		return "browser.click", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "x", "x", "y", "y", "screenshot_id", "screenshotId", "button", "button", "click_count", "clickCount"), nil
 	case "workass_browser_type":
 		return "browser.type", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "text", "text", "submit", "submit"), nil
 	case "workass_browser_scroll":
@@ -286,6 +336,21 @@ func browserMCPToolBoundary(name string) (string, bool, bool, map[string]string,
 		return "browser.wait", false, false, fields("tab_id", "tabId", "condition", "condition", "selector", "selector", "timeout_ms", "timeoutMs"), nil
 	case "workass_browser_diagnostics":
 		return "browser.diagnostics", false, false, fields("tab_id", "tabId", "after_sequence", "afterSequence", "limit", "limit"), nil
+	case "workass_browser_select":
+		return "browser.select", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "values", "values", "labels", "labels", "indexes", "indexes"), nil
+	case "workass_browser_hover":
+		return "browser.hover", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId"), nil
+	case "workass_browser_drag":
+		return "browser.drag", true, false, fields("tab_id", "tabId", "from_element_ref", "fromElementRef", "from_selector", "fromSelector", "from_snapshot_id", "fromSnapshotId",
+			"to_element_ref", "toElementRef", "to_selector", "toSelector", "to_snapshot_id", "toSnapshotId", "delta_x", "deltaX", "delta_y", "deltaY"), nil
+	case "workass_browser_upload":
+		return "browser.upload", true, false, fields("tab_id", "tabId", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId", "paths", "paths"), nil
+	case "workass_browser_dialog":
+		return "browser.dialog", true, false, fields("tab_id", "tabId", "accept", "accept", "prompt_text", "promptText"), nil
+	case "workass_browser_close":
+		return "browser.close", true, false, fields("tab_id", "tabId"), nil
+	case "workass_browser_evaluate":
+		return "browser.evaluate", true, false, fields("tab_id", "tabId", "expression", "expression", "selector", "selector", "element_ref", "elementRef", "snapshot_id", "snapshotId"), nil
 	default:
 		return "", false, false, nil, errors.New("unknown browser tool: " + name)
 	}
@@ -327,19 +392,20 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 		}
 		return nil
 	}
-	for _, key := range []string{"selector", "elementRef", "snapshotId", "screenshotId", "url", "key", "text", "condition", "mode", "action", "format", "sinceSnapshotId", "frameRef"} {
+	for _, key := range []string{"selector", "elementRef", "snapshotId", "screenshotId", "url", "key", "text", "condition", "mode", "action", "format", "sinceSnapshotId", "frameRef",
+		"cursor", "button", "promptText", "expression", "fromElementRef", "fromSelector", "fromSnapshotId", "toElementRef", "toSelector", "toSnapshotId"} {
 		if _, present := params[key]; present {
 			if err := stringField(key, false); err != nil {
 				return err
 			}
 		}
 	}
-	for _, key := range []string{"visible", "submit", "observeAfter", "includeFrames"} {
+	for _, key := range []string{"visible", "submit", "observeAfter", "includeFrames", "accept"} {
 		if err := boolField(key); err != nil {
 			return err
 		}
 	}
-	for _, key := range []string{"x", "y"} {
+	for _, key := range []string{"x", "y", "deltaX", "deltaY"} {
 		if err := numberField(key); err != nil {
 			return err
 		}
@@ -347,15 +413,30 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 	switch name {
 	case "workass_browser_snapshot":
 		format := browserString(params["format"])
-		if _, present := params["format"]; present && format != "json" && format != "compact" {
-			return errors.New("format must be json or compact")
+		if _, present := params["format"]; present && format != "json" && format != "compact" && format != "outline" {
+			return errors.New("format must be outline, json or compact")
 		}
 		if _, present := params["sinceSnapshotId"]; present {
 			if err := stringField("sinceSnapshotId", true); err != nil {
 				return errors.New("since_snapshot_id must be a non-empty string")
 			}
 			if format == "json" {
-				return errors.New("since_snapshot_id requires format compact")
+				return errors.New("since_snapshot_id requires format outline or compact")
+			}
+		}
+		_, hasCursor := params["cursor"]
+		_, hasMax := params["maxBytes"]
+		if (hasCursor || hasMax) && format != "outline" {
+			return errors.New("cursor and max_bytes are used with format outline")
+		}
+		if hasCursor {
+			if err := stringField("cursor", true); err != nil {
+				return errors.New("cursor must be a non-empty string")
+			}
+		}
+		if hasMax {
+			if err := validateBrowserInteger(params["maxBytes"], "max_bytes", 2048, 60000); err != nil {
+				return err
 			}
 		}
 	case "workass_browser_read":
@@ -363,7 +444,50 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 	case "workass_browser_navigate":
 		return stringField("url", true)
 	case "workass_browser_click":
+		if err := validateBrowserClickOptions(params); err != nil {
+			return err
+		}
 		return validateBrowserClickTarget(params, "browser click")
+	case "workass_browser_select":
+		if err := validateBrowserElementTarget(params, "browser select"); err != nil {
+			return err
+		}
+		return validateBrowserSelectOptions(params)
+	case "workass_browser_hover":
+		return validateBrowserElementTarget(params, "browser hover")
+	case "workass_browser_drag":
+		return validateBrowserDrag(params)
+	case "workass_browser_upload":
+		if err := validateBrowserElementTarget(params, "browser upload"); err != nil {
+			return err
+		}
+		paths, ok := params["paths"].([]any)
+		if !ok || len(paths) < 1 || len(paths) > 10 {
+			return errors.New("paths must list 1 to 10 absolute file paths")
+		}
+		for _, raw := range paths {
+			path, ok := raw.(string)
+			if !ok || !filepath.IsAbs(path) {
+				return errors.New("each path must be an absolute file path")
+			}
+		}
+	case "workass_browser_dialog":
+		if _, ok := params["accept"].(bool); !ok {
+			return errors.New("accept must be true or false")
+		}
+	case "workass_browser_evaluate":
+		expression, ok := params["expression"].(string)
+		if !ok || strings.TrimSpace(expression) == "" {
+			return errors.New("expression must be a non-empty string")
+		}
+		if len(expression) > 8*1024 {
+			return errors.New("expression is limited to 8 KiB")
+		}
+		_, hasSelector := params["selector"]
+		_, hasRef := params["elementRef"]
+		if hasSelector || hasRef {
+			return validateBrowserElementTarget(params, "browser evaluate")
+		}
 	case "workass_browser_type":
 		if _, present := params["text"]; !present {
 			return errors.New("text is required")
@@ -548,6 +672,108 @@ func browserFiniteNumber(value any) (float64, bool) {
 	return number, !math.IsNaN(number) && !math.IsInf(number, 0)
 }
 
+// An outline ref (e12) is used on its own; a json snapshot element_ref needs
+// its snapshot_id.
+var browserOutlineRef = regexp.MustCompile(`^e[0-9]+$`)
+
+func browserRefTargetValid(ref any, hasRef bool, snapshot any, hasSnapshot bool) bool {
+	refText, refString := ref.(string)
+	if !hasRef || !refString || strings.TrimSpace(refText) == "" {
+		return false
+	}
+	if hasSnapshot {
+		snapshotText, snapshotString := snapshot.(string)
+		return snapshotString && strings.TrimSpace(snapshotText) != ""
+	}
+	return browserOutlineRef.MatchString(strings.TrimSpace(refText))
+}
+
+func validateBrowserClickOptions(params map[string]any) error {
+	if value, present := params["button"]; present {
+		if text, _ := value.(string); text != "left" && text != "right" && text != "middle" {
+			return errors.New("button must be left, right, or middle")
+		}
+	}
+	if value, present := params["clickCount"]; present {
+		if err := validateBrowserInteger(value, "click_count", 1, 3); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateBrowserSelectOptions(params map[string]any) error {
+	given := 0
+	for _, key := range []string{"values", "labels", "indexes"} {
+		value, present := params[key]
+		if !present {
+			continue
+		}
+		given++
+		list, ok := value.([]any)
+		if !ok || len(list) < 1 || len(list) > 50 {
+			return fmt.Errorf("%s must list 1 to 50 options", key)
+		}
+		for _, item := range list {
+			if key == "indexes" {
+				if err := validateBrowserInteger(item, "indexes item", 0, 10000); err != nil {
+					return err
+				}
+			} else if _, ok := item.(string); !ok {
+				return fmt.Errorf("%s must be strings", key)
+			}
+		}
+	}
+	if given != 1 {
+		return errors.New("browser select requires exactly one of values, labels, or indexes")
+	}
+	return nil
+}
+
+func validateBrowserDrag(params map[string]any) error {
+	end := func(prefix, label string) (bool, error) {
+		ref, hasRef := params[prefix+"ElementRef"]
+		snapshot, hasSnapshot := params[prefix+"SnapshotId"]
+		selector, hasSelector := params[prefix+"Selector"]
+		if hasSnapshot && !hasRef {
+			return false, fmt.Errorf("%s_snapshot_id is only used with %s_element_ref", label, label)
+		}
+		if hasRef && hasSelector {
+			return false, fmt.Errorf("give %s_element_ref or %s_selector, not both", label, label)
+		}
+		if hasSelector {
+			if text, ok := selector.(string); !ok || strings.TrimSpace(text) == "" {
+				return false, fmt.Errorf("%s_selector must be a non-empty string", label)
+			}
+			return true, nil
+		}
+		if hasRef {
+			if !browserRefTargetValid(ref, hasRef, snapshot, hasSnapshot) {
+				return false, fmt.Errorf("%s_element_ref must be an outline ref (e12) or come with %s_snapshot_id", label, label)
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	from, err := end("from", "from")
+	if err != nil {
+		return err
+	}
+	if !from {
+		return errors.New("browser drag requires from_element_ref or from_selector")
+	}
+	to, err := end("to", "to")
+	if err != nil {
+		return err
+	}
+	_, hasDX := params["deltaX"]
+	_, hasDY := params["deltaY"]
+	if to == (hasDX || hasDY) {
+		return errors.New("browser drag requires a drop target (to_element_ref or to_selector) or an offset (delta_x, delta_y), not both")
+	}
+	return nil
+}
+
 func validateBrowserClickTarget(params map[string]any, label string) error {
 	selector := params["selector"]
 	_, hasSelector := params["selector"]
@@ -567,10 +793,8 @@ func validateBrowserClickTarget(params map[string]any, label string) error {
 		forms++
 	}
 	if refTarget {
-		refText, refString := ref.(string)
-		snapshotText, snapshotString := snapshot.(string)
-		if !hasRef || !hasSnapshot || !refString || !snapshotString || strings.TrimSpace(refText) == "" || strings.TrimSpace(snapshotText) == "" {
-			return fmt.Errorf("%s requires element_ref with snapshot_id", label)
+		if !browserRefTargetValid(ref, hasRef, snapshot, hasSnapshot) {
+			return fmt.Errorf("%s requires an outline element_ref (e12) or an element_ref with its snapshot_id", label)
 		}
 		forms++
 	}
@@ -593,7 +817,7 @@ func validateBrowserClickTarget(params map[string]any, label string) error {
 		forms++
 	}
 	if forms != 1 {
-		return fmt.Errorf("%s requires exactly one selector, element_ref with snapshot_id, or screenshot coordinate target", label)
+		return fmt.Errorf("%s requires exactly one target: an element_ref, a selector, or screenshot coordinates", label)
 	}
 	return nil
 }
@@ -611,14 +835,12 @@ func validateBrowserElementTarget(params map[string]any, label string) error {
 		}
 	}
 	if refTarget {
-		refText, refString := ref.(string)
-		snapshotText, snapshotString := snapshot.(string)
-		if !hasRef || !hasSnapshot || !refString || !snapshotString || strings.TrimSpace(refText) == "" || strings.TrimSpace(snapshotText) == "" {
-			return fmt.Errorf("%s requires element_ref with snapshot_id", label)
+		if !browserRefTargetValid(ref, hasRef, snapshot, hasSnapshot) {
+			return fmt.Errorf("%s requires an outline element_ref (e12) or an element_ref with its snapshot_id", label)
 		}
 	}
 	if selectorTarget == refTarget {
-		return fmt.Errorf("%s requires selector or element_ref with snapshot_id", label)
+		return fmt.Errorf("%s requires a selector or an element_ref", label)
 	}
 	return nil
 }
@@ -677,6 +899,12 @@ func prepareBrowserBatchActions(value any) ([]any, error) {
 		case "click":
 			fields["selector"], fields["element_ref"], fields["snapshot_id"] = "selector", "elementRef", "snapshotId"
 			fields["x"], fields["y"], fields["screenshot_id"] = "x", "y", "screenshotId"
+			fields["button"], fields["click_count"] = "button", "clickCount"
+		case "select":
+			fields["selector"], fields["element_ref"], fields["snapshot_id"] = "selector", "elementRef", "snapshotId"
+			fields["values"], fields["labels"], fields["indexes"] = "values", "labels", "indexes"
+		case "hover":
+			fields["selector"], fields["element_ref"], fields["snapshot_id"] = "selector", "elementRef", "snapshotId"
 		case "type":
 			fields["selector"], fields["element_ref"], fields["snapshot_id"] = "selector", "elementRef", "snapshotId"
 			fields["text"], fields["submit"] = "text", "submit"
@@ -714,6 +942,10 @@ func validateBrowserBatchAction(kind string, action map[string]any, index int) e
 		return validateBrowserMCPParams("workass_browser_scroll", action)
 	case "key":
 		return validateBrowserMCPParams("workass_browser_key", action)
+	case "select":
+		return validateBrowserMCPParams("workass_browser_select", action)
+	case "hover":
+		return validateBrowserMCPParams("workass_browser_hover", action)
 	case "snapshot":
 		return nil
 	default:
@@ -724,15 +956,11 @@ func validateBrowserBatchAction(kind string, action map[string]any, index int) e
 func validateOptionalBrowserElementRef(params map[string]any, label string) (bool, error) {
 	ref, hasRef := params["elementRef"]
 	snapshot, hasSnapshot := params["snapshotId"]
-	if hasRef != hasSnapshot {
-		return false, fmt.Errorf("%s element_ref requires snapshot_id", label)
+	if hasSnapshot && !hasRef {
+		return false, fmt.Errorf("%s snapshot_id is only used with element_ref", label)
 	}
-	if hasRef {
-		refText, refString := ref.(string)
-		snapshotText, snapshotString := snapshot.(string)
-		if !refString || !snapshotString || strings.TrimSpace(refText) == "" || strings.TrimSpace(snapshotText) == "" {
-			return false, fmt.Errorf("%s requires non-empty element_ref and snapshot_id", label)
-		}
+	if hasRef && !browserRefTargetValid(ref, hasRef, snapshot, hasSnapshot) {
+		return false, fmt.Errorf("%s requires an outline element_ref (e12) or an element_ref with its snapshot_id", label)
 	}
 	return hasRef, nil
 }

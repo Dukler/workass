@@ -219,7 +219,7 @@ test('compact snapshots list every link with its URL on a page the json format c
   const linkLines = lines.filter((line) => / link "Item \d+/.test(line));
   const jsonLinks = json.semantic.filter((node) => node.role === 'link' && node.href);
   assert.ok(linkLines.length > jsonLinks.length * 2, `compact ${linkLines.length} links vs json ${jsonLinks.length}`);
-  assert.match(lines.find((line) => line.includes('"Item 7 running')), /^e\d+ link "Item 7 running shoe size 7" href=https:\/\/shop\.example\/itm\/7\?hash=item7&var=x+$/);
+  assert.match(lines.find((line) => line.includes('"Item 7 running')), /^c\d+ link "Item 7 running shoe size 7" href=https:\/\/shop\.example\/itm\/7\?hash=item7&var=x+$/);
   assert.match(compact.elements, /textbox "Search" value="shoes"/);
   assert.match(compact.elements, /textbox "Password" value=\[redacted\]/);
   assert.doesNotMatch(JSON.stringify(compact), /hunter2-SECRET/);
@@ -234,6 +234,10 @@ test('compact snapshots list every link with its URL on a page the json format c
   assert.ok(Array.isArray(target.path));
   const stale = await page.manager.observationTarget(page.entry, { elementRef: refs[2], snapshotId: json.snapshot_id });
   assert.equal(stale.status, 'stale');
+  // Compact refs are their own namespace: without their snapshot_id they
+  // reach nothing, never an outline's element of the same number.
+  assert.match(refs[2], /^c\d+$/);
+  await assert.rejects(page.manager.observationTarget(page.entry, { elementRef: refs[2] }), /snapshot_id/, 'a bare compact ref is refused');
 });
 
 test('incremental compact snapshots report only changes and keep earlier refs valid', async () => {
@@ -253,8 +257,8 @@ test('incremental compact snapshots report only changes and keep earlier refs va
   assert.equal(second.base_snapshot_id, first.snapshot_id);
   const changes = second.changes.split('\n');
   assert.ok(changes.some((line) => line.startsWith(`~ ${searchRef} textbox "Search" value="trail shoes"`)), second.changes);
-  assert.ok(changes.some((line) => /^\+ e\d+ link "Item 77 trail shoe" href=https:\/\/shop\.example\/itm\/77$/.test(line)), second.changes);
-  assert.ok(changes.some((line) => /^- e\d+ link "Item 4 /.test(line)), second.changes);
+  assert.ok(changes.some((line) => /^\+ c\d+ link "Item 77 trail shoe" href=https:\/\/shop\.example\/itm\/77$/.test(line)), second.changes);
+  assert.ok(changes.some((line) => /^- c\d+ link "Item 4 /.test(line)), second.changes);
   assert.equal(second.incremental.changed, 1);
   assert.equal(second.incremental.added, 1);
   assert.equal(second.incremental.removed, 1);
@@ -280,7 +284,7 @@ test('incremental compact snapshots report only changes and keep earlier refs va
   const unknown = await page.snapshot({ sinceSnapshotId: 'not-a-snapshot' });
   assert.equal(unknown.incremental.reason, 'base_snapshot_unknown');
   await assert.rejects(page.snapshot({ format: 'json', sinceSnapshotId: fourth.snapshot_id }), /requires format compact/);
-  await assert.rejects(page.snapshot({ format: 'yaml' }), /format must be json or compact/);
+  await assert.rejects(page.snapshot({ format: 'yaml' }), /format must be outline, json or compact/);
 });
 
 test('accessibility text inside a secret field never becomes a snapshot row', async () => {
