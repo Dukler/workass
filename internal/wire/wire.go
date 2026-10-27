@@ -224,6 +224,12 @@ const (
 
 // Hub owns the invoke handler registry and connected WebSocket clients.
 type Hub struct {
+	// invokesInFlight and the last invoke's start and end (unix ns) let
+	// background maintenance stay out of the way of a client's reads (Busy).
+	invokesInFlight atomic.Int64
+	lastInvokeStart atomic.Int64
+	lastInvokeEnd   atomic.Int64
+
 	mu sync.RWMutex
 	// Auxiliary mutation authority exists only while a same-device projection
 	// client is live. This lock makes primary removal and aux invoke admission one
@@ -1339,7 +1345,31 @@ func (h *Hub) readLoop(c *client) {
 	}
 }
 
+// Busy reports client activity: an invoke started or finished within tail,
+// or one still in flight that started less than busyInvokeHold ago (an invoke
+// that legitimately waits a long time does not count past that). It is a hint
+// for background work that should yield to a client, never a gate.
+func (h *Hub) Busy(tail time.Duration) bool {
+	if h == nil {
+		return false
+	}
+	now := time.Now()
+	recent := func(at int64, within time.Duration) bool { return at != 0 && now.Sub(time.Unix(0, at)) < within }
+	if h.invokesInFlight.Load() > 0 && recent(h.lastInvokeStart.Load(), busyInvokeHold) {
+		return true
+	}
+	return recent(h.lastInvokeStart.Load(), tail) || recent(h.lastInvokeEnd.Load(), tail)
+}
+
+const busyInvokeHold = 5 * time.Second
+
 func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
+	h.lastInvokeStart.Store(time.Now().UnixNano())
+	h.invokesInFlight.Add(1)
+	defer func() {
+		h.lastInvokeEnd.Store(time.Now().UnixNano())
+		h.invokesInFlight.Add(-1)
+	}()
 	var result any
 	var afterReply func()
 	var errText *string

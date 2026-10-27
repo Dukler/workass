@@ -585,7 +585,7 @@ func (m *Manager) observeProviderLaneACPEvent(payload map[string]any) error {
 		}
 		return err
 	case "tool":
-		attachments, err := m.persistProviderEventAttachments(providerEventSlice(event["images"]))
+		attachments, err := m.persistProviderEventAttachments(withToolImageCloneSources(providerEventSlice(event["images"]), asString(event["input"])))
 		if err != nil {
 			return err
 		}
@@ -774,7 +774,7 @@ func (m *Manager) observeSettledSubagentTool(jobID string, event map[string]any)
 	if lane == nil {
 		return nil
 	}
-	attachments, err := m.persistProviderEventAttachments(providerEventSlice(event["images"]))
+	attachments, err := m.persistProviderEventAttachments(withToolImageCloneSources(providerEventSlice(event["images"]), asString(event["input"])))
 	if err != nil {
 		return err
 	}
