@@ -289,9 +289,17 @@ func TestClientThatCannotKeepUpIsDroppedAlone(t *testing.T) {
 	text := strings.Repeat("z", 512<<10)
 	_ = fastPeer.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	fastDone := make(chan error, 1)
-	go func() { fastDone <- readBurst(fastPeer.reader, "test:limit", events, 512<<10, nil) }()
+	var fastRead atomic.Int32
+	go func() { fastDone <- readBurst(fastPeer.reader, "test:limit", events, 512<<10, &fastRead) }()
 
 	for i := 0; i < events; i++ {
+		// Pace on the fast client, at most two events behind, so a CPU-starved
+		// run cannot push it past the limit too; the stuck one never reads.
+		for deadline := time.Now().Add(10 * time.Second); int(fastRead.Load()) < i-2; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("fast client stalled at %d of %d events", fastRead.Load(), i)
+			}
+		}
 		hub.Broadcast("test:limit", map[string]any{"seq": i, "text": text})
 	}
 	waitForClientDropped(t, hub, stuck, 5*time.Second)

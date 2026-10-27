@@ -214,7 +214,8 @@ describe('paged session reads', () => {
     store.state.deferredChats = null;
     store.setSidebarSearch('hit', []);
     await wait(200);
-    assert.deepEqual(searches, [], 'a whole shell needs no daemon search');
+    // A late refresh may read the page (search null); what must not happen is a search.
+    assert.deepEqual(searches.filter((search) => search !== null), [], 'a whole shell needs no daemon search');
 
     store.state.deferredChats = { count: 2, cwds: [['/work/beta', 2]] };
     store.setSidebarSearch('H', []);
@@ -246,7 +247,8 @@ describe('paged session reads', () => {
     await wait(20);
     await store.agentRefresh;
     await wait(20);
-    assert.deepEqual(includes, [['tab-1', 'tab-filed']]);
+    // The open's own read asks for its row first; a later refresh may read the page again.
+    assert.deepEqual(includes[0], ['tab-1', 'tab-filed']);
     assert.equal(store.state.activeId, 'tab-filed');
     assert.equal(store.pageIncludes.has('tab-filed'), false, 'once on screen, the page lists it on its own');
     assert.equal(await store.ensureChatLoaded('M~m1~tab-x'), false, 'another machine\'s chat is not this page\'s');
