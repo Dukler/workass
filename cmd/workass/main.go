@@ -295,6 +295,14 @@ func main() {
 		logger.Printf("[workass] initialize authoritative chat runtime: %v", err)
 		os.Exit(1)
 	}
+	// The image store's maintenance (raw migration, rollback-window reclaim,
+	// deleted-chat collection) starts after the listener is ready; whether a
+	// new image also gets its legacy file is settled now, before any write.
+	imageStore := imageStoreMaintenanceFor(stateDir, daemonVersion, chatActors, providerChats, logger.Printf)
+	imageStore.applyMarker()
+	imageStore.foreground = func() bool {
+		return hub.Busy(imageStoreForegroundTail) || chatImageHTTPBusy(imageStoreForegroundTail)
+	}
 	chatControl := newChatControlCoordinator(acpManager, hub.Broadcast, providerChats)
 	// Scheduled messages are best effort at start: a store that cannot be
 	// opened leaves the three tools reporting "unavailable", not the daemon down.
@@ -370,7 +378,11 @@ func main() {
 	if machineBook != nil {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
-	handler.Metrics = func() map[string]any { return daemonMetrics(providerChats, stateDir, hub, acpManager) }
+	handler.Metrics = func() map[string]any {
+		out := daemonMetrics(providerChats, stateDir, hub, acpManager)
+		out["imageStore"] = imageStore.metrics()
+		return out
+	}
 	agentControl, err := newAgentControlHandlerBeforeProviderStartup(acpManager, hub.Broadcast, chatControl)
 	if err != nil {
 		acpManager.Reset()
@@ -391,11 +403,17 @@ func main() {
 	// first on shutdown, so no delivery races the actors' detach below.
 	var scheduledRun sync.WaitGroup
 	stopScheduled := func() {}
+	var imageStoreRun sync.WaitGroup
+	stopImageStore := func() {}
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stopScheduled()
 			scheduledRun.Wait()
+			// The image pass reads the chat store; it stops before the store
+			// closes. Every step it takes is durable, so stopping is safe.
+			stopImageStore()
+			imageStoreRun.Wait()
 			forkService.CancelAll()
 			// Durable chat actors own the disposable provider-lane attachments.
 			// Detach those actors before the manager tears down its bridge maps so
@@ -490,6 +508,13 @@ func main() {
 			scheduledMessages.Run(scheduledCtx)
 		}()
 	}
+	imageStoreCtx, cancelImageStore := context.WithCancel(signalCtx)
+	stopImageStore = cancelImageStore
+	imageStoreRun.Add(1)
+	go func() {
+		defer imageStoreRun.Done()
+		imageStore.run(imageStoreCtx)
+	}()
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
 		Bind:   *bind,
 		Port:   *port,

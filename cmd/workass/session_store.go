@@ -5,12 +5,14 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/maphash"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -570,9 +572,13 @@ func (p providerAttachmentPlan) Materialize() error {
 	}
 	for _, attachment := range p.Attachments {
 		ref := strings.TrimPrefix(strings.TrimSpace(attachment.Ref), providerSessionImageRefPrefix)
-		if _, _, _, err := externalSessionImageInfo(ref, p.stateDir); err != nil {
+		file, err := locateSessionImage(ref, p.stateDir)
+		if err != nil {
 			return err
 		}
+		// The actor commit that references it comes next; keep the collector
+		// off it until then.
+		touchSessionImage(file.name)
 	}
 	return nil
 }
@@ -617,13 +623,12 @@ func (s *sessionStore) PlanProviderAttachments(images []any) (providerAttachment
 			}
 		}
 		if !planned {
-			var info os.FileInfo
-			var infoErr error
-			name, _, info, infoErr = externalSessionImageInfo(ref, stateDir)
+			file, infoErr := locateSessionImage(ref, stateDir)
 			if infoErr != nil {
 				return providerAttachmentPlan{}, infoErr
 			}
-			size = info.Size()
+			touchSessionImage(file.name)
+			name, size = file.name, file.logicalSize()
 			width, height = sessionImageRefSize(ref, stateDir)
 		}
 		if len(name) < 16 || strings.Contains(name, "/") {
@@ -788,6 +793,9 @@ type sessionImageWritePlan struct {
 	dir  string
 	path string
 	data string
+	// cloneSources are local files that may hold exactly this image; the raw
+	// form is cloned from the first that verifies (session_image_source.go).
+	cloneSources []string
 }
 
 func stageExternalSessionImageData(value any, stateDir string) ([]sessionImageWritePlan, error) {
@@ -807,8 +815,16 @@ func stageExternalSessionImageData(value any, stateDir string) ([]sessionImageWr
 func stageExternalSessionImageDataInto(value any, stateDir string, plans *[]sessionImageWritePlan, byPath map[string]int) error {
 	switch item := value.(type) {
 	case map[string]any:
+		var cloneSources []string
+		if _, hinted := item[sessionImageSourceField]; hinted {
+			// A capture-time hint never outlives staging, image or not.
+			cloneSources = sessionImageCloneSources(item)
+		}
 		if strings.HasPrefix(strings.ToLower(fieldString(item, "mimeType")), "image/") {
 			if data := fieldString(item, "data"); data != "" {
+				if cloneSources == nil {
+					cloneSources = sessionImageCloneSources(item)
+				}
 				name := sessionImageName(data)
 				ref := sessionImageDirname + "/" + name
 				dir := filepath.Join(stateDir, sessionImageDirname)
@@ -817,9 +833,15 @@ func stageExternalSessionImageDataInto(value any, stateDir string, plans *[]sess
 					if (*plans)[existingIndex].data != data {
 						return fmt.Errorf("session image ref %s has conflicting staged content", ref)
 					}
+					existing := &(*plans)[existingIndex]
+					for _, source := range cloneSources {
+						if !slices.Contains(existing.cloneSources, source) {
+							existing.cloneSources = append(existing.cloneSources, source)
+						}
+					}
 				} else {
 					byPath[path] = len(*plans)
-					*plans = append(*plans, sessionImageWritePlan{ref: ref, dir: dir, path: path, data: data})
+					*plans = append(*plans, sessionImageWritePlan{ref: ref, dir: dir, path: path, data: data, cloneSources: cloneSources})
 				}
 				delete(item, "data")
 				item[sessionImageDataRefField] = ref
@@ -841,6 +863,11 @@ func stageExternalSessionImageDataInto(value any, stateDir string, plans *[]sess
 }
 
 func persistSessionImagePlans(plans []sessionImageWritePlan) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	sessionImageStoreMu.RLock()
+	defer sessionImageStoreMu.RUnlock()
 	for _, plan := range plans {
 		if err := persistSessionImagePlan(plan); err != nil {
 			return err
@@ -849,7 +876,84 @@ func persistSessionImagePlans(plans []sessionImageWritePlan) error {
 	return nil
 }
 
+// persistSessionImagePlan stores one staged image. Canonical base64 text is
+// stored as raw bytes (session_image_store.go), cloned from a matching local
+// file when the plan names one. While the rollback window is open the legacy
+// text file is written too, so the previous release still reads it. Text that
+// is not canonical base64 (a data URL) is its own identity and keeps the
+// legacy form.
 func persistSessionImagePlan(plan sessionImageWritePlan) error {
+	name := filepath.Base(plan.path)
+	touchSessionImage(name)
+	if !sessionImageRawStore {
+		// 0.1.229's store, byte for byte: the base64 text only.
+		sessionImageWriteStats.legacy.Add(1)
+		return persistLegacySessionImagePlan(plan)
+	}
+	rawPath := plan.path + sessionImageRawSuffix
+	shadow := sessionImageLegacyShadow.Load()
+	if sessionImageVerifiedCurrent(rawPath) && (!shadow || sessionImageVerifiedCurrent(plan.path)) {
+		return nil
+	}
+	raw, canonical := decodeCanonicalSessionImage(plan.data)
+	if !canonical {
+		sessionImageWriteStats.legacy.Add(1)
+		return persistLegacySessionImagePlan(plan)
+	}
+	if err := ensureSessionImageDir(plan.dir); err != nil {
+		return err
+	}
+	// While the window is open the legacy file is the durable copy, so the raw
+	// one is written batched (its data handed to the device, nothing flushed)
+	// and the legacy write's own full flushes, of its file and then of the
+	// directory both share, make both durable at once. A legacy file that was
+	// already durable leaves the raw one to the reclaim's barrier, which comes
+	// before anything relies on it. After the window the raw file is flushed
+	// itself. Either way one image costs one pair of full flushes, as before.
+	durability := sessionImageDurable
+	if shadow {
+		durability = sessionImageBatched
+	}
+	if !sessionImageVerifiedCurrent(rawPath) {
+		if _, err := persistRawSessionImage(plan.dir, name, raw, plan.cloneSources, durability); err != nil {
+			return err
+		}
+	}
+	if shadow {
+		return persistLegacySessionImagePlan(plan)
+	}
+	return nil
+}
+
+// sessionImageVerifiedCurrent reports that path was written or verified by
+// this process and is still that same regular file.
+func sessionImageVerifiedCurrent(path string) bool {
+	verified, ok := sessionImageVerified(path)
+	if !ok {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() == verified.size && info.ModTime().UnixNano() == verified.modTimeUnixNano
+}
+
+func ensureSessionImageDir(dir string) error {
+	dirExisted := true
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		dirExisted = false
+	} else if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if !dirExisted {
+		return syncDirectory(filepath.Dir(dir))
+	}
+	return nil
+}
+
+// persistLegacySessionImagePlan writes the legacy form: the base64 text.
+func persistLegacySessionImagePlan(plan sessionImageWritePlan) error {
 	if verified, ok := sessionImageVerified(plan.path); ok {
 		info, err := os.Lstat(plan.path)
 		switch {
@@ -861,19 +965,8 @@ func persistSessionImagePlan(plan sessionImageWritePlan) error {
 			return err
 		}
 	}
-	dirExisted := true
-	if _, err := os.Stat(plan.dir); os.IsNotExist(err) {
-		dirExisted = false
-	} else if err != nil {
+	if err := ensureSessionImageDir(plan.dir); err != nil {
 		return err
-	}
-	if err := os.MkdirAll(plan.dir, 0o700); err != nil {
-		return err
-	}
-	if !dirExisted {
-		if err := syncDirectory(filepath.Dir(plan.dir)); err != nil {
-			return err
-		}
 	}
 	if info, err := os.Lstat(plan.path); err == nil {
 		if !info.Mode().IsRegular() {
@@ -1004,36 +1097,17 @@ func rehydrateExternalSessionImagesShared(value any, stateDir string, resolved m
 	return errors.Join(warnings...)
 }
 
+// readExternalSessionImage returns the verified base64 text of ref, from
+// either stored form (session_image_store.go).
 func readExternalSessionImage(ref, stateDir string) (string, error) {
-	name, path, _, err := externalSessionImageInfo(ref, stateDir)
+	data, raw, err := readSessionImageVerified(ref, stateDir)
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read session image ref %s: %w", ref, err)
-	}
-	sum := sha256.Sum256(data)
-	if fmt.Sprintf("%x", sum[:]) != name {
-		return "", fmt.Errorf("session image ref %s failed content verification", ref)
+	if raw {
+		return base64.StdEncoding.EncodeToString(data), nil
 	}
 	return string(data), nil
-}
-
-func externalSessionImageInfo(ref, stateDir string) (name, path string, info os.FileInfo, err error) {
-	name, ok := validSessionImageRef(ref)
-	if !ok {
-		return "", "", nil, fmt.Errorf("invalid session image ref %q", ref)
-	}
-	path = filepath.Join(stateDir, sessionImageDirname, name)
-	info, err = os.Lstat(path)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("read session image ref %s: %w", ref, err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > maxPersistedSessionImageBytes {
-		return "", "", nil, fmt.Errorf("session image ref %s is not a bounded regular file", ref)
-	}
-	return name, path, info, nil
 }
 
 func validSessionImageRef(ref string) (string, bool) {

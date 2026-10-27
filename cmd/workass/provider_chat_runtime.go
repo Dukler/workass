@@ -2595,11 +2595,11 @@ func steerAttachmentInputIdentity(images []any, stores ...*sessionStore) ([]prov
 			}
 			ref = cleanRef
 			if store != nil && store.enabled() {
-				name, _, info, refErr := externalSessionImageInfo(ref, filepath.Dir(store.path))
+				file, refErr := locateSessionImage(ref, filepath.Dir(store.path))
 				if refErr != nil {
 					return nil, fmt.Errorf("provider image %d has an unreadable durable content reference: %w", index, refErr)
 				}
-				digest, size = name, info.Size()
+				digest, size = file.name, file.logicalSize()
 				width, height = sessionImageRefSize(ref, filepath.Dir(store.path))
 			} else {
 				if digest == "" {

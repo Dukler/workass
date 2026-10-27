@@ -1331,6 +1331,13 @@ func (r *providerChatRuntime) QueueAgentMessageWithAttachments(ctx context.Conte
 		if err != nil {
 			return nil, err
 		}
+		for index, image := range images {
+			// The file the agent attached is usually the image itself: let the
+			// store clone it instead of writing its bytes again.
+			if item, ok := image.(map[string]any); ok && index < len(attachments) {
+				item[acp.ImageCloneSourceField] = attachments[index].Path
+			}
+		}
 		if attachmentPlan, err = r.sessions.PlanProviderAttachments(images); err != nil {
 			return nil, err
 		}
