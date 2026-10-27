@@ -885,6 +885,11 @@ func persistSessionImagePlans(plans []sessionImageWritePlan) error {
 func persistSessionImagePlan(plan sessionImageWritePlan) error {
 	name := filepath.Base(plan.path)
 	touchSessionImage(name)
+	if !sessionImageRawStore {
+		// 0.1.229's store, byte for byte: the base64 text only.
+		sessionImageWriteStats.legacy.Add(1)
+		return persistLegacySessionImagePlan(plan)
+	}
 	rawPath := plan.path + sessionImageRawSuffix
 	shadow := sessionImageLegacyShadow.Load()
 	if sessionImageVerifiedCurrent(rawPath) && (!shadow || sessionImageVerifiedCurrent(plan.path)) {

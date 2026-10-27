@@ -11,6 +11,13 @@ import (
 // sessionImageClonesPossible: no clone source is ever worth looking for here.
 const sessionImageClonesPossible = false
 
+// sessionImageRawStoreSupported is off here: the raw store has only been
+// proven on macOS, and Windows (and Linux) code paths are compile-checked
+// only. These platforms keep 0.1.229's store exactly: new images are written
+// as base64 text, and no migration, reclaim or deleted-chat collection runs.
+// Turn on only after a real runtime check on the platform passes.
+const sessionImageRawStoreSupported = false
+
 // Only APFS clones a file. Elsewhere (Windows, Linux) a raw image is always
 // written from the bytes already in hand, and a candidate is never read.
 func cloneRawSessionImage(dir, final, name string, raw []byte, candidate string, durability sessionImageDurability) (sessionImageCloneOutcome, error) {

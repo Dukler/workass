@@ -33,6 +33,14 @@ import (
 // accepts exactly 64 hex characters, so no Ref can ever name a raw file.
 const sessionImageRawSuffix = ".raw"
 
+// sessionImageRawStore turns the raw store on: raw writes, the migration,
+// reclaim and deleted-chat collection. It is the platform's
+// sessionImageRawStoreSupported (on for macOS only); when it is off, new
+// images are written exactly as 0.1.229 writes them and the maintenance pass
+// does nothing. Readers accept both forms on every platform. A variable only
+// so tests on one platform can prove the other's path.
+var sessionImageRawStore = sessionImageRawStoreSupported
+
 // sessionImageFile is one stored form of an image.
 type sessionImageFile struct {
 	name string

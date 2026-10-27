@@ -70,7 +70,9 @@ the file and the reason until the file is fixed or removed and the import comple
 is not the file's (the database busy, the disk full, a read error) stops the start the same way but
 writes no refusal: the error names the cause, and the next start retries the import.
 
-Chat images (`state/images/`). Every image keeps one identity, sha256 of its standard base64
+Chat images (`state/images/`). The raw store below is on for macOS only
+(`sessionImageRawStoreSupported`); Windows and Linux keep 0.1.229's store (base64 text, no
+maintenance pass) until a runtime check on the platform passes. Every image keeps one identity, sha256 of its standard base64
 text, which every Ref, URL and SQLite row names. It is stored as `images/<digest>.raw` (the image
 bytes; on macOS usually an APFS clone of the file a "View image" call read, verified byte for byte
 before and after) and/or the legacy `images/<digest>` (the base64 text, the only form 0.1.229 and

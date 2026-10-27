@@ -18,6 +18,11 @@ import (
 // ENOTSUP per attempt.
 const sessionImageClonesPossible = true
 
+// sessionImageRawStoreSupported: the raw store, its migration, reclaim and
+// deleted-chat collection were proven on macOS against a copy of a real
+// store. See session_image_clone_other.go for the other platforms.
+const sessionImageRawStoreSupported = true
+
 // cloneRawSessionImage makes final an APFS clone of candidate when candidate
 // is, byte for byte, raw (the verified content of name).
 //
