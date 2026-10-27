@@ -283,6 +283,11 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // once and may again, so every image from this start on keeps its legacy file
 // (the pass then restarts the window).
 func (m *imageStoreMaintenance) applyMarker() {
+	if !sessionImageRawStore {
+		// Nothing is written raw here; the legacy file is the only form.
+		sessionImageLegacyShadow.Store(true)
+		return
+	}
 	marker, err := m.loadMarker()
 	shadow := err != nil || !marker.reclaimAllowed(m.now(), m.window) || m.olderBuildWroteSince(marker.WindowStartedAt)
 	sessionImageLegacyShadow.Store(shadow)
@@ -320,8 +325,13 @@ func (m *imageStoreMaintenance) olderBuildWroteSince(start time.Time) bool {
 	return false
 }
 
-// run is the daemon-lifetime loop.
+// run is the daemon-lifetime loop. Where the raw store is off it never
+// starts: no migration, reclaim or collection.
 func (m *imageStoreMaintenance) run(ctx context.Context) {
+	if !sessionImageRawStore {
+		m.logf("[image-store] raw store off on this platform: images stay base64 text, no maintenance pass")
+		return
+	}
 	if err := m.sleep(ctx, m.startDelay); err != nil {
 		return
 	}
@@ -362,6 +372,7 @@ func humanBytes(n int64) string {
 // metrics is the latest report, for GET /workass/metrics.
 func (m *imageStoreMaintenance) metrics() map[string]any {
 	out := map[string]any{
+		"rawStore":     sessionImageRawStore,
 		"legacyShadow": sessionImageLegacyShadow.Load(),
 		"newImages": map[string]any{
 			"cloned": sessionImageWriteStats.cloned.Load(), "written": sessionImageWriteStats.written.Load(),
@@ -642,6 +653,10 @@ func (m *imageStoreMaintenance) cleanupTemps() {
 
 // runOnce is one complete pass. It never runs twice at once.
 func (m *imageStoreMaintenance) runOnce(ctx context.Context) (report imageStoreReport, err error) {
+	if !sessionImageRawStore {
+		// Never reached through run; a direct call touches nothing either.
+		return imageStoreReport{StartedAt: m.now(), FinishedAt: m.now(), Phase: "off"}, nil
+	}
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
 	report = imageStoreReport{StartedAt: m.now(), Phase: "migrate"}
