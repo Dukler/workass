@@ -78,6 +78,11 @@ var sessionImageProtectedHomeDirs = []string{
 // network volumes and the automounter's roots.
 var sessionImageProtectedRoots = []string{"/Volumes", "/net", "/Network", "/automount"}
 
+// sessionImageExemptRoots are mount points the protected-roots rule skips.
+// Production leaves it empty; the test binary adds the scratch volume the
+// release gate mounts under /Volumes for its fixtures.
+var sessionImageExemptRoots []string
+
 // darwinDataVolumePrefix is the firmlinked path of the data volume:
 // /System/Volumes/Data/Users/me/Desktop is ~/Desktop.
 const darwinDataVolumePrefix = "/System/Volumes/Data"
@@ -171,8 +176,17 @@ func (g sessionImageSourceGuard) check(path string) error {
 				return fmt.Errorf("%w: under ~/%s", errSessionImageSourceProtected, dir)
 			}
 		}
+		exempt := false
+		for _, root := range sessionImageExemptRoots {
+			// A walk toward an exempt root passes its ancestors (/Volumes itself).
+			root = g.fold(filepath.ToSlash(filepath.Clean(root)))
+			if pathWithin(candidate, root) || pathWithin(root, candidate) {
+				exempt = true
+				break
+			}
+		}
 		for _, root := range sessionImageProtectedRoots {
-			if pathWithin(candidate, g.fold(root)) {
+			if !exempt && pathWithin(candidate, g.fold(root)) {
 				return fmt.Errorf("%w: under %s", errSessionImageSourceProtected, root)
 			}
 		}
