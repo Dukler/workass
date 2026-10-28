@@ -56,5 +56,18 @@ export function projectSteeringPresentation(messages: readonly Msg[]): SteeringP
 // Failed and cancelled replies stay: their state is the message.
 export function isEmptySettledReply(message: Msg): boolean {
   return message.role === 'assistant' && message.status === 'done'
-    && !(message.content ?? '').trim() && !message.events?.length && !message.images?.length;
+    && isNoReplyText(message.content ?? '') && !message.events?.length && !message.images?.length;
+}
+
+// Claude Code's own words for "nothing to say". It writes them as a synthetic
+// reply after a rate-limit stop or an interrupted turn, and the model copies
+// them when a background task wakes it up with nothing to add. Claude Code
+// never shows either; here they read as the end of the previous reply (user
+// 2026-10-28). The Claude host stops sending them; this hides the stored ones.
+// Mirrors NO_REPLY_PLACEHOLDERS in scripts/claude-native-host.mjs.
+const NO_REPLY_PLACEHOLDERS = new Set(['No response requested.', '(no content)']);
+
+function isNoReplyText(content: string): boolean {
+  const text = content.trim();
+  return !text || NO_REPLY_PLACEHOLDERS.has(text);
 }

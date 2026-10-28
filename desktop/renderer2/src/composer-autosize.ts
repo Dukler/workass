@@ -18,9 +18,20 @@ export function autosizeComposerTextarea(el: HTMLTextAreaElement, maxHeight = DE
     return;
   }
 
+  // Measuring collapses the box to one row, and reading scrollHeight forces a
+  // layout in that state: the transcript above grew by the draft's height and
+  // the browser clamped its scroll offset. A reader at the bottom of a long
+  // chat was left that far up on every keystroke of a multi-line draft, then
+  // pulled back down — the transcript bounced while the user typed (user
+  // 2026-10-28). Holding the composer box at its size keeps the measurement
+  // inside it.
+  const box = el.parentElement;
+  const heldMinHeight = box?.style.minHeight ?? '';
+  if (box) box.style.minHeight = `${box.offsetHeight}px`;
   el.style.height = 'auto';
   const full = el.scrollHeight;
   el.style.height = `${Math.min(full, maxHeight)}px`;
+  if (box) box.style.minHeight = heldMinHeight;
   // Below the cap the box always grows to fit, so it must not scroll. Only once
   // the draft reaches the cap do wheel/caret scrolling and the top fade engage.
   el.style.overflowY = full > maxHeight ? 'auto' : 'hidden';
