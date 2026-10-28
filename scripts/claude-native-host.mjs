@@ -22,6 +22,22 @@ let sdkPromise;
 
 const transientOAuthRefreshError = 'Failed to authenticate: OAuth session expired and could not be refreshed';
 
+// Claude Code's own words for "nothing to say". It writes them as a synthetic
+// reply after a rate-limit stop or an interrupted turn, and the model copies
+// them when a background task wakes it up with nothing to add. Claude Code
+// never shows either; forwarded, they read as the last line of the previous
+// reply (user 2026-10-28). Mirrored in renderer2 chat/steering-presentation.ts.
+const NO_REPLY_PLACEHOLDERS = ['No response requested.', '(no content)'];
+
+function isNoReplyPlaceholder(text) {
+  return NO_REPLY_PLACEHOLDERS.includes(String(text || '').trim());
+}
+
+function couldBeNoReplyPlaceholder(text) {
+  const start = String(text || '').trimStart();
+  return isNoReplyPlaceholder(start) || NO_REPLY_PLACEHOLDERS.some((placeholder) => placeholder.startsWith(start));
+}
+
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
@@ -490,6 +506,9 @@ class ClaudeSession {
     this.answeredQuestions = new Set();
     this.partialTextSeen = false;
     this.partialThoughtSeen = false;
+    // The streamed start of the current text block, held while it could still
+    // be a no-reply placeholder; null when nothing is held.
+    this.heldText = null;
     this.providerRealm = null;
   }
 
@@ -1356,10 +1375,14 @@ class ClaudeSession {
     }
     if (message.type === 'assistant') {
       if (!parentToolUseId && message.message?.usage) this.contextTokens = contextTokens(message.message.usage);
+      if (!parentToolUseId) this.releaseHeldText();
       this.handleAssistantContent(message.message?.content, parentToolUseId);
       return;
     }
     if (message.type === 'result') {
+      // Every finished block was released at its stop. Still held here means
+      // the stream was cut inside a placeholder's first words: nothing to show.
+      this.heldText = null;
       // D8: a result stamped with a non-human origin belongs to the turn the
       // harness started, not to a human prompt that may be queued alongside it.
       // Settling activePrompt or consuming a steer boundary here would end the
@@ -1470,11 +1493,19 @@ class ClaudeSession {
       if (Number.isFinite(tokens)) this.turnTokensCurrent = tokens;
       return;
     }
+    if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
+      this.heldText = '';
+      return;
+    }
+    if (event.type === 'content_block_stop') {
+      this.releaseHeldText();
+      return;
+    }
     if (event.type !== 'content_block_delta') return;
     if (event.delta?.type === 'text_delta' && event.delta.text) {
       this.partialTextSeen = true;
       this.noteTurnPhase('writing');
-      this.emitPromptUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: event.delta.text } });
+      this.emitStreamedText(event.delta.text);
     }
     if (event.delta?.type === 'thinking_delta' && event.delta.thinking) {
       this.partialThoughtSeen = true;
@@ -1483,11 +1514,36 @@ class ClaudeSession {
     }
   }
 
+  // A text block is held only while everything streamed so far could still be
+  // a no-reply placeholder: the first word that rules that out releases it, so
+  // a real answer is delayed by a delta at most.
+  emitStreamedText(text) {
+    if (this.heldText !== null) {
+      const held = this.heldText + text;
+      if (couldBeNoReplyPlaceholder(held)) {
+        this.heldText = held;
+        return;
+      }
+      this.heldText = null;
+      text = held;
+    }
+    this.emitPromptUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+  }
+
+  // The block ended: drop it only when it was exactly a placeholder.
+  releaseHeldText() {
+    const held = this.heldText;
+    this.heldText = null;
+    if (held && !isNoReplyPlaceholder(held)) {
+      this.emitPromptUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: held } });
+    }
+  }
+
   handleAssistantContent(content, parentToolUseId = '') {
     for (const block of Array.isArray(content) ? content : []) {
       if (block?.type === 'tool_use') this.startTool(block, parentToolUseId);
       else if (parentToolUseId) continue;
-      else if (block?.type === 'text' && block.text && !this.partialTextSeen) {
+      else if (block?.type === 'text' && block.text && !this.partialTextSeen && !isNoReplyPlaceholder(block.text)) {
         this.emitPromptUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: block.text } });
       } else if (block?.type === 'thinking' && block.thinking && !this.partialThoughtSeen) {
         this.emitPromptUpdate({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: block.thinking } });

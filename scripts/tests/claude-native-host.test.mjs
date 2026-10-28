@@ -213,6 +213,27 @@ test('official Claude SDK host marks only human-typed prompts with a human origi
   assert.equal(await echo(6, { workassCommandInput: { text: 'notice', humanAuthored: false, taskNotification: true } }), 'origin=null');
 });
 
+// Claude Code's "nothing to say" placeholder, synthetic or written by the
+// model on a background-task wake, read as the end of the previous reply.
+test('native Claude host never forwards Claude Code\'s no-reply placeholder', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  const before = peer.messages.length;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:no-reply-placeholder]' }],
+  } });
+  const prompted = await peer.waitFor((message) => message.id === 3);
+  assert.equal(prompted.error, undefined, JSON.stringify(prompted));
+  const chunks = peer.messages.slice(before)
+    .filter((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_message_chunk')
+    .map((message) => message.params.update.content.text);
+  assert.equal(chunks.join(''), 'No, the batch is still running.');
+});
+
 test('native Claude host preserves external MCP stdio configuration', async (t) => {
   const peer = startHost({ WORKASS_CLAUDE_FIXTURE_REQUIRE_STDIO_MCP: '1' });
   t.after(() => peer.child.kill('SIGKILL'));

@@ -147,3 +147,19 @@ test('a reply that finished having said and done nothing leaves no row', () => {
   const ids = projectSteeringPresentation(rows).transcriptMessages.map((message) => message.id);
   assert.deepEqual(ids, ['prompt', 'one', 'tools-only', 'failed', 'running', 'two']);
 });
+
+// Claude Code's "nothing to say" placeholder, synthetic or copied by the model
+// on a background-task wake, read as the last line of the previous reply.
+test('a reply that is only Claude Code\'s nothing-to-say placeholder leaves no row', () => {
+  const rows = [
+    user('prompt', 'max out the compute'),
+    assistant('answer', 'Growing the labelling in batches of 10.'),
+    assistant('wake', 'No response requested.'),
+    assistant('synthetic', '(no content)\n'),
+    assistant('quoted', 'The CLI wrote "No response requested." there.'),
+    assistant('with-tools', 'No response requested.', { events: [{ key: 't', at: 0, kind: 'thinking', text: 'checking' }] as Msg['events'] }),
+    assistant('failed', 'No response requested.', { status: 'failed' }),
+  ];
+  const ids = projectSteeringPresentation(rows).transcriptMessages.map((message) => message.id);
+  assert.deepEqual(ids, ['prompt', 'answer', 'quoted', 'with-tools', 'failed']);
+});

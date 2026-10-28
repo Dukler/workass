@@ -422,6 +422,26 @@ class FixtureQuery {
         await this.endTurn(text);
         continue;
       }
+      // Claude Code's "nothing to say" placeholder: once as its synthetic
+      // reply, once streamed by the model, then a real answer that starts
+      // with the same word.
+      if (text.includes('[fixture:no-reply-placeholder]')) {
+        const base = { parent_tool_use_id: null, session_id: this.sessionId };
+        const stream = (event) => this.emit({ ...base, type: 'stream_event', uuid: randomUUID(), event });
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }] } });
+        stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'No response' } });
+        stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' requested.' } });
+        stream({ type: 'content_block_stop', index: 0 });
+        this.emit({ ...base, type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'No response requested.' }] } });
+        stream({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
+        stream({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'No' } });
+        stream({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: ', the batch' } });
+        stream({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: ' is still running.' } });
+        stream({ type: 'content_block_stop', index: 1 });
+        this.emit(this.result('success'));
+        continue;
+      }
       // Echo how the host marked this prompt, so a test can see the origin
       // Claude Code would read (human-only features such as ultracode).
       if (text.includes('[fixture:echo-origin]')) {

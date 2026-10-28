@@ -12,7 +12,11 @@ function textarea(overrides: Record<string, unknown> = {}) {
     scrollHeight: 101,
     scrollTop: 0,
     style: { height: '', overflowY: '' },
-    parentElement: { classList: { toggle: (name: string, on: boolean) => classes.set(name, on) } },
+    parentElement: {
+      classList: { toggle: (name: string, on: boolean) => classes.set(name, on) },
+      style: { minHeight: '' },
+      offsetHeight: 142,
+    },
     getBoundingClientRect: () => ({ width: 786 }),
     ...overrides,
   };
@@ -35,6 +39,27 @@ test('autosize fits the complete draft until the cap and collapses only when emp
   autosizeComposerTextarea(empty.el);
   assert.equal(empty.el.style.height, '');
   assert.equal(empty.el.style.overflowY, 'hidden');
+});
+
+test('measuring a multi-line draft never shrinks the composer box under the transcript', () => {
+  const box = { classList: { toggle: () => undefined }, style: { minHeight: '' }, offsetHeight: 142 };
+  const heldDuringCollapse: string[] = [];
+  let height = '120px';
+  const style = {
+    overflowY: '',
+    get height() { return height; },
+    set height(value: string) {
+      if (value === 'auto') heldDuringCollapse.push(box.style.minHeight);
+      height = value;
+    },
+  };
+  const { el } = textarea({ style, parentElement: box });
+
+  autosizeComposerTextarea(el);
+
+  assert.deepEqual(heldDuringCollapse, ['142px'], 'the box keeps its height while the textarea measures');
+  assert.equal(el.style.height, '101px');
+  assert.equal(box.style.minHeight, '', 'the hold is released once the new height is set');
 });
 
 test('a post-switch width change triggers one fresh draft measurement', () => {
