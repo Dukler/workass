@@ -1,7 +1,13 @@
 #!/bin/sh
-# Publish and read back the three immutable Windows update assets. This script
-# never activates an installed app; discovery and installation remain a user
-# click in the packaged Windows renderer.
+# Publish and read back the immutable update assets of one GitHub release: the
+# three Windows ones, and — when --linux-release-dir is given — the three
+# headless Linux ones beside them. One tag carries every non-Mac target, so a
+# Windows client and a Linux daemon read their own manifest from the same
+# immutable release and never see each other's.
+#
+# This script never activates an installed app or daemon; on Windows
+# installation remains a user click, and on Linux it remains an explicit
+# authorized workass_apply_update for that exact machine.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -12,9 +18,10 @@ release_dir=''
 repository=Dukler/workass
 verify_only=0
 receipt=''
+linux_release_dir=''
 
 usage() {
-  echo "usage: scripts/release/publish-windows.sh --version X.Y.Z --commit FULL_SHA --release-dir DIR [--verify-only] [--receipt FILE]"
+  echo "usage: scripts/release/publish-windows.sh --version X.Y.Z --commit FULL_SHA --release-dir DIR [--linux-release-dir DIR] [--verify-only] [--receipt FILE]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -22,6 +29,7 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || { echo "--version needs a value" >&2; exit 2; }; version=$2; shift 2 ;;
     --commit) [ "$#" -ge 2 ] || { echo "--commit needs a value" >&2; exit 2; }; commit=$2; shift 2 ;;
     --release-dir) [ "$#" -ge 2 ] || { echo "--release-dir needs a value" >&2; exit 2; }; release_dir=$2; shift 2 ;;
+    --linux-release-dir) [ "$#" -ge 2 ] || { echo "--linux-release-dir needs a value" >&2; exit 2; }; linux_release_dir=$2; shift 2 ;;
     --verify-only) verify_only=1; shift ;;
     --receipt) [ "$#" -ge 2 ] || { echo "--receipt needs a value" >&2; exit 2; }; receipt=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -32,6 +40,7 @@ done
 printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || { echo "invalid version" >&2; exit 2; }
 printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$' || { echo "invalid commit" >&2; exit 2; }
 case "$release_dir" in /*) ;; *) echo "--release-dir must be absolute" >&2; exit 2 ;; esac
+case "$linux_release_dir" in ''|/*) ;; *) echo "--linux-release-dir must be absolute" >&2; exit 2 ;; esac
 case "$receipt" in ''|/*) ;; *) echo "--receipt must be absolute" >&2; exit 2 ;; esac
 for tool in gh curl node shasum cmp; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing Windows publisher tool: $tool" >&2; exit 1; }
@@ -45,6 +54,17 @@ for name in "$archive" "$manifest" "$checksums"; do
   [ -f "$release_dir/$name" ] || { echo "Windows release asset is missing: $release_dir/$name" >&2; exit 1; }
 done
 (cd "$release_dir" && shasum -a 256 -c "$checksums") >/dev/null
+linux_archive="Workass-$version-linux-amd64.tar.gz"
+linux_manifest=workass-linux-amd64-release.json
+linux_checksums=SHA256SUMS-linux-amd64
+if [ -n "$linux_release_dir" ]; then
+  for name in "$linux_archive" "$linux_manifest" "$linux_checksums"; do
+    [ -f "$linux_release_dir/$name" ] || { echo "Linux release asset is missing: $linux_release_dir/$name" >&2; exit 1; }
+  done
+  (cd "$linux_release_dir" && shasum -a 256 -c "$linux_checksums") >/dev/null
+fi
+release_title="Workass $version — Windows portable"
+[ -z "$linux_release_dir" ] || release_title="Workass $version — Windows portable + Linux headless"
 gh auth status >/dev/null
 
 tmp_root=$(mktemp -d "$repo_root/.dev/github-release.XXXXXX")
@@ -76,29 +96,41 @@ if (compare(parse(version), parse(latest.tagName)) < 0) {
 NODE
 fi
 
+# Every asset is printed as "<root>/<name>" so a missing one is re-uploaded
+# from the platform directory it actually lives in.
 validate_release() {
   mode=$1
-  node - "$view" "$version" "$commit" "$release_dir" "$mode" <<'NODE'
+  node - "$view" "$version" "$commit" "$release_dir" "$mode" "$release_title" "$linux_release_dir" <<'NODE'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const [viewFile, version, commit, root, mode] = process.argv.slice(2);
+const [viewFile, version, commit, root, mode, expectedTitle, linuxRoot] = process.argv.slice(2);
 const release = JSON.parse(fs.readFileSync(viewFile, 'utf8'));
-const expectedTitle = `Workass ${version} — Windows portable`;
 if (release.tagName !== `v${version}` || release.targetCommitish !== commit || release.name !== expectedTitle ||
     release.isDraft !== false || release.isPrerelease !== false) {
   throw new Error('GitHub release identity, target, title, or stable state does not match');
 }
-const names = [`Workass-${version}-windows-amd64.zip`, 'workass-windows-amd64-release.json', 'SHA256SUMS'];
+const expected = [
+  [root, `Workass-${version}-windows-amd64.zip`],
+  [root, 'workass-windows-amd64-release.json'],
+  [root, 'SHA256SUMS'],
+];
+if (linuxRoot) {
+  expected.push(
+    [linuxRoot, `Workass-${version}-linux-amd64.tar.gz`],
+    [linuxRoot, 'workass-linux-amd64-release.json'],
+    [linuxRoot, 'SHA256SUMS-linux-amd64'],
+  );
+}
 const assets = new Map((release.assets || []).map((asset) => [asset.name, asset]));
 const missing = [];
-for (const name of names) {
-  const file = path.join(root, name);
+for (const [assetRoot, name] of expected) {
+  const file = path.join(assetRoot, name);
   const size = fs.statSync(file).size;
   const digest = `sha256:${crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')}`;
   const remote = assets.get(name);
   if (!remote) {
-    missing.push(name);
+    missing.push(file);
     continue;
   }
   if (remote.size !== size || remote.digest !== digest) throw new Error(`immutable GitHub asset mismatch: ${name}`);
@@ -122,8 +154,8 @@ elif gh release view "$tag" --repo "$repository" \
     old_ifs=$IFS
     IFS='
 '
-    for name in $missing_assets; do
-      gh release upload "$tag" "$release_dir/$name" --repo "$repository"
+    for asset in $missing_assets; do
+      gh release upload "$tag" "$asset" --repo "$repository"
     done
     IFS=$old_ifs
   fi
@@ -131,12 +163,17 @@ else
   if tag_commit=$(gh api "repos/$repository/commits/$tag" --jq .sha 2>/dev/null); then
     [ "$tag_commit" = "$commit" ] || { echo "existing tag $tag targets a different commit" >&2; exit 1; }
   fi
-  gh release create "$tag" \
-    "$release_dir/$archive" "$release_dir/$manifest" "$release_dir/$checksums" \
+  set -- "$release_dir/$archive" "$release_dir/$manifest" "$release_dir/$checksums"
+  notes="Portable Windows update. Installation remains an explicit in-app click."
+  if [ -n "$linux_release_dir" ]; then
+    set -- "$@" "$linux_release_dir/$linux_archive" "$linux_release_dir/$linux_manifest" "$linux_release_dir/$linux_checksums"
+    notes="Portable Windows update plus the headless Linux daemon tree. Installation remains an explicit in-app click on Windows, and an explicitly authorized per-machine activation on a Linux service host."
+  fi
+  gh release create "$tag" "$@" \
     --repo "$repository" \
     --target "$commit" \
-    --title "Workass $version — Windows portable" \
-    --notes "Portable Windows update. Installation remains an explicit in-app click."
+    --title "$release_title" \
+    --notes "$notes"
 fi
 
 verified=0
@@ -153,41 +190,63 @@ while [ "$attempt" -le 6 ]; do
 done
 [ "$verified" -eq 1 ] || { validate_release complete; exit 1; }
 
-latest="$tmp_root/latest.json"
-latest_url="https://github.com/$repository/releases/latest/download/$manifest"
-latest_verified=0
-attempt=1
-while [ "$attempt" -le 6 ]; do
-  if curl -fLsS --max-time 30 "$latest_url?workass_release=$commit" -o "$latest" && cmp -s "$release_dir/$manifest" "$latest"; then
-    latest_verified=1
-    break
-  fi
-  sleep 2
-  attempt=$((attempt + 1))
-done
-[ "$latest_verified" -eq 1 ] || { echo "GitHub latest manifest does not resolve to the published immutable bytes" >&2; exit 1; }
+# Both clients discover through the same stable /releases/latest/download/
+# redirect, so both manifests have to resolve there before the release is
+# called published. A Linux daemon that cannot read its own manifest is a
+# machine that silently never updates.
+verify_latest_manifest() {
+  manifest_name=$1
+  local_copy=$2
+  latest="$tmp_root/latest-$manifest_name"
+  latest_url="https://github.com/$repository/releases/latest/download/$manifest_name"
+  attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if curl -fLsS --max-time 30 "$latest_url?workass_release=$commit" -o "$latest" && cmp -s "$local_copy" "$latest"; then
+      echo "$latest_url"
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  echo "GitHub latest $manifest_name does not resolve to the published immutable bytes" >&2
+  return 1
+}
+latest_url=$(verify_latest_manifest "$manifest" "$release_dir/$manifest")
+linux_latest_url=''
+if [ -n "$linux_release_dir" ]; then
+  linux_latest_url=$(verify_latest_manifest "$linux_manifest" "$linux_release_dir/$linux_manifest")
+fi
 
 release_url=$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).url)' "$view")
 if [ -n "$receipt" ]; then
-  node - "$receipt" "$view" "$release_dir" "$version" "$commit" "$repository" "$latest_url" <<'NODE'
+  node - "$receipt" "$view" "$release_dir" "$version" "$commit" "$repository" "$latest_url" "$linux_release_dir" "$linux_latest_url" <<'NODE'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const [receiptFile, viewFile, root, version, commit, repository, latestManifestUrl] = process.argv.slice(2);
+const [receiptFile, viewFile, root, version, commit, repository, latestManifestUrl, linuxRoot, linuxLatestManifestUrl] = process.argv.slice(2);
 const release = JSON.parse(fs.readFileSync(viewFile, 'utf8'));
 const names = {
   archive: `Workass-${version}-windows-amd64.zip`,
   manifest: 'workass-windows-amd64-release.json',
   checksums: 'SHA256SUMS',
 };
-const artifact = (name) => {
-  const file = path.join(root, name);
+const linuxNames = {
+  archive: `Workass-${version}-linux-amd64.tar.gz`,
+  manifest: 'workass-linux-amd64-release.json',
+  checksums: 'SHA256SUMS-linux-amd64',
+};
+const artifactIn = (assetRoot) => (name) => {
+  const file = path.join(assetRoot, name);
   const bytes = fs.readFileSync(file);
   return { name, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
 };
+const artifact = artifactIn(root);
 const expected = {
   schemaVersion: 1,
   product: 'Workass',
+  // The receipt kind is unchanged on purpose: it is referenced by name in the
+  // paired-publication verifier and by the ship receipt. Linux rides along as
+  // additive fields rather than a renamed document.
   kind: 'windows-publication',
   status: 'verified',
   repository,
@@ -197,6 +256,10 @@ const expected = {
   releaseUrl: release.url,
   latestManifestUrl,
   assets: Object.fromEntries(Object.entries(names).map(([key, name]) => [key, artifact(name)])),
+  ...(linuxRoot ? {
+    linuxLatestManifestUrl,
+    linux: Object.fromEntries(Object.entries(linuxNames).map(([key, name]) => [key, artifactIn(linuxRoot)(name)])),
+  } : {}),
 };
 let recorded = null;
 try { recorded = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch {}
@@ -219,4 +282,6 @@ echo "WORKASS_WINDOWS_GITHUB_RELEASE_VERIFIED"
 echo "version=$version"
 echo "commit=$commit"
 echo "release=$release_url"
+[ -z "$linux_release_dir" ] || echo "WORKASS_LINUX_GITHUB_RELEASE_VERIFIED"
+[ -z "$linux_latest_url" ] || echo "linux_latest_manifest=$linux_latest_url"
 [ -z "$receipt" ] || echo "windows_publication=$receipt"

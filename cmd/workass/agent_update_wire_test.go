@@ -10,7 +10,7 @@ import (
 func TestAgentUpdateWireRoutesOnlyTheExactMachine(t *testing.T) {
 	router := &stubAgentChatRemoteRouter{result: map[string]any{"ok": true}}
 	hub := wire.NewHub()
-	registerAgentUpdateWireHandlers(hub, router, "machine-work")
+	registerAgentUpdateWireHandlers(hub, router, nil, "machine-work")
 
 	result, err := hub.Invoke(agentUpdateStatusChannel, []any{map[string]any{"machine_id": "machine-work"}})
 	if err != nil || mapFromAnyMain(result)["ok"] != true {
@@ -27,7 +27,7 @@ func TestAgentUpdateWireRoutesOnlyTheExactMachine(t *testing.T) {
 func TestAgentUpdateWireFencesAuthorizedApplyBeforeRenderer(t *testing.T) {
 	router := &stubAgentChatRemoteRouter{result: map[string]any{"started": true}}
 	hub := wire.NewHub()
-	registerAgentUpdateWireHandlers(hub, router, "machine-work")
+	registerAgentUpdateWireHandlers(hub, router, nil, "machine-work")
 	valid := map[string]any{
 		"machine_id": "machine-work", "expected_current_version": "1.2.3", "expected_target_version": "1.2.4",
 		"authorization": "update machine-work from 1.2.3 to 1.2.4", "operation_id": "update-work-1.2.4",

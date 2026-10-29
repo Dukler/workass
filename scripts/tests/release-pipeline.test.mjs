@@ -9,6 +9,9 @@ import {
   fileArtifact,
   gateReceiptTool,
   inputTool,
+  makeLinuxCandidate,
+  makeMacCandidate,
+  makeWindowsCandidate,
   makeReleaseInput,
   nextVersionTool,
   publicationTool,
@@ -212,12 +215,16 @@ test('candidate receipt binds both archives, both feeds, input, version, and com
     'frontier-hosts/windows-amd64/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
   ]) write(path.join(windowsBundle, ...relative.split('/')), relative);
 
+  makeLinuxCandidate(candidate, version, commit);
+
   const recorded = run(process.execPath, [candidateTool, 'record', '--root', candidate, '--input', input,
     '--version', version, '--build', build, '--commit', commit]);
   assert.equal(recorded.status, 0, recorded.stderr);
   const receipt = JSON.parse(fs.readFileSync(path.join(candidate, 'receipt.json'), 'utf8'));
   assert.equal(receipt.commit, commit);
-  assert.deepEqual(Object.keys(receipt.artifacts).sort(), ['macos', 'macosFeed', 'windows', 'windowsFeed']);
+  assert.deepEqual(Object.keys(receipt.artifacts).sort(),
+    ['linux', 'linuxFeed', 'macos', 'macosFeed', 'windows', 'windowsFeed']);
+  assert.equal(receipt.artifacts.linux.name, `Workass-${version}-linux-amd64.tar.gz`);
 
   fs.appendFileSync(path.join(windowsRoot, 'workass-windows-amd64-release.json'), ' ');
   const rerecorded = run(process.execPath, [candidateTool, 'record', '--root', candidate, '--input', input,
@@ -255,6 +262,11 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
   write(path.join(windowsRoot, windowsArchiveName), 'windows archive');
   write(path.join(windowsRoot, 'workass-windows-amd64-release.json'), 'windows feed');
   write(path.join(windowsRoot, 'SHA256SUMS'), 'windows sums');
+  const linuxRoot = path.join(candidate, 'linux', version);
+  const linuxArchiveName = `Workass-${version}-linux-amd64.tar.gz`;
+  write(path.join(linuxRoot, linuxArchiveName), 'linux archive');
+  write(path.join(linuxRoot, 'workass-linux-amd64-release.json'), 'linux feed');
+  write(path.join(linuxRoot, 'SHA256SUMS-linux-amd64'), 'linux sums');
   write(path.join(candidate, 'input-manifest.json'), 'input');
   const candidateReceipt = {
     schemaVersion: 1,
@@ -268,6 +280,8 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
       macosFeed: fileArtifact(path.join(candidate, 'macos-feed', 'workass-darwin-arm64-release.json')),
       windows: fileArtifact(path.join(windowsRoot, windowsArchiveName)),
       windowsFeed: fileArtifact(path.join(windowsRoot, 'workass-windows-amd64-release.json')),
+      linux: fileArtifact(path.join(linuxRoot, linuxArchiveName)),
+      linuxFeed: fileArtifact(path.join(linuxRoot, 'workass-linux-amd64-release.json')),
     },
   };
   write(path.join(candidate, 'receipt.json'), `${JSON.stringify(candidateReceipt)}\n`);
@@ -287,6 +301,12 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
       manifest: fileArtifact(path.join(windowsRoot, 'workass-windows-amd64-release.json')),
       checksums: fileArtifact(path.join(windowsRoot, 'SHA256SUMS')),
     },
+    linuxLatestManifestUrl: 'https://github.com/Dukler/workass/releases/latest/download/workass-linux-amd64-release.json',
+    linux: {
+      archive: fileArtifact(path.join(linuxRoot, linuxArchiveName)),
+      manifest: fileArtifact(path.join(linuxRoot, 'workass-linux-amd64-release.json')),
+      checksums: fileArtifact(path.join(linuxRoot, 'SHA256SUMS-linux-amd64')),
+    },
   };
   write(path.join(candidate, 'windows-publication.json'), `${JSON.stringify(windowsPublication)}\n`);
 
@@ -298,6 +318,102 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
 
   fs.appendFileSync(path.join(macosOutput, archiveName), 'changed');
   assert.notEqual(run(process.execPath, [publicationTool, 'verify', ...args]).status, 0);
+});
+
+test('candidate verification binds the headless Linux artifact and refuses a mislabelled one', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-release-linux-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const version = '1.2.3';
+  const build = '20260814010101';
+  const input = path.join(root, 'input');
+  write(path.join(input, 'manifest.json'), '{}\n');
+
+  const stage = (name, options) => {
+    const candidate = path.join(root, name);
+    makeMacCandidate(candidate, version, build);
+    makeWindowsCandidate(candidate, version);
+    makeLinuxCandidate(candidate, version, commit, options);
+    return candidate;
+  };
+
+  const good = stage('good');
+  const verified = run(process.execPath, [candidateTool, 'verify', '--root', good, '--input', input,
+    '--version', version, '--build', build, '--commit', commit]);
+  assert.equal(verified.status, 0, verified.stderr);
+
+  // A Linux daemon must never be handed the Windows artifact, so a feed whose
+  // platform, arch or headless flag is wrong is not a publishable candidate.
+  for (const [name, mutate] of [
+    ['windows platform', (feed) => { feed.platform = 'windows'; }],
+    ['arm64 arch', (feed) => { feed.arch = 'arm64'; }],
+    ['not headless', (feed) => { feed.headless = false; }],
+    ['no service', (feed) => { delete feed.service; }],
+    ['app-bundle url', (feed) => { feed.artifacts.update.url = 'https://example.invalid/other.tar.gz'; }],
+    ['wrong digest', (feed) => { feed.artifacts.update.sha256 = 'f'.repeat(64); }],
+  ]) {
+    const archiveBytes = Buffer.from('linux archive');
+    const archiveName = `Workass-${version}-linux-amd64.tar.gz`;
+    const feed = {
+      schemaVersion: 1, product: 'Workass', version, platform: 'linux', arch: 'amd64',
+      headless: true, service: 'systemd-user',
+      artifacts: { update: {
+        name: archiveName,
+        url: `https://github.com/Dukler/workass/releases/download/v${version}/${archiveName}`,
+        sha256: sha256(archiveBytes), size: archiveBytes.length,
+      } },
+    };
+    mutate(feed);
+    const broken = stage(`broken-${name.replace(/\s+/g, '-')}`, { feed });
+    const result = run(process.execPath, [candidateTool, 'verify', '--root', broken, '--input', input,
+      '--version', version, '--build', build, '--commit', commit]);
+    assert.notEqual(result.status, 0, `${name} candidate was accepted`);
+    assert.match(result.stderr, /Linux candidate manifest/);
+  }
+
+  // An install is only complete if every piece a headless host needs is in the
+  // bundle. Removing the Pi host is the exact gap the hand-provisioned record
+  // had to close by hand.
+  const incomplete = stage('incomplete');
+  fs.rmSync(path.join(incomplete, 'linux', version, `Workass-${version}-linux-amd64`,
+    'frontier-hosts', 'linux-amd64', 'pi-native-host.mjs'));
+  const missing = run(process.execPath, [candidateTool, 'verify', '--root', incomplete, '--input', input,
+    '--version', version, '--build', build, '--commit', commit]);
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /pi-native-host\.mjs/);
+});
+
+test('the canonical lane stages, verifies and publishes the Linux artifact with the Windows one', () => {
+  const orchestrator = fs.readFileSync(path.join(releaseRoot, 'stage-updates.sh'), 'utf8');
+  const preparer = fs.readFileSync(path.join(releaseRoot, 'prepare-input.sh'), 'utf8');
+  const publisher = fs.readFileSync(path.join(releaseRoot, 'publish-windows.sh'), 'utf8');
+  const linuxStage = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-linux-headless.sh'), 'utf8');
+
+  // The input carries a Linux daemon, Node and the native hosts, because a
+  // headless install assembled from three places is not one artifact.
+  assert.match(preparer, /GOOS=linux GOARCH=amd64 go build[\s\S]{0,200}cmd\/workass\b/);
+  assert.match(preparer, /cmd\/workass-agent/);
+  assert.match(preparer, /vendor-node-runtime\.sh" --target linux-amd64/);
+  assert.match(preparer, /workass_release_run_phase linux_frontier vendor_linux_frontier/);
+
+  const stagePhase = orchestrator.indexOf('workass_release_run_phase stage_linux stage_linux');
+  const verifyPhase = orchestrator.indexOf('workass_release_run_phase verify_candidates verify_candidate');
+  assert.ok(stagePhase >= 0 && stagePhase < verifyPhase);
+  assert.match(orchestrator, /--linux-release-dir "\$candidate\/linux\/\$version"/);
+  // The archive is unpacked and the daemon's own file type checked on the
+  // build host; a Mach-O binary in a Linux release would otherwise only be
+  // discovered by the machine it bricks.
+  assert.match(orchestrator, /ELF 64-bit\.\*x86-64/);
+
+  // Both manifests must resolve through the stable latest redirect, and the
+  // Linux assets are additive on the same tag rather than a second release.
+  assert.match(publisher, /workass-linux-amd64-release\.json/);
+  assert.match(publisher, /verify_latest_manifest "\$linux_manifest"/);
+  assert.doesNotMatch(publisher, /gh release create "v\$version-linux"/);
+
+  // No Electron in a bundle with no window, and no npm on the release host.
+  assert.doesNotMatch(linuxStage, /vendor-electron-runtime|resources\/app|npm run build/);
+  assert.match(linuxStage, /headless: true/);
+  assert.match(linuxStage, /service: 'systemd-user'/);
 });
 
 test('canonical pipeline stages both platforms from one verified input and publishes only explicitly', () => {

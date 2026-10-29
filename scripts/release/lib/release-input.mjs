@@ -17,6 +17,13 @@ const inputPaths = Object.freeze({
   windowsElectron: 'windows/electron/win32-x64',
   windowsNode: 'windows/runtime/node/windows-amd64',
   windowsFrontierHosts: 'windows/runtime/frontier-hosts/windows-amd64',
+  // Linux ships a headless daemon tree: no Electron, no renderer resources,
+  // because a service host has no window to put them in.
+  linuxDaemon: 'linux/runtime/workass',
+  linuxTools: 'linux/runtime/workass-tools',
+  linuxAgent: 'linux/runtime/workass-agent',
+  linuxNode: 'linux/runtime/node/linux-amd64',
+  linuxFrontierHosts: 'linux/runtime/frontier-hosts/linux-amd64',
 });
 
 function fail(message) {

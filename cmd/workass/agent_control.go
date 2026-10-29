@@ -19,6 +19,9 @@ type agentControlHandler struct {
 	chats       *chatControlCoordinator
 	artifacts   *artifacthost.Registry
 	remoteChats agentChatRemoteRouter
+	// headlessUpdates is set only on an install with no Electron shell. When it
+	// is present it owns the update.* family; otherwise the renderer does.
+	headlessUpdates *headlessUpdateService
 	// selfMachineID lets an explicit fleet machine id that happens to name THIS
 	// machine take the ordinary local path, so "machine" is a uniform argument
 	// rather than a switch between two different tools.
@@ -140,6 +143,18 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	case "update.targets", "update.status", "update.apply":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
+		}
+		// A headless daemon answers for itself; a packaged install asks its
+		// stamped renderer, which owns the transactional UpdateManager.
+		if h.headlessUpdates.available() {
+			if request.Method == "update.targets" {
+				return h.headlessUpdates.Targets(r.Context())
+			}
+			if strings.TrimSpace(fieldString(params, "machine_id")) == "" {
+				params = copyAnyMap(params)
+				params["machine_id"] = h.selfMachineID
+			}
+			return h.headlessUpdates.headlessUpdateCall(r.Context(), request.Method, params)
 		}
 		if h.remoteChats == nil {
 			return nil, errors.New("Workass updater MCP router has no local renderer")

@@ -1,7 +1,12 @@
 #!/bin/sh
 # Canonical private release lane: prepare one immutable source input, stage and
-# verify both platform updates, then optionally publish. It never clicks either
+# verify every platform update, then optionally publish. It never clicks any
 # updater and therefore never replaces the user's manual activation decision.
+#
+# Three targets: the Mac app bundle through its local feed, the portable
+# Windows app, and the headless Linux daemon tree. The last one has no window,
+# so its artifact is a service install rather than an app, and it is published
+# as additional assets on the same GitHub release the Windows client reads.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -29,7 +34,7 @@ Options:
   --candidate DIR        isolated candidate output
   --macos-output DIR     local Mac update feed used only with --publish
   --offline              require all pinned runtimes to be cached
-  --publish              publish GitHub Windows assets and Mac local feed
+  --publish              publish GitHub Windows + Linux assets and the Mac local feed
 
 Without --publish, production feeds and GitHub are read-only.
 EOF
@@ -73,7 +78,7 @@ export WORKASS_RELEASE_TIMING_FILE WORKASS_RELEASE_PHASE_LOG_DIR
 mkdir -p "$WORKASS_RELEASE_PHASE_LOG_DIR"
 release_started=$(workass_release_now)
 
-for tool in node ditto unzip codesign plutil file shasum cmp awk diff; do
+for tool in node ditto unzip tar codesign plutil file shasum cmp awk diff; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing release staging tool: $tool" >&2; exit 1; }
 done
 
@@ -99,6 +104,13 @@ stage_windows() {
     --output-root "$candidate/windows"
 }
 
+stage_linux() {
+  "$repo_root/scripts/stage-linux-headless.sh" \
+    --version "$version" \
+    --release-input "$input" \
+    --output-root "$candidate/linux"
+}
+
 safe_zip_entries() {
   zip_file=$1
   unzip -Z1 "$zip_file" | LC_ALL=C awk '
@@ -114,6 +126,9 @@ verify_candidate() {
     --version "$version" --build "$build_number" --commit "$commit"
 
   mac_zip="$candidate/macos-feed/Workass-$version-darwin-arm64.zip"
+  linux_root="$candidate/linux/$version"
+  linux_bundle="$linux_root/Workass-$version-linux-amd64"
+  linux_archive="$linux_root/Workass-$version-linux-amd64.tar.gz"
   windows_root="$candidate/windows/$version"
   windows_bundle="$windows_root/Workass-$version-windows-amd64"
   windows_zip="$windows_root/Workass-$version-windows-amd64.zip"
@@ -155,6 +170,21 @@ NODE
   file "$extracted_windows_bundle/workass-tools.exe" | grep -Eq 'PE32\+ executable.*x86-64'
   node "$repo_root/desktop/scripts/stamp-windows-icon.mjs" --verify \
     --exe "$extracted_windows_bundle/Workass.exe" --icon "$repo_root/desktop/assets/icon.ico"
+
+  # The Linux archive is extracted and inspected on the build host for the same
+  # reason the Windows one is: a cross-compiled binary that is not actually a
+  # Linux ELF, or an archive that unpacks somewhere other than its own bundle
+  # directory, is a release that bricks a headless machine with no window to
+  # show the error in.
+  mkdir -p "$verify_root/linux"
+  tar -xzf "$linux_archive" -C "$verify_root/linux"
+  extracted_linux_bundle="$verify_root/linux/Workass-$version-linux-amd64"
+  diff -qr "$linux_bundle" "$extracted_linux_bundle" >/dev/null
+  file "$extracted_linux_bundle/workass" | grep -Eq 'ELF 64-bit.*x86-64'
+  file "$extracted_linux_bundle/workass-tools" | grep -Eq 'ELF 64-bit.*x86-64'
+  file "$extracted_linux_bundle/workass-agent" | grep -Eq 'ELF 64-bit.*x86-64'
+  file "$extracted_linux_bundle/node/linux-amd64/bin/node" | grep -Eq 'ELF 64-bit.*x86-64'
+  [ -x "$extracted_linux_bundle/workass" ] || { echo "the published Linux daemon is not executable" >&2; return 1; }
 
   node "$verify_tool" record --root "$candidate" --input "$input" \
     --version "$version" --build "$build_number" --commit "$commit"
@@ -236,6 +266,7 @@ publish_windows() {
     --version "$version" \
     --commit "$commit" \
     --release-dir "$candidate/windows/$version" \
+    --linux-release-dir "$candidate/linux/$version" \
     --receipt "$candidate/windows-publication.json"
 }
 
@@ -244,6 +275,7 @@ verify_published_release() {
     --version "$version" \
     --commit "$commit" \
     --release-dir "$candidate/windows/$version" \
+    --linux-release-dir "$candidate/linux/$version" \
     --verify-only \
     --receipt "$candidate/windows-publication.json"
   node "$script_dir/lib/verify-publication.mjs" record \
@@ -260,6 +292,7 @@ if [ -f "$candidate/receipt.json" ]; then
   echo "WORKASS_RELEASE_CANDIDATE_REUSED"
 else
   workass_release_run_parallel_pair stage_macos stage_macos stage_windows stage_windows
+  workass_release_run_phase stage_linux stage_linux
   workass_release_run_phase verify_candidates verify_candidate
 fi
 

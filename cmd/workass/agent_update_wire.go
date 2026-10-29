@@ -22,7 +22,12 @@ var updateVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 // same exact-machine updater surface as a local agent MCP call. The daemon does
 // not touch installation files: it asks this machine's stamped Electron
 // renderer, which in turn invokes the existing transactional UpdateManager.
-func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, selfMachineID string) {
+//
+// A headless install has no renderer at all, so when one is present it owns
+// both channels instead. The channel names, payloads and authorization text
+// are identical either way: a controller on another machine cannot tell, and
+// does not need to, which half of the fleet answers.
+func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, headless *headlessUpdateService, selfMachineID string) {
 	if hub == nil {
 		return
 	}
@@ -30,6 +35,9 @@ func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRout
 		params := firstMapArg(args)
 		if err := validateAgentUpdateTarget(params, selfMachineID); err != nil {
 			return nil, err
+		}
+		if headless.available() {
+			return headless.headlessUpdateCall(context.Background(), "update.local.status", params)
 		}
 		if renderer == nil {
 			return nil, errors.New("Workass updater status requires the local Electron renderer")
@@ -40,6 +48,9 @@ func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRout
 		params := firstMapArg(args)
 		if err := validateAgentUpdateApply(params, selfMachineID); err != nil {
 			return nil, err
+		}
+		if headless.available() {
+			return headless.headlessUpdateCall(context.Background(), "update.local.apply", params)
 		}
 		if renderer == nil {
 			return nil, errors.New("Workass update activation requires the local Electron renderer")
