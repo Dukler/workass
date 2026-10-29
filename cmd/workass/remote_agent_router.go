@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"workass/internal/fleetid"
 	"workass/internal/wire"
 )
 
@@ -17,7 +18,9 @@ const (
 	remoteAgentRouteRequestChannel  = "agent:route-request"
 	remoteAgentRouteResponseChannel = "agent:route-response"
 	remoteAgentRouteTimeout         = 2 * time.Minute
-	machineTaggedIDPrefix           = "M~"
+	// machineTaggedIDPrefix is fleetid.LegacyPrefix under the name this edge
+	// has always used for it.
+	machineTaggedIDPrefix = fleetid.LegacyPrefix
 )
 
 type agentChatRemoteRouter interface {
@@ -146,17 +149,13 @@ func copyRemoteAgentRouteParams(params map[string]any) map[string]any {
 	return out
 }
 
+// splitMachineTaggedID reports which machine an addressing id names. Its
+// answer is unchanged for every id that exists today — an `M~machine~local`
+// tag names that machine, an untagged id names this one — and it now also
+// reads the global form `wa:<home>/<type>/<local>`, whose home is the same
+// answer by a different spelling (fleetid, docs/specs/fleet-runtime.md §3).
 func splitMachineTaggedID(value string) (machineID, localID string, tagged bool, err error) {
-	value = strings.TrimSpace(value)
-	if !strings.HasPrefix(value, machineTaggedIDPrefix) {
-		return "", value, false, nil
-	}
-	rest := strings.TrimPrefix(value, machineTaggedIDPrefix)
-	cut := strings.IndexByte(rest, '~')
-	if cut <= 0 || cut == len(rest)-1 {
-		return "", "", false, errors.New("malformed machine-tagged chat id")
-	}
-	return rest[:cut], rest[cut+1:], true, nil
+	return fleetid.Split(value, "")
 }
 
 func remoteAgentChatTarget(params map[string]any) (string, bool, error) {

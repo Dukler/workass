@@ -117,6 +117,16 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		params = copyAnyMap(params)
 		delete(params, "machine_id")
 	}
+	// The same uniformity for ids: an id whose home is this machine resolves to
+	// the in-process path, whether it was spelled as a global fleet id, as the
+	// legacy machine tag, or as the bare local id it contains. Another home's
+	// id continues onward in the tag its relay already speaks, so nothing
+	// downstream of here sees a shape it did not see before.
+	resolvedParams, fleetRouteErr := resolveFleetAddressedParams(h.fleetRouter(), params)
+	if fleetRouteErr != nil {
+		return nil, fleetRouteErr
+	}
+	params = resolvedParams
 	if machineID, remote, routeErr := remoteAgentMethodTarget(request.Method, params); routeErr != nil {
 		return nil, routeErr
 	} else if remote {
