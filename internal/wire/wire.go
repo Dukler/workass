@@ -81,6 +81,10 @@ var mutatingChannels = map[string]struct{}{
 	"code:unlock":            {},
 	"code:lock":              {},
 	"chat:permission-decide": {},
+	// The fleet Agent API control channel carries chat creation, configuration,
+	// deletion, sends, subagents and forks for a chat on this machine. It is
+	// control in exactly the sense chat:delete and job:start are.
+	"agent:control": {},
 	// `chat:permissions-pending` used to sit here, on the reasoning that
 	// permission titles belong to the surface that can answer them. That
 	// conflated seeing with deciding. An approved device already reads every

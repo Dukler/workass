@@ -350,3 +350,96 @@ test('agent MCP remote reads drop an indivisible oversized message instead of ov
   assert.deepEqual(read.messages, []);
   assert.ok(new TextEncoder().encode(JSON.stringify(read)).byteLength < 768 * 1024);
 });
+
+function readyMachine() {
+  return {
+    machineId, name: 'duklerver', reportedName: 'duklerver', nickname: '', address: '192.168.0.212:80',
+    link: 'ready' as const, reason: '', secure: true, reachable: true, paired: true,
+    requested: false, discovered: true,
+  };
+}
+
+interface ForwardShape {
+  state: { chats: Chat[]; machines: ReturnType<typeof readyMachine>[]; activeId: string | null };
+  machines: { linkFor(id: string): { invoke<T>(channel: string, payload: unknown): Promise<T> } | undefined };
+  routeAgentRequest(request: AgentRouteRequest): Promise<unknown>;
+}
+
+function forwardingStore(subject: ForwardShape, reply: unknown, calls: Array<{ channel: string; payload: unknown }>) {
+  subject.state.machines = [readyMachine()];
+  subject.machines = {
+    linkFor: (id) => id === machineId ? {
+      invoke: async <T>(channel: string, payload: unknown) => { calls.push({ channel, payload }); return reply as T; },
+    } : undefined,
+  };
+}
+
+test('configuring a chat on another machine runs that daemon own agent control, with its own ids', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as unknown as ForwardShape;
+  const calls: Array<{ channel: string; payload: unknown }> = [];
+  forwardingStore(subject, {
+    ok: true, tabId: 'tab-hello', chatId: 'chat-hello', cwd: '/srv/work',
+    providerId: 'codex', modelId: 'gpt-5.5', modeId: 'agent-full-access',
+  }, calls);
+  const result = await subject.routeAgentRequest(request('chat.configure', {
+    tab_id: tabId, chat_id: chatId, machine_id: machineId,
+    permission_intent: 'full', operation_id: 'configure-duklerver-1',
+  })) as Record<string, unknown>;
+  assert.deepEqual(calls, [{ channel: 'agent:control', payload: { method: 'chat.configure', params: {
+    tab_id: 'tab-hello', chat_id: 'chat-hello', permission_intent: 'full', operation_id: 'configure-duklerver-1',
+  } } }]);
+  // Back out tagged, so the next tool call addresses the same machine.
+  assert.equal(result.tabId, tabId);
+  assert.equal(result.chatId, chatId);
+  assert.equal(result.modeId, 'agent-full-access');
+  assert.equal(subject.state.activeId, null);
+});
+
+test('spawning and listing subagents on another machine reaches it and tags the ids it mints', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as unknown as ForwardShape;
+  const calls: Array<{ channel: string; payload: unknown }> = [];
+  forwardingStore(subject, { id: 'sub-1', label: 'remote child', status: 'running' }, calls);
+  const spawned = await subject.routeAgentRequest(request('agent.spawn', {
+    tab_id: tabId, chat_id: chatId, machine_id: machineId, prompt: 'build it', operation_id: 'spawn-1',
+  })) as Record<string, unknown>;
+  assert.equal(spawned.id, tagId(machineId, 'sub-1'));
+  // The tagged child id is accepted back untagged by its own daemon.
+  await subject.routeAgentRequest(request('agent.wait', {
+    tab_id: tabId, chat_id: chatId, machine_id: machineId, id: tagId(machineId, 'sub-1'), operation_id: 'wait-1',
+  }));
+  assert.equal(calls.length, 2);
+  assert.deepEqual((calls[1].payload as { params: Record<string, unknown> }).params.id, 'sub-1');
+});
+
+test('a remote provider catalog keeps its native mode ids untagged', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as unknown as ForwardShape;
+  const calls: Array<{ channel: string; payload: unknown }> = [];
+  forwardingStore(subject, {
+    schemaVersion: 2,
+    groups: [{ providerId: 'codex', modes: [{ id: 'agent-full-access', name: 'Full access' }] }],
+  }, calls);
+  const catalog = await subject.routeAgentRequest(request('agent.catalog', { machine_id: machineId })) as Record<string, unknown>;
+  const groups = catalog.groups as Array<{ modes: Array<{ id: string }> }>;
+  assert.equal(groups[0].modes[0].id, 'agent-full-access');
+  assert.equal(catalog.machineId, machineId);
+});
+
+test('an unavailable machine fails visibly instead of acting on this one', async (t) => {
+  const { Store } = await loadStore(t);
+  const subject = new Store() as unknown as ForwardShape;
+  const calls: Array<{ channel: string; payload: unknown }> = [];
+  forwardingStore(subject, { ok: true }, calls);
+  subject.state.machines = [{ ...readyMachine(), link: 'closed' as const }];
+  await assert.rejects(subject.routeAgentRequest(request('chat.delete', {
+    tab_id: tabId, chat_id: chatId, machine_id: machineId, operation_id: 'delete-1',
+  })), /unavailable/);
+  assert.equal(calls.length, 0);
+  await assert.rejects(subject.routeAgentRequest(request('chat.configure', {
+    tab_id: tabId, chat_id: chatId, operation_id: 'no-machine',
+  })), /did not name a target machine/);
+  await assert.rejects(subject.routeAgentRequest(request('html.render', { machine_id: machineId })), /not supported/);
+  assert.equal(calls.length, 0);
+});

@@ -405,3 +405,71 @@ keeps a compact transcript (text, tool calls, per-call cache usage; no image
 bytes) for `retention_days` (default 7) plus the receipt. `retention:"keep"`
 keeps everything. Live children are not restart-durable: a daemon restart
 settles them as failed with that reason.
+
+## Driving chats on another fleet machine
+
+Every Workass tool reaches exactly one machine, and the ids say which. A chat
+mounted from another fleet machine is returned by `workass_list_chats` with a
+machine-tagged `tabId`/`chatId` pair (`M~<machineId>~<localId>`) and its
+`machineId`. Pass that pair back and the tool runs on the machine that owns the
+chat; pass an untagged pair and it runs here, byte-identically to before.
+
+`cmd/workass/agent_remote_parity.go` is the single authority for this. Each
+control method is classified once:
+
+- **chat-scoped** — addressed by the exact pair, so a tagged pair selects the
+  owning machine: read, diagnostics, configure, rename, settle, focus, delete,
+  send, cancel, subsession, `spawned_work.*`, `fork.create`, `fork.list`, and
+  the whole subagent family (spawn, list, receipts, wait, wait_many, message,
+  retry, cancel, permission decisions).
+- **machine-scoped** — no chat to address, so they take `machine_id`:
+  `workass_create_chat` and `workass_agent_catalog`. The catalog is what *that*
+  machine can actually run: its providers, models, efforts and native
+  permission modes. Read it before you configure or create a chat there.
+  `machine_id` naming this machine is simply local.
+- **fork-scoped** — addressed by the `fork_point_id` / `run_id` / `child_id`
+  the owning machine minted: `fork.run`, `fork.wait`, `fork.cancel`,
+  `fork.retry`.
+- **local-only** — they act on the calling chat, on this machine's filesystem,
+  or on the person at this controller, and each says so in its own words:
+  `workass_ask_user_question`, `workass_render_html`, `workass_host_artifact`,
+  the scheduled-message tools, external-work registration/settling, and the
+  obligation read.
+
+The subagent and subsession tools take an optional `tab_id` + `chat_id`. Absent,
+they mean the calling chat, as they always did. Tagged, they name the owning
+chat on another machine — which is how one agent delegates there. Locally an
+explicit pair may only be the calling chat, so no agent gains reach into a
+sibling chat.
+
+How it travels: the local daemon resolves the machine and hands the call to the
+renderer's machine router, which strips the ids back to what that daemon minted
+and invokes `agent:control` on it. That channel is additive to the frozen
+`invoke/reply/event` protocol and is authorized exactly like `chat:delete` or
+`job:start` — the paired controller link, then the durable actor fence, then the
+same short-lived actor owner key the local path mints. Remote validation is
+therefore the same Go code as local validation: an unknown model, a `cwd` that
+is not a directory *there*, a running turn that forbids a provider change, and
+operation-id idempotency all behave the same.
+
+Four boundaries worth knowing:
+
+- **Remote waits poll.** Invokes share one ordered lane per client, so a
+  blocking cross-machine wait would stall every other operation against that
+  machine. `workass_wait_subagent`, `workass_wait_subagents` and
+  `workass_wait_fork_run` are bounded to a short window on a remote chat and
+  return the same shape a local wait returns when its window elapses. Re-ask,
+  or use `workass_schedule_message` to come back later.
+- **No remote steer.** `workass_send_chat_message` accepts `auto` and `queue`
+  on a remote chat; `steer` is refused so a lost route reply cannot duplicate
+  live input.
+- **No remote attachments.** Attachment paths are read on the machine that runs
+  the chat. Host the file with `workass_host_artifact` on the machine that has
+  it and send the link.
+- **Remote create does not inherit.** There is no calling chat on the target to
+  inherit from, so selection is explicit or that machine's first ready provider,
+  and `cwd` must be an absolute directory on that machine (`inherit` is
+  rejected).
+
+An unreachable machine fails visibly. A tagged destination is binding: it never
+degrades into the same operation against this machine.

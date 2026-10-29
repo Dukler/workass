@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -14,10 +15,14 @@ import (
 )
 
 type agentControlHandler struct {
-	manager       *acp.Manager
-	chats         *chatControlCoordinator
-	artifacts     *artifacthost.Registry
-	remoteChats   agentChatRemoteRouter
+	manager     *acp.Manager
+	chats       *chatControlCoordinator
+	artifacts   *artifacthost.Registry
+	remoteChats agentChatRemoteRouter
+	// selfMachineID lets an explicit fleet machine id that happens to name THIS
+	// machine take the ordinary local path, so "machine" is a uniform argument
+	// rather than a switch between two different tools.
+	selfMachineID string
 	forks         *acp.ForkService
 	validateOwner func(ownerKey, chatID, tabID string) bool
 }
@@ -103,6 +108,34 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	chatID := fieldString(params, "parent_chat_id")
 	tabID := fieldString(params, "parent_tab_id")
 	ownerKey := fieldString(params, "owner_key")
+	// One authority decides whether this call addresses this machine or another
+	// fleet machine, for every tool, before any local state is touched.
+	if self := strings.TrimSpace(h.selfMachineID); self != "" && self == strings.TrimSpace(fieldString(params, "machine_id")) {
+		params = copyAnyMap(params)
+		delete(params, "machine_id")
+	}
+	if machineID, remote, routeErr := remoteAgentMethodTarget(request.Method, params); routeErr != nil {
+		return nil, routeErr
+	} else if remote {
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerErrorFor(request.Method)); err != nil {
+			return nil, err
+		}
+		if request.Method == "chat.send" {
+			if err := remoteAgentRejectAttachments(params); err != nil {
+				return nil, err
+			}
+		}
+		return h.forwardRemoteAgentCall(r.Context(), request.Method, machineID, params)
+	}
+	// The subagent family now accepts an explicit pair so it can name a chat on
+	// another machine. Locally that pair may only be the calling chat.
+	switch request.Method {
+	case "chat.subsession", "agent.spawn", "agent.list", "agent.receipts", "agent.wait", "agent.wait_many",
+		"agent.message", "agent.retry", "agent.cancel", "agent.decide_permission":
+		if _, _, err := remoteAgentSubagentPair(params, tabID, chatID); err != nil {
+			return nil, err
+		}
+	}
 	switch request.Method {
 	case "update.targets", "update.status", "update.apply":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
@@ -132,16 +165,6 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			}
 			local["remoteAvailable"] = true
 			return mergeRemoteAgentChatList(local, remote), nil
-		}
-		if machineID, remote, routeErr := remoteAgentChatTarget(params); routeErr != nil {
-			return nil, routeErr
-		} else if remote {
-			if h.remoteChats == nil {
-				return nil, errors.New("Workass remote-chat MCP router is unavailable")
-			}
-			forwarded := copyRemoteAgentRouteParams(params)
-			forwarded["machine_id"] = machineID
-			return h.remoteChats.Call(r.Context(), request.Method, forwarded)
 		}
 		switch request.Method {
 		case "chat.diagnostics":
@@ -383,6 +406,32 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		})
 	default:
 		return nil, errors.New("unknown agent control method")
+	}
+}
+
+// forwardRemoteAgentCall hands one addressed call to the renderer's machine
+// router. The caller's bearer capability and parent ids never travel; the
+// destination daemon authorizes the controller link and re-applies the exact
+// actor fence, so remote validation is the same code as local validation.
+func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method, machineID string, params map[string]any) (any, error) {
+	if h == nil || h.remoteChats == nil {
+		return nil, errors.New("Workass remote-chat MCP router is unavailable")
+	}
+	forwarded := copyRemoteAgentRouteParams(params)
+	forwarded["machine_id"] = machineID
+	return h.remoteChats.Call(ctx, method, forwarded)
+}
+
+// agentOwnerErrorFor keeps each method family's existing authorization wording
+// when the call is about to be forwarded instead of executed here.
+func agentOwnerErrorFor(method string) string {
+	switch {
+	case strings.HasPrefix(method, "chat."), strings.HasPrefix(method, "schedule."):
+		return "Workass chat control caller is not an owned ACP session"
+	case strings.HasPrefix(method, "fork."):
+		return "Workass fork caller is not an owned ACP session"
+	default:
+		return agentOwnerReadError
 	}
 }
 
