@@ -398,6 +398,10 @@ func main() {
 	registerForkWireHandlers(hub, forkService)
 	rendererAgentRouter := registerRendererAgentRouter(hub)
 	agentControl.remoteChats = rendererAgentRouter
+	agentControl.selfMachineID = identity.MachineID
+	if registerAgentControlWireHandler(hub, agentControl) {
+		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
+	}
 	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, identity.MachineID)
 	// The scheduled-message loop lives for the daemon's lifetime and is joined
 	// first on shutdown, so no delivery races the actors' detach below.

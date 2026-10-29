@@ -58,6 +58,14 @@ func agentMCPTools() []map[string]any {
 			"items": map[string]any{"type": "string", "minLength": 1},
 		}
 	}
+	// ownerPair is the optional owning chat a subagent tool may name. Absent it
+	// means the calling chat; machine-tagged it means a chat on that fleet
+	// machine, which is how one agent delegates onto another machine.
+	ownerPair := func(properties map[string]any) map[string]any {
+		properties["tab_id"] = str(agenttext.Get("schema.remote.owner_tab_id"))
+		properties["chat_id"] = str(agenttext.Get("schema.remote.owner_chat_id"))
+		return properties
+	}
 	mutationObject := func(properties map[string]any, required ...string) map[string]any {
 		properties["operation_id"] = operationID()
 		required = append(required, "operation_id")
@@ -104,6 +112,7 @@ func agentMCPTools() []map[string]any {
 			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.17")),
 			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.18"), "read", "edit", "full"),
 			"focus":             boolean(agenttext.Get("schema.agentMCPTools.guidance.19")),
+			"machine_id":        str(agenttext.Get("schema.remote.machine_id")),
 		}), false, false, false, false),
 		tool("workass_create_subsession", agenttext.Get("tools.workass_create_subsession"), mutationObject(map[string]any{
 			"title":             str(agenttext.Get("schema.agentMCPTools.subsession.title")),
@@ -115,6 +124,8 @@ func agentMCPTools() []map[string]any {
 			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.17")),
 			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.18"), "read", "edit", "full"),
 			"focus":             boolean(agenttext.Get("schema.agentMCPTools.guidance.19")),
+			"tab_id":            str(agenttext.Get("schema.remote.owner_tab_id")),
+			"chat_id":           str(agenttext.Get("schema.remote.owner_chat_id")),
 		}, "title"), false, false, false, false),
 		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
@@ -162,7 +173,9 @@ func agentMCPTools() []map[string]any {
 		tool("workass_cancel_chat_turn", agenttext.Get("tools.workass_cancel_chat_turn"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 		}, "tab_id", "chat_id"), false, true, false, false),
-		tool("workass_agent_catalog", agenttext.Get("tools.workass_agent_catalog"), object(map[string]any{}), true, false, true, false),
+		tool("workass_agent_catalog", agenttext.Get("tools.workass_agent_catalog"), object(map[string]any{
+			"machine_id": str(agenttext.Get("schema.remote.machine_id")),
+		}), true, false, true, false),
 		tool("workass_host_artifact", agenttext.Get("tools.workass_host_artifact"), mutationObject(map[string]any{
 			"source_path": str(agenttext.Get("schema.agentMCPTools.guidance.42")),
 			"entry":       str(agenttext.Get("schema.agentMCPTools.guidance.43")),
@@ -189,29 +202,31 @@ func agentMCPTools() []map[string]any {
 				"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.52"), "inherit", "read", "edit", "full"),
 				"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.53")),
 				"fork":              boolean(agenttext.Get("schema.agentMCPTools.subagent.fork")),
+				"tab_id":            str(agenttext.Get("schema.remote.owner_tab_id")),
+				"chat_id":           str(agenttext.Get("schema.remote.owner_chat_id")),
 			},
 		}, false, true, false, true),
-		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(map[string]any{}), true, false, true, false),
-		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), mutationObject(map[string]any{
+		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(ownerPair(map[string]any{})), true, false, true, false),
+		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
 			"timeout_ms":  subagentWaitTimeoutSchema(),
-		}, "subagent_id"), false, false, false, false),
-		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), mutationObject(map[string]any{
+		}), "subagent_id"), false, false, false, false),
+		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), mutationObject(ownerPair(map[string]any{
 			"subagent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8},
 			"return_when":  enum(agenttext.Get("schema.agentMCPTools.guidance.55"), "first", "all"),
 			"timeout_ms":   subagentWaitTimeoutSchema(),
-		}, "subagent_ids"), false, false, false, false),
-		tool("workass_message_subagent", agenttext.Get("tools.workass_message_subagent"), mutationObject(map[string]any{
+		}), "subagent_ids"), false, false, false, false),
+		tool("workass_message_subagent", agenttext.Get("tools.workass_message_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.56")),
 			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.57")),
-		}, "subagent_id", "message"), false, false, false, true),
-		tool("workass_retry_subagent", agenttext.Get("tools.workass_retry_subagent"), mutationObject(map[string]any{
+		}), "subagent_id", "message"), false, false, false, true),
+		tool("workass_retry_subagent", agenttext.Get("tools.workass_retry_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.58")),
 			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.59")),
-		}, "subagent_id"), false, true, false, true),
-		tool("workass_list_subagent_receipts", agenttext.Get("tools.workass_list_subagent_receipts"), object(map[string]any{
+		}), "subagent_id"), false, true, false, true),
+		tool("workass_list_subagent_receipts", agenttext.Get("tools.workass_list_subagent_receipts"), object(ownerPair(map[string]any{
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
-		}), true, false, true, false),
+		})), true, false, true, false),
 		tool("workass_list_spawned_work", agenttext.Get("tools.workass_list_spawned_work"), object(map[string]any{
 			"tab_id":     str(agenttext.Get("schema.agentMCPTools.guidance.09")),
 			"chat_id":    str(agenttext.Get("schema.agentMCPTools.guidance.21")),
@@ -239,9 +254,9 @@ func agentMCPTools() []map[string]any {
 			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
 		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_cancel_subagent", agenttext.Get("tools.workass_cancel_subagent"), mutationObject(map[string]any{
+		tool("workass_cancel_subagent", agenttext.Get("tools.workass_cancel_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
-		}, "subagent_id"), false, true, false, false),
+		}), "subagent_id"), false, true, false, false),
 		tool("workass_create_fork_point", agenttext.Get("tools.workass_create_fork_point"), mutationObject(map[string]any{
 			"tab_id":   str(agenttext.Get("schema.fork.target_tab")),
 			"chat_id":  str(agenttext.Get("schema.fork.target_chat")),
@@ -289,10 +304,10 @@ func agentMCPTools() []map[string]any {
 			"child_id": str(agenttext.Get("schema.fork.child_id")),
 			"message":  str(agenttext.Get("schema.fork.retry_message")),
 		}, "run_id", "child_id"), false, false, false, true),
-		tool("workass_decide_subagent_permission", agenttext.Get("tools.workass_decide_subagent_permission"), mutationObject(map[string]any{
+		tool("workass_decide_subagent_permission", agenttext.Get("tools.workass_decide_subagent_permission"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.78")),
 			"decision":    enum(agenttext.Get("schema.agentMCPTools.guidance.79"), "allow", "deny"),
-		}, "subagent_id", "decision"), false, true, false, false),
+		}), "subagent_id", "decision"), false, true, false, false),
 		tool("workass_ask_user_question", agenttext.Get("tools.workass_ask_user_question"), mutationObject(map[string]any{
 			"question_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$", "description": agenttext.Get("schema.agentMCPTools.question.id")},
 			"question":    map[string]any{"type": "string", "minLength": 1, "maxLength": 400, "description": agenttext.Get("schema.agentMCPTools.question.prompt")},

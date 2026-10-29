@@ -243,6 +243,17 @@ func (m *Manager) AgentCatalog(ctx context.Context, ownerKey, parentChatID, pare
 	return m.agentCatalogV2(ctx, parent), nil
 }
 
+// MachineAgentCatalog is what THIS machine can actually run: its providers,
+// models, efforts, permission modes and fork capability, with no active chat
+// selection. Another fleet machine reads it before it creates or configures a
+// chat here, so no agent has to guess which models exist on which machine.
+func (m *Manager) MachineAgentCatalog(ctx context.Context) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return m.agentCatalogV2(ctx, &Job{})
+}
+
 // SpawnSubagent starts one explicitly coordinated ACP session/engine and
 // returns immediately. Status/wait/cancel are separate operations so a parent
 // can fan out sequential MCP calls without relying on parallel tool dispatch.

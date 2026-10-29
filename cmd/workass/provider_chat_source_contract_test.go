@@ -264,6 +264,8 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 	return map[string]phaseCManagerRule{
 		"cmd/workass/agent_control.go:ownerAuthorized:ValidateAgentOwner":                                                {1, "owner authorization after actor fencing"},
 		"cmd/workass/agent_control.go:call:AgentCatalog":                                                                 {1, "actor-authorized catalog projection"},
+		"cmd/workass/agent_control_remote.go:callAsController:MachineAgentCatalog":                                       {1, "a fleet machine reads what this machine can actually run"},
+		"cmd/workass/agent_control_remote.go:controllerChatCall:WithActorOwner":                                          {1, "a controller-authorized tool call runs for the addressed chat under a short-lived owner"},
 		"cmd/workass/chat_diagnostics.go:TurnDiagnostics:TurnDiagnostics":                                                {1, "exact actor-fenced, bounded timing-only executor read"},
 		"cmd/workass/chat_control.go:authorize:ValidateAgentOwner":                                                       {1, "owner authorization after actor fencing"},
 		"cmd/workass/chat_control.go:resolveControls:Catalog":                                                            {1, "provider catalog lookup"},

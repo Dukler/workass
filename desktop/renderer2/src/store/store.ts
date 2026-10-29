@@ -62,7 +62,8 @@ import { machineScopeOf } from '../wire/machineRouter';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { setMachineRouter } from '../wire/api';
 import { installWorkassArtifactsBridge, connectedArtifactURL, parseArtifactLink, isArtifactLink } from '../connected-artifacts';
-import { localId, machineOf, tagId, tagPayload } from '../wire/machineIds';
+import { localId, machineOf, tagId, tagPayload, untagFor } from '../wire/machineIds';
+import { AGENT_CONTROL_CHANNEL, REMOTE_AGENT_CONTROL_METHODS } from '../wire/agentControl';
 import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 
@@ -3824,9 +3825,40 @@ export class Store {
         }
         return result;
       }
-      default:
-        throw new Error(`remote-chat MCP method is not supported: ${String(request.method ?? '')}`);
+      default: {
+        const method = String(request.method ?? '').trim();
+        if (REMOTE_AGENT_CONTROL_METHODS.has(method)) return this.forwardAgentControl(method, params);
+        throw new Error(`remote-chat MCP method is not supported: ${method}`);
+      }
     }
+  }
+
+  // Every remaining Agent API method reaches the owning machine the same way,
+  // so the tools behave identically on a fleet machine and here.
+  //
+  // The alternative was a bespoke renderer implementation per tool — a second
+  // copy of the daemon's catalog validation, permission-intent resolution, cwd
+  // checks and idempotency receipts, living in TypeScript and drifting from the
+  // Go that defines them. Instead the call is handed to the owning daemon's own
+  // agent-control channel: remote validation IS local validation, by
+  // construction. This window only strips the ids back to what that daemon
+  // minted and retags the reply.
+  private async forwardAgentControl(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const machineId = String(params.machine_id ?? '').trim();
+    if (!machineId) throw new Error(`${method} did not name a target machine`);
+    const machine = this.state.machines.find((candidate) => candidate.machineId === machineId);
+    const link = this.machines?.linkFor(machineId);
+    if (!machine || !link || machine.link !== 'ready') throw new Error(`remote machine ${machineId} is unavailable`);
+    const forwarded: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (key === 'machine_id') continue;
+      forwarded[key] = untagFor(machineId, value);
+    }
+    const result = await link.invoke<unknown>(AGENT_CONTROL_CHANNEL, { method, params: forwarded });
+    // The provider catalog carries no addressing ids, but it does carry native
+    // mode ids. Tagging those would hand the agent a mode id no daemon knows.
+    if (method === 'agent.catalog') return { ...(result as Record<string, unknown>), machineId };
+    return tagPayload(machineId, result);
   }
 
   private async ensureUpdateMachineIdentity(): Promise<string> {

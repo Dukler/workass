@@ -358,6 +358,74 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	return created, nil
 }
 
+// createOnThisMachine is chat.create arriving from another fleet machine over
+// the controller link. There is no calling chat here to inherit from, so the
+// selection is either explicit or this machine's own catalog default — the same
+// resolution the composer performs for a brand-new chat. Idempotency, catalog
+// validation, cwd validation, and durable readback are the local ones.
+func (c *chatControlCoordinator) createOnThisMachine(ctx context.Context, params map[string]any) (map[string]any, error) {
+	if c == nil || c.providerChats == nil || c.manager == nil {
+		return nil, errors.New("Workass chat actor is unavailable")
+	}
+	operationID, err := requiredChatOperation(params, "create")
+	if err != nil {
+		return nil, err
+	}
+	focus, _ := boolField(params, "focus")
+	intentDigest, err := headlessCreateIntentDigest("", "", params)
+	if err != nil {
+		return nil, err
+	}
+	if existing, found, err := c.providerChats.existingHeadlessCreate(operationID, intentDigest, focus); found {
+		if err != nil {
+			return nil, err
+		}
+		c.refreshCreated(fieldString(existing, "tabId"), fieldString(existing, "chatId"), focus)
+		return existing, nil
+	}
+	current := map[string]any{}
+	if fieldString(params, "provider_id") == "" {
+		providerID, err := c.defaultReadyProvider(ctx)
+		if err != nil {
+			return nil, err
+		}
+		current["providerId"] = providerID
+	}
+	controls, err := c.resolveControls(ctx, current, params)
+	if err != nil {
+		return nil, err
+	}
+	cwd := strings.TrimSpace(fieldString(params, "cwd"))
+	if cwd == "inherit" {
+		return nil, errors.New("cwd inherit has no meaning across machines; pass an absolute directory on the target machine or omit cwd")
+	}
+	if err := validateChatCWD(cwd); err != nil {
+		return nil, err
+	}
+	created, err := c.providerChats.CreateChatWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.providerChats.ReadChat(fieldString(created, "tabId"), fieldString(created, "chatId"), 1, false); err != nil {
+		return nil, fmt.Errorf("created chat is not addressable: %w", err)
+	}
+	c.refreshCreated(fieldString(created, "tabId"), fieldString(created, "chatId"), focus)
+	created["providerId"], created["modelId"], created["effort"], created["modeId"] = controls.ProviderID, controls.BaseModel, controls.Effort, controls.ModeID
+	created["resolvedModelId"] = controls.ModelID
+	return created, nil
+}
+
+// defaultReadyProvider is the catalog order the composer uses for a new chat.
+func (c *chatControlCoordinator) defaultReadyProvider(ctx context.Context) (string, error) {
+	groups, _ := c.manager.Catalog(ctx)["groups"].([]acp.CatalogGroup)
+	for _, group := range groups {
+		if group.Status == "ready" {
+			return group.ProviderID, nil
+		}
+	}
+	return "", errors.New("no provider on this machine is ready; call workass_agent_catalog for that machine")
+}
+
 // subsession creates a SUBSESSION of the calling chat (user 2026-10-16): a
 // permanent child chat listed under it that people and agents keep writing
 // into. fork=false (default) starts it fresh; fork=true starts it as a native
