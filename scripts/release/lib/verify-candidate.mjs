@@ -120,6 +120,43 @@ function verify(args) {
     'frontier-hosts/windows-amd64/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
   ]) requireFile(path.join(windowsBundle, ...relative.split('/')));
 
+  const linuxRoot = path.join(args.root, 'linux', args.version);
+  const linuxBundleName = `Workass-${args.version}-linux-amd64`;
+  const linuxArchive = artifact(path.join(linuxRoot, `${linuxBundleName}.tar.gz`));
+  const linuxFeedFile = path.join(linuxRoot, 'workass-linux-amd64-release.json');
+  const linuxFeed = readJson(linuxFeedFile);
+  const linuxUpdate = linuxFeed.artifacts?.update;
+  if (linuxFeed.schemaVersion !== 1 || linuxFeed.product !== 'Workass' || linuxFeed.version !== args.version ||
+      linuxFeed.platform !== 'linux' || linuxFeed.arch !== 'amd64' || linuxFeed.headless !== true ||
+      linuxFeed.service !== 'systemd-user' || linuxUpdate?.name !== linuxArchive.name ||
+      linuxUpdate?.sha256 !== linuxArchive.sha256 || linuxUpdate?.size !== linuxArchive.size ||
+      linuxUpdate?.url !== `https://github.com/Dukler/workass/releases/download/v${args.version}/${linuxArchive.name}`) {
+    fail('Linux candidate manifest does not match the staged release');
+  }
+  checkSums(path.join(linuxRoot, 'SHA256SUMS-linux-amd64'), linuxArchive);
+
+  const linuxBundle = path.join(linuxRoot, linuxBundleName);
+  const linuxRuntime = readJson(path.join(linuxBundle, 'manifest.json'));
+  if (linuxRuntime.version !== args.version || linuxRuntime.platform !== 'linux' ||
+      linuxRuntime.arch !== 'amd64' || linuxRuntime.headless !== true ||
+      linuxRuntime.revision !== args.commit) {
+    fail('Linux runtime manifest does not match the candidate');
+  }
+  // The four pieces a headless install needs, named one by one: the record of
+  // the hand-provisioned host had to gather each of them separately, and a
+  // release that drops any one of them is an install that half works.
+  for (const relative of [
+    'workass',
+    'workass-tools',
+    'workass-agent',
+    'node/linux-amd64/bin/node',
+    'frontier-hosts/linux-amd64/claude-native-host.mjs',
+    'frontier-hosts/linux-amd64/codex-native-host.mjs',
+    'frontier-hosts/linux-amd64/pi-native-host.mjs',
+    'frontier-hosts/linux-amd64/omp-native-host.mjs',
+    'frontier-hosts/linux-amd64/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
+  ]) requireFile(path.join(linuxBundle, ...relative.split('/')));
+
   const inputManifest = artifact(path.join(args.input, 'manifest.json'));
   return {
     schemaVersion: 1,
@@ -133,6 +170,8 @@ function verify(args) {
       macosFeed: artifact(macFeedFile),
       windows: windowsArchive,
       windowsFeed: artifact(windowsFeedFile),
+      linux: linuxArchive,
+      linuxFeed: artifact(linuxFeedFile),
     },
   };
 }

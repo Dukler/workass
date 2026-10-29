@@ -1,7 +1,7 @@
 #!/bin/sh
 # One owned production publication action. All gates, platform packaging,
 # remote readback, and receipts stay inside the canonical lane; this command
-# never activates an installed app.
+# never activates an installed app or daemon on any machine.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -17,8 +17,8 @@ usage() {
   cat <<'EOF'
 usage: scripts/release/ship.sh [--version X.Y.Z] [--offline] [--macos-output DIR]
 
-Publishes the next paired Mac/Windows update from clean, pushed main and emits
-one final receipt. It does not install or activate the release.
+Publishes the next Mac/Windows/Linux update from clean, pushed main and emits
+one final receipt. It does not install or activate the release on any machine.
 EOF
 }
 

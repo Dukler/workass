@@ -32,6 +32,7 @@ import (
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
 	"workass/internal/fleet"
+	"workass/internal/headlessupdate"
 	"workass/internal/httpserve"
 	"workass/internal/lease"
 	"workass/internal/machineid"
@@ -59,6 +60,19 @@ func main() {
 			fmt.Fprintln(os.Stderr, acp.RedactSensitiveText(err.Error()))
 			os.Exit(1)
 		}
+		return
+	}
+	// `workass version` exists so a staged release can be proved before it is
+	// moved into place: the headless updater runs this exact command on the
+	// downloaded binary and refuses to swap a tree whose daemon does not run
+	// here, or does not report the version its manifest binds.
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"product": "Workass",
+			"version": daemonVersion,
+			"os":      runtime.GOOS,
+			"arch":    runtime.GOARCH,
+		})
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "tools" {
@@ -167,7 +181,27 @@ func main() {
 		fmt.Fprintf(os.Stdout, "Workass headless service installed and started (%s)\n", serviceName())
 		return
 	}
-	_ = headless // The daemon is already UI-free; this flag documents the intended launch mode.
+	// The flag now carries weight on one platform: a Linux service install has
+	// no Electron shell to ask, so it owns its own update activation. The
+	// packaged Mac and Windows shells also launch their daemon with --headless
+	// and keep the renderer's transactional UpdateManager untouched, which is
+	// why this is gated on the platform and not on the flag alone.
+	var headlessUpdates *headlessUpdateService
+	if *headless && runtime.GOOS == "linux" {
+		headlessUpdates = newHeadlessUpdateService(headlessupdate.Options{
+			Executable: currentExecutablePath(),
+			StateDir:   stateDir,
+			Version:    daemonVersion,
+			Log:        log.New(os.Stderr, "", log.LstdFlags).Printf,
+		}, "", "")
+		// The arbiter runs before any port is opened or any engine starts: if
+		// the previous activation has to be rolled back, the cheapest moment to
+		// do it is before this boot owns anything.
+		if headlessUpdates.Settle() {
+			fmt.Fprintln(os.Stderr, "workass: restored the previous version; exiting for the service to restart it")
+			os.Exit(headlessupdate.RestartExitCode)
+		}
+	}
 	mocksDir := resolveMocksDir(*mocksDirFlag, os.Getenv("WORKASS_MOCKS_DIR"), cwd, currentExecutablePath())
 	flagEngine := engineConfig{
 		HibernateTTL:            *hibernateTTL,
@@ -220,6 +254,15 @@ func main() {
 		logger.Printf("[workass] machine identity unavailable: %v", identityErr)
 	} else {
 		logger.Printf("[workass] machine %s (%s)", identity.MachineID, identity.DisplayName)
+	}
+	if headlessUpdates != nil {
+		headlessUpdates.SetMachine(identity.MachineID, identity.DisplayName)
+		if headlessUpdates.updates.Supported() {
+			logger.Printf("[workass] headless updates ready for %s %s-%s under %s",
+				daemonVersion, headlessUpdates.updates.Platform(), headlessUpdates.updates.Arch(), headlessUpdates.updates.InstallRoot())
+		} else {
+			logger.Printf("[workass] headless updates unavailable: %s", headlessUpdates.unsupportedReason())
+		}
 	}
 	leaseManager, err := lease.NewManager(lease.Options{
 		StateDir: stateDir,
@@ -402,7 +445,8 @@ func main() {
 	if registerAgentControlWireHandler(hub, agentControl) {
 		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
 	}
-	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, identity.MachineID)
+	agentControl.headlessUpdates = headlessUpdates
+	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID)
 	// The scheduled-message loop lives for the daemon's lifetime and is joined
 	// first on shutdown, so no delivery races the actors' detach below.
 	var scheduledRun sync.WaitGroup
@@ -438,6 +482,10 @@ func main() {
 	defer cleanup()
 	shutdownRoot, requestShutdown := context.WithCancel(context.Background())
 	defer requestShutdown()
+	// The headless updater stops this daemon the same way the recovery hook
+	// does: it cancels the root context and lets the ordinary graceful path
+	// settle engines. Only the exit code afterwards differs.
+	headlessUpdates.SetRestart(func() { requestShutdown() })
 	mux := http.NewServeMux()
 	mux.HandleFunc("/workass/recovery/shutdown", localRecoveryShutdownHandler(requestShutdown))
 	updateControl := newLocalUpdateControl(acpManager, requestShutdown)
@@ -494,6 +542,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := releaseProviderStartupAfterHTTPReady(signalCtx, listener, readinessTLS, serveErr, func() error {
+		// Serving is the health gate for a staged update: until this runs, the
+		// activation receipt still says "activated", and a boot that never
+		// gets here is rolled back by the next one's arbiter.
+		headlessUpdates.Confirm()
 		acpManager.StartProviderStartup()
 		acpManager.StartProviderDetection(signalCtx)
 		return providerChats.ResumeActors()
@@ -512,6 +564,9 @@ func main() {
 			scheduledMessages.Run(scheduledCtx)
 		}()
 	}
+	if headlessUpdates != nil {
+		go headlessUpdates.Run(signalCtx)
+	}
 	imageStoreCtx, cancelImageStore := context.WithCancel(signalCtx)
 	stopImageStore = cancelImageStore
 	imageStoreRun.Add(1)
@@ -528,6 +583,14 @@ func main() {
 		cleanup()
 		logger.Printf("[workass] server stopped: %v", err)
 		os.Exit(1)
+	}
+	// An update stop is not an ordinary one. The unit in the field is written
+	// Restart=on-failure, so a clean exit here would leave the machine down
+	// holding a brand new binary it never ran.
+	if headlessUpdates.RestartForUpdate() {
+		cleanup()
+		logger.Printf("[workass] exiting %d so the service starts the installed update", headlessupdate.RestartExitCode)
+		os.Exit(headlessupdate.RestartExitCode)
 	}
 }
 

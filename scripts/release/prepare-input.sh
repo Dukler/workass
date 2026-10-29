@@ -64,7 +64,7 @@ done
 mkdir -p "$(dirname -- "$output")"
 incoming="$output.incoming.$$"
 [ ! -e "$incoming" ] || { echo "release input staging path already exists: $incoming" >&2; exit 1; }
-mkdir -p "$incoming/macos/runtime" "$incoming/windows/runtime"
+mkdir -p "$incoming/macos/runtime" "$incoming/windows/runtime" "$incoming/linux/runtime"
 cleanup() { rm -rf "$incoming"; }
 trap cleanup EXIT HUP INT TERM
 
@@ -107,6 +107,17 @@ build_windows_daemon() {
     -o "$incoming/windows/runtime/workass-tools.exe" ./cmd/workass-tools)
 }
 
+build_linux_daemon() {
+  # The Linux target is headless, so it carries the daemon, the tools client and
+  # the LM Studio ACP server, and no Electron at all.
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags "-s -w -X main.daemonVersion=$version" -o "$incoming/linux/runtime/workass" ./cmd/workass)
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -o "$incoming/linux/runtime/workass-tools" ./cmd/workass-tools)
+  (cd "$repo_root" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -o "$incoming/linux/runtime/workass-agent" ./cmd/workass-agent)
+}
+
 vendor_runtime_core() {
   platform=$1
   electron_target=$2
@@ -127,10 +138,17 @@ vendor_frontier_target() {
   "$repo_root/scripts/vendor-frontier-hosts.sh" --target "$node_target" --output-root "$platform_root/runtime/frontier-hosts" $offline_arg
 }
 
+vendor_linux_runtime() {
+  offline_arg=''
+  [ "$offline" -eq 0 ] || offline_arg=--offline
+  "$repo_root/scripts/vendor-node-runtime.sh" --target linux-amd64 --output-root "$incoming/linux/runtime/node" $offline_arg
+}
+
 vendor_macos_runtime() { vendor_runtime_core macos darwin-arm64 darwin-arm64; }
 vendor_windows_runtime() { vendor_runtime_core windows win32-x64 windows-amd64; }
 vendor_macos_frontier() { vendor_frontier_target macos darwin-arm64; }
 vendor_windows_frontier() { vendor_frontier_target windows windows-amd64; }
+vendor_linux_frontier() { vendor_frontier_target linux linux-amd64; }
 
 write_manifest() {
   node "$input_tool" create --root "$incoming" --version "$version" --commit "$commit"
@@ -145,11 +163,14 @@ else
 fi
 workass_release_run_phase renderer_snapshot stage_renderer
 workass_release_run_parallel_pair macos_daemon build_macos_daemon windows_daemon build_windows_daemon
+workass_release_run_phase linux_daemon build_linux_daemon
 workass_release_run_parallel_pair macos_runtimes vendor_macos_runtime windows_runtimes vendor_windows_runtime
+workass_release_run_phase linux_runtime vendor_linux_runtime
 # Both frontier targets read one shared pinned SDK cache. Stage one first so a
 # cold cache cannot race two downloads; the copies themselves are tiny.
 workass_release_run_phase macos_frontier vendor_macos_frontier
 workass_release_run_phase windows_frontier vendor_windows_frontier
+workass_release_run_phase linux_frontier vendor_linux_frontier
 workass_release_run_phase input_manifest write_manifest
 
 mv "$incoming" "$output"

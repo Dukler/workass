@@ -116,3 +116,105 @@ command cp "$WORKASS_TEST_MANIFEST" "$output"
   assert.match(ghCalls, /release view/);
   assert.doesNotMatch(ghCalls, /release (create|upload)/);
 });
+
+test('one GitHub release carries both the Windows and the headless Linux manifests', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-linux-readback-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(repoRoot, '.dev'), { recursive: true });
+  const bin = path.join(root, 'bin');
+  const releaseDir = path.join(root, 'release-windows');
+  const linuxDir = path.join(root, 'release-linux');
+  const version = '1.2.3';
+  const windowsArchiveName = `Workass-${version}-windows-amd64.zip`;
+  const windowsManifestName = 'workass-windows-amd64-release.json';
+  const linuxArchiveName = `Workass-${version}-linux-amd64.tar.gz`;
+  const linuxManifestName = 'workass-linux-amd64-release.json';
+  const windowsArchive = Buffer.from('windows archive');
+  const linuxArchive = Buffer.from('linux daemon tree');
+  write(path.join(releaseDir, windowsArchiveName), windowsArchive);
+  write(path.join(releaseDir, windowsManifestName), 'windows manifest');
+  write(path.join(releaseDir, 'SHA256SUMS'), `${sha256(windowsArchive)}  ${windowsArchiveName}\n`);
+  write(path.join(linuxDir, linuxArchiveName), linuxArchive);
+  write(path.join(linuxDir, linuxManifestName), 'linux manifest');
+  write(path.join(linuxDir, 'SHA256SUMS-linux-amd64'), `${sha256(linuxArchive)}  ${linuxArchiveName}\n`);
+  const asset = (dir, name) => {
+    const local = fileArtifact(path.join(dir, name));
+    return { name, size: local.size, digest: `sha256:${local.sha256}` };
+  };
+  const fullView = path.join(root, 'full-view.json');
+  const latestView = path.join(root, 'latest-view.json');
+  write(fullView, JSON.stringify({
+    tagName: `v${version}`,
+    targetCommitish: commit,
+    // The title names both targets once Linux rides along, so a human reading
+    // the release page is not told it is Windows-only.
+    name: `Workass ${version} — Windows portable + Linux headless`,
+    isDraft: false,
+    isPrerelease: false,
+    assets: [
+      asset(releaseDir, windowsArchiveName), asset(releaseDir, windowsManifestName), asset(releaseDir, 'SHA256SUMS'),
+      asset(linuxDir, linuxArchiveName), asset(linuxDir, linuxManifestName), asset(linuxDir, 'SHA256SUMS-linux-amd64'),
+    ],
+    url: `https://github.com/Dukler/workass/releases/tag/v${version}`,
+  }));
+  write(latestView, JSON.stringify({ tagName: `v${version}`, isDraft: false, isPrerelease: false }));
+  const calls = path.join(root, 'gh-calls.log');
+  write(path.join(bin, 'gh'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$WORKASS_TEST_GH_CALLS"
+if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
+if [ "$1" = release ] && [ "$2" = view ]; then
+  case "$3" in v*) command cat "$WORKASS_TEST_GH_FULL" ;; *) command cat "$WORKASS_TEST_GH_LATEST" ;; esac
+  exit 0
+fi
+exit 97
+`);
+  // The stub resolves the latest-download redirect per platform: each client
+  // must read its own manifest, and serving one for the other is the exact
+  // failure this readback exists to catch.
+  write(path.join(bin, 'curl'), `#!/bin/sh
+output=''
+url=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output=$2; shift 2 ;;
+    https://*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$output" ] || exit 2
+case "$url" in
+  *workass-linux-amd64-release.json*) command cp "$WORKASS_TEST_LINUX_MANIFEST" "$output" ;;
+  *workass-windows-amd64-release.json*) command cp "$WORKASS_TEST_MANIFEST" "$output" ;;
+  *) exit 22 ;;
+esac
+`);
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  fs.chmodSync(path.join(bin, 'curl'), 0o755);
+  const receipt = path.join(root, 'windows-publication.json');
+  const result = run('sh', [path.join(releaseRoot, 'publish-windows.sh'),
+    '--version', version, '--commit', commit, '--release-dir', releaseDir,
+    '--linux-release-dir', linuxDir, '--verify-only', '--receipt', receipt], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      WORKASS_TEST_GH_CALLS: calls,
+      WORKASS_TEST_GH_FULL: fullView,
+      WORKASS_TEST_GH_LATEST: latestView,
+      WORKASS_TEST_MANIFEST: path.join(releaseDir, windowsManifestName),
+      WORKASS_TEST_LINUX_MANIFEST: path.join(linuxDir, linuxManifestName),
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /WORKASS_LINUX_GITHUB_RELEASE_VERIFIED/);
+  const recorded = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+  assert.equal(recorded.kind, 'windows-publication');
+  assert.deepEqual(recorded.linux, {
+    archive: fileArtifact(path.join(linuxDir, linuxArchiveName)),
+    manifest: fileArtifact(path.join(linuxDir, linuxManifestName)),
+    checksums: fileArtifact(path.join(linuxDir, 'SHA256SUMS-linux-amd64')),
+  });
+  assert.equal(recorded.linuxLatestManifestUrl,
+    'https://github.com/Dukler/workass/releases/latest/download/workass-linux-amd64-release.json');
+  const ghCalls = fs.readFileSync(calls, 'utf8');
+  assert.doesNotMatch(ghCalls, /release (create|upload)/);
+});

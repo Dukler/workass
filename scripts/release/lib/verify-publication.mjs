@@ -93,6 +93,18 @@ function expectedReceipt(args) {
     fail('Windows publication receipt does not match the verified candidate');
   }
 
+  // The Linux daemon tree rides the same GitHub release. It is bound here with
+  // the same strictness as the Windows zip: a publication that advertises a
+  // Linux manifest whose bytes are not the verified candidate's is not a
+  // publication a daemon may discover.
+  const linuxChecksums = artifact(path.join(args.root, 'linux', args.version, 'SHA256SUMS-linux-amd64'));
+  if (!sameArtifact(windows.linux?.archive, candidate.artifacts?.linux) ||
+      !sameArtifact(windows.linux?.manifest, candidate.artifacts?.linuxFeed) ||
+      !sameArtifact(windows.linux?.checksums, linuxChecksums) ||
+      windows.linuxLatestManifestUrl !== 'https://github.com/Dukler/workass/releases/latest/download/workass-linux-amd64-release.json') {
+    fail('Linux publication receipt does not match the verified candidate');
+  }
+
   const archiveName = `Workass-${args.version}-darwin-arm64.zip`;
   const candidateArchive = artifact(path.join(args.root, 'macos-feed', archiveName));
   const candidateFeed = artifact(path.join(args.root, 'macos-feed', 'workass-darwin-arm64-release.json'));
