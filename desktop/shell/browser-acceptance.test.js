@@ -39,7 +39,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { BrowserManager } = require('./browser-manager');
+const { BrowserManager, parseBrowserKey } = require('./browser-manager');
 const actions = require('./browser-actions');
 const { fakeBrowser } = require('./browser-fake-page.test-helper');
 
@@ -206,6 +206,9 @@ class Guest extends Contents {
   endFrameSubscription() { this.frameCallback = null; }
   setBackgroundThrottling(value) { this.throttling = value; }
   capturePage() { return Promise.resolve(frameImage()); }
+  // The guest's own input: Chromium delivers it to this guest only.
+  sendInputEvent(event) { (this.inputEvents ||= []).push(event); }
+  async insertText(text) { (this.insertedTexts ||= []).push(text); }
   async executeJavaScript(script) {
     if (script.includes('location.href, readyState: document.readyState') && this.gate) await this.gate;
     return super.executeJavaScript(script);
@@ -764,17 +767,73 @@ test('finding 12: the pop-out window takes typing, hover, drags and double click
   assert.ok(mouse.some((event) => event.type === 'mouseMoved' && event.buttons === 0), 'hover');
   assert.ok(mouse.some((event) => event.type === 'mouseMoved' && event.buttons === 1 && event.button === 'left'), 'a drag or a text selection');
   assert.ok(mouse.some((event) => event.type === 'mousePressed' && event.clickCount === 2), 'a double click');
-  const keys = input.filter((call) => call.method === 'Input.dispatchKeyEvent').map((call) => call.params);
-  assert.ok(keys.some((event) => event.type === 'keyDown' && event.text === 'a'), 'typing');
-  assert.ok(keys.some((event) => event.type === 'keyUp' && event.key === 'a'));
-  assert.ok(input.some((call) => call.method === 'Input.insertText' && call.params.text === 'ñandú'), 'composed text');
+  // Keys and text go through the guest's own input: protocol keyboard input
+  // on a guest's top frame lands in whatever has focus in the app window.
+  assert.equal(input.filter((call) => ['Input.dispatchKeyEvent', 'Input.insertText'].includes(call.method)).length, 0, 'no protocol keyboard input on the top frame');
+  const keys = guest.inputEvents || [];
+  assert.ok(keys.some((event) => event.type === 'keyDown' && event.keyCode === 'a'), 'typing');
+  assert.ok(keys.some((event) => event.type === 'char' && event.keyCode === 'a'), 'the typed character');
+  assert.ok(keys.some((event) => event.type === 'keyUp' && event.keyCode === 'a'));
+  assert.deepEqual(guest.insertedTexts, ['ñandú'], 'composed text');
   // Nothing but input reaches the page from the window.
   const count = guest.debugger.calls.length;
+  const events = keys.length;
   send({ type: 'Runtime.evaluate', expression: 'alert(1)' });
   onInput({ sender: {} }, { type: 'keyDown', key: 'b', code: 'KeyB', keyCode: 66, text: 'b' });
   await settle(10);
   assert.equal(guest.debugger.calls.length, count);
+  assert.equal((guest.inputEvents || []).length, events);
   manager.destroy();
+});
+
+// 2026-10-28: an agent typing into its hidden page wrote "Humberto Primo
+// 1500, Capital Federal" into the composer of the chat the person was in.
+// Chromium sends protocol keyboard input on a <webview> guest's top frame to
+// whatever has focus in the app window, so a hosted page never takes keys
+// or text that way.
+test('an agent typing into a hosted page never sends keyboard input through the top frame (webview host)', async () => {
+  const { manager } = webviewHost();
+  const entry = manager.get('chat-keys');
+  assert.equal(await entry.ready, true);
+  const guest = entry.view.webContents;
+  const tabId = manager.tabInfo(entry).id;
+  await manager.executeCDP({ tabId }, 'Input.insertText', { text: 'Humberto Primo 1500, Capital Federal' });
+  await manager.dispatchBrowserKey(entry, parseBrowserKey('Backspace', 'darwin'));
+  await manager.dispatchBrowserKey(entry, parseBrowserKey('Enter', 'darwin'));
+  const protocolKeys = guest.debugger.calls.filter((call) => ['Input.dispatchKeyEvent', 'Input.insertText'].includes(call.method));
+  assert.deepEqual(protocolKeys, [], 'nothing the app window could take');
+  assert.deepEqual(guest.insertedTexts, ['Humberto Primo 1500, Capital Federal']);
+  assert.deepEqual((guest.inputEvents || []).map((event) => `${event.type}:${event.keyCode}`),
+    ['keyDown:Backspace', 'keyUp:Backspace', 'keyDown:Enter', 'char:Enter', 'keyUp:Enter']);
+  manager.destroy();
+});
+
+test('an agent press in a hosted page puts the app window focus back where it was (webview host)', async () => {
+  const { manager, win } = webviewHost();
+  const entry = manager.get('chat-focus');
+  assert.equal(await entry.ready, true);
+  const scripts = [];
+  win.webContents.executeJavaScript = async (script) => { scripts.push(script); return true; };
+  const tabId = manager.tabInfo(entry).id;
+  await manager.executeCDP({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 });
+  await manager.executeCDP({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: 10, y: 10, button: 'left', clickCount: 1 });
+  const steps = scripts.map((script) => /workass-browser-(keep|restore)-app-focus/u.exec(script)?.[1]).filter(Boolean);
+  assert.deepEqual(steps, ['keep', 'restore', 'restore'], 'kept before the press, put back after it and after the release');
+  assert.match(scripts[scripts.length - 1], /presses - 1/u, 'the release ends the press');
+  manager.destroy();
+});
+
+test('a protocol key event becomes the guest input Electron delivers to that guest alone', () => {
+  const { guestKeyPlan } = require('./browser-manager');
+  assert.deepEqual(guestKeyPlan({ type: 'keyDown', key: 'a', code: 'KeyA', text: 'a', modifiers: 0 }),
+    { events: [{ type: 'keyDown', keyCode: 'a', modifiers: [] }, { type: 'char', keyCode: 'a', modifiers: [] }], text: '', commands: [] });
+  assert.deepEqual(guestKeyPlan({ type: 'rawKeyDown', key: 'ArrowDown', code: 'ArrowDown', modifiers: 8 }).events,
+    [{ type: 'keyDown', keyCode: 'Down', modifiers: ['shift'] }]);
+  assert.deepEqual(guestKeyPlan({ type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 4, commands: ['selectAll'] }),
+    { events: [{ type: 'keyDown', keyCode: 'a', modifiers: ['meta'] }], text: '', commands: ['selectAll'] });
+  assert.deepEqual(guestKeyPlan({ type: 'keyDown', key: 'ñ', code: 'Semicolon', text: 'ñ' }).text, 'ñ', 'a layout character is typed as text');
+  assert.deepEqual(guestKeyPlan({ type: 'keyUp', key: ':', code: 'Semicolon', modifiers: 8 }).events, [{ type: 'keyUp', keyCode: ':', modifiers: ['shift'] }]);
+  assert.throws(() => guestKeyPlan({ type: 'keyDown', key: 'MediaPlayPause', code: 'MediaPlayPause' }), /cannot be sent/u, 'refused, never faked');
 });
 
 test('real-Electron follow-up: a hidden native-view page an agent drives is held painting, then let go (native-view host)', async () => {

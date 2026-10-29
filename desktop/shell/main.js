@@ -267,6 +267,7 @@ function createWindow(url, browserReporter, isController) {
     onHosts: (hosts) => {
       if (!win.isDestroyed()) win.webContents.send('workass-browser:hosts', hosts);
     },
+    clipboard,
     pipPreload: path.join(__dirname, 'browser-pip-preload.js'),
     downloadsDir: path.join(RUNTIME.dataRoot, 'browser-downloads'),
     chromeVersion: process.versions.chrome,
