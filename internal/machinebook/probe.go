@@ -158,3 +158,27 @@ func isTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
+
+// ProbeAddress asks one address who it is, for a caller that owns its own HTTP
+// client — the fleet mesh, which must prove an address IS the daemon it expects
+// before it presents any credential (docs/specs/fleet-runtime.md §4).
+//
+// It is the same code path the book uses for discovery and liveness, exported
+// rather than copied, so there is one reading of the identity card and one set
+// of rules about what counts as a daemon.
+func ProbeAddress(ctx context.Context, address string, client *http.Client) (Card, error) {
+	if client == nil {
+		probe := &http.Client{Timeout: DefaultProbeTimeout, Transport: newProbeTransport(nil)}
+		return probeWithClient(ctx, address, probe)
+	}
+	return probeWithClient(ctx, address, client)
+}
+
+// NewProbeTransport builds a transport that accepts a daemon's self-signed
+// per-machine certificate, which is the private-PKI boundary every probe
+// crosses. Identity is proven by the card and the pinned fingerprint, not by a
+// public certificate authority.
+func NewProbeTransport() *http.Transport { return newProbeTransport(nil) }
+
+// DefaultProbeTimeout bounds one identity probe.
+const DefaultProbeTimeout = 5 * time.Second

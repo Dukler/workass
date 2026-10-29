@@ -13,7 +13,9 @@ import (
 	"strings"
 
 	"workass/internal/fleet"
+	"workass/internal/fleetclient"
 	"workass/internal/fleetqr"
+	"workass/internal/lease"
 )
 
 // dataRootEnvVar is set by the launchd/systemd unit and by every profile in
@@ -78,6 +80,9 @@ func runFleetCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) e
   forget    stop accepting enrolments under a key id
   qr        draw a scannable join code in the terminal, for a machine with
             no screen: workass fleet qr [host[:port]]
+  links     show the peer daemons linked to this machine, and the links it
+            dialled out itself. Read-only: revoking one is fleet:unlink,
+            which also fences the live socket.
 
 `)
 		flags.PrintDefaults()
@@ -151,6 +156,14 @@ func runFleetCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) e
 		fmt.Fprintf(stdout, "joined fleet %s\n", key.KeyID)
 		fmt.Fprint(stdout, "Clients holding this key can now enrol here on their own.\n")
 		return nil
+
+	case "links":
+		// Read-only on purpose. The running daemon holds devices.json in memory
+		// and rewrites it on its next change, so a revocation typed here would be
+		// silently undone — exactly the kind of half-true state this design
+		// exists to remove. Revoking a link is `fleet:unlink` on the wire, which
+		// fences the socket in the same breath.
+		return printFleetLinks(stateDir, stdout)
 
 	case "list":
 		keys := store.Keys()
@@ -285,4 +298,72 @@ func readSecret(stdin io.Reader, stdout, stderr io.Writer) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// printFleetLinks shows both halves of this machine's mesh: the peers that
+// linked IN, which is the device store's view, and the peers this daemon
+// dialled OUT, which is the peer store's.
+//
+// Both are needed to read a problem. A link is one duplex connection per pair
+// in the design, but the two records are written by different events — an
+// inbound enrolment and an outbound dial — so a machine that appears on one
+// list and not the other is itself the finding.
+func printFleetLinks(stateDir string, stdout io.Writer) error {
+	leases, err := lease.NewManager(lease.Options{StateDir: stateDir})
+	if err != nil {
+		return err
+	}
+	inbound := leases.PeerLinks()
+	if len(inbound) == 0 {
+		fmt.Fprintf(stdout, "no peer daemon has linked to this machine\n")
+	}
+	for _, device := range inbound {
+		grant := strings.TrimSpace(device.Grant)
+		if grant == "" {
+			grant = "full"
+		}
+		fmt.Fprintf(stdout, "in   %s  name=%q  key=%s  grant=%s  lastSeen=%s\n",
+			device.Peer, device.Name, device.KeyID, grant, device.LastSeen)
+	}
+	for _, blocked := range leases.BlockedPeers() {
+		fmt.Fprintf(stdout, "cut  %s  name=%q  revoked=%s  (it cannot link again until it is approved)\n",
+			blocked.MachineID, blocked.Name, blocked.RevokedAt)
+	}
+	peers, err := fleetclient.Open(stateDir)
+	if err != nil {
+		return err
+	}
+	outbound := peers.Redacted()
+	if len(outbound) == 0 {
+		fmt.Fprintf(stdout, "this machine has dialled no peer\n")
+	}
+	for _, peer := range outbound {
+		state := "paired"
+		switch {
+		case peer.RevokedByPeer:
+			state = "revoked by that peer"
+		case !peer.Linked():
+			state = "known, not linked"
+		}
+		fmt.Fprintf(stdout, "out  %s  name=%q  %s  lastUse=%s\n", peer.MachineID, peer.Name, state, peer.LastUseAt)
+		for _, route := range peer.Routes {
+			note := ""
+			switch {
+			case route.Refused:
+				note = "  REFUSED: " + route.RefusedReason
+			case route.CooldownUntil != "":
+				note = "  cooling until " + route.CooldownUntil
+			}
+			fmt.Fprintf(stdout, "       %s  %s  %s  lastSuccess=%s%s\n",
+				route.Kind, route.Address, route.Source, firstNonEmptyCLI(route.LastSuccessAt, "never"), note)
+		}
+	}
+	return nil
+}
+
+func firstNonEmptyCLI(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }

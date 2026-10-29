@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -37,17 +38,50 @@ func registerAgentControlWireHandler(hub *wire.Hub, control *agentControlHandler
 	if hub == nil || control == nil {
 		return false
 	}
-	hub.Register("agent:control", func(args []any) (any, error) {
-		return control.callAsController(context.Background(), firstMapArg(args))
+	// RegisterWithCaller, not Register: §6's limit is the LESSER of the caller's
+	// own ceiling and the grant recorded for the link the command arrived on, and
+	// the link is a property of the caller. An invoke that reaches this channel
+	// without a socket gets an empty caller, which is the local path and is
+	// exactly what it was before.
+	hub.RegisterWithCaller("agent:control", func(caller wire.Caller, args []any) (any, error) {
+		return control.callAsControllerFor(context.Background(), caller, firstMapArg(args))
 	})
 	return true
 }
 
 func (h *agentControlHandler) callAsController(ctx context.Context, payload map[string]any) (any, error) {
+	return h.callAsControllerFor(ctx, wire.Caller{}, payload)
+}
+
+func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wire.Caller, payload map[string]any) (any, error) {
 	if h == nil || h.chats == nil || h.chats.providerChats == nil || h.manager == nil {
 		return nil, errors.New("Workass agent control is unavailable")
 	}
+	if version := intField(payload, "v"); version > fleetEnvelopeVersion {
+		// A structured refusal naming the supported range, rather than reading a
+		// shape this daemon does not know (§14, version skew).
+		return nil, fmt.Errorf("this daemon speaks fleet command envelope v%d; the caller sent v%d — update this machine",
+			fleetEnvelopeVersion, version)
+	}
 	method := strings.TrimSpace(fieldString(payload, "method"))
+	// The envelope, evaluated here because the home is where authorization is
+	// written (§11). The grant belongs to the link; the limit is the caller's own
+	// ceiling; the effective permission is the lesser, and it can only narrow.
+	//
+	// It is read BEFORE the locality table, so a command that is refused for
+	// both reasons is refused for the one the caller can act on: "this link does
+	// not carry schedule.*" tells them which capability is missing, where "no
+	// remote form" would send them looking for a routing mistake they did not
+	// make.
+	forwarded := fleetForwardedWork{
+		Peer:        strings.TrimSpace(caller.Peer),
+		Limit:       fleetEffectiveLimit(caller.Grant, fieldString(payload, "limit")),
+		Origin:      fleetOriginFrom(payload["origin"]),
+		OperationID: strings.TrimSpace(fieldString(payload, "operation_id")),
+	}
+	if err := fleetRefuseNarrowedSurface(method, forwarded.Limit, mapFromAnyMain(payload["params"])); err != nil {
+		return nil, err
+	}
 	kind, known := remoteAgentMethodKinds[method]
 	if !known || kind == remoteAgentLocalOnly {
 		reason := remoteAgentLocalOnlyReasons[method]
@@ -65,6 +99,13 @@ func (h *agentControlHandler) callAsController(ctx context.Context, payload map[
 	}
 	delete(params, "machine_id")
 	delete(params, "owner_key")
+	if forwarded.OperationID != "" && strings.TrimSpace(fieldString(params, "operation_id")) == "" {
+		// One operation id for "launch there" and "record here". Carrying the
+		// caller's key into the local apply is what makes a replay produce
+		// exactly one child here and exactly one row there (§6).
+		params["operation_id"] = forwarded.OperationID
+	}
+	ctx = withFleetForwardedWork(ctx, forwarded)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://127.0.0.1"+toolsPath, nil)
 	if err != nil {
 		return nil, err
@@ -76,6 +117,12 @@ func (h *agentControlHandler) callAsController(ctx context.Context, payload map[
 			return h.chats.createOnThisMachine(ctx, params)
 		case "agent.catalog":
 			return h.manager.MachineAgentCatalog(ctx), nil
+		case "chat.list":
+			// This machine's own catalog, and deliberately not the fleet's: the
+			// caller is already asking every peer it knows, so answering with a
+			// merged list here would double-count a shared peer and, between two
+			// daemons that each know the other, never terminate.
+			return h.chats.list()
 		}
 		return nil, errors.New("unknown machine-scoped agent control method")
 	case remoteAgentForkScoped:
