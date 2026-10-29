@@ -429,105 +429,16 @@ function cdpBrowserKey(parsed) {
   };
 }
 
-// A hosted page is the guest of a <webview> in the app window, and Chromium
-// hands protocol keyboard input sent to a guest's top frame (and Electron's
-// own editing commands, paste included) to whatever has focus in the whole
-// window: the composer of the chat the person is typing in, not the page.
-// The guest's own input (sendInputEvent, insertText) reaches only the guest,
-// so a hosted top frame takes its keys that way, translated from the
-// protocol event. Verified on Electron 43.1.1.
-const HOSTED_KEY_METHODS = new Set(['Input.dispatchKeyEvent', 'Input.insertText', 'Input.imeSetComposition']);
-const GUEST_NAMED_KEYS = new Map([
-  ['ArrowUp', 'Up'], ['ArrowDown', 'Down'], ['ArrowLeft', 'Left'], ['ArrowRight', 'Right'],
-  [' ', 'Space'], ['Enter', 'Enter'], ['Backspace', 'Backspace'], ['Delete', 'Delete'], ['Tab', 'Tab'],
-  ['Escape', 'Escape'], ['Home', 'Home'], ['End', 'End'], ['PageUp', 'PageUp'], ['PageDown', 'PageDown'],
-  ['Insert', 'Insert'], ['Shift', 'Shift'], ['Control', 'Control'], ['Alt', 'Alt'], ['Meta', 'Meta'],
-  ['CapsLock', 'Capslock'],
-]);
-const GUEST_PUNCTUATION_BY_CODE = new Map(Array.from(CDP_PUNCTUATION_KEYS, ([key, value]) => [value.code, key]));
-// Mac editing commands a protocol key event can carry; the guest's own input
-// has no such field, so they run in the focused frame's document instead.
-const GUEST_EDITING_COMMANDS = new Map([
-  ['selectAll', 'selectAll'], ['copy', 'copy'], ['cut', 'cut'], ['undo', 'undo'], ['redo', 'redo'],
-  ['deleteBackward', 'delete'], ['deleteForward', 'forwardDelete'], ['paste', 'paste'],
-]);
-
-function printableAscii(text) {
-  return typeof text === 'string' && text.length === 1 && text.charCodeAt(0) >= 0x20 && text.charCodeAt(0) < 0x7f;
-}
-
-// The key a protocol key event names, as Electron's sendInputEvent spells it,
-// or null when it has no spelling there.
-function guestKeyCode(params) {
-  const key = String(params.key || '');
-  if (GUEST_NAMED_KEYS.has(key)) return GUEST_NAMED_KEYS.get(key);
-  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/u.test(key)) return key;
-  if (printableAscii(key)) return key;
-  const code = String(params.code || '');
-  let match = /^Key([A-Z])$/u.exec(code);
-  if (match) return match[1].toLowerCase();
-  match = /^Digit([0-9])$/u.exec(code);
-  if (match) return match[1];
-  if (GUEST_PUNCTUATION_BY_CODE.has(code)) return GUEST_PUNCTUATION_BY_CODE.get(code);
-  if (code === 'Space') return 'Space';
-  return null;
-}
-
-function guestModifiers(bits) {
-  const value = Number(bits) || 0;
-  return [[1, 'alt'], [2, 'control'], [4, 'meta'], [8, 'shift']].filter(([bit]) => value & bit).map(([, name]) => name);
-}
-
-// The guest input for one protocol key event: Electron events to send, text
-// to insert (a character Electron cannot spell as a key), and editing
-// commands to run once the key is down.
-function guestKeyPlan(params) {
-  const type = String(params.type || '');
-  const modifiers = guestModifiers(params.modifiers);
-  const keyCode = guestKeyCode(params);
-  const text = typeof params.text === 'string' ? params.text : '';
-  const plan = { events: [], text: '', commands: [] };
-  if (type === 'keyUp') {
-    if (keyCode) plan.events.push({ type: 'keyUp', keyCode, modifiers });
-    return plan;
-  }
-  if (type === 'char') {
-    if (text === '\r' || printableAscii(text)) plan.events.push({ type: 'char', keyCode: text === '\r' ? 'Enter' : text, modifiers });
-    else if (text) plan.text = text;
-    return plan;
-  }
-  if (type !== 'keyDown' && type !== 'rawKeyDown') throw new Error(`unsupported key event type: ${type || 'none'}`);
-  if (!keyCode) {
-    // A character with no key of its own (a layout's ñ, an emoji) is typed
-    // as text; a named key Electron cannot send is refused, never faked.
-    if (text === '\r' || printableAscii(text)) plan.events.push({ type: 'char', keyCode: text === '\r' ? 'Enter' : text, modifiers });
-    else if (text) plan.text = text;
-    if (text) return plan;
-    throw new Error(`this key cannot be sent to the page: ${String(params.key || params.code || 'unknown')}`);
-  }
-  plan.events.push({ type: 'keyDown', keyCode, modifiers });
-  if (type === 'keyDown' && text) {
-    if (text === '\r' || printableAscii(text)) plan.events.push({ type: 'char', keyCode: text === '\r' ? 'Enter' : text, modifiers });
-    else plan.text = text;
-  }
-  for (const command of Array.isArray(params.commands) ? params.commands : []) {
-    const name = GUEST_EDITING_COMMANDS.get(String(command));
-    if (name) plan.commands.push(name);
-  }
-  return plan;
-}
-
 class BrowserManager {
   constructor({
     win, WebContentsView, BrowserWindow, nativeImage, session, partition = DEFAULT_PARTITION, chromeVersion, platform,
     onState, requestOpen, onLifecycle, host = 'view', preferredHost = null, webContentsFromId = null, onHosts = null, pipPreload = '',
-    downloadsDir = '', clipboard = null,
+    downloadsDir = '',
   }) {
     if (!win || !WebContentsView || !session) throw new Error('browser manager dependencies missing');
     this.win = win;
     this.WebContentsView = WebContentsView;
     this.BrowserWindow = BrowserWindow || null;
-    this.clipboard = clipboard || null;
     this.nativeImage = nativeImage || null;
     this.partition = partition;
     // 'webview': every page is the guest of a <webview> the app renderer
@@ -3753,41 +3664,21 @@ class BrowserManager {
   // left down is released by the operation that made it (serialize) or on
   // blur.
   async boundedInput(entry, debug, method, params, sessionId) {
-    const hosted = this.isHosted(entry);
-    if (hosted && HOSTED_KEY_METHODS.has(method)) {
-      return this.withInputBound(entry, method, '', () => this.hostedKeyInput(entry, debug, method, params, sessionId));
-    }
     const pointer = method === 'Input.dispatchMouseEvent' ? String(params.type || '') : '';
     if (pointer === 'mousePressed') {
       entry.pointerDown = { sessionId: sessionId || null, x: Number(params.x) || 0, y: Number(params.y) || 0, button: params.button || 'left' };
     }
-    // A press in a hosted page focuses its frame, and Chromium moves the app
-    // window's focus to the page's <webview> with it: the person's composer
-    // would lose its caret and their next keys would go to the agent's page.
-    // The app's focus is put back as soon as the page has taken the press.
-    const keepsFocus = hosted && (pointer === 'mousePressed' || pointer === 'mouseReleased');
-    if (keepsFocus && pointer === 'mousePressed') await this.keepAppFocus();
-    let settled = false;
-    try {
-      const result = await this.withInputBound(entry, method, pointer, () => debug.sendCommand(method, params, sessionId || undefined));
-      if (pointer === 'mouseReleased') entry.pointerDown = null;
-      settled = true;
-      return result;
-    } finally {
-      if (keepsFocus) await this.restoreAppFocus(pointer === 'mouseReleased' || !settled);
-    }
-  }
-
-  async withInputBound(entry, method, pointer, send) {
     let timer = null;
     const limitMs = this.inputCommandTimeoutMs ?? INPUT_COMMAND_TIMEOUT_MS;
     try {
-      return await Promise.race([
-        Promise.resolve().then(send),
+      const result = await Promise.race([
+        Promise.resolve(debug.sendCommand(method, params, sessionId || undefined)),
         new Promise((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error(`the page did not take ${method.slice('Input.'.length)} within ${Math.round(limitMs / 1000)}s`)), limitMs);
         }),
       ]);
+      if (pointer === 'mouseReleased') entry.pointerDown = null;
+      return result;
     } catch (error) {
       if (/did not take/u.test(String(error && error.message))) {
         entry.inputTimedOut = true;
@@ -3795,170 +3686,6 @@ class BrowserManager {
       }
       throw error;
     } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  // Keyboard input for a hosted page, one event at a time in the order it
-  // was sent (the pop-out window sends without waiting). A cross-site frame
-  // with focus takes it through its own target, which Chromium delivers to
-  // that frame alone; the top frame (and frames sharing its renderer) through
-  // the guest's own input. Never through the top frame's protocol session.
-  hostedKeyInput(entry, debug, method, params, sessionId) {
-    const run = (entry.hostedKeyChain || Promise.resolve()).then(async () => {
-      if (sessionId) return debug.sendCommand(method, params, sessionId);
-      const frame = await this.hostedKeyFrame(entry);
-      const target = frame ? this.inputTargetForFrame(entry, frame.id) : null;
-      if (target && target.sessionId) return debug.sendCommand(method, params, target.sessionId);
-      return this.guestKeyInput(entry, frame, method, params);
-    });
-    entry.hostedKeyChain = run.catch(() => {});
-    return run;
-  }
-
-  // The frame the page's focus is in, following focused frame owners down
-  // from the top frame. Unlike focusedFrame this does not ask a frame whether
-  // its document has focus: only the top frame is emulated focused, so a
-  // cross-site frame in a hosted page always says no.
-  async hostedKeyFrame(entry) {
-    let frame = this.frameForSession(entry, null);
-    for (let depth = 0; frame && !frame.detached && depth < 64; depth += 1) {
-      let activeFrame = false;
-      try {
-        activeFrame = await this.evaluateFrame(entry, frame.id, `(/* workass-browser-key-frame */ () => {
-          let active = document.activeElement;
-          const seen = new Set();
-          while (active && !seen.has(active)) {
-            seen.add(active);
-            const nested = active.shadowRoot?.activeElement || null;
-            if (!nested || nested === active) break;
-            active = nested;
-          }
-          return active?.localName === 'iframe' || active?.localName === 'frame';
-        })()`) === true;
-      } catch { return frame; }
-      if (!activeFrame) return frame;
-      const children = Array.from(entry.frames.values()).filter((candidate) => candidate.parentFrameId === frame.id && !candidate.detached);
-      const matches = [];
-      for (const child of children) {
-        if (await this.frameOwnerIsDeepActive(entry, frame, child)) matches.push(child);
-      }
-      if (matches.length !== 1) return frame;
-      frame = matches[0];
-    }
-    return frame;
-  }
-
-  async guestKeyInput(entry, frame, method, params) {
-    const wc = this.liveContents(entry);
-    if (!wc || wc.isDestroyed?.()) throw new Error('browser page is not available');
-    if (method === 'Input.insertText') {
-      const text = String(params.text ?? '');
-      if (text) await wc.insertText(text);
-      return {};
-    }
-    if (method !== 'Input.dispatchKeyEvent') throw new Error(`${method.slice('Input.'.length)} is not available for this page`);
-    const plan = guestKeyPlan(params);
-    const frameId = frame ? frame.id : null;
-    // A key event from the guest's input can reach the page after a command
-    // sent later over the protocol. A key-up (and a key-down that carries
-    // editing commands, which need the key's user activation) is waited for
-    // in the frame that has focus, so what runs next sees the key's effect.
-    const waitFor = plan.events.some((event) => event.type === 'keyUp') ? 'keyup'
-      : plan.commands.length && plan.events.some((event) => event.type === 'keyDown') ? 'keydown' : '';
-    if (waitFor) await this.armGuestKeyBarrier(entry, frameId, waitFor);
-    for (const event of plan.events) wc.sendInputEvent(event);
-    if (plan.text) await wc.insertText(plan.text);
-    if (waitFor) await this.awaitGuestKeyBarrier(entry, frameId);
-    for (const command of plan.commands) {
-      if (command === 'paste') {
-        // Electron's own paste lands in the app's focused element too; plain
-        // text from the clipboard is inserted in the page instead.
-        const pasted = this.clipboard && typeof this.clipboard.readText === 'function' ? String(this.clipboard.readText() || '') : '';
-        if (pasted) await wc.insertText(pasted);
-        continue;
-      }
-      await this.evaluateFrame(entry, frameId, `(/* workass-browser-key-command */ () => document.execCommand(${JSON.stringify(command)}))()`);
-    }
-    return {};
-  }
-
-  async armGuestKeyBarrier(entry, frameId, type) {
-    try {
-      await this.evaluateFrame(entry, frameId, `(/* workass-browser-key-barrier-arm */ () => {
-        const key = Symbol.for('workass.browser.key-barrier');
-        globalThis[key] = new Promise((resolve) => {
-          const done = () => { removeEventListener(${JSON.stringify(type)}, done, true); clearTimeout(timer); resolve(true); };
-          const timer = setTimeout(done, 1000);
-          addEventListener(${JSON.stringify(type)}, done, true);
-        });
-        return true;
-      })()`);
-    } catch { /* the key goes ahead unwaited */ }
-  }
-
-  async awaitGuestKeyBarrier(entry, frameId) {
-    try {
-      await this.evaluateFrame(entry, frameId, `(/* workass-browser-key-barrier-wait */ async () => {
-        const key = Symbol.for('workass.browser.key-barrier');
-        const barrier = globalThis[key];
-        delete globalThis[key];
-        if (barrier) await barrier;
-        return true;
-      })()`);
-    } catch { /* a navigation the key started replaced the document */ }
-  }
-
-  // The app window's focused element before an agent's press in a hosted
-  // page, and putting it back after. An element in the app is refocused
-  // where it was (a textarea keeps its caret); a page the person is not
-  // looking at is never left holding the app's focus.
-  async keepAppFocus() {
-    await this.appFocusScript(`(/* workass-browser-keep-app-focus */ () => {
-      const key = Symbol.for('workass.browser.app-focus');
-      const state = window[key] || (window[key] = { element: null, presses: 0, at: 0 });
-      // A press whose release never came through here (a stuck page) leaves
-      // its count behind; after a while the focus is taken fresh.
-      if (state.presses === 0 || Date.now() - state.at > 10000) {
-        state.presses = 0;
-        const active = document.activeElement;
-        const hiddenPage = active && active.localName === 'webview' && active.closest('.wbs-page')?.dataset?.shown !== '1';
-        state.element = hiddenPage ? null : active;
-      }
-      state.presses += 1;
-      state.at = Date.now();
-      return true;
-    })()`);
-  }
-
-  async restoreAppFocus(final) {
-    await this.appFocusScript(`(/* workass-browser-restore-app-focus */ () => {
-      const key = Symbol.for('workass.browser.app-focus');
-      const state = window[key];
-      if (!state) return false;
-      const kept = state.element;
-      if (${final ? 'true' : 'false'}) {
-        state.presses = Math.max(0, state.presses - 1);
-        if (state.presses === 0) delete window[key];
-      }
-      const active = document.activeElement;
-      if (!active || active.localName !== 'webview' || active === kept) return false;
-      if (kept && kept.isConnected && kept !== document.body && typeof kept.focus === 'function') kept.focus({ preventScroll: true });
-      else active.blur();
-      return true;
-    })()`);
-  }
-
-  async appFocusScript(script) {
-    const wc = this.win && !this.win.isDestroyed?.() ? this.win.webContents : null;
-    if (!wc || wc.isDestroyed?.() || typeof wc.executeJavaScript !== 'function') return;
-    let timer = null;
-    try {
-      await Promise.race([
-        Promise.resolve().then(() => wc.executeJavaScript(script)),
-        new Promise((resolve) => { timer = setTimeout(resolve, INPUT_RELEASE_TIMEOUT_MS); }),
-      ]);
-    } catch { /* the app renderer is reloading */ } finally {
       clearTimeout(timer);
     }
   }
@@ -3978,7 +3705,6 @@ class BrowserManager {
       new Promise((resolve) => setTimeout(resolve, INPUT_RELEASE_TIMEOUT_MS)),
     ]);
     if (down) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: down.x, y: down.y, button: down.button, buttons: 0, clickCount: 1 }, down.sessionId);
-    if (down && this.isHosted(entry)) await this.restoreAppFocus(true);
     await send('Input.cancelDragging', {}, down ? down.sessionId : null);
     this.lifecycle(entry, 'input-released', { pressed: !!down });
   }
@@ -6443,4 +6169,4 @@ class BrowserManager {
   }
 }
 
-module.exports = { BrowserManager, DEFAULT_PARTITION, cleanUserAgent, guestKeyPlan, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };
+module.exports = { BrowserManager, DEFAULT_PARTITION, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };

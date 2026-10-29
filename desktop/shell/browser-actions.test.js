@@ -179,7 +179,7 @@ function inputDouble({ hang = () => false } = {}) {
     holdPainting(target) { target.holds = (target.holds || 0) + 1; },
     releasePainting(target) { target.holds -= 1; },
   };
-  for (const name of ['boundedInput', 'withInputBound', 'keepAppFocus', 'restoreAppFocus', 'appFocusScript', 'releaseStuckInput', 'withPainting', 'serialize', 'browserClick']) self[name] = BrowserManager.prototype[name];
+  for (const name of ['boundedInput', 'releaseStuckInput', 'withPainting', 'serialize', 'browserClick']) self[name] = BrowserManager.prototype[name];
   self.executeCDP = (_target, method, params) => self.boundedInput(entry, debug, method, params, null);
   return { self, entry, sent };
 }
