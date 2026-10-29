@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"workass/internal/fleetid"
 	"workass/internal/wire"
 )
 
@@ -133,7 +134,13 @@ func clampControllerWait(method string, params map[string]any) {
 func rejectMachineTaggedParams(params map[string]any) error {
 	for key, value := range params {
 		text, ok := value.(string)
-		if !ok || !strings.HasPrefix(strings.TrimSpace(text), machineTaggedIDPrefix) {
+		// Either dialect of a home-bearing id is the same fault here: the router
+		// strips its own tags on the way out, so anything still naming a home is
+		// a routing error, and resolving it locally would address the wrong chat.
+		// This scan reaches every param, message text included, so it asks
+		// whether the value NAMES a home rather than whether it merely opens
+		// like one.
+		if !ok || !fleetid.NamesHome(text) {
 			continue
 		}
 		return errors.New("a forwarded Workass tool call must carry this machine's own ids; " + key + " is machine-tagged")
