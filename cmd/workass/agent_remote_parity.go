@@ -66,6 +66,13 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"fork.retry":              remoteAgentForkScoped,
 	"chat.create":             remoteAgentMachineScoped,
 	"agent.catalog":           remoteAgentMachineScoped,
+	// chat.list is machine-scoped because a catalog belongs to a machine, not to
+	// a chat. It used to be absent here, which was correct while the renderer was
+	// the only bridge: the renderer kept its own socket to each machine and read
+	// each catalog natively. With the daemon able to dial, the fleet-wide chat
+	// list has to be answerable over a link too, or workass_list_chats would be
+	// the one tool that still needed the app open (§6, §10).
+	"chat.list": remoteAgentMachineScoped,
 	"agent.question":          remoteAgentLocalOnly,
 	"html.render":             remoteAgentLocalOnly,
 	"artifact.host":           remoteAgentLocalOnly,

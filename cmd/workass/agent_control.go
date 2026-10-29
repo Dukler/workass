@@ -434,17 +434,70 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	}
 }
 
-// forwardRemoteAgentCall hands one addressed call to the renderer's machine
-// router. The caller's bearer capability and parent ids never travel; the
-// destination daemon authorizes the controller link and re-applies the exact
-// actor fence, so remote validation is the same code as local validation.
+// forwardRemoteAgentCall hands one addressed call to the home that owns it —
+// over this daemon's own link when there is one, and over the renderer relay
+// when the peer has no mesh yet. The caller's bearer capability and parent ids
+// never travel; the destination daemon authorizes the link and re-applies the
+// exact actor fence, so remote validation is the same code as local validation.
+//
+// What is added here is the §6 envelope: the caller's own permission ceiling,
+// which the home can only narrow, and an immutable origin stamp so provenance
+// survives restarts and re-homing.
 func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method, machineID string, params map[string]any) (any, error) {
 	if h == nil || h.remoteChats == nil {
 		return nil, errors.New("Workass remote-chat MCP router is unavailable")
 	}
+	// No chaining: work that arrived here through a link below full access may
+	// not use THIS daemon's links, so a narrowed grant cannot be laundered into
+	// a wider one by passing through a third machine (§11).
+	if err := fleetRefuseSecondHop(ctx, method); err != nil {
+		return nil, err
+	}
 	forwarded := copyRemoteAgentRouteParams(params)
 	forwarded["machine_id"] = machineID
+	if limit := h.callerFleetLimit(ctx, params); limit != "" {
+		forwarded[fleetLimitParam] = limit
+	}
+	if origin := h.callerFleetOrigin(ctx, params); !origin.empty() {
+		forwarded[fleetOriginParam] = origin.payload()
+	}
 	return h.remoteChats.Call(ctx, method, forwarded)
+}
+
+// callerFleetLimit is the caller's own permission ceiling, in the read/edit/full
+// vocabulary. A chat whose effective mode cannot be resolved states nothing
+// rather than claiming full: unstated is how every peer behaved before the
+// envelope existed, and the home resolves it the same way for both.
+//
+// Work that itself arrived over a link carries that link's effective limit
+// onward unchanged, which is what makes narrowing transitive without a counter.
+func (h *agentControlHandler) callerFleetLimit(ctx context.Context, params map[string]any) string {
+	if work, forwarded := fleetForwardedWorkFrom(ctx); forwarded {
+		return canonicalFleetLimit(work.Limit)
+	}
+	if h == nil || h.manager == nil {
+		return ""
+	}
+	return h.manager.CallerPermissionIntent(
+		fieldString(params, "owner_key"),
+		fieldString(params, "parent_chat_id"),
+		fieldString(params, "parent_tab_id"),
+	)
+}
+
+// callerFleetOrigin stamps who asked. An origin that arrived with the command
+// is immutable and travels on unchanged; otherwise this machine and this chat
+// are the origin.
+func (h *agentControlHandler) callerFleetOrigin(ctx context.Context, params map[string]any) fleetCommandOrigin {
+	if work, forwarded := fleetForwardedWorkFrom(ctx); forwarded && !work.Origin.empty() {
+		return work.Origin
+	}
+	return fleetCommandOrigin{
+		Machine:     strings.TrimSpace(h.selfMachineID),
+		ChatID:      fieldString(params, "parent_chat_id"),
+		TabID:       fieldString(params, "parent_tab_id"),
+		OperationID: fieldString(params, "operation_id"),
+	}
 }
 
 // agentOwnerErrorFor keeps each method family's existing authorization wording

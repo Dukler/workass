@@ -421,6 +421,11 @@ func main() {
 	if machineBook != nil {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
+	// The daemon's own outbound half. Until now internal/wire only ACCEPTED
+	// sockets, so the renderer was the fleet's only bridge and closing the app
+	// closed the fleet (docs/specs/fleet-runtime.md §1). With a mesh, a command
+	// for another home travels over a link this daemon dialled itself.
+	fleetMesh := openFleetMesh(stateDir, identity, fleetKeys, machineBook, hub, logger)
 	handler.Metrics = func() map[string]any {
 		out := daemonMetrics(providerChats, stateDir, hub, acpManager)
 		out["imageStore"] = imageStore.metrics()
@@ -440,7 +445,10 @@ func main() {
 	}
 	registerForkWireHandlers(hub, forkService)
 	rendererAgentRouter := registerRendererAgentRouter(hub)
-	agentControl.remoteChats = rendererAgentRouter
+	// A direct link is preferred and the renderer relay is the fallback, which
+	// is migration M1 exactly: semantics do not change, and the only observable
+	// difference is that remote calls now work with the app closed (§12).
+	agentControl.remoteChats = newFleetMeshRouter(fleetMesh.mesh, rendererAgentRouter, identity.MachineID, logger.Printf)
 	agentControl.selfMachineID = identity.MachineID
 	if registerAgentControlWireHandler(hub, agentControl) {
 		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
@@ -462,6 +470,7 @@ func main() {
 			// closes. Every step it takes is durable, so stopping is safe.
 			stopImageStore()
 			imageStoreRun.Wait()
+			fleetMesh.Close()
 			forkService.CancelAll()
 			// Durable chat actors own the disposable provider-lane attachments.
 			// Detach those actors before the manager tears down its bridge maps so
@@ -574,10 +583,16 @@ func main() {
 		defer imageStoreRun.Done()
 		imageStore.run(imageStoreCtx)
 	}()
+	if linked := fleetMesh.Start(signalCtx); linked > 0 {
+		logger.Printf("[workass] fleet mesh supervising %d peer link(s)", linked)
+	}
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
 		Bind:   *bind,
 		Port:   *port,
 		Beacon: *beacon,
+		// Discovery is what already exists: every book refresh is also when a
+		// newly-sighted machine of this fleet becomes a peer with a heartbeat.
+		OnBook: fleetMesh.SyncFromBook,
 	}, logger)
 	if err := serveDaemonHTTPWithServeError(signalCtx, server, listener, cleanup, serveErr); err != nil {
 		cleanup()

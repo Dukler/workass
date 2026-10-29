@@ -148,6 +148,11 @@ type machinePresenceOptions struct {
 	Bind   string
 	Port   int
 	Beacon bool
+	// OnBook runs after every refresh that changed the book. The fleet mesh
+	// reads it there rather than owning a clock of its own: a machine sighted by
+	// discovery becomes a peer with a heartbeat on the same tick that noticed it
+	// (docs/specs/fleet-runtime.md §4).
+	OnBook func() int
 }
 
 // startMachinePresence runs TCP-port-80 discovery and liveness until ctx ends.
@@ -158,6 +163,9 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 		return
 	}
 	broadcast := func() {
+		if opts.OnBook != nil {
+			opts.OnBook()
+		}
 		hub.Broadcast("machines:changed", map[string]any{
 			"machines": book.List(),
 			"self": map[string]any{

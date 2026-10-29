@@ -450,3 +450,28 @@ func (m *Manager) agentCatalogV2(ctx context.Context, parent *Job) map[string]an
 		},
 	}
 }
+
+// CallerPermissionIntent is one chat's own permission ceiling, in the
+// provider-neutral read/edit/full vocabulary, for the fleet edge that must
+// state a limit it can only narrow (docs/specs/fleet-runtime.md §6).
+//
+// It is the same reading inherited subagent permission already does — the
+// parent's effective mode, translated to an intent — which is the precedent the
+// spec names: a delegated run's authority is DERIVED from its parent's rather
+// than chosen freely. An unresolvable mode returns empty, which means unknown
+// and never full.
+func (m *Manager) CallerPermissionIntent(ownerKey, chatID, tabID string) string {
+	if m == nil {
+		return ""
+	}
+	_, _, parent, ok := m.subagentOwnerContext(ownerKey, chatID, tabID)
+	if !ok || parent == nil {
+		return ""
+	}
+	modeID := strings.TrimSpace(m.effectiveSubagentParentMode(parent))
+	if modeID == "" {
+		return ""
+	}
+	providerID := firstNonEmpty(strings.TrimSpace(parent.ProviderID), strings.TrimSpace(parent.startOpts.ProviderID))
+	return permissionIntentForMode(providerID, modeID)
+}

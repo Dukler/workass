@@ -36,6 +36,42 @@ type Device struct {
 	LastSeen   string `json:"lastSeen"`
 	Owner      string `json:"owner,omitempty"`
 	KeyID      string `json:"keyId,omitempty"`
+	// Kind tells one shape of approved identity from another. It is empty for
+	// every device approved or enrolled before peer links existed, which is
+	// exactly what a browser, a phone and a renderer still are; KindPeer marks
+	// another daemon's link (docs/specs/fleet-runtime.md §4).
+	Kind string `json:"kind,omitempty"`
+	// Peer is the machine id on the other end of a peer link. It is the name a
+	// human revokes by: one link, one machine, revocable without re-keying the
+	// fleet.
+	Peer string `json:"peer,omitempty"`
+	// Grant is the permission ceiling this link was given, in the read/edit/full
+	// vocabulary the provider lanes already use. Empty means full, which is what
+	// fleet membership has always meant; a forwarded command's effective
+	// permission is the lesser of this and the caller's own limit (§6).
+	Grant string `json:"grant,omitempty"`
+}
+
+// KindPeer marks a device record that is another daemon's link rather than a
+// person's browser.
+const KindPeer = "peer"
+
+// IsPeer reports whether this record is a peer link.
+func (d Device) IsPeer() bool { return d.Kind == KindPeer }
+
+// BlockedPeer records a peer link a human revoked.
+//
+// Revocation has to outlive the connection, and this is the record that makes
+// it mean something: a key-holding peer could otherwise re-enrol itself
+// silently one second later under the very fleet key that is meant to stay
+// untouched (§4 — "revoking a link stops its subscriptions and monitors at
+// once" and "cutting one machine out never means re-keying the fleet"). So the
+// receiving side remembers the machine id it cut off and refuses its enrolments
+// until a human re-approves that one peer.
+type BlockedPeer struct {
+	MachineID string `json:"machineId"`
+	RevokedAt string `json:"revokedAt"`
+	Name      string `json:"name,omitempty"`
 }
 
 // Options configures the device lease store.
@@ -58,11 +94,16 @@ type Manager struct {
 	controllerTaken bool
 	logf            func(format string, args ...any)
 	now             func() time.Time
+	blockedPeers    []BlockedPeer
 }
 
 type stateFile struct {
 	Version int      `json:"version"`
 	Devices []Device `json:"devices"`
+	// BlockedPeers is additive and absent from every file written before peer
+	// links existed, so an older daemon reading a newer file simply has no
+	// blocks and a newer daemon reading an older file starts with none.
+	BlockedPeers []BlockedPeer `json:"blockedPeers,omitempty"`
 }
 
 // NewManager loads state/devices.json from the supplied state directory.
@@ -127,6 +168,35 @@ func (m *Manager) ApproveDevice(name, ip string) (Device, string, error) {
 // everything downstream, from authentication to revocation, cannot tell the two
 // kinds of device apart and does not need to.
 func (m *Manager) EnrollDevice(name, ip, token, owner, keyID string) (Device, error) {
+	return m.enroll(name, ip, token, owner, keyID, "", "")
+}
+
+// EnrollPeerDevice records another daemon's link under the same derivation and
+// the same storage as a browser's, marked as a peer and named by the machine on
+// the other end.
+//
+// It is one mechanism, not two: everything downstream — authentication,
+// lastSeen, the controller lease, revocation, socket fencing — cannot tell a
+// peer link from an enrolled browser and does not need to. What the kind buys
+// is the thing §4 asks for: a link a human can SEE and revoke on its own,
+// without touching the fleet key or any other peer.
+func (m *Manager) EnrollPeerDevice(name, ip, token, owner, keyID, peerMachineID, grant string) (Device, error) {
+	peerMachineID = strings.TrimSpace(peerMachineID)
+	if peerMachineID == "" {
+		return Device{}, errors.New("a peer link needs the peer's machine id")
+	}
+	if m.PeerBlocked(peerMachineID) {
+		return Device{}, fmt.Errorf("%w: %s", ErrPeerRevoked, peerMachineID)
+	}
+	return m.enroll(name, ip, token, owner, keyID, peerMachineID, grant)
+}
+
+// ErrPeerRevoked reports an enrolment from a peer a human cut off. It is its
+// own error because it is not a credential failure: the key was right, and the
+// answer is still no until that one link is approved again.
+var ErrPeerRevoked = errors.New("that peer link was revoked on this machine")
+
+func (m *Manager) enroll(name, ip, token, owner, keyID, peerMachineID, grant string) (Device, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return Device{}, errors.New("enrol needs a derived token")
@@ -147,6 +217,11 @@ func (m *Manager) EnrollDevice(name, ip, token, owner, keyID string) (Device, er
 		LastSeen:   now,
 		Owner:      strings.TrimSpace(owner),
 		KeyID:      strings.TrimSpace(keyID),
+		Peer:       strings.TrimSpace(peerMachineID),
+		Grant:      strings.TrimSpace(grant),
+	}
+	if device.Peer != "" {
+		device.Kind = KindPeer
 	}
 
 	m.mu.Lock()
@@ -158,6 +233,15 @@ func (m *Manager) EnrollDevice(name, ip, token, owner, keyID string) (Device, er
 			m.devices[i].LastSeen = now
 			if ip != "" {
 				m.devices[i].IP = ip
+			}
+			// A peer that re-derives the same token is the same link. Keep its
+			// kind and peer id current rather than leaving a record that once
+			// enrolled as a browser describing a daemon.
+			if device.Peer != "" {
+				m.devices[i].Kind, m.devices[i].Peer = device.Kind, device.Peer
+				if device.Grant != "" {
+					m.devices[i].Grant = device.Grant
+				}
 			}
 			if err := m.saveLocked(); err != nil {
 				return Device{}, err
@@ -385,6 +469,7 @@ func (m *Manager) load() error {
 		return fmt.Errorf("unsupported device state version %d", root.Version)
 	}
 	m.devices = append([]Device(nil), root.Devices...)
+	m.blockedPeers = append([]BlockedPeer(nil), root.BlockedPeers...)
 	return nil
 }
 
@@ -392,7 +477,7 @@ func (m *Manager) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(stateFile{Version: stateVersion, Devices: m.devices}, "", "  ")
+	data, err := json.MarshalIndent(stateFile{Version: stateVersion, Devices: m.devices, BlockedPeers: m.blockedPeers}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -426,4 +511,135 @@ func randomHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+// PeerLinks returns the peer links this machine has accepted, newest last.
+//
+// This is the list §4 calls "visible and revocable individually": one row per
+// linked daemon, naming which fleet key let it in and when it was last used.
+func (m *Manager) PeerLinks() []Device {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Device, 0, len(m.devices))
+	for _, device := range m.devices {
+		if device.IsPeer() {
+			out = append(out, device)
+		}
+	}
+	return out
+}
+
+// PeerLink returns the accepted link for one peer machine id.
+func (m *Manager) PeerLink(peerMachineID string) (Device, bool) {
+	peerMachineID = strings.TrimSpace(peerMachineID)
+	if peerMachineID == "" {
+		return Device{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, device := range m.devices {
+		if device.IsPeer() && device.Peer == peerMachineID {
+			return device, true
+		}
+	}
+	return Device{}, false
+}
+
+// RevokePeerLink cuts exactly one peer: its device record is removed, its
+// machine id is blocked from re-enrolling, and nothing else is touched — not
+// the fleet key, not another peer, not a browser.
+//
+// The returned device is the record that was removed, so the caller can fence
+// its live sockets and name it in the `link_revoked` it owes its watchers.
+func (m *Manager) RevokePeerLink(peerMachineID string) (Device, bool, error) {
+	peerMachineID = strings.TrimSpace(peerMachineID)
+	if peerMachineID == "" {
+		return Device{}, false, errors.New("revoking a link needs the peer's machine id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	removed := Device{}
+	kept := make([]Device, 0, len(m.devices))
+	for _, device := range m.devices {
+		if device.IsPeer() && device.Peer == peerMachineID {
+			removed = device
+			continue
+		}
+		kept = append(kept, device)
+	}
+	now := m.now().Format(time.RFC3339)
+	blocked := false
+	for i := range m.blockedPeers {
+		if m.blockedPeers[i].MachineID == peerMachineID {
+			m.blockedPeers[i].RevokedAt = now
+			blocked = true
+		}
+	}
+	if !blocked {
+		m.blockedPeers = append(m.blockedPeers, BlockedPeer{MachineID: peerMachineID, RevokedAt: now, Name: removed.Name})
+	}
+	found := removed.ID != ""
+	if found {
+		m.devices = kept
+		if m.controllerID == removed.ID {
+			m.controllerID = ""
+			m.controllerTaken = false
+		}
+	}
+	if err := m.saveLocked(); err != nil {
+		return removed, found, err
+	}
+	return removed, found, nil
+}
+
+// AllowPeer lifts a revocation so that peer may link again. Re-approving one
+// link is as narrow as cutting it was.
+func (m *Manager) AllowPeer(peerMachineID string) (bool, error) {
+	peerMachineID = strings.TrimSpace(peerMachineID)
+	if peerMachineID == "" {
+		return false, errors.New("allowing a link needs the peer's machine id")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := make([]BlockedPeer, 0, len(m.blockedPeers))
+	lifted := false
+	for _, blocked := range m.blockedPeers {
+		if blocked.MachineID == peerMachineID {
+			lifted = true
+			continue
+		}
+		kept = append(kept, blocked)
+	}
+	if !lifted {
+		return false, nil
+	}
+	m.blockedPeers = kept
+	if err := m.saveLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// PeerBlocked reports whether a peer machine id was revoked here.
+func (m *Manager) PeerBlocked(peerMachineID string) bool {
+	peerMachineID = strings.TrimSpace(peerMachineID)
+	if peerMachineID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, blocked := range m.blockedPeers {
+		if blocked.MachineID == peerMachineID {
+			return true
+		}
+	}
+	return false
+}
+
+// BlockedPeers lists the revoked links, so a human can see what they cut off
+// and lift it.
+func (m *Manager) BlockedPeers() []BlockedPeer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]BlockedPeer(nil), m.blockedPeers...)
 }

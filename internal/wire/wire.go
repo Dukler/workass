@@ -253,6 +253,8 @@ type Hub struct {
 	requestSeq        uint64
 	lease             *lease.Manager
 	fleetKeys         *fleet.Store
+	peerLinks         func(PeerLinkEvent)
+	callerHandlers    map[string]CallerHandler
 	machineID         string
 	instanceID        string
 	tlsFingerprint    string
@@ -516,10 +518,17 @@ func (h *Hub) Invoke(channel string, args []any) (result any, err error) {
 	return result, err
 }
 
-func (h *Hub) invokeRegistered(channel string, args []any) (result any, err error) {
+// invokeRegistered runs one channel handler under the panic guard and the
+// channel stats. An override is the same handler reached with its caller's
+// identity bound; it is passed in rather than looked up so there is exactly one
+// place where a handler panic is contained.
+func (h *Hub) invokeRegistered(channel string, args []any, override ...Handler) (result any, err error) {
 	h.mu.RLock()
 	fn := h.handlers[channel].fn
 	h.mu.RUnlock()
+	if len(override) > 0 && override[0] != nil {
+		fn = override[0]
+	}
 	if fn == nil {
 		return nil, fmt.Errorf("unknown channel: %s", channel)
 	}
@@ -1600,6 +1609,15 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 		}
 		return h.handleRevoke(args)
 	}
+	if channel == PeerLinkChannel {
+		return h.handlePeerHeartbeat(c, args)
+	}
+	if _, link := peerLinkChannels[channel]; link {
+		if !h.mayAdministerDevices(c, device) {
+			return nil, h.notControllerError(device)
+		}
+		return h.handlePeerLinkChannel(c, channel, args)
+	}
 	if _, admin := fleetAdminChannels[channel]; admin {
 		if !h.mayAdministerDevices(c, device) {
 			return nil, h.notControllerError(device)
@@ -1621,6 +1639,14 @@ func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error
 		if h.lease.TakeControl(device) {
 			c.tookControl.Store(true)
 		}
+	}
+	// A channel that asked to know its caller is told. Everything else takes
+	// the path it always took, byte for byte.
+	if fn := h.callerHandler(channel); fn != nil {
+		caller := h.callerFor(c)
+		return h.invokeRegistered(channel, append([]any(nil), args...), func(args []any) (any, error) {
+			return fn(caller, args)
+		})
 	}
 	return h.invokeRegistered(channel, args)
 }
@@ -1728,7 +1754,26 @@ func (h *Hub) handleFleetEnroll(c *client, args []any) (any, error) {
 		h.logf("[fleet] enrolment refused for %s (attempt %d)", c.ip, failures)
 		return nil, structuredError("fleet:rejected", "that key does not belong to this fleet", nil)
 	}
-	device, err := h.lease.EnrollDevice(firstNonEmpty(stringField(arg, "name"), c.deviceName), c.ip, token, key.Owner, key.KeyID)
+	name := firstNonEmpty(stringField(arg, "name"), c.deviceName)
+	peer, isPeer := readPeerEnrolment(arg, c.ip)
+	var (
+		device lease.Device
+		err    error
+	)
+	if isPeer {
+		// A peer link is one revocable record per machine id. A link a human cut
+		// off stays cut: the key still matches, so re-enrolling on the next dial
+		// would quietly undo their decision (§4).
+		device, err = h.lease.EnrollPeerDevice(name, c.ip, token, key.Owner, key.KeyID, peer.MachineID, "")
+		if errors.Is(err, lease.ErrPeerRevoked) {
+			h.logf("[fleet] refused a link from %s: it was revoked on this machine", peer.MachineID)
+			return nil, structuredError("fleet:peer-revoked",
+				"that link was revoked on this machine; approve it again before it can reconnect",
+				map[string]any{"peer": peer.MachineID})
+		}
+	} else {
+		device, err = h.lease.EnrollDevice(name, c.ip, token, key.Owner, key.KeyID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1753,10 +1798,26 @@ func (h *Hub) handleFleetEnroll(c *client, args []any) (any, error) {
 		"at":        time.Now().UTC().Format(time.RFC3339),
 	})
 	h.logf("[fleet] %s enrolled %q under key %s", c.ip, device.Name, key.KeyID)
-	return map[string]any{
+	if isPeer {
+		at := time.Now().UTC()
+		h.Broadcast("fleet:link-paired", map[string]any{
+			"event": "link_paired", "peer": peer.MachineID, "name": device.Name,
+			"deviceId": device.ID, "keyId": key.KeyID, "ip": c.ip,
+			"at": at.Format(time.RFC3339),
+		})
+		h.notePeerLink(PeerLinkEvent{
+			Kind: "paired", Peer: peer.MachineID, Name: firstNonEmpty(peer.Name, device.Name),
+			Address: peer.Address, DeviceID: device.ID, At: at,
+		})
+	}
+	reply := map[string]any{
 		"ok": true, "deviceId": device.ID, "name": device.Name,
 		"keyId": key.KeyID, "owner": key.Owner, "machineId": machineID,
-	}, nil
+	}
+	if isPeer {
+		reply["peer"] = peer.MachineID
+	}
+	return reply, nil
 }
 
 func (h *Hub) handleTakeControl(c *client) (any, error) {
