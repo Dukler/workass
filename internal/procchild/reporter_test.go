@@ -232,6 +232,53 @@ func TestAnUnreachableDaemonIsLoudOnStderrAndKeepsTrying(t *testing.T) {
 	}
 }
 
+func TestABacklogLargerThanOneBatchDrainsInOrderAcrossSeveralReports(t *testing.T) {
+	state := t.TempDir()
+	childID, err := IDForOperation("op-" + t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := OpenOutbox(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbox.Close()
+	// A day of heartbeats and then the outcome: more than one request may
+	// carry. The daemon refuses an oversized batch WHOLE, so a supervisor that
+	// sent the lot would be refused forever and the outcome would never land.
+	const queued = MaxReportBatch + 17
+	for index := 0; index < queued-1; index++ {
+		if _, err := outbox.Append(childID, KindHeartbeat, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := outbox.Append(childID, KindSettled, map[string]any{"outcome": OutcomeSettled}); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &recordingReporter{}
+	record := newJournal(childID, outbox, reporter, &bytes.Buffer{}, time.Now,
+		func() Report { return Report{ChildID: childID} }, time.Millisecond, time.Second)
+	record.flush()
+	applied := reporter.applied()
+	if len(applied) != queued {
+		t.Fatalf("the whole backlog must be delivered, got %d of %d", len(applied), queued)
+	}
+	for index, event := range applied {
+		if event.Seq != uint64(index+1) {
+			t.Fatalf("the backlog must arrive in seq order, event %d has seq %d", index, event.Seq)
+		}
+	}
+	if applied[len(applied)-1].Kind != KindSettled {
+		t.Fatalf("the outcome must be the last thing delivered, got %q", applied[len(applied)-1].Kind)
+	}
+	if reporter.reportCount() < 2 {
+		t.Fatalf("a backlog over the batch ceiling must take several reports, got %d", reporter.reportCount())
+	}
+	if pending, err := outbox.PendingCount(childID); err != nil || pending != 0 {
+		t.Fatalf("the queue must be empty after a full drain, got %d / %v", pending, err)
+	}
+}
+
 func TestADaemonOlderThanThisContractIsNamedAsSuchAndNotWaitedOutForTwoMinutes(t *testing.T) {
 	state := t.TempDir()
 	childID, err := IDForOperation("op-" + t.Name())

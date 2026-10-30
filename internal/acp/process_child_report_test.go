@@ -109,6 +109,17 @@ func TestAMalformedReportIsRefusedWholeRatherThanAppliedInPart(t *testing.T) {
 	}
 }
 
+func TestTheBatchCeilingIsOneNumberOnBothSides(t *testing.T) {
+	// The supervisor states it, the daemon enforces it, and the tool schema
+	// declares it. Two of them disagreeing would be a refusal with no visible
+	// cause: a backlog the supervisor thought was legal and the daemon refused
+	// whole, forever.
+	if procchild.MaxReportBatch != MaxReportedEventsPerCall {
+		t.Fatalf("the supervisor sends batches of %d and this daemon accepts %d",
+			procchild.MaxReportBatch, MaxReportedEventsPerCall)
+	}
+}
+
 func TestADeadSupervisorsQueuedOutcomeIsRecoveredFromTheOutboxBeforeLostIsReached(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)
