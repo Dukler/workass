@@ -80,13 +80,29 @@ type Options struct {
 	Synchronous Synchronous
 	// BinaryVersion is recorded in schema_migrations and receipts.
 	BinaryVersion string
-	// Migrations overrides the embedded schema; tests only.
+	// Migrations overrides the embedded schema. It is how a second, small
+	// database (the supervised-job outbox) carries its own schema through this
+	// one opener, and how a test supplies a minimal one.
 	Migrations []Migration
 	// BackupDir, when set, receives a VACUUM INTO snapshot before pending
 	// migrations are applied to a database that already has a schema.
 	BackupDir string
 	// QuickCheck runs PRAGMA quick_check after open and fails on any finding.
 	QuickCheck bool
+	// Shared opens a database that MORE THAN ONE PROCESS writes.
+	//
+	// state.db is the opposite of this and stays so: one daemon, EXCLUSIVE
+	// locking, a wal-index in heap memory. But the supervised-job outbox
+	// (internal/procchild) is written by every `workass run` on the machine and
+	// read by the daemon, so it is a second, small database with the same
+	// driver, the same pragmas and the same BUSY retry policy — and without the
+	// exclusive lock, which would make the second supervisor fail to start.
+	//
+	// What it costs is honest and bounded: a -shm file exists for as long as
+	// any process has the file open, and a writer waits out busy_timeout
+	// instead of failing fast. What it buys is that one package still opens
+	// every SQLite file Workass has.
+	Shared bool
 }
 
 // DB is the open state database. It is safe for concurrent use; statements
@@ -96,6 +112,10 @@ type DB struct {
 	path          string
 	binaryVersion string
 	version       int
+	// shared records that other processes may hold this file open, which is
+	// what makes the exclusive lock and the closing TRUNCATE checkpoint wrong
+	// rather than merely unnecessary.
+	shared bool
 	// prunedBackups: older migration backups this open removed.
 	prunedBackups []string
 
@@ -187,17 +207,19 @@ func Open(opts Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	connector := &pragmaConnector{base: base, pragmas: connectionPragmas(busy, syncMode)}
+	connector := &pragmaConnector{base: base, pragmas: connectionPragmas(busy, syncMode, opts.Shared)}
 	pool := sql.OpenDB(connector)
 	// One connection: EXCLUSIVE locking mode admits no second one, and one
 	// writer is the design anyway. It never idles out, so the lock and the
-	// heap wal-index live as long as the daemon.
+	// heap wal-index live as long as the daemon. A shared database keeps the
+	// single connection too — one writer per PROCESS is still what serializes
+	// its own statements; what it gives up is only the exclusive file lock.
 	pool.SetMaxOpenConns(1)
 	pool.SetMaxIdleConns(1)
 	pool.SetConnMaxLifetime(0)
 	pool.SetConnMaxIdleTime(0)
 
-	db := &DB{sql: pool, path: path, binaryVersion: strings.TrimSpace(opts.BinaryVersion)}
+	db := &DB{sql: pool, path: path, binaryVersion: strings.TrimSpace(opts.BinaryVersion), shared: opts.Shared}
 	// Refuse a newer schema before the first write transaction, so a file
 	// from a newer build is left byte-for-byte as it was.
 	if err := refuseNewerSchema(pool, len(migrations)); err != nil {
@@ -223,15 +245,21 @@ func Open(opts Options) (*DB, error) {
 	return db, nil
 }
 
-func connectionPragmas(busy time.Duration, syncMode Synchronous) []string {
+func connectionPragmas(busy time.Duration, syncMode Synchronous, shared bool) []string {
 	// Order matters and is why these are not DSN _pragma values (the driver
 	// sorts those): locking_mode must precede every read of the file, so that
 	// the wal-index is created in heap memory and no -shm file ever exists.
 	// On a reopened WAL database even the page_count check of the auto_vacuum
 	// step is such a read: before EXCLUSIVE it created a -shm file.
+	locking := "PRAGMA locking_mode = EXCLUSIVE"
+	if shared {
+		// NORMAL is SQLite's default, stated rather than assumed: a database
+		// several processes write cannot be held exclusively by one of them.
+		locking = "PRAGMA locking_mode = NORMAL"
+	}
 	return []string{
 		fmt.Sprintf("PRAGMA busy_timeout = %d", busy.Milliseconds()),
-		"PRAGMA locking_mode = EXCLUSIVE",
+		locking,
 		newFileAutoVacuum,
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = " + string(syncMode),
@@ -328,6 +356,13 @@ func (db *DB) acquire() error {
 	}
 	if !strings.EqualFold(mode, "wal") {
 		return fmt.Errorf("state database journal mode is %q, want wal", mode)
+	}
+	if db.shared {
+		// Taking the write lock at open would be exactly the wrong thing here:
+		// the point of a shared database is that the next process can write it
+		// too, and holding a transaction open to prove we can would be the one
+		// way to stop it.
+		return nil
 	}
 	return db.Write(context.Background(), func(tx *Tx) error {
 		// An empty write transaction still takes the write lock, which
@@ -525,7 +560,13 @@ func (db *DB) Close() error {
 		db.mu.Lock()
 		defer db.mu.Unlock()
 		db.closed = true
-		_, checkpointErr := db.sql.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		var checkpointErr error
+		if !db.shared {
+			// Truncating a WAL another process is reading would be a courtesy
+			// paid with its correctness, so a shared file is simply closed and
+			// the next opener checkpoints what it finds.
+			_, checkpointErr = db.sql.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		}
 		db.closeErr = errors.Join(classify(checkpointErr), db.sql.Close())
 	})
 	return db.closeErr

@@ -109,10 +109,9 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	// The chat on THIS machine that holds the job's local row. It is not the
 	// owner — the owner is the chat that asked, on its own machine — but a row
 	// needs a chat here, because the row IS this machine's record of the work.
-	hostTabID := strings.TrimSpace(fieldString(params, "host_tab_id"))
-	hostChatID := strings.TrimSpace(fieldString(params, "host_chat_id"))
-	if hostTabID == "" || hostChatID == "" {
-		return nil, errors.New("process.start needs host_tab_id + host_chat_id: the exact chat on this machine that will hold the job's local row. Call workass_list_chats with this machine_id, or create one with workass_create_chat machine_id")
+	hostTabID, hostChatID, err := processStartHostPair(params, h.selfMachineID)
+	if err != nil {
+		return nil, err
 	}
 	if err := h.fenceActor(hostTabID, hostChatID); err != nil {
 		return nil, err
@@ -134,7 +133,7 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 		return nil, err
 	}
 
-	arguments := processStartArguments(label, owner.String(), operationID, cwd, credentialPath, params, command)
+	arguments := processStartArguments(label, owner.String(), operationID, cwd, credentialPath, h.manager.StateDir(), params, command)
 	cmd := exec.Command(executable, arguments...)
 	cmd.Dir = cwd
 	cmd.Env = environment
@@ -177,6 +176,12 @@ func (h *agentControlHandler) writeRunCredential(tabID, chatID, operationID, chi
 	template.Credential = token
 	template.ChatID = chatID
 	template.TabID = tabID
+	// Where this daemon keeps its state, stated rather than left to be
+	// derived. The supervisor resolved it from a default before, and that
+	// default resolved `state` against the JOB's working directory: four jobs
+	// started with cwd=/tmp wrote their whole lifecycle to /tmp/state and no
+	// chat was ever told. The daemon is the one authority on this answer.
+	template.StateDir = h.manager.StateDir()
 	dir := filepath.Join(h.manager.StateDir(), "run-credentials", childID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -186,6 +191,58 @@ func (h *agentControlHandler) writeRunCredential(tabID, chatID, operationID, chi
 		return "", err
 	}
 	return path, nil
+}
+
+// processStartHostPair reads the host chat's pair, accepting the dialect the
+// caller actually has.
+//
+// An agent that asks `workass_list_chats` for the chats on another machine is
+// handed machine-TAGGED ids, because that is how every other tool addresses
+// them. Passing those straight back to `process.start` was refused with "a
+// forwarded Workass tool call must carry this machine's own ids" — technically
+// true and practically a dead end, since the tagged pair was the only pair the
+// agent had ever been given. So a tag that names THIS machine is stripped and
+// accepted; a tag that names a different one is still refused, because a chat
+// on a third machine cannot hold a row for a job running here.
+func processStartHostPair(params map[string]any, selfMachineID string) (string, string, error) {
+	const guidance = "process.start needs host_tab_id + host_chat_id: the exact chat on this machine that will hold the job's local row. Call workass_list_chats with this machine_id, or create one with workass_create_chat machine_id"
+	tabID, tabHome, err := processStartLocalID(fieldString(params, "host_tab_id"), selfMachineID, "host_tab_id")
+	if err != nil {
+		return "", "", err
+	}
+	chatID, chatHome, err := processStartLocalID(fieldString(params, "host_chat_id"), selfMachineID, "host_chat_id")
+	if err != nil {
+		return "", "", err
+	}
+	if tabID == "" || chatID == "" {
+		return "", "", errors.New(guidance)
+	}
+	if tabHome != chatHome {
+		return "", "", errors.New("host_tab_id and host_chat_id must be spelled the same way: either both machine-tagged for this machine, or both bare")
+	}
+	return tabID, chatID, nil
+}
+
+// processStartLocalID reduces one host id to the bare local id this machine
+// knows it by.
+func processStartLocalID(value, selfMachineID, field string) (string, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false, nil
+	}
+	machineID, local, tagged, err := splitMachineTaggedID(value)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", field, err)
+	}
+	if !tagged {
+		return value, false, nil
+	}
+	if strings.TrimSpace(selfMachineID) != "" && machineID != strings.TrimSpace(selfMachineID) {
+		return "", true, fmt.Errorf(
+			"%s names a chat on %s, but the job runs here: the chat that holds the local row must be on this machine. The chat that ASKED is carried separately and keeps the outcome, wherever it is",
+			field, machineID)
+	}
+	return local, true, nil
 }
 
 // processStartCommand reads the job's argv. There is no shell anywhere in this
@@ -224,9 +281,13 @@ func processStartCommand(params map[string]any) ([]string, error) {
 // PATH: a command line is readable by every process on the machine through ps
 // and lands in shell history, which is why no Workass credential has ever been
 // accepted in argv.
-func processStartArguments(label, owner, operationID, cwd, credentialPath string, params map[string]any, command []string) []string {
+func processStartArguments(label, owner, operationID, cwd, credentialPath, stateDir string, params map[string]any, command []string) []string {
 	arguments := []string{"run", "--quiet", "--label", label, "--owner", owner,
-		"--operation-id", operationID, "--cwd", cwd, "--token-file", credentialPath}
+		"--operation-id", operationID, "--cwd", cwd, "--token-file", credentialPath,
+		// Belt and braces, and deliberately: the credential states it too, but
+		// a job must not be one unreadable file away from reporting into a
+		// directory nothing reads.
+		"--state-dir", stateDir}
 	arguments = append(arguments, processStartDeclarations(params)...)
 	arguments = append(arguments, "--")
 	return append(arguments, command...)

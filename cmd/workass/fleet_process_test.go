@@ -362,12 +362,15 @@ func TestADeclaredOwnerNamesTheChatThatIsOwedTheOutcome(t *testing.T) {
 	if remote.Machine != "m-7f3ad2" || remote.ChatID != "app-chat-1792187130561" {
 		t.Fatalf("a declared owner must name its own machine and chat, got %+v", remote)
 	}
-	if remote.TabID != "" {
-		// A chat on another machine has no tab id this machine could know.
-		t.Fatalf("a remote owner must carry no local tab id, got %q", remote.TabID)
-	}
-	if remote.LaneID != "lane-1" {
-		t.Fatalf("the origin stamp stays this chat's own, got %q", remote.LaneID)
+	// Everything that is only true HERE is dropped. The tab, the lane and the
+	// running turn are ids in THIS machine's chat, and exported to a chat
+	// elsewhere they name nothing — which is not merely useless but wrong in a
+	// way that fails silently: the notice admission fence compares the tab
+	// exactly and drops a mismatch, and refuses a lane it cannot find. That is
+	// how the first live two-machine test had four jobs report perfectly and
+	// tell nobody. The owner's own machine fills these in from what it knows.
+	if remote.TabID != "" || remote.LaneID != "" || remote.OperationID != "" {
+		t.Fatalf("a remote owner must carry none of this machine's local ids, got %+v", remote)
 	}
 	// A legacy machine-tagged id still resolves, per the identifier law.
 	legacy, err := resolveProcessOwner("M~m-7f3ad2~app-chat-1792187130561", testHomeMachine, "chat-1", "tab-1", "", "")

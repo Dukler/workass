@@ -29,6 +29,16 @@ type Config struct {
 	Credential string `json:"credential"`
 	ChatID     string `json:"chat_id"`
 	TabID      string `json:"tab_id"`
+	// StateDir is the daemon state directory this credential belongs to.
+	//
+	// Additive and optional: every existing reader ignores it. It is here
+	// because a helper process that needs to find the daemon's own state had no
+	// non-guessing way to — `workass run` derived it from a default that
+	// resolved `state` against the JOB's working directory, and four supervised
+	// jobs duly reported into /tmp/state where no daemon would ever look. The
+	// daemon that minted the credential is the one authority on the answer, so
+	// it states it here.
+	StateDir string `json:"state_dir,omitempty"`
 }
 
 type Call struct {

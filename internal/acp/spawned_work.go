@@ -151,6 +151,19 @@ type SpawnedWorkItem struct {
 	Isolation    string `json:"isolation,omitempty"`
 	// Stalled is the one-shot declared stall: a flag on running, never a state.
 	Stalled bool `json:"stalled,omitempty"`
+	// Reporting is whether the supervisor is still reporting to this daemon.
+	//
+	// Empty means it is, which is what every row that predates this field also
+	// means. "silent" means its last report is older than three heartbeats
+	// while its pid is still alive — the job may be perfectly healthy, but
+	// NOTHING HERE KNOWS, and a row that looked healthy in that state was the
+	// operator's objection to the old design. A silent row is not a verdict and
+	// never settles anything; it says who stopped answering.
+	Reporting string `json:"reporting,omitempty"`
+	// ReportGapMs is the longest stretch the supervisor told this daemon it had
+	// been unable to report. It outlives the outage, so a row that healed still
+	// shows that it happened.
+	ReportGapMs int64 `json:"reportGapMs,omitempty"`
 	// HostMachine and HostMachineName name the fleet machine a row's work runs
 	// on when that is NOT this machine (docs/specs/fleet-runtime.md §6: where it
 	// runs is a different fact from who owns it). Empty — which is every row
@@ -163,6 +176,10 @@ type SpawnedWorkItem struct {
 	MaxRuntimeMs int64 `json:"maxRuntimeMs,omitempty"`
 	StaleAfterMs int64 `json:"staleAfterMs,omitempty"`
 	MaxHoldMs    int64 `json:"maxHoldMs,omitempty"`
+	// HeartbeatMs is the reporting cadence the supervisor declared, which is
+	// what silence is measured against. Declared rather than assumed, so one
+	// constant lives in one place.
+	HeartbeatMs int64 `json:"heartbeatMs,omitempty"`
 }
 
 // Supervised reports whether this row is a process child with a supervisor of
@@ -222,12 +239,22 @@ type spawnedWorkRecord struct {
 	InterimSince     time.Time
 	ChildrenDoneAt   time.Time
 	ExternalDoneFile string
-	// SpoolFile and SpoolSeq are the supervisor's event spool and this daemon's
-	// cursor into it. The cursor is persisted with the snapshot, so a daemon
-	// that restarts mid-job resumes where it stopped reading instead of
-	// re-applying a settle it already applied.
+	// SpoolFile and SpoolSeq are where this child's events live and how far
+	// this daemon has applied them. Both keep the names they are stored under
+	// (identifier law) while what they name has moved on: SpoolFile is the
+	// machine's supervised-job OUTBOX, one SQLite database rather than one
+	// JSONL file per child, and SpoolSeq is the acknowledgement cursor — the
+	// highest per-child seq this daemon has applied, which is what it answers
+	// every report with and what makes a replay exactly-once.
 	SpoolFile string
 	SpoolSeq  uint64
+	// LastReportAt is when this daemon last heard from the supervisor, by any
+	// event including a heartbeat. Not persisted: a daemon that just restarted
+	// has heard nothing yet from anybody, and treating that as silence would
+	// raise one false alarm per job on every restart. It starts at the restore.
+	LastReportAt time.Time
+	// ReportedSilent keeps the silence notice one-shot.
+	ReportedSilent bool
 	// SupervisorMissingSince starts the grace before a vanished supervisor
 	// becomes `lost`. A grace, not an instant: a supervisor between fork and
 	// its own first write is briefly unprobeable on some hosts, and calling

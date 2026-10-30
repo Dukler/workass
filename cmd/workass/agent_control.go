@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
+	"workass/internal/procchild"
 	providercontract "workass/internal/provider"
 )
 
@@ -404,18 +406,31 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			},
 		})
 	case "process.register":
-		// `workass run` registering the child it supervises. Not an outbox
-		// mutation: a repeat with the same operation id must be ACCEPTED and
-		// must re-read the spool, which is how the supervisor's closing poke
-		// delivers an outcome immediately. Idempotency comes from the work id
-		// being derived from the operation id (§6), so a retry resolves to the
-		// row that already exists rather than creating a second one.
+		// `workass run` reporting the child it supervises: the registration
+		// facts and the batch of events this daemon has not acknowledged. Not
+		// an outbox mutation: a repeat with the same operation id must be
+		// ACCEPTED and must apply whatever it carries, which is how the
+		// supervisor's heartbeat, its backlog after an outage and its closing
+		// outcome all arrive through one verb. Idempotency comes from the work
+		// id being derived from the operation id (§6) and from the per-event
+		// seq cursor, so a retry resolves to the row that already exists and
+		// re-applies nothing.
 		result, err := h.registerProcessChild(ownerKey, tabID, chatID, params)
 		if err == nil && h.manager != nil {
-			// The grant ends with the report it authorized. A token that leaks
-			// from the job's own file afterwards authorizes nothing.
+			// The grant lasts as long as the job, because the job reports for
+			// as long as it runs — this used to end with the FIRST report,
+			// which was correct only while the spool was the real record. It
+			// ends the moment the job is terminal: a token that leaks after
+			// that authorizes nothing.
 			if _, isRun := h.manager.RunTokenFor(ownerKey); isRun {
-				h.manager.ConsumeRunToken(ownerKey)
+				if processReportIsTerminal(result) {
+					h.manager.ConsumeRunToken(ownerKey)
+				} else {
+					// Still running, so the credential is still needed. The
+					// touch is what keeps the idle ceiling from expiring a job
+					// that has been reporting all day.
+					h.manager.TouchRunToken(ownerKey)
+				}
 			}
 		}
 		return result, err
@@ -534,6 +549,9 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	}
 	forwarded := copyRemoteAgentRouteParams(params)
 	forwarded["machine_id"] = machineID
+	if err := stripDestinationMachineTags(forwarded, machineID); err != nil {
+		return nil, err
+	}
 	if limit := h.callerFleetLimit(ctx, params); limit != "" {
 		forwarded[fleetLimitParam] = limit
 	}
@@ -567,6 +585,44 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 		}
 	}
 	return result, nil
+}
+
+// fleetDestinationTaggedParams are the params that may arrive machine-tagged
+// for the DESTINATION and must reach it as its own bare ids.
+//
+// They are the ids an agent is handed by a listing and then passes to a tool
+// that acts on the machine they came from. The router has always stripped its
+// own tags on the way out for the addressing pair; these are the same thing
+// for ids that are not the address. `host_tab_id` / `host_chat_id` are the case
+// that made this visible: `workass_list_chats` hands out tagged ids, so the
+// tagged pair was the only pair an agent had, and `process.start` refused it
+// with "a forwarded Workass tool call must carry this machine's own ids".
+var fleetDestinationTaggedParams = []string{"host_tab_id", "host_chat_id", "work_id"}
+
+// stripDestinationMachineTags reduces those ids to the destination's own local
+// ids, and refuses one that names a third machine.
+func stripDestinationMachineTags(params map[string]any, machineID string) error {
+	machineID = strings.TrimSpace(machineID)
+	for _, field := range fleetDestinationTaggedParams {
+		value := strings.TrimSpace(fieldString(params, field))
+		if value == "" {
+			continue
+		}
+		home, local, tagged, err := splitMachineTaggedID(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+		if !tagged {
+			continue
+		}
+		if machineID != "" && home != machineID {
+			// Not a tag to strip but a different machine named, which no
+			// stripping could make true.
+			return fmt.Errorf("%s names a chat on %s, but this call is addressed to %s; the chat that holds the local row must be on the machine that runs the work", field, home, machineID)
+		}
+		params[field] = local
+	}
+	return nil
 }
 
 // callerFleetLimit is the caller's own permission ceiling, in the read/edit/full
@@ -660,6 +716,43 @@ func localRemoteAddr(remote string) bool {
 // and the log already holds the event. An owner on another machine is offered
 // the monitor over the mesh; an owner on this machine gets a self-homed one,
 // which the home delivers in process — the same projection either way.
+// reportedProcessEvents reads one report's batch off the wire.
+//
+// Validation of the SEQUENCE belongs to the manager, which owns the cursor;
+// this only turns the JSON into events and drops nothing silently — an entry
+// with no seq survives as a zero seq, which the manager refuses by name.
+func reportedProcessEvents(value any) []procchild.Event {
+	raw := anySlice(value)
+	if len(raw) == 0 {
+		return nil
+	}
+	events := make([]procchild.Event, 0, len(raw))
+	for _, entry := range raw {
+		fields := mapFromAnyMain(entry)
+		if fields == nil {
+			continue
+		}
+		event := procchild.Event{
+			Seq:     uint64(intField(fields, "seq")),
+			Kind:    strings.TrimSpace(fieldString(fields, "kind")),
+			Payload: mapFromAnyMain(fields["payload"]),
+		}
+		if stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(fieldString(fields, "at"))); err == nil {
+			event.At = stamp.UTC()
+		} else {
+			event.At = time.Now().UTC()
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+// processReportIsTerminal reads the row's own status out of the report's answer.
+func processReportIsTerminal(result any) bool {
+	status := strings.TrimSpace(fieldString(mapFromAnyMain(result), "status"))
+	return status != "" && status != "running"
+}
+
 func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID string, params map[string]any) (any, error) {
 	if h == nil || h.manager == nil || h.chats == nil || h.chats.providerChats == nil {
 		return nil, errors.New("process children require the durable chat actor")
@@ -697,6 +790,9 @@ func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID strin
 		MaxRuntimeMs:  int64(intField(params, "max_runtime_ms")),
 		StaleAfterMs:  int64(intField(params, "stale_after_ms")),
 		MaxHoldMs:     int64(intField(params, "max_hold_ms")),
+		HeartbeatMs:   int64(intField(params, "heartbeat_ms")),
+		ReportGapMs:   int64(intField(params, "report_gap_ms")),
+		Events:        reportedProcessEvents(params["events"]),
 		OriginLaneID:  laneID, OriginOperationID: operationID, OriginTurnID: turnID,
 	})
 	if err != nil {

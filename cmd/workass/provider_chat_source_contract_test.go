@@ -353,6 +353,12 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// settles nothing: if the supervisor never returns, the row becomes
 		// `lost` through the ordinary verdict, which is the honest answer.
 		"cmd/workass/agent_control.go:call:CancelProcessChild": {1, "a cancel is recorded for the supervisor and settles nothing itself"},
+		// The same call for a peer. A process child's home is the machine with
+		// the pid, so list/read/cancel are machine-scoped and a fleet link
+		// reaches them; the authorization is the link's grant intersected with
+		// the caller's own limit, and a cancel is refused outright below full
+		// access (fleet_limit.go).
+		"cmd/workass/agent_control_remote.go:processChildForController:CancelProcessChild": {1, "a peer's cancel is the same recorded wish, and settles nothing itself"},
 		// A subagent HOSTED here for a chat on another machine (fleet-runtime
 		// §6: where it runs is not who owns it). There is no chat actor here to
 		// go through — the owner is elsewhere and holds the row, the monitor and
@@ -368,7 +374,8 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// operation id; consuming ends the grant with the single registration it
 		// authorized (fleet_process_start.go).
 		"cmd/workass/fleet_process_start.go:writeRunCredential:MintRunToken": {1, "one one-shot credential for one supervised job"},
-		"cmd/workass/agent_control.go:call:ConsumeRunToken":                  {1, "the job's credential ends with the report it authorized"},
+		"cmd/workass/agent_control.go:call:ConsumeRunToken":                  {1, "the job's credential ends the moment its job is terminal"},
+		"cmd/workass/agent_control.go:call:TouchRunToken":                    {1, "a reporting job keeps its credential; the ceiling is idleness, not age"},
 	}
 }
 

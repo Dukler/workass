@@ -98,9 +98,12 @@ type fleetWatcher struct {
 	// know this, which is why dropping a monitor whose watcher is gone is the
 	// watcher's own job.
 	chatExists func(tabID, chatID string) bool
-	threshold  time.Duration
-	now        func() time.Time
-	logf       func(string, ...any)
+	// chatTab resolves this machine's own tab for a chat an offer named
+	// without one.
+	chatTab   func(chatID string) string
+	threshold time.Duration
+	now       func() time.Time
+	logf      func(string, ...any)
 
 	mu sync.Mutex
 	// darkSince latches the home_down notice per home, so a machine that has
@@ -116,15 +119,25 @@ type fleetWatcherOptions struct {
 	Deliver    func(fleetMonitorNotice) error
 	Budget     *fleetNoticeBudget
 	ChatExists func(tabID, chatID string) bool
-	Threshold  time.Duration
-	Now        func() time.Time
-	Logf       func(string, ...any)
+	// ChatTab answers which tab a chat on THIS machine lives in.
+	//
+	// It exists because a job's owner may be declared as a global chat id —
+	// `workass run --owner wa:m-away/chat/app-chat-1` — and the machine that
+	// runs the job has no way to know that chat's tab. The notice admission
+	// fence compares the tab exactly and silently drops a mismatch, so an
+	// offer with no tab produced a monitor that recorded every event and
+	// delivered none of them. This machine knows its own chats; it fills the
+	// gap rather than inheriting it.
+	ChatTab   func(chatID string) string
+	Threshold time.Duration
+	Now       func() time.Time
+	Logf      func(string, ...any)
 }
 
 func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
 	watcher := &fleetWatcher{
 		self: strings.TrimSpace(opts.Self), monitors: opts.Monitors, mesh: opts.Mesh,
-		deliver: opts.Deliver, budget: opts.Budget, chatExists: opts.ChatExists,
+		deliver: opts.Deliver, budget: opts.Budget, chatExists: opts.ChatExists, chatTab: opts.ChatTab,
 		threshold: opts.Threshold, now: opts.Now, logf: opts.Logf,
 		darkSince: map[string]time.Time{}, announced: map[string]bool{},
 	}

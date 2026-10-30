@@ -77,18 +77,38 @@ func startLiveSupervisor(t *testing.T, stateDir, operationID, command string) (*
 	})
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		events, _ := procchild.ReadSpool(procchild.SpoolPath(stateDir, childID))
+		events := liveOutboxEvents(stateDir, childID)
 		for _, event := range events {
 			if event.Kind == procchild.KindStarted {
 				pid, _ := event.Payload["pid"].(float64)
+				if pid == 0 {
+					if whole, ok := event.Payload["pid"].(int); ok {
+						pid = float64(whole)
+					}
+				}
 				return cmd, childID, int(pid)
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the supervisor never started its job; spool = %d event(s)", len(events))
+			t.Fatalf("the supervisor never started its job; its outbox holds %d event(s)", len(events))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// liveOutboxEvents reads one child's queue, tolerating an outbox that does not
+// exist yet: a supervisor between fork and its first write has written nothing.
+func liveOutboxEvents(stateDir, childID string) []procchild.Event {
+	outbox, err := procchild.OpenOutboxForReading(stateDir)
+	if err != nil {
+		return nil
+	}
+	defer outbox.Close()
+	events, err := outbox.All(childID, 0, 0)
+	if err != nil {
+		return nil
+	}
+	return events
 }
 
 func registerLiveChild(t *testing.T, manager *Manager, childID string, supervisorPID int) {
@@ -144,13 +164,9 @@ func TestAJobKilledExternallyIsLostAndItsOwnerIsNotified(t *testing.T) {
 	if !procchild.PIDAlive(childPID) {
 		t.Fatal("killing the supervisor's group reached the job; the child was not isolated")
 	}
-	events, err := procchild.ReadSpool(procchild.SpoolPath(state, childID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range events {
+	for _, event := range liveOutboxEvents(state, childID) {
 		if procchild.Terminal(event.Kind) {
-			t.Fatalf("a SIGKILLed supervisor cannot have written an outcome, yet the spool holds %q", event.Kind)
+			t.Fatalf("a SIGKILLed supervisor cannot have recorded an outcome, yet its outbox holds %q", event.Kind)
 		}
 	}
 

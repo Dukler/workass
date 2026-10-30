@@ -127,6 +127,20 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 			// The one command this daemon starts a process for, and the whole of
 			// why that is still §9-safe is in fleet_process_start.go.
 			return h.startProcessChildHere(ctx, forwarded, params)
+		case "process.list", "process.read", "process.cancel":
+			// The reads and the stop for a job whose HOME is this machine.
+			//
+			// They were in the locality table as machine-scoped from the start
+			// and this switch did not implement them, so the route arrived and
+			// was answered "unknown machine-scoped agent control method" — the
+			// one shape of failure the single routing authority was meant to
+			// make impossible. There is no chat here to act for: a process
+			// child's home is the machine with the pid, its owner is a global
+			// chat id on the registration, and §6 holds those are two facts.
+			// Authorization is the link's grant intersected with the caller's
+			// own limit, already applied above, and a stop is refused outright
+			// below full access (fleet_limit.go).
+			return h.processChildForController(method, params)
 		}
 		return nil, errors.New("unknown machine-scoped agent control method")
 	case remoteAgentForkScoped:
@@ -194,6 +208,35 @@ func (h *agentControlHandler) monitorForwardedSpawn(forwarded fleetForwardedWork
 		"ref": row.Ref, "targetId": row.TargetID, "label": row.Label, "slice": slicePayload(slice),
 	}
 	return merged
+}
+
+// processChildForController answers the machine-scoped process-child family
+// for a peer, through the same manager calls the local path uses.
+//
+// Identical answers, deliberately: the local case goes through the actor fence
+// because there is a calling chat to fence, and this one goes through the link
+// grant because there is not. What they must never differ in is the ANSWER, so
+// neither re-reads nor re-shapes anything the other does not.
+func (h *agentControlHandler) processChildForController(method string, params map[string]any) (any, error) {
+	if h == nil || h.manager == nil {
+		return nil, errors.New("supervised jobs require the chat manager")
+	}
+	switch method {
+	case "process.list":
+		return map[string]any{
+			"ok": true, "children": h.manager.ListProcessChildren(),
+			"resource_queues": h.manager.ResourceQueues(), "machine_id": h.selfMachineID,
+		}, nil
+	case "process.read":
+		tailChars := intField(params, "tail_chars")
+		if tailChars < 0 || tailChars > 65536 {
+			return nil, errors.New("process child tail_chars must be between 0 and 65536")
+		}
+		return h.manager.ReadProcessChild(fieldString(params, "work_id"), tailChars, uint64(intField(params, "after_seq")))
+	case "process.cancel":
+		return h.manager.CancelProcessChild(fieldString(params, "work_id"), fieldString(params, "reason"))
+	}
+	return nil, errors.New("unknown machine-scoped agent control method")
 }
 
 func (h *agentControlHandler) forkOwnerForController(method string, params map[string]any) (string, string, bool) {

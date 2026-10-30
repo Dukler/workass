@@ -15,17 +15,20 @@ import (
 
 // The one place that speaks to the daemon.
 //
-// Registration is a tool call like any other — `workass_register_process_child`
-// over the pinned loopback HTTPS the tools client already uses — and it carries
-// the caller's own operation id, so the daemon's answer to a repeat is the row
-// it already has. Three consequences, all of them the point:
+// A report is a tool call like any other — `workass_register_process_child`
+// over the pinned loopback HTTPS the tools client already uses — carrying the
+// caller's own operation id and the batch of events not yet acknowledged. The
+// daemon applies them in seq order and answers with how far it got. Four
+// consequences, all of them the point:
 //
-//   - A retry after an uncertain reply cannot create a second child. §6 calls
-//     this "one operation_id for both sides"; the failure it removes is the one
-//     where "launch there" succeeded, "record here" was retried, and the chat
-//     ended up with two rows for one job or one row for a job that had moved on.
-//   - The daemon can be DOWN at this moment without the run being affected. The
-//     spool is the record; registration is how the chat learns promptly.
+//   - A retry after an uncertain reply cannot create a second child, and
+//     cannot apply an event twice. §6 calls this "one operation_id for both
+//     sides"; the daemon dedups events by seq on top of it.
+//   - This is the PRIMARY path. The chat learns from the report, not from
+//     anything on disk, which is the whole correction the first live test
+//     forced: four jobs wrote a perfect spool and no chat was ever told.
+//   - The daemon can still be DOWN at this moment without the run being
+//     affected. The outbox holds the batch and the next report delivers it.
 //   - The credential never touches argv. A command line is readable by every
 //     process on the box through `ps` and lands in shell history, which is why
 //     the fleet key has never been accepted there either
@@ -45,12 +48,17 @@ const ContextEnvVar = "WORKASS_TOOL_CONTEXT"
 // daemon keeps its state.
 const DataRootEnvVar = "WORKASS_DATA_ROOT"
 
-// daemonRegistrar registers through the ordinary tool endpoint.
-type daemonRegistrar struct {
+// daemonReporter reports through the ordinary tool endpoint.
+type daemonReporter struct {
 	config toolcli.Config
 	// consume is the path to unlink after a successful read, set only for a
 	// token file minted for this run — never for the engine's own context,
 	// which belongs to the chat and outlives this job.
+	//
+	// It is unlinked as soon as it has been READ, not when the job ends: the
+	// credential is in this process's memory from then on and the job reports
+	// with it for its whole life, so leaving the file on disk for the length of
+	// a training run is a window with no purpose.
 	consume string
 	timeout time.Duration
 }
@@ -62,7 +70,7 @@ type daemonRegistrar struct {
 // WORKASS_TOOL_CONTEXT every Workass-launched process already holds. A run with
 // none of them still works — it supervises, spools and settles — it simply has
 // no chat to tell, and says so.
-func ResolveCredential(tokenFile string) (Registrar, string, error) {
+func ResolveCredential(tokenFile string) (Reporter, string, error) {
 	path, consume := strings.TrimSpace(tokenFile), true
 	if path == "" {
 		path, consume = strings.TrimSpace(os.Getenv(TokenEnvVar)), true
@@ -89,32 +97,53 @@ func ResolveCredential(tokenFile string) (Registrar, string, error) {
 	if strings.TrimSpace(config.Credential) == "" {
 		return nil, "", errors.New("that Workass credential file carries no credential")
 	}
-	registrar := &daemonRegistrar{config: config, timeout: 20 * time.Second}
+	reporter := &daemonReporter{config: config, timeout: 20 * time.Second}
 	if consume {
-		registrar.consume = path
+		// Read, and therefore spent: the token lives in this process from here
+		// on, and the file it came from has no further purpose.
+		_ = os.Remove(path)
 	}
-	return registrar, path, nil
+	return reporter, path, nil
 }
 
-// Register performs one registration call.
-func (d *daemonRegistrar) Register(
-	spec Spec, childID, outputFile, doneFile, spoolFile string, supervisorPID, pgid int, group GroupKind,
-) (Registration, error) {
-	if d == nil {
-		return Registration{}, errors.New("this run has no Workass credential")
+// CredentialStateDir is the daemon state directory a credential file names.
+//
+// It is the authoritative answer to "where does this machine's daemon keep its
+// state", because the daemon itself wrote it there. The alternative — deriving
+// it, or falling back to a default — is what produced the bug this redesign
+// started from: a relative `state` resolved against the JOB's working
+// directory, so four jobs reported into /tmp/state where no daemon would look.
+func CredentialStateDir(tokenFile string) string {
+	registrarPath := strings.TrimSpace(tokenFile)
+	if registrarPath == "" {
+		return ""
 	}
+	config, err := toolcli.ReadConfig(registrarPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.StateDir)
+}
+
+// Report performs one report: the registration facts and every event the
+// daemon has not acknowledged, in seq order.
+func (d *daemonReporter) Report(request Report) (Acknowledgement, error) {
+	if d == nil {
+		return Acknowledgement{}, errors.New("this run has no Workass credential")
+	}
+	spec := request.Spec
 	arguments := map[string]any{
 		"operation_id":  strings.TrimSpace(spec.OperationID),
-		"work_id":       childID,
+		"work_id":       request.ChildID,
 		"label":         spec.Label,
 		"role":          strings.TrimSpace(spec.Role),
-		"output_file":   outputFile,
-		"done_file":     doneFile,
-		"spool_file":    spoolFile,
-		"pid":           supervisorPID,
-		"process_group": pgid,
-		"isolation":     string(group),
+		"output_file":   request.OutputFile,
+		"done_file":     request.DoneFile,
+		"pid":           request.SupervisorPID,
+		"process_group": request.ProcessGroup,
+		"isolation":     string(request.Group),
 		"command":       strings.Join(spec.Command, " "),
+		"events":        eventArguments(request.Events),
 	}
 	if resource := NormalizeResource(spec.Resource); resource != "" {
 		arguments["resource"] = resource
@@ -131,37 +160,71 @@ func (d *daemonRegistrar) Register(
 	if owner := strings.TrimSpace(spec.Owner); owner != "" {
 		arguments["owner"] = owner
 	}
+	if request.Heartbeat > 0 {
+		arguments["heartbeat_ms"] = request.Heartbeat.Milliseconds()
+	}
+	if request.ReportGap > 0 {
+		// Told rather than inferred: the daemon could only guess at an outage
+		// that is already over, and a row that silently healed would hide that
+		// the job spent twenty minutes unable to say anything.
+		arguments["report_gap_ms"] = request.ReportGap.Milliseconds()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	response, err := toolcli.Do(ctx, d.config, "", &toolcli.Call{
 		Name: "workass_register_process_child", Arguments: arguments,
 	})
 	if err != nil {
-		return Registration{}, err
+		return Acknowledgement{}, err
 	}
 	if strings.TrimSpace(response.Error) != "" {
-		return Registration{}, errors.New(response.Error)
-	}
-	if d.consume != "" {
-		// A credential minted for this run has been used; leaving it on disk
-		// for the length of a training job is a window with no purpose.
-		_ = os.Remove(d.consume)
-		d.consume = ""
+		return Acknowledgement{}, errors.New(response.Error)
 	}
 	fields, _ := response.Result.(map[string]any)
-	registration := Registration{ChildID: childID, OutputFile: outputFile, DoneFile: doneFile}
+	ack := Acknowledgement{ChildID: request.ChildID}
 	if value, ok := fields["workId"].(string); ok && strings.TrimSpace(value) != "" {
-		registration.ChildID = value
+		ack.ChildID = value
 	}
 	if value, ok := fields["status"].(string); ok {
-		registration.Status = value
+		ack.Status = value
 	}
-	return registration, nil
+	switch value := fields["ackThrough"].(type) {
+	case float64:
+		if value > 0 {
+			ack.AckThrough = uint64(value)
+		}
+	case int64:
+		if value > 0 {
+			ack.AckThrough = uint64(value)
+		}
+	}
+	// Whether the ack is sufficient is the journal's call, not this client's:
+	// one authority for "was this delivered", and it is the one that owns the
+	// queue (reporter.go).
+	return ack, nil
+}
+
+// eventArguments is the wire shape of one batch. It is the Event struct's own
+// JSON, built explicitly so a change to the struct cannot quietly change the
+// wire.
+func eventArguments(events []Event) []map[string]any {
+	out := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		entry := map[string]any{
+			"seq": event.Seq, "kind": event.Kind,
+			"at": event.At.UTC().Format(time.RFC3339Nano),
+		}
+		if len(event.Payload) > 0 {
+			entry["payload"] = event.Payload
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // StateDirForCredential derives the daemon's state directory from the
-// credential's own path, which is the one place it is reliably knowable
-// without a new environment variable.
+// credential's own PATH. It is the fallback behind CredentialStateDir, for a
+// context file written by a build that predates the stated field.
 //
 // The engine writes its context at
 // <state>/tool-bootstrap/bridge-XXXX/context.json (internal/acp's

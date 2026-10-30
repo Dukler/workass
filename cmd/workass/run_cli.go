@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -49,7 +51,8 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
 	owner := flags.String("owner", "", "global fleet id of the chat or turn owed this job's outcome; defaults to the calling chat")
 	operationID := flags.String("operation-id", "", "stable id for this job; a repeat with the same id is the same job, never a second one")
 	tokenFile := flags.String("token-file", "", "file holding this run's Workass credential; defaults to WORKASS_RUN_TOKEN_FILE, then WORKASS_TOOL_CONTEXT")
-	stateDir := flags.String("state-dir", "", "daemon state directory override; resolved from the credential or WORKASS_DATA_ROOT by default")
+	stateDir := flags.String("state-dir", "", "daemon state directory; resolved from the credential or WORKASS_DATA_ROOT by default, and never from the working directory")
+	unreported := flags.Bool("unreported", false, "run with no chat told: supervise, queue the events and print the receipt, but report to no daemon")
 	workDir := flags.String("cwd", "", "working directory for the job")
 	outputFile := flags.String("output-file", "", "absolute path for the job's combined output; defaults to this machine's external-work directory")
 	quiet := flags.Bool("quiet", false, "print only the final JSON receipt")
@@ -66,12 +69,15 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
   --owner GLOBAL-ID        the chat or turn owed the outcome, on any machine
   --operation-id ID        the same id is the same job, never a second one
   --token-file FILE        this run's credential; never passed on a command line
+  --unreported             supervise with no chat told, and say so
 
 The job runs in its own process group, so it is not a child of the daemon and
-survives a daemon restart or a self-update. Its transitions are written to a
-spool on disk before anything is reported, so a daemon that is down misses
-nothing. A supervisor pid that is gone with no settled event means lost, not
-running.
+survives a daemon restart or a self-update. Every transition is REPORTED to
+this machine's daemon and acknowledged by it; the outbox (state/process-outbox.db)
+is the write-ahead copy, so a daemon that is down misses nothing and the backlog
+drains in order when it answers. A supervisor that cannot report says so on
+stderr and in its receipt, and keeps trying. A supervisor pid that is gone with
+no settled event means lost, not running.
 
 `)
 		flags.PrintDefaults()
@@ -89,11 +95,19 @@ running.
 		return 2
 	}
 
-	resolvedStateDir, registrar, err := resolveRunContext(*tokenFile, *stateDir, stderr)
+	resolvedStateDir, reporter, err := resolveRunContext(*tokenFile, *stateDir, *unreported, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
 		return procchild.ExitSupervisorFailed
 	}
+	outbox, err := procchild.OpenOutbox(resolvedStateDir)
+	if err != nil {
+		// Loud and first. An unusable outbox is not a degraded mode: it is a
+		// supervisor that cannot write down what it is about to witness.
+		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
+		return procchild.ExitSupervisorFailed
+	}
+	defer outbox.Close()
 
 	floor, err := procchild.ParseBytes(*minFreeDisk)
 	if err != nil {
@@ -118,17 +132,35 @@ running.
 		Resource: *resource, MaxRuntime: *maxRuntime, StaleAfter: *staleAfter, MaxHold: *maxHold,
 		Inputs: splitInputList(*inputs), MinFreeDisk: floor, Owner: *owner,
 		Dir: strings.TrimSpace(*workDir), Command: command, OutputFile: strings.TrimSpace(*outputFile),
-		Diagnostics: diagnostics, Registrar: registrar,
+		Diagnostics: diagnostics, Reporter: reporter, Outbox: outbox,
 	}
 	result, err := procchild.Run(spec)
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
 		return procchild.ExitSupervisorFailed
 	}
+	// The receipt says what was reported, not just what happened. A run that
+	// finished perfectly and could not tell anybody is a different outcome from
+	// a run that finished perfectly, and the receipt is where a caller standing
+	// here finds out which one it got.
 	receipt := map[string]any{
 		"workId": result.ChildID, "operationId": id, "outcome": result.Outcome,
 		"exitCode": result.ExitCode, "elapsedMs": result.Elapsed.Milliseconds(),
-		"outputFile": result.OutputFile, "registered": result.Registered,
+		"outputFile": result.OutputFile, "registered": result.Reporting.Delivered,
+		"reported": result.Reporting.Delivered, "stateDir": resolvedStateDir,
+		"outbox": outbox.Path(),
+	}
+	if result.Reporting.Unreported {
+		receipt["reported"], receipt["unreported"] = false, true
+	}
+	if result.Reporting.Pending > 0 {
+		receipt["pendingEvents"] = result.Reporting.Pending
+	}
+	if result.Reporting.Gap > 0 {
+		receipt["reportGapMs"] = result.Reporting.Gap.Milliseconds()
+	}
+	if result.Reporting.LastError != "" {
+		receipt["reportError"] = acp.RedactSensitiveText(result.Reporting.LastError)
 	}
 	if len(result.Refusals) > 0 {
 		refusals := make([]map[string]string, 0, len(result.Refusals))
@@ -145,38 +177,83 @@ running.
 	return result.ExitCode
 }
 
-// resolveRunContext finds this machine's state directory and, when there is a
-// credential, the client that will register the child.
+// resolveRunContext finds this machine's state directory and the daemon this
+// run reports to.
 //
-// A run with no credential is not an error: it supervises, spools and settles
-// exactly the same, and the only thing it lacks is a chat to tell. Saying so
-// once on stderr is better than refusing work a human asked for from a shell.
-func resolveRunContext(tokenFile, stateDirOverride string, stderr io.Writer) (string, procchild.Registrar, error) {
-	registrar, credentialPath, err := procchild.ResolveCredential(tokenFile)
+// The resolution order is deliberate, and every step of it is an answer
+// somebody AUTHORITATIVE gave: the flag the caller passed, then the state
+// directory the daemon itself wrote into the credential, then the path that
+// credential sits in, then the data root a unit or a profile exported. What is
+// NOT in the list any more is a bare relative default — `state`, resolved
+// against the process's working directory. That default is the bug this whole
+// path was rewritten for: four supervised jobs with cwd=/tmp wrote their events
+// to /tmp/state/process-children, where no daemon would ever look, and every
+// one of them reported ok to the agent that started them.
+//
+// An ambiguous answer is refused rather than guessed at.
+func resolveRunContext(tokenFile, stateDirOverride string, unreported bool, stderr io.Writer) (string, procchild.Reporter, error) {
+	reporter, credentialPath, err := procchild.ResolveCredential(tokenFile)
 	if err != nil {
 		return "", nil, err
 	}
 	stateDir := strings.TrimSpace(stateDirOverride)
 	if stateDir == "" && credentialPath != "" {
+		// What the daemon stated, which is the one authority on its own state.
+		stateDir = procchild.CredentialStateDir(credentialPath)
+	}
+	if stateDir == "" && credentialPath != "" {
+		// Where the credential sits, for a context file written by a build that
+		// predates the stated field.
 		stateDir = procchild.StateDirForCredential(credentialPath)
 	}
 	if stateDir == "" {
-		// defaultFleetStateDir is the same resolution `workass fleet` uses: the
-		// data root a unit or a profile set, then this machine's own install.
-		// One answer to "where does this machine keep its state", not two.
-		stateDir = defaultFleetStateDir()
+		if root := strings.TrimSpace(os.Getenv(procchild.DataRootEnvVar)); root != "" {
+			stateDir = filepath.Join(root, "state")
+		}
+	}
+	if stateDir == "" {
+		stateDir = installedFleetStateDir()
+	}
+	if stateDir == "" {
+		return "", nil, errors.New(
+			"this run cannot tell where this machine's Workass daemon keeps its state, so it refuses to start rather than write its events somewhere nothing will read: " +
+				"pass --state-dir, or run it with a Workass credential (--token-file / WORKASS_TOOL_CONTEXT), or export WORKASS_DATA_ROOT")
 	}
 	if !filepath.IsAbs(stateDir) {
-		absolute, err := filepath.Abs(stateDir)
-		if err != nil {
-			return "", nil, err
+		// Never relative. A relative state directory resolves against the JOB's
+		// working directory, which is the exact failure above.
+		return "", nil, fmt.Errorf(
+			"the supervised-job state directory %q is relative, so it would resolve against this job's working directory; pass an absolute --state-dir", stateDir)
+	}
+	stateDir = filepath.Clean(stateDir)
+	if reporter == nil {
+		if !unreported {
+			// Refused rather than run quietly. A run that supervises and tells
+			// nobody looked identical, from the outside, to one that reported.
+			return "", nil, procchild.ErrUnreportedRun
 		}
-		stateDir = absolute
+		fmt.Fprintf(stderr, "workass run: --unreported, so NO CHAT WILL BE TOLD about this job; it is supervised and its events are queued at %s\n",
+			procchild.OutboxPath(stateDir))
 	}
-	if registrar == nil {
-		fmt.Fprintf(stderr, "workass run: no Workass credential in this environment; the job is supervised and spooled at %s, but no chat is told\n", stateDir)
+	return stateDir, reporter, nil
+}
+
+// installedFleetStateDir is this machine's own installed state directory, and
+// only when it is really there.
+//
+// It is defaultFleetStateDir without the relative fallback: `fleet join` may
+// reasonably create a state directory where none exists, but a supervised job
+// may not, because the place it would create one is wherever the job happens
+// to be running.
+func installedFleetStateDir() string {
+	candidate := defaultFleetStateDir()
+	if candidate == "" || !filepath.IsAbs(candidate) {
+		return ""
 	}
-	return filepath.Clean(stateDir), registrar, nil
+	if info, err := os.Stat(candidate); err != nil || !info.IsDir() {
+		return ""
+	}
+	return candidate
 }
 
 func splitInputList(value string) []string {

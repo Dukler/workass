@@ -206,9 +206,7 @@ func resolveProcessOwner(declared, selfMachine, callerChatID, callerTabID, laneI
 		if owner.Machine == strings.TrimSpace(selfMachine) {
 			return owner, nil
 		}
-		// A chat on another machine has no tab id this machine could know, and
-		// the sync that offers the monitor carries what the owner knows.
-		owner.TabID = ""
+		owner.forgetLocalContext()
 		return owner, nil
 	}
 	switch id.Type {
@@ -223,12 +221,26 @@ func resolveProcessOwner(declared, selfMachine, callerChatID, callerTabID, laneI
 	}
 	owner.Machine = id.Home
 	if owner.Machine != strings.TrimSpace(selfMachine) {
-		owner.TabID = ""
+		owner.forgetLocalContext()
 	}
 	if strings.TrimSpace(owner.ChatID) == "" {
 		return processOwner{}, errors.New("--owner names a turn but no chat; give the chat's global id")
 	}
 	return owner, nil
+}
+
+// forgetLocalContext drops everything about the owner that is only true HERE.
+//
+// A tab, a lane and a running turn are ids in THIS machine's chat. Exported to
+// a chat on another machine they name nothing — and they are not merely
+// useless, they are wrong in a way that fails silently: the notice admission
+// fence compares the tab exactly and drops a mismatch, and it refuses a lane
+// it cannot find. That is how four live jobs with a declared remote owner
+// reported perfectly and told nobody. The owner's own machine fills these in
+// from what it knows (RegisterOffer), and an absent lane falls through to the
+// chat's desired lane, exactly as a local completion with no origin lane does.
+func (o *processOwner) forgetLocalContext() {
+	o.TabID, o.LaneID, o.OperationID = "", "", ""
 }
 
 // RegisterOffer is the watcher's side of fleet:monitor.offer.
@@ -265,6 +277,12 @@ func (w *fleetWatcher) RegisterOffer(peer string, params map[string]any) (any, e
 	tabID := strings.TrimSpace(fieldString(params, "watcherTabId"))
 	if chatID == "" {
 		chatID = watcher.Local
+	}
+	if tabID == "" && w.chatTab != nil {
+		// The offering machine could not know this chat's tab, and the notice
+		// admission fence compares it exactly: an empty tab matched nothing and
+		// was dropped in silence. This machine owns the chat, so it answers.
+		tabID = strings.TrimSpace(w.chatTab(chatID))
 	}
 	if w.chatExists != nil && !w.chatExists(tabID, chatID) {
 		if tabID != "" {

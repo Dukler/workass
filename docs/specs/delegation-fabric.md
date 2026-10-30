@@ -261,10 +261,16 @@ Properties that matter:
   (no environment or secret capture inside the daemon).
 - **It survives daemon restarts and self-updates**, because the daemon is not
   its parent — the case that kills in-process subagents today.
-- **It works while the daemon is down.** Events are appended to a spool
-  directory under the state root; the daemon ingests the spool on start and on
-  a tick. Facts on disk, as before: a supervisor that needs a live daemon would
-  fail exactly during an update, which is when it is most needed.
+- **It REPORTS, and it works while the daemon is down.** Superseded 2026-10-30
+  by `fleet-runtime.md` §14c: every transition is reported to the local daemon
+  over the authenticated Agent API and acknowledged by seq, and the on-disk
+  copy is a SQLite transactional outbox (`state/process-outbox.db`) that is a
+  write-ahead log for exactly the window when the daemon is unreachable —
+  appended before the call, marked delivered by the ack, replayed in seq order
+  on reconnect. Facts on disk, as before, because a supervisor that needs a
+  live daemon would fail exactly during an update; but the FILE is no longer
+  the channel, because a spool nobody reads and a report nobody receives looked
+  identical from the outside, and that is how four live jobs told nobody.
 - **Authorization never rides argv.** The delegation token comes from
   `--delegation-token-file` (0600, consumed and unlinked) or an env var — not
   the command line (binding law, `fleet_cli.go`).
@@ -531,7 +537,7 @@ same events; compaction appends `truncated` and a behind-cursor reader resyncs
 from the head; M1 implicit-parent load.
 
 **P2 — `workass run` + honest process evidence.** Preflight, process group /
-scope / Job object, spool-and-ingest, `lost`, `timed_out`, one-shot `stalled`,
+scope / Job object, report-and-acknowledge (§14c), `lost`, `timed_out`, one-shot `stalled`,
 refusal of evidence-less creation, liveness on every platform the daemon builds
 for. Tests: child survives a daemon restart *and* a daemon update; kill the
 supervisor ⇒ `lost`, never `running`; events written while the daemon is down
@@ -595,7 +601,7 @@ fallback transport.
 | Child dies silently | the host sees a gone pid with no `settled` ⇒ `lost{evidence}` (§4) |
 | Child never starts | evidence-less create refused; `accepted` without `started` past deadline ⇒ `timed_out` |
 | Supervisor itself dies (OOM, reboot) | pid gone + no `settled` ⇒ host appends `lost` |
-| Daemon restart or self-update mid-child | `process` children are not daemon children; events spool and are ingested |
+| Daemon restart or self-update mid-child | `process` children are not daemon children; events are queued in the outbox and replayed in order on reconnect |
 | Liveness by text matching | evidence is the log, the pid and the output file on the host; never a pattern over a remote command line |
 | Stale `running` after a host goes dark | one notice per machine: `host unreachable since T, last known: …` (§6, rule 2) |
 | Report cannot reach the parent | store-and-forward delivery with acks (rule 1); needs no renderer and no human |

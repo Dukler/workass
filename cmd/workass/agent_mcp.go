@@ -273,8 +273,29 @@ func agentMCPTools() []map[string]any {
 			"max_runtime_ms": integer(agenttext.Get("schema.process.max_runtime_ms"), 0),
 			"stale_after_ms": integer(agenttext.Get("schema.process.stale_after_ms"), 0),
 			"max_hold_ms":    integer(agenttext.Get("schema.process.max_hold_ms"), 0),
-			"tab_id":         str(agenttext.Get("schema.agentMCPTools.guidance.67")),
-			"chat_id":        str(agenttext.Get("schema.agentMCPTools.guidance.68")),
+			"heartbeat_ms":   integer(agenttext.Get("schema.process.heartbeat_ms"), 0),
+			"report_gap_ms":  integer(agenttext.Get("schema.process.report_gap_ms"), 0),
+			// The batch. This is what makes the report the primary path rather
+			// than a courtesy on top of a file: the supervisor says what
+			// happened, the daemon answers how far it applied, and the
+			// acknowledgement is what retires the event from the outbox.
+			"events": map[string]any{
+				"type": "array", "maxItems": acp.MaxReportedEventsPerCall,
+				"description": agenttext.Get("schema.process.events"),
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []any{"seq", "kind"},
+					"properties": map[string]any{
+						"seq":     integer(agenttext.Get("schema.process.event_seq"), 1),
+						"kind":    str(agenttext.Get("schema.process.event_kind")),
+						"at":      str(agenttext.Get("schema.process.event_at")),
+						"payload": map[string]any{"type": "object", "description": agenttext.Get("schema.process.event_payload")},
+					},
+				},
+			},
+			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.67")),
+			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.68")),
 		}, "work_id", "label", "pid", "output_file"), false, false, true, true),
 		// Starting one on ANOTHER machine. On this machine `workass run` in the
 		// agent's own shell is still the only way, which is what keeps the

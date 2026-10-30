@@ -20,25 +20,31 @@ import (
 //
 //  1. Derive the child id from the caller's operation id, so "launch there"
 //     and "record here" cannot become two half-truths (§6).
-//  2. Open the spool and record what it was asked to do, BEFORE it asks
+//  2. Open the outbox and record what it was asked to do, BEFORE it asks
 //     anybody for anything. From this line on, a crash is legible.
-//  3. Preflight. A refusal here is synchronous, in seconds, and creates no
-//     row: the work never started, so a chat with a "running" row for it would
-//     be a row about nothing.
-//  4. Register with the daemon — idempotently, and NOT fatally. The daemon may
-//     be restarting or mid-self-update; the work is the point, the spool is the
-//     record, and the daemon ingests it when it returns.
+//  3. REPORT that to the daemon and be acknowledged, which is what creates the
+//     row. A daemon that is down is not fatal — the event is queued and the
+//     backlog drains when it answers — but it is never quiet either.
+//  4. Preflight. A refusal is reported like any other outcome, because the
+//     caller of a job started from another machine is not standing here to
+//     read a receipt: a refusal nobody is told is the same as a job that
+//     vanished.
 //  5. Take the resource hold, reporting queue position as it waits.
 //  6. Start the child in its own process group / scope / job object, so it is
 //     NOT a daemon child and survives a daemon restart and a self-update.
 //  7. Watch three things it declared — a runtime ceiling, an output-silence
-//     threshold, a stop-file — and act on each exactly once.
-//  8. Append the real outcome with the real exit code, release the hold, poke
-//     the daemon so the notice is prompt, and exit with the child's own code.
+//     threshold, a stop-file — and act on each exactly once, reporting a
+//     heartbeat on the declared cadence meanwhile.
+//  8. Report the real outcome with the real exit code, release the hold, and
+//     exit with the child's own code — saying plainly if the outcome could not
+//     be delivered.
 //
-// It reports nothing about being alive, and that is the design: it is a child
-// of nothing, its pid is on the record, and a pid that is gone with no settled
-// event in the spool is `lost`. Absence is evidence.
+// Liveness has two witnesses, and both are needed. The supervisor's heartbeat
+// answers "is it still reporting", which is the question a healthy quiet job
+// and a job that has lost its daemon would otherwise answer identically. The
+// pid answers "is it still there": a supervisor pid that is gone with no
+// terminal event delivered and none left in its outbox is `lost`, and absence
+// is still evidence.
 
 // Result is what one supervised run amounted to.
 type Result struct {
@@ -50,26 +56,11 @@ type Result struct {
 	DoneFile   string
 	SpoolFile  string
 	// Refusals is non-empty only when preflight refused, in which case nothing
-	// was started, nothing was registered and no row exists.
+	// was started — but the refusal IS reported, so the chat that asked learns
+	// its job did not run.
 	Refusals []Refusal
-	// Registered reports whether the daemon acknowledged the child. False means
-	// the spool is the only record so far, which the daemon reconciles.
-	Registered bool
-}
-
-// Registration is what the daemon answers when a child is registered.
-type Registration struct {
-	ChildID    string
-	OutputFile string
-	DoneFile   string
-	Status     string
-}
-
-// Registrar is the daemon client, injected so the supervisor is testable
-// without a daemon and so the one place that speaks to the daemon is the one
-// place that speaks to the daemon.
-type Registrar interface {
-	Register(spec Spec, childID, outputFile, doneFile, spoolFile string, pid, pgid int, group GroupKind) (Registration, error)
+	// Reporting is what this run can honestly say about having been reported.
+	Reporting ReportingHealth
 }
 
 // Spec is one run, exactly as the command line described it.
@@ -96,11 +87,20 @@ type Spec struct {
 	// goes to the output file and never here, so a caller reading this stream
 	// sees the supervision and not the work.
 	Diagnostics io.Writer
-	Registrar   Registrar
-	Now         func() time.Time
-	StopPoll    time.Duration
-	StalePoll   time.Duration
-	StopGrace   time.Duration
+	// Reporter is the daemon this run reports to. Nil is an unreported run,
+	// which the CLI only allows when the operator asked for one by name.
+	Reporter  Reporter
+	Outbox    *Outbox
+	Now       func() time.Time
+	StopPoll  time.Duration
+	StalePoll time.Duration
+	StopGrace time.Duration
+	// ReportRetry and ReportDeadline are how fast an unreachable daemon is
+	// retried and how long a finished supervisor keeps trying before it says it
+	// could not deliver. Zero means the production constants; a test moves them
+	// so it does not have to wait out a real outage.
+	ReportRetry    time.Duration
+	ReportDeadline time.Duration
 }
 
 // Exit codes the supervisor itself produces, distinct from the child's.
@@ -157,10 +157,18 @@ func Run(spec Spec) (Result, error) {
 	if _, err := EnsureDir(spec.StateDir, childID); err != nil {
 		return Result{}, err
 	}
-	spoolPath := SpoolPath(spec.StateDir, childID)
-	spool, err := OpenSpool(spoolPath)
-	if err != nil {
-		return Result{}, err
+	outbox := spec.Outbox
+	if outbox == nil {
+		// The state directory is a resolved absolute path by the time it gets
+		// here (resolveRunContext refuses anything else), and the outbox refuses
+		// again on its own account. Two refusals for one mistake, because the
+		// mistake wrote four jobs' worth of events into /tmp/state.
+		opened, err := OpenOutbox(spec.StateDir)
+		if err != nil {
+			return Result{}, err
+		}
+		defer opened.Close()
+		outbox = opened
 	}
 	outputFile, err := resolveOutputFile(spec, childID)
 	if err != nil {
@@ -168,12 +176,49 @@ func Run(spec Spec) (Result, error) {
 	}
 	doneFile := outputFile + ".done"
 	result := Result{
-		ChildID: childID, OutputFile: outputFile, DoneFile: doneFile, SpoolFile: spoolPath,
+		ChildID: childID, OutputFile: outputFile, DoneFile: doneFile,
+		SpoolFile: outbox.Path(),
 	}
 
-	// Recorded before anything is asked of the machine, so even a supervisor
-	// that dies in preflight leaves a legible reason behind.
-	if _, err := spool.Append(KindCreated, map[string]any{
+	// The registration facts, read fresh for every report: a replayed batch
+	// must carry the pid and process group that are true NOW, not the ones that
+	// were true when its first event was queued.
+	live := struct {
+		mu   sync.Mutex
+		pgid int
+		kind GroupKind
+	}{kind: GroupNone}
+	facts := func() Report {
+		live.mu.Lock()
+		defer live.mu.Unlock()
+		return Report{
+			Spec: spec, ChildID: childID, OutputFile: outputFile, DoneFile: doneFile,
+			SupervisorPID: os.Getpid(), ProcessGroup: live.pgid, Group: live.kind,
+		}
+	}
+	record := newJournal(childID, outbox, spec.Reporter, diagnostics, now, facts, spec.ReportRetry, spec.ReportDeadline)
+	// One timer for the whole run: it reports the heartbeat while the daemon is
+	// reachable and retries the backlog while it is not. The caller asked for
+	// supervision, and this is what supervision reports with.
+	beats := time.NewTicker(record.retry)
+	defer beats.Stop()
+	heartbeatDone := make(chan struct{})
+	defer close(heartbeatDone)
+	go func() {
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-beats.C:
+				record.beat()
+			}
+		}
+	}()
+
+	// Recorded before anything is asked of the machine, and reported at once,
+	// so the chat that asked has a row from the first moment there is anything
+	// to have a row about.
+	if _, err := record.record(KindCreated, map[string]any{
 		"label": spec.Label, "role": spec.Role, "command": spec.Command,
 		"resource": NormalizeResource(spec.Resource), "owner": strings.TrimSpace(spec.Owner),
 		"maxRuntimeMs": spec.MaxRuntime.Milliseconds(), "staleAfterMs": spec.StaleAfter.Milliseconds(),
@@ -193,30 +238,26 @@ func Run(spec Spec) (Result, error) {
 			lines = append(lines, refusal.String())
 		}
 		sort.Strings(lines)
-		// A refusal is terminal for this run and is recorded as such, but it
-		// never becomes a row in a chat: nothing started, so there is nothing
-		// for a chat to be told about except the answer the caller already has.
-		_, _ = spool.Append(KindSettled, map[string]any{
+		// A refusal is terminal, and it IS news. The old design dropped it on
+		// the floor — "nothing started, so there is nothing to tell a chat" —
+		// which is true only when the caller is standing here reading the
+		// receipt. A job started from another machine has a chat waiting, and a
+		// refusal it never hears about is indistinguishable from a job that
+		// vanished. This is what the live test's refused case proved.
+		_, _ = record.record(KindSettled, map[string]any{
 			"outcome": OutcomeFailed, "summary": "preflight refused: " + strings.Join(lines, "; "),
 			"preflight": lines, "exitCode": ExitPreflightRefused,
 		})
 		result.Outcome, result.ExitCode = OutcomeFailed, ExitPreflightRefused
-		_ = RemoveSpool(spec.StateDir, childID)
+		result.Reporting = record.settle()
 		return result, nil
 	}
 
 	group, command := newGroup(childID, spec.Command)
 	defer group.close()
-
-	if spec.Registrar != nil {
-		if _, err := spec.Registrar.Register(spec, childID, outputFile, doneFile, spoolPath, os.Getpid(), 0, group.Kind()); err != nil {
-			// Not fatal, on purpose. The daemon is allowed to be restarting;
-			// the spool is the record and the reconcile pass will find it.
-			fmt.Fprintf(diagnostics, "workass run: the daemon did not record this child yet (%v); its spool will be ingested when it does\n", err)
-		} else {
-			result.Registered = true
-		}
-	}
+	live.mu.Lock()
+	live.kind = group.Kind()
+	live.mu.Unlock()
 
 	stopPath := StopPath(spec.StateDir, childID)
 	// A stop-file left by a previous run of the same operation id would stop
@@ -231,7 +272,7 @@ func Run(spec Spec) (Result, error) {
 			Label: spec.Label, Owner: spec.Owner, MaxHold: spec.MaxHold,
 			Cancelled: func() bool { return stopRequested(stopPath) },
 			OnQueued: func(position, total int) {
-				_, _ = spool.Append(KindQueued, map[string]any{
+				_, _ = record.record(KindQueued, map[string]any{
 					"resource": NormalizeResource(spec.Resource), "position": position, "waiting": total,
 				})
 				fmt.Fprintf(diagnostics, "workass run: waiting for %s, position %d of %d\n",
@@ -239,11 +280,11 @@ func Run(spec Spec) (Result, error) {
 			},
 		})
 		if err != nil {
-			_, _ = spool.Append(KindSettled, map[string]any{
+			_, _ = record.record(KindSettled, map[string]any{
 				"outcome": OutcomeCancelled, "summary": err.Error(), "exitCode": ExitCancelled,
 			})
 			result.Outcome, result.ExitCode = OutcomeCancelled, ExitCancelled
-			pokeDaemon(spec, result, group, 0, diagnostics)
+			result.Reporting = record.settle()
 			return result, nil
 		}
 		defer lease.Release()
@@ -264,54 +305,55 @@ func Run(spec Spec) (Result, error) {
 	group.prepare(cmd)
 	started := now()
 	if err := cmd.Start(); err != nil {
-		_, _ = spool.Append(KindSettled, map[string]any{
+		_, _ = record.record(KindSettled, map[string]any{
 			"outcome": OutcomeFailed, "summary": "the command could not be started: " + err.Error(),
 			"exitCode": ExitSupervisorFailed,
 		})
 		result.Outcome, result.ExitCode = OutcomeFailed, ExitSupervisorFailed
-		pokeDaemon(spec, result, group, 0, diagnostics)
+		result.Reporting = record.settle()
 		return result, nil
 	}
 	if err := group.adopt(cmd); err != nil {
 		fmt.Fprintf(diagnostics, "workass run: %v; a stop will reach this process and not its descendants\n", err)
 	}
 	pid := cmd.Process.Pid
-	_, _ = spool.Append(KindStarted, map[string]any{
+	live.mu.Lock()
+	live.pgid = group.GroupID()
+	live.mu.Unlock()
+	// The row gains its pid here, which is the evidence the daemon's `lost`
+	// verdict needs — and it rides the same report as the started event, so
+	// there is no second verb and no window where one arrived without the other.
+	_, _ = record.record(KindStarted, map[string]any{
 		"pid": pid, "pgid": group.GroupID(), "group": string(group.Kind()),
 		"unit": groupUnit(group), "supervisorPid": os.Getpid(), "resource": NormalizeResource(spec.Resource),
 	})
-	if spec.Registrar != nil {
-		// Re-register with the pid now that there is one. Same operation id, so
-		// this is the same child: the row gains its pid, which is the evidence
-		// the daemon's `lost` verdict needs.
-		if _, err := spec.Registrar.Register(spec, childID, outputFile, doneFile, spoolPath, os.Getpid(), group.GroupID(), group.Kind()); err == nil {
-			result.Registered = true
-		}
-	}
 
-	outcome, exitCode := supervise(spec, spool, group, cmd, pid, stopPath, outputFile, started, diagnostics)
+	outcome, exitCode := supervise(spec, record, group, cmd, pid, stopPath, outputFile, started, diagnostics)
 	elapsed := now().Sub(started)
 	result.Outcome, result.ExitCode, result.Elapsed = outcome, exitCode, elapsed
 
 	summary := outcomeSummary(outcome, exitCode, elapsed)
-	_, _ = spool.Append(KindSettled, map[string]any{
+	_, _ = record.record(KindSettled, map[string]any{
 		"outcome": outcome, "exitCode": exitCode, "summary": summary,
 		"elapsedMs": elapsed.Milliseconds(), "pid": pid,
 	})
 	// The done marker keeps the pre-P4 settle path working byte for byte: a
 	// child registered through the external-work adapter is settled from this
-	// file by the same reconcile branch it always was, whether or not anything
-	// read the spool.
+	// file by the same reconcile branch it always was, whatever happened to the
+	// report.
 	writeDoneFile(doneFile, exitCode)
 	lease.Release()
-	pokeDaemon(spec, result, group, pid, diagnostics)
+	// The last thing it does is make sure the outcome arrived, and say so if it
+	// did not. Exiting quietly with an undelivered settle is the one failure
+	// this whole path exists to remove.
+	result.Reporting = record.settle()
 	return result, nil
 }
 
 // supervise watches the three things the caller declared and the one thing it
 // did not: the child's own exit.
 func supervise(
-	spec Spec, spool *Spool, group *group, cmd *exec.Cmd, pid int,
+	spec Spec, record *journal, group *group, cmd *exec.Cmd, pid int,
 	stopPath, outputFile string, started time.Time, diagnostics io.Writer,
 ) (string, int) {
 	now := spec.Now
@@ -351,7 +393,7 @@ func supervise(
 	stop := func(reason, outcome string) {
 		once.Do(func() {
 			stopping = outcome
-			_, _ = spool.Append(KindCancelRequested, map[string]any{"by": reason, "outcome": outcome})
+			_, _ = record.record(KindCancelRequested, map[string]any{"by": reason, "outcome": outcome})
 			fmt.Fprintf(diagnostics, "workass run: stopping (%s); %s then a kill after %s\n",
 				reason, gracefulMeans(group.Kind()), grace)
 			// The stop-file is the graceful half on every platform, and the only
@@ -394,7 +436,7 @@ func supervise(
 				// One notice, however long the silence lasts. A stall is a flag
 				// on running, never a state, and a chat told about it on every
 				// poll would be a chat nobody reads.
-				_, _ = spool.Append(KindStalled, map[string]any{
+				_, _ = record.record(KindStalled, map[string]any{
 					"evidence": evidence, "staleAfterMs": spec.StaleAfter.Milliseconds(),
 				})
 				fmt.Fprintf(diagnostics, "workass run: %s\n", evidence)
@@ -563,21 +605,4 @@ func resolveOutputFile(spec Spec, childID string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
-}
-
-// pokeDaemon re-registers the finished child with the same operation id, so the
-// daemon ingests the spool now rather than on its next pass. It is a courtesy,
-// not a mechanism: a failure here delays the notice by one reconcile tick and
-// loses nothing.
-func pokeDaemon(spec Spec, result Result, group *group, pid int, diagnostics io.Writer) {
-	if spec.Registrar == nil {
-		return
-	}
-	if _, err := spec.Registrar.Register(
-		spec, result.ChildID, result.OutputFile, result.DoneFile, result.SpoolFile,
-		os.Getpid(), group.GroupID(), group.Kind(),
-	); err != nil {
-		fmt.Fprintf(diagnostics, "workass run: the outcome is on disk; the daemon will ingest it (%v)\n", err)
-	}
-	_ = pid
 }

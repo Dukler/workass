@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 	"workass/internal/agenttext"
+	"workass/internal/procchild"
 
 	providercontract "workass/internal/provider"
 )
@@ -147,8 +148,16 @@ type Manager struct {
 	harnessTurns        *harnessTurnStore
 	spawnedWorkMu       sync.Mutex
 	spawnedWorkCommitMu sync.Mutex
-	spawnedWork         map[string]*spawnedWorkRecord
-	spawnedCandidates   map[string]spawnedWorkCandidate
+	// The supervised-job outbox, opened lazily and held open: it is the one
+	// file this daemon reads to recover what a DEAD supervisor queued, and the
+	// one it prunes on retention. A live supervisor reports over the API and
+	// this handle is never on that path.
+	processOutboxMu       sync.Mutex
+	processOutboxHandle   *procchild.Outbox
+	processOutboxFailed   bool
+	processOutboxPrunedAt time.Time
+	spawnedWork           map[string]*spawnedWorkRecord
+	spawnedCandidates     map[string]spawnedWorkCandidate
 	// spawnedWorkSettled remembers recently evicted settled items, so a late
 	// event for a finished task (Claude Code sends task_updated, then
 	// task_notification) updates that item instead of minting a blank one.
