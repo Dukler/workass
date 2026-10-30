@@ -89,13 +89,23 @@ const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
 // transaction each. It returns the resulting user_version.
 func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 	var current int
-	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
-		return 0, classify(err)
-	}
-	if current > len(migrations) {
-		return 0, fmt.Errorf("%w: schema version %d, this build knows %d; update Workass or restore a backup", ErrSchemaTooNew, current, len(migrations))
-	}
-	if err := verifyHistory(db, migrations, current); err != nil {
+	// The version and the history are read in ONE transaction. Read apart, a
+	// SHARED database being created by another process at this instant can
+	// commit between them, and a good file reads as a mismatch: version 0 with
+	// migration 1 recorded, or no history table and then a table.
+	err := db.Read(context.Background(), func(tx *Tx) error {
+		if err := tx.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
+			return err
+		}
+		if current > len(migrations) {
+			return fmt.Errorf("%w: schema version %d, this build knows %d; update Workass or restore a backup", ErrSchemaTooNew, current, len(migrations))
+		}
+		if migrateReadHook != nil {
+			migrateReadHook()
+		}
+		return verifyHistory(tx, migrations, current)
+	})
+	if err != nil {
 		return 0, err
 	}
 	if current == len(migrations) {
@@ -211,6 +221,10 @@ func writeUpgradeBase(dir string, version int) error {
 	return os.Rename(partial, filepath.Join(dir, upgradeBaseFile))
 }
 
+// migrateReadHook, when set (tests), runs between reading the version and the
+// history.
+var migrateReadHook func()
+
 // pruneBackupHook, when set (tests), runs before each backup is removed.
 var pruneBackupHook func(name string)
 
@@ -260,27 +274,27 @@ func pruneMigrationBackups(dir, keep string, base int) []string {
 	return removed
 }
 
-func verifyHistory(db *DB, migrations []Migration, current int) error {
+func verifyHistory(tx *Tx, migrations []Migration, current int) error {
 	var tables int
-	if err := db.sql.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
-		return classify(err)
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return err
 	}
 	if tables == 0 {
 		if current != 0 {
 			return fmt.Errorf("%w: user_version %d without schema_migrations", ErrSchemaMismatch, current)
 		}
 		var others int
-		if err := db.sql.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table'`).Scan(&others); err != nil {
-			return classify(err)
+		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table'`).Scan(&others); err != nil {
+			return err
 		}
 		if others != 0 {
 			return fmt.Errorf("%w: database has tables but no migration history", ErrSchemaMismatch)
 		}
 		return nil
 	}
-	rows, err := db.sql.Query(`SELECT version, name FROM schema_migrations ORDER BY version`)
+	rows, err := tx.Query(`SELECT version, name FROM schema_migrations ORDER BY version`)
 	if err != nil {
-		return classify(err)
+		return err
 	}
 	defer rows.Close()
 	expected := 1
