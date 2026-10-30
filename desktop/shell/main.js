@@ -225,7 +225,7 @@ function createWindow(url, browserReporter, isController) {
   const isUpdateRelaunch = revealUpdateRelaunch;
   revealUpdateRelaunch = false;
   const showOnCreate = shouldShowWindowOnCreate({ platform: process.platform, updateRelaunch: isUpdateRelaunch });
-  const browserHost = resolveBrowserHost({ env: process.env, platform: process.platform, dataRoot: RUNTIME.dataRoot });
+  const browserHost = resolveBrowserHost({ env: process.env, dataRoot: RUNTIME.dataRoot });
   console.error(`[shell] browser host ${browserHost.host} (${browserHost.source})`);
   const windowIcon = resolveWindowIconPath({
     platform: process.platform,
