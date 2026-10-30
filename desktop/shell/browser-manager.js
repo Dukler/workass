@@ -3694,7 +3694,17 @@ class BrowserManager {
   // (a hung renderer, a drag handed elsewhere) fails the call, and a press it
   // left down is released by the operation that made it (serialize) or on
   // blur.
-  async boundedInput(entry, debug, method, params, sessionId) {
+  async boundedInput(entry, debug, method, rawParams, sessionId) {
+    // A native page fitted into its frame is emulated at that scale, and
+    // protocol pointer input on its top frame is in the scaled widget's pixels,
+    // not the page's: unscaled, a click on a floating page lands far from its
+    // target and still reports success. A cross-site frame's own session takes
+    // that frame's pixels.
+    const fitted = !this.isHosted(entry) && (method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchDragEvent')
+      && !sessionId && Number(entry.presentationScale) > 0 && entry.presentationScale !== 1;
+    const params = fitted && Number.isFinite(rawParams.x) && Number.isFinite(rawParams.y)
+      ? { ...rawParams, x: rawParams.x * entry.presentationScale, y: rawParams.y * entry.presentationScale }
+      : rawParams;
     const pointer = method === 'Input.dispatchMouseEvent' ? String(params.type || '') : '';
     if (pointer === 'mousePressed') {
       entry.pointerDown = { sessionId: sessionId || null, x: Number(params.x) || 0, y: Number(params.y) || 0, button: params.button || 'left' };
