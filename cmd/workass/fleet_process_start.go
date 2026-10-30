@@ -66,8 +66,8 @@ const processStartLocalReason = "a supervised job on THIS machine is started by 
 // arrives in the owning chat as a notice, through the monitor the supervisor's
 // own registration offers (§7).
 func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forwarded fleetForwardedWork, params map[string]any) (any, error) {
-	if h == nil || h.manager == nil || h.chats == nil || h.chats.providerChats == nil {
-		return nil, errors.New("supervised jobs require the durable chat actor")
+	if h == nil || h.manager == nil {
+		return nil, errors.New("supervised jobs require the chat manager")
 	}
 	// §11: narrowed work may not run arbitrary commands here. The refusal names
 	// the capability, as every structural refusal must.
@@ -106,29 +106,29 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 		return nil, err
 	}
 
-	// The chat on THIS machine that holds the job's local row. It is not the
-	// owner — the owner is the chat that asked, on its own machine — but a row
-	// needs a chat here, because the row IS this machine's record of the work.
-	hostTabID, hostChatID, err := processStartHostPair(params, h.selfMachineID)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.fenceActor(hostTabID, hostChatID); err != nil {
-		return nil, err
-	}
-	if _, err := h.chats.providerChats.ReadChat(hostTabID, hostChatID, 1, false); err != nil {
-		return nil, errors.New("host_tab_id + host_chat_id do not name a chat on this machine")
-	}
-
 	owner, err := fleetid.New(forwarded.Origin.Machine, fleetid.Chat, forwarded.Origin.ChatID)
 	if err != nil {
 		return nil, fmt.Errorf("the asking chat is not a resolvable fleet id: %w", err)
+	}
+	// One operation id is one job. A replay that arrives after an uncertain
+	// reply answers with the job that exists, rather than starting a second
+	// supervisor over the first one's id, output file and stop file.
+	if existing, found := h.manager.ProcessChildByID(childID); found {
+		if strings.TrimSpace(existing.Owner) != owner.String() {
+			return nil, fmt.Errorf("operation_id %q already names a job owned by %s; one id is one job, so choose another", operationID, existing.Owner)
+		}
+		return map[string]any{
+			"ok": true, "replayed": true, "workId": childID, "operationId": operationID,
+			"machineId": h.selfMachineID, "owner": owner.String(), "status": existing.Status,
+			"outputFile": existing.OutputFile,
+			"queuedAt":   existing.QueuedAt, "startedAt": existing.StartedAt,
+		}, nil
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("this daemon cannot locate its own executable, so it cannot start `workass run`: %w", err)
 	}
-	credentialPath, err := h.writeRunCredential(hostTabID, hostChatID, operationID, childID)
+	credentialPath, err := h.writeRunCredential(childID, owner.String(), operationID)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +182,7 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	// and says where to read its complaint.
 	reporting := "pending"
 	registration, regErr := h.registerStartedProcessChild(startedProcessChild{
-		TabID: hostTabID, ChatID: hostChatID, ChildID: childID, Label: label,
-		Owner: owner.String(), SupervisorPID: supervisorPID, Command: command,
+		ChildID: childID, Label: label, Owner: owner.String(), SupervisorPID: supervisorPID, Command: command,
 		OutputFile: outputFile, SupervisorLog: logPath, Params: params,
 	})
 	if regErr != nil {
@@ -196,9 +195,12 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	result := map[string]any{
 		"ok": true, "workId": childID, "operationId": operationID,
 		"machineId": h.selfMachineID, "supervisorPid": supervisorPID,
-		"owner": owner.String(), "hostTabId": hostTabID, "hostChatId": hostChatID,
-		"outputFile": outputFile, "supervisorLog": logPath, "reporting": reporting,
-		"startedAt": time.Now().UTC().Format(time.RFC3339),
+		"owner": owner.String(), "outputFile": outputFile, "supervisorLog": logPath,
+		"reporting": reporting,
+		// Not "startedAt": the job's command has not started, and may wait hours
+		// for a resource before it does. workass_list_process_children says when
+		// it has.
+		"queuedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 	if monitor, ok := registration["monitor"]; ok {
 		result["monitor"] = monitor
@@ -226,8 +228,6 @@ func openSupervisorLog(path, childID, label string) (*os.File, error) {
 
 // startedProcessChild is one launch, as the row this daemon writes for it.
 type startedProcessChild struct {
-	TabID         string
-	ChatID        string
 	ChildID       string
 	Label         string
 	Owner         string
@@ -238,8 +238,8 @@ type startedProcessChild struct {
 	Params        map[string]any
 }
 
-// registerStartedProcessChild writes the launch's row in the host chat and
-// offers the owner its monitor, through the same registration a report uses.
+// registerStartedProcessChild writes the launch's row on this machine and offers
+// the owner its monitor, through the same registration a report uses.
 //
 // The same one deliberately: a second write path for "the daemon started it"
 // would be a second shape of row, and the first report amending this one is
@@ -267,10 +267,8 @@ func (h *agentControlHandler) registerStartedProcessChild(started startedProcess
 			params[field] = value
 		}
 	}
-	value, err := h.manager.WithActorOwner(started.ChatID, started.TabID, func(owner string) (any, error) {
-		return h.registerProcessChildWith(owner, started.TabID, started.ChatID, params,
-			processChildLocalStart{SupervisorLog: started.SupervisorLog, Awaiting: true})
-	})
+	value, err := h.registerProcessChildWith("", "", "", params,
+		processChildLocalStart{SupervisorLog: started.SupervisorLog, Awaiting: true, Hosted: true})
 	if err != nil {
 		return nil, err
 	}
@@ -281,18 +279,16 @@ func (h *agentControlHandler) registerStartedProcessChild(started startedProcess
 // read it. `workass run` unlinks a --token-file it consumed, and the token
 // itself is revoked by the registration it authorized, so the file and the
 // grant both end with the job's first report.
-func (h *agentControlHandler) writeRunCredential(tabID, chatID, operationID, childID string) (string, error) {
+func (h *agentControlHandler) writeRunCredential(childID, owner, operationID string) (string, error) {
 	template, err := h.manager.ToolContextTemplate()
 	if err != nil {
 		return "", err
 	}
-	token := h.manager.MintRunToken(chatID, tabID, operationID)
+	token := h.manager.MintRunToken(childID, owner, operationID)
 	if token == "" {
 		return "", errors.New("this daemon could not mint a credential for the job")
 	}
 	template.Credential = token
-	template.ChatID = chatID
-	template.TabID = tabID
 	// Where this daemon keeps its state, stated rather than left to be
 	// derived. The supervisor resolved it from a default before, and that
 	// default resolved `state` against the JOB's working directory: four jobs
@@ -308,58 +304,6 @@ func (h *agentControlHandler) writeRunCredential(tabID, chatID, operationID, chi
 		return "", err
 	}
 	return path, nil
-}
-
-// processStartHostPair reads the host chat's pair, accepting the dialect the
-// caller actually has.
-//
-// An agent that asks `workass_list_chats` for the chats on another machine is
-// handed machine-TAGGED ids, because that is how every other tool addresses
-// them. Passing those straight back to `process.start` was refused with "a
-// forwarded Workass tool call must carry this machine's own ids" — technically
-// true and practically a dead end, since the tagged pair was the only pair the
-// agent had ever been given. So a tag that names THIS machine is stripped and
-// accepted; a tag that names a different one is still refused, because a chat
-// on a third machine cannot hold a row for a job running here.
-func processStartHostPair(params map[string]any, selfMachineID string) (string, string, error) {
-	const guidance = "process.start needs host_tab_id + host_chat_id: the exact chat on this machine that will hold the job's local row. Call workass_list_chats with this machine_id, or create one with workass_create_chat machine_id"
-	tabID, tabHome, err := processStartLocalID(fieldString(params, "host_tab_id"), selfMachineID, "host_tab_id")
-	if err != nil {
-		return "", "", err
-	}
-	chatID, chatHome, err := processStartLocalID(fieldString(params, "host_chat_id"), selfMachineID, "host_chat_id")
-	if err != nil {
-		return "", "", err
-	}
-	if tabID == "" || chatID == "" {
-		return "", "", errors.New(guidance)
-	}
-	if tabHome != chatHome {
-		return "", "", errors.New("host_tab_id and host_chat_id must be spelled the same way: either both machine-tagged for this machine, or both bare")
-	}
-	return tabID, chatID, nil
-}
-
-// processStartLocalID reduces one host id to the bare local id this machine
-// knows it by.
-func processStartLocalID(value, selfMachineID, field string) (string, bool, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", false, nil
-	}
-	machineID, local, tagged, err := splitMachineTaggedID(value)
-	if err != nil {
-		return "", false, fmt.Errorf("%s: %w", field, err)
-	}
-	if !tagged {
-		return value, false, nil
-	}
-	if strings.TrimSpace(selfMachineID) != "" && machineID != strings.TrimSpace(selfMachineID) {
-		return "", true, fmt.Errorf(
-			"%s names a chat on %s, but the job runs here: the chat that holds the local row must be on this machine. The chat that ASKED is carried separately and keeps the outcome, wherever it is",
-			field, machineID)
-	}
-	return local, true, nil
 }
 
 // processStartCommand reads the job's argv. There is no shell anywhere in this
@@ -530,8 +474,8 @@ func sortStrings(values []string) {
 // It is an allow-list of exactly one method, checked before anything else a
 // request could reach, so a credential that leaks out of a job's own file
 // cannot send a message, read a chat, spawn an agent or start another job. The
-// binding is checked too: a token minted for one job and one chat on this
-// machine registers that job in that chat, and refuses anything else.
+// binding is checked too: a token minted for one job and its owner reports that
+// job for that owner, under no chat, and refuses anything else.
 func (h *agentControlHandler) fenceRunCredential(method, ownerKey, tabID, chatID string, params map[string]any) error {
 	if h == nil || h.manager == nil {
 		return nil
@@ -543,11 +487,50 @@ func (h *agentControlHandler) fenceRunCredential(method, ownerKey, tabID, chatID
 	if method != "process.register" {
 		return errors.New("this is a one-shot supervised-job credential: it authorizes only workass_register_process_child, for the one job it was minted for")
 	}
-	if binding.ChatID != strings.TrimSpace(chatID) || binding.TabID != strings.TrimSpace(tabID) {
-		return errors.New("this supervised-job credential belongs to a different chat on this machine")
-	}
 	if binding.OperationID != strings.TrimSpace(fieldString(params, "operation_id")) {
 		return errors.New("this supervised-job credential was minted for a different job")
 	}
+	if !binding.JobScoped() {
+		// Minted when a chat here held the job's row; that job keeps reporting
+		// the way it always has until it ends (internal/acp/run_tokens.go).
+		if binding.ChatID != strings.TrimSpace(chatID) || binding.TabID != strings.TrimSpace(tabID) {
+			return errors.New("this supervised-job credential belongs to a different chat on this machine")
+		}
+		return nil
+	}
+	if strings.TrimSpace(chatID) != "" || strings.TrimSpace(tabID) != "" ||
+		strings.TrimSpace(fieldString(params, "chat_id")) != "" || strings.TrimSpace(fieldString(params, "tab_id")) != "" {
+		return errors.New("this supervised-job credential names no chat, so it cannot act for one")
+	}
+	if binding.WorkID != strings.TrimSpace(fieldString(params, "work_id")) {
+		return errors.New("this supervised-job credential was minted for a different job")
+	}
+	if binding.Owner != strings.TrimSpace(fieldString(params, "owner")) {
+		return errors.New("this supervised-job credential was minted for a different owner")
+	}
 	return nil
+}
+
+// processStartOldHostRefusals are what a daemon too old for this start says.
+// Each is fixed text in a build that has already shipped.
+var processStartOldHostRefusals = []string{
+	"process.start needs host_tab_id + host_chat_id",
+	"unknown machine-scoped agent control method",
+}
+
+// processStartHostRefusal names a host that cannot take this start.
+//
+// A host that still requires a chat of its own answers with guidance about two
+// fields this tool no longer has, which would send a caller looking for a chat
+// to create. Both of those refusals happen before that daemon launches anything.
+func processStartHostRefusal(machineID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, refusal := range processStartOldHostRefusals {
+		if strings.Contains(err.Error(), refusal) {
+			return fmt.Errorf("machine %s runs an older Workass that cannot start this job, and nothing was started: it can only hold a job inside a chat of its own, and this version does not ask for one. Update %s, then start the job again", machineID, machineID)
+		}
+	}
+	return err
 }

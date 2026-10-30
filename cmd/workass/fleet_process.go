@@ -364,6 +364,7 @@ func spawnedWorkReceiptPayload(receipt acp.SpawnedWorkReceipt) map[string]any {
 		"exitCode": intPointerPayload(receipt.ExitCode), "summary": receipt.Summary,
 		"outputTail": receipt.OutputTail, "tailLimited": receipt.TailLimited,
 		"modelLabel": receipt.ModelLabel,
+		"queuedAt":   receipt.QueuedAt, "queuedMs": receipt.QueuedMs, "runMs": receipt.RunMs,
 	}
 }
 
@@ -378,6 +379,8 @@ func spawnedWorkReceiptFromPayload(payload map[string]any) acp.SpawnedWorkReceip
 		OutputFile: fieldString(payload, "outputFile"), Summary: fieldString(payload, "summary"),
 		OutputTail:  redactedSessionString(fieldString(payload, "outputTail")),
 		TailLimited: boolFieldValue(payload, "tailLimited"), ModelLabel: fieldString(payload, "modelLabel"),
+		QueuedAt: fieldString(payload, "queuedAt"), QueuedMs: int64(intField(payload, "queuedMs")),
+		RunMs: int64(intField(payload, "runMs")),
 	}
 	if value, present := intFieldPresent(payload, "pid"); present {
 		receipt.PID = &value
@@ -518,6 +521,7 @@ func (h *agentControlHandler) watchedRemoteProcessTargets(tabID, chatID string) 
 var remoteProcessNumberFields = []string{
 	"pid", "supervisor_pid", "process_group", "exit_code", "queue_position",
 	"max_runtime_ms", "stale_after_ms", "max_hold_ms", "heartbeat_ms", "report_gap_ms",
+	"queued_ms", "run_ms",
 }
 
 // normalizeRemoteProcessNumbers puts one forwarded row's numbers back in the

@@ -386,11 +386,10 @@ func (r *providerChatRuntime) exactActor(tabID, chatID string) (*providerChatAct
 // chatProviderID is the provider a chat is CONFIGURED for, read from its
 // durable presentation rather than from a live session binding.
 //
-// The two differ exactly when it matters here: a supervised job's host chat
-// holds the job's local row and nobody is running a turn in it, so the manager
-// has no bound provider for it and a registration that asked only the binding
-// was refused. The durable answer is the one that is true whether or not
-// anybody is talking in that chat right now.
+// The two differ exactly when it matters here: when nobody is running a turn in
+// a chat, the manager has no bound provider for it and a registration that asked
+// only the binding was refused. The durable answer is the one that is true
+// whether or not anybody is talking in that chat right now.
 func (r *providerChatRuntime) chatProviderID(tabID, chatID string) string {
 	if r == nil {
 		return ""

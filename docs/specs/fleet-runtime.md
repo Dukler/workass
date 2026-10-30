@@ -446,7 +446,8 @@ stderr AND in the receipt and keeps trying; a wrong or relative state
 directory is refused before anything runs; concurrent supervisors share one
 outbox without losing a seq; and **a remote start from a chat on P produces
 exactly one notice in that chat on P for each of settled, refused, timed_out,
-cancelled and lost.**
+cancelled and lost.** Plus §14e's: a real `workass run` started on a host with no
+chats at all reports every one of those outcomes to its owner.
 
 **P5 — waits and forks collapse.** Declared `waiting{conditions}` resumes the
 same native session; an undeclared wait raises `attention{ended-while-waiting}`
@@ -547,9 +548,10 @@ says so ("no Workass credential in this environment ... but no chat is told").
    its own credential path, and the variables the caller named. Nothing of the
    daemon's environment reaches it, so no secret can;
 4. the only credential it holds is a token good for exactly one method
-   (`process.register`), one job and one chat on the host, revoked the moment
+   (`process.register`), one job and that job's one owner, revoked the moment
    that job is terminal — it lasts the job's life rather than one call,
-   because §14c made reporting continuous rather than a closing poke;
+   because §14c made reporting continuous rather than a closing poke. It names
+   no chat, so it authenticates as nobody (§14e);
 5. it is still `workass run` that supervises, in its own process group, so the
    child is not a child of the daemon and P4's `lost` verdict is unchanged.
 
@@ -701,7 +703,8 @@ and it asked only this daemon's LIVE session bindings — which a supervised
 job's host chat does not have. That chat is a record holder: nobody prompts in
 it, so after a restart nothing is bound to it, and the registration answered
 "external work registration is unavailable for this Workass ACP provider". The
-chat's DURABLE provider is now the fallback behind the live binding.
+chat's DURABLE provider is now the fallback behind the live binding. (§14e
+removed the host chat itself; the fallback stays for a local `workass run`.)
 
 **And the thing that hid both.** `process.start` gave the supervisor it
 launched no stdout and no stderr, and passed `--quiet`. So "NOT REPORTING" —
@@ -741,6 +744,83 @@ dropped. Forwarded numbers are normalised on arrival, because the transport
 hands some of them back as decimal strings and a list whose local rows carry
 `0` and whose remote rows carry `"0"` is one nobody can write a comparison
 against.
+
+## 14e. No chat on the host (2026-10-30)
+
+§14b's `process.start` required `host_tab_id` + `host_chat_id`, a real chat on
+the running machine to hold the job's row, called a record holder because
+nobody prompts in it. What the operator saw was an empty chat on duklerver that
+had nothing to do with the work, and the ruling was "it shouldnt have this
+split". The split was a contradiction of §6 and of §14b's own first finding:
+hosted subagents already keep where it runs and who owns it as two facts.
+
+**Starting a remote job needs a machine and a job.** Both fields are gone from
+the schema and the wire method. On the host:
+
+- **The row is keyed by the job's id and names its owner**, with no chat. No
+  actor fences it, no rail shows it, no provider is looked up for it, and no
+  session binding can refuse it. It lives in the same registry as every process
+  child, so list, read, cancel, silence and `lost` are the code that exists. A
+  row whose chat fields are empty is by definition hosted.
+- **Its durable record is `state/hosted-process-children.json`**, because the
+  per-tab snapshots and receipts that keep a chat's row are what it does not
+  have. A settled row leaves the list as a chat's settled row does, but stays
+  readable by id, the most recent 64 of them, so a replayed start finds the job.
+- **The credential is bound to the job id, the owner and the operation id**
+  (§14b condition 4). It is narrower than the one it replaces, not wider: it
+  resolves to no chat, so no chat-authorized path can accept it, and the tool
+  endpoint admits it for `workass_register_process_child` alone, by POST, with
+  no chat stated; it is not even a catalog reader. A report naming another job,
+  another owner or any chat is refused.
+
+The owner side did not change, because it never depended on any of this: the
+monitor is offered to the owner by global id, the notice comes through it, and
+`workass_list_process_children` folds the job in from that monitor with its
+`host_machine`. The asking chat holds the monitor and the notice. It does not
+yet hold a rail row as a hosted subagent's chat does, which is a surface change
+and belongs with the UI work.
+
+**Mixed versions, both directions, because machines update one at a time.**
+
+- *New owner, old host.* The old host answers with guidance about two fields
+  this tool no longer has, before it launches anything. The owner refuses by
+  name instead: the machine runs an older Workass, nothing was started, update
+  it. That reads a fixed sentence out of builds that have already shipped,
+  because a link carries no capability list to ask.
+- *Old owner, new host.* The old owner still sends the two fields and the new
+  host does not read them, so the job runs and its chat is not involved.
+- *A job already running when its host updates.* It holds a token bound to a
+  chat on the host, its row is in that chat, and its supervisor reports with
+  what it has. Those records keep working, with exactly the old checks, until
+  the job ends; none is ever minted again. This is durable state belonging to
+  work in flight rather than a compatibility surface: cutting it off would be
+  the silent job §14c exists to prevent.
+
+**A job's wait is not its run.** A notice reported elapsed 5h45m35s beside a
+result saying "Finished with exit 0 after 2h47m22s", and the list showed a job
+at queue position 2 as `running` with a `started_at` from when it was queued.
+Three facts now stay apart: `queued_at`, when it was asked for; `started_at`,
+when its command started, absent until then; and its run time, which the
+supervisor measures from exec and states when it settles. The list reads
+`status: "queued"` until exec. That word is for readers: the row's own status
+stays the closed lifecycle in which anything but `running` has ended, which is
+what a supervisor's report is answered with and what spends its credential.
+
+A notice carries `<run-time>`, plus `<queued>` when the wait rounds to at least
+a second, and a job that never ran carries no run time. A receipt from a host
+that predates the split keeps `<elapsed>`, because that number does include the
+queue and calling it a run time would be false. A job that straddles the update
+still gets both numbers right, since its supervisor always measured from exec.
+
+`stale_after` cannot call a wait a stall: the stall clock starts at exec, and
+`max_hold` is read only from a holder. Nothing in the daemon infers a stall on
+its own. A supervisor keeps heartbeating while it waits, so a queued job is not
+`not reporting` either.
+
+**One operation id is one job, now actually.** A replayed start used to launch a
+second supervisor over the first one's id, output file and stop file. It now
+answers with the job that exists, `replayed: true`, and an id already owned by
+another chat is refused.
 
 ## 15. Non-goals and deferred
 

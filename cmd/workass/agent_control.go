@@ -582,6 +582,9 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	// chat, so the pair is deliberately absent from the forwarded params.
 	hostedSpawn := hostedSpawnIsForThisMachine(method, forwarded)
 	result, err := h.remoteChats.Call(ctx, method, forwarded)
+	if method == "process.start" {
+		err = processStartHostRefusal(machineID, err)
+	}
 	if err != nil || method != "agent.spawn" {
 		return result, err
 	}
@@ -613,11 +616,8 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 // They are the ids an agent is handed by a listing and then passes to a tool
 // that acts on the machine they came from. The router has always stripped its
 // own tags on the way out for the addressing pair; these are the same thing
-// for ids that are not the address. `host_tab_id` / `host_chat_id` are the case
-// that made this visible: `workass_list_chats` hands out tagged ids, so the
-// tagged pair was the only pair an agent had, and `process.start` refused it
-// with "a forwarded Workass tool call must carry this machine's own ids".
-var fleetDestinationTaggedParams = []string{"host_tab_id", "host_chat_id", "work_id"}
+// for ids that are not the address.
+var fleetDestinationTaggedParams = []string{"work_id"}
 
 // stripDestinationMachineTags reduces those ids to the destination's own local
 // ids, and refuses one that names a third machine.
@@ -638,7 +638,7 @@ func stripDestinationMachineTags(params map[string]any, machineID string) error 
 		if machineID != "" && home != machineID {
 			// Not a tag to strip but a different machine named, which no
 			// stripping could make true.
-			return fmt.Errorf("%s names a chat on %s, but this call is addressed to %s; the chat that holds the local row must be on the machine that runs the work", field, home, machineID)
+			return fmt.Errorf("%s names work on %s, but this call is addressed to %s", field, home, machineID)
 		}
 		params[field] = local
 	}
@@ -785,42 +785,33 @@ type processChildLocalStart struct {
 	// Awaiting marks the row as written before any report, which is what makes
 	// a supervisor that never reports visible instead of absent.
 	Awaiting bool
+	// Hosted is the job being registered for its owner, with no chat here.
+	Hosted bool
 }
 
 func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID string, params map[string]any) (any, error) {
-	return h.registerProcessChildWith(ownerKey, tabID, chatID, params, processChildLocalStart{})
+	start := processChildLocalStart{}
+	if h != nil && h.manager != nil {
+		if binding, isRun := h.manager.RunTokenFor(ownerKey); isRun && binding.JobScoped() {
+			// fenceRunCredential has already held this report to the job and the
+			// owner the credential names.
+			start.Hosted = true
+		}
+	}
+	return h.registerProcessChildWith(ownerKey, tabID, chatID, params, start)
 }
 
 func (h *agentControlHandler) registerProcessChildWith(
 	ownerKey, tabID, chatID string, params map[string]any, start processChildLocalStart,
 ) (any, error) {
-	if h == nil || h.manager == nil || h.chats == nil || h.chats.providerChats == nil {
-		return nil, errors.New("process children require the durable chat actor")
-	}
-	targetTab := firstNonEmptyString(fieldString(params, "tab_id"), tabID)
-	targetChat := firstNonEmptyString(fieldString(params, "chat_id"), chatID)
-	if targetTab != tabID || targetChat != chatID {
-		return nil, errors.New("a process child is registered by the supervisor on this machine, in the exact calling chat")
-	}
-	if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child registration"); err != nil {
-		return nil, err
-	}
-	laneID, operationID, turnID, err := h.chats.providerChats.backgroundOriginStamp(tabID, chatID)
-	if err != nil {
-		return nil, err
+	if h == nil || h.manager == nil {
+		return nil, errors.New("process children require the chat manager")
 	}
 	var supervisor *int
 	if value, ok := intFieldPresent(params, "pid"); ok {
 		supervisor = &value
 	}
-	owner, err := resolveProcessOwner(
-		fieldString(params, "owner"), h.selfMachineID, chatID, tabID, laneID, operationID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	result, err := h.manager.RegisterProcessChild(acp.ProcessChildRegistrationOptions{
-		OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID, TabID: tabID, ChatID: chatID,
+	opts := acp.ProcessChildRegistrationOptions{
 		WorkID: fieldString(params, "work_id"), Label: fieldString(params, "label"),
 		Role: fieldString(params, "role"), Command: fieldString(params, "command"),
 		Owner: fieldString(params, "owner"), Resource: fieldString(params, "resource"),
@@ -833,13 +824,43 @@ func (h *agentControlHandler) registerProcessChildWith(
 		HeartbeatMs:   int64(intField(params, "heartbeat_ms")),
 		ReportGapMs:   int64(intField(params, "report_gap_ms")),
 		Events:        reportedProcessEvents(params["events"]),
-		OriginLaneID:  laneID, OriginOperationID: operationID, OriginTurnID: turnID,
-		// The host chat's durable provider, because the registration needs one
-		// and a record-holder chat has no live session to be bound to.
-		ProviderID:          h.chats.providerChats.chatProviderID(tabID, chatID),
-		SupervisorLog:       start.SupervisorLog,
-		AwaitingFirstReport: start.Awaiting,
-	})
+		SupervisorLog: start.SupervisorLog, AwaitingFirstReport: start.Awaiting,
+		HostedForOwner: start.Hosted,
+	}
+	var owner processOwner
+	if start.Hosted {
+		// No chat here is involved, so none is fenced, stamped or asked for its
+		// provider: where the job runs and who owns it are two facts (§6).
+		var err error
+		if owner, err = resolveProcessOwner(opts.Owner, h.selfMachineID, "", "", "", ""); err != nil {
+			return nil, err
+		}
+	} else {
+		if h.chats == nil || h.chats.providerChats == nil {
+			return nil, errors.New("process children require the durable chat actor")
+		}
+		targetTab := firstNonEmptyString(fieldString(params, "tab_id"), tabID)
+		targetChat := firstNonEmptyString(fieldString(params, "chat_id"), chatID)
+		if targetTab != tabID || targetChat != chatID {
+			return nil, errors.New("a process child is registered by the supervisor on this machine, in the exact calling chat")
+		}
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child registration"); err != nil {
+			return nil, err
+		}
+		laneID, operationID, turnID, err := h.chats.providerChats.backgroundOriginStamp(tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		if owner, err = resolveProcessOwner(opts.Owner, h.selfMachineID, chatID, tabID, laneID, operationID); err != nil {
+			return nil, err
+		}
+		opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.TabID, opts.ChatID = ownerKey, chatID, tabID, tabID, chatID
+		opts.OriginLaneID, opts.OriginOperationID, opts.OriginTurnID = laneID, operationID, turnID
+		// The chat's durable provider, for a chat with no live session to be
+		// bound to.
+		opts.ProviderID = h.chats.providerChats.chatProviderID(tabID, chatID)
+	}
+	result, err := h.manager.RegisterProcessChild(opts)
 	if err != nil {
 		return nil, err
 	}

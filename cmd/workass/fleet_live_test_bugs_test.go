@@ -68,7 +68,7 @@ func TestProcessStartHereRefusesAndNamesTheCommand(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
 	harness.handler.agentControl.selfMachineID = "m-self"
 	for _, arguments := range []map[string]any{
-		{"operation_id": "start-1", "label": "x", "cwd": "/tmp", "command": []any{"true"}, "machine_id": "m-self", "host_tab_id": "t", "host_chat_id": "c"},
+		{"operation_id": "start-1", "label": "x", "cwd": "/tmp", "command": []any{"true"}, "machine_id": "m-self"},
 	} {
 		status, response := harness.request(t, http.MethodPost, map[string]any{
 			"name": "workass_start_process_child", "arguments": arguments,
@@ -140,21 +140,27 @@ func TestProcessStartBuildsTheJobEnvironmentFromNothing(t *testing.T) {
 	}
 }
 
-// B5's credential: one job, one call. A token that leaks out of the job's own
-// file authorizes nothing else.
+// B5's credential: one job, one owner, one call. A token that leaks out of the
+// job's own file authorizes nothing else.
 func TestRunCredentialAuthorizesOnlyItsOwnRegistration(t *testing.T) {
 	harness := newStatelessMCPTestHarness(t)
 	control := harness.handler.agentControl
-	token := harness.manager.MintRunToken("mcp-chat", "mcp-tab", "start-1")
+	const owner = "wa:m-away/chat/mcp-chat"
+	token := harness.manager.MintRunToken("xwjob00000001", owner, "start-1")
 	if token == "" {
 		t.Fatal("no run credential was minted")
 	}
-	if again := harness.manager.MintRunToken("mcp-chat", "mcp-tab", "start-1"); again != token {
+	if again := harness.manager.MintRunToken("xwjob00000001", owner, "start-1"); again != token {
 		t.Fatal("a replayed start minted a second credential for one job")
 	}
-	if err := control.fenceRunCredential("process.register", token, "mcp-tab", "mcp-chat",
-		map[string]any{"operation_id": "start-1"}); err != nil {
+	own := map[string]any{"operation_id": "start-1", "work_id": "xwjob00000001", "owner": owner}
+	if err := control.fenceRunCredential("process.register", token, "", "", own); err != nil {
 		t.Fatalf("the job's own registration was refused: %v", err)
+	}
+	withField := func(field, value string) map[string]any {
+		out := copyAnyMap(own)
+		out[field] = value
+		return out
 	}
 	for _, item := range []struct {
 		name   string
@@ -163,14 +169,23 @@ func TestRunCredentialAuthorizesOnlyItsOwnRegistration(t *testing.T) {
 		chatID string
 		params map[string]any
 	}{
-		{"another method", "chat.send", "mcp-tab", "mcp-chat", map[string]any{"operation_id": "start-1"}},
-		{"another spawn", "agent.spawn", "mcp-tab", "mcp-chat", map[string]any{"operation_id": "start-1"}},
-		{"another job", "process.register", "mcp-tab", "mcp-chat", map[string]any{"operation_id": "start-2"}},
-		{"another chat", "process.register", "other-tab", "other-chat", map[string]any{"operation_id": "start-1"}},
+		{"another method", "chat.send", "", "", own},
+		{"another spawn", "agent.spawn", "", "", own},
+		{"another operation", "process.register", "", "", withField("operation_id", "start-2")},
+		{"another job", "process.register", "", "", withField("work_id", "xwjob00000002")},
+		{"another owner", "process.register", "", "", withField("owner", "wa:m-away/chat/other")},
+		{"no owner", "process.register", "", "", withField("owner", "")},
+		{"a chat on this machine", "process.register", "mcp-tab", "mcp-chat", own},
+		{"a targeted chat", "process.register", "", "", withField("chat_id", "mcp-chat")},
 	} {
 		if err := control.fenceRunCredential(item.method, token, item.tabID, item.chatID, item.params); err == nil {
 			t.Errorf("a one-shot job credential authorized %s", item.name)
 		}
+	}
+	// It is nobody: no path that authorizes by chat can accept it, even for the
+	// empty chat it names.
+	if harness.manager.ValidateAgentOwner(token, "", "") {
+		t.Fatal("a job credential authenticated as a chat")
 	}
 	// An ordinary owner key is untouched by the fence.
 	if err := control.fenceRunCredential("chat.send", "mcp-owner", "mcp-tab", "mcp-chat", map[string]any{}); err != nil {

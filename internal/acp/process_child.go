@@ -96,10 +96,10 @@ type ProcessChildRegistrationOptions struct {
 	OriginOperationID string
 	OriginTurnID      string
 
-	// ProviderID is the host chat's DURABLE provider, read by the caller that
-	// can read it. It is the fallback behind this manager's live session
-	// binding, which a record-holder chat with no running turn does not have
-	// (resolveExternalWorkOwner says what that cost).
+	// ProviderID is the chat's DURABLE provider, read by the caller that can read
+	// it. It is the fallback behind this manager's live session binding, which a
+	// chat with no running turn does not have (resolveExternalWorkOwner says what
+	// that cost).
 	ProviderID string
 	// SupervisorLog is where the supervisor's own stream — its diagnostics and
 	// its closing receipt — is being captured, set only when THIS daemon
@@ -117,6 +117,12 @@ type ProcessChildRegistrationOptions struct {
 	// three: a supervisor reports at startup, so a minute of nothing from a
 	// process this daemon launched itself is already news.
 	AwaitingFirstReport bool
+	// HostedForOwner is a job this machine runs for a chat on another machine.
+	// No chat here holds it: the row is keyed by the job alone and names its
+	// owner, and the caller has already authorized it by the job's own
+	// credential, or by being the daemon that launched it. The chat fields above
+	// stay empty (process_child_hosted.go).
+	HostedForOwner bool
 }
 
 // RegisterProcessChild records one supervised child and applies the batch of
@@ -133,9 +139,17 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 		return nil, err
 	}
 	defer m.endWorkAdmission()
-	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID, opts.ProviderID)
-	if err != nil {
-		return nil, err
+	tabID, chatID, providerID := "", "", ""
+	if opts.HostedForOwner {
+		if strings.TrimSpace(opts.Owner) == "" {
+			return nil, errors.New("a job hosted for another machine must name its owner; no chat here is owed its outcome")
+		}
+	} else {
+		var err error
+		tabID, chatID, providerID, err = m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID, opts.ProviderID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	workID := strings.TrimSpace(opts.WorkID)
 	if !procchild.ValidID(workID) {
@@ -176,7 +190,7 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	now := time.Now().UTC()
 	supervisor := *opts.SupervisorPID
 	key := spawnedWorkKey(tabID, chatID, workID)
-	if opts.AwaitingFirstReport {
+	if opts.AwaitingFirstReport && !opts.HostedForOwner {
 		// The launch row loses every race it can lose. The daemon starts the
 		// supervisor and then writes the row, so a job that finishes in
 		// milliseconds may already have reported, been settled, and had its
@@ -200,6 +214,7 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 				ID: workID, TaskID: workID, TabID: tabID, ChatID: chatID, ProviderID: providerID,
 				Kind: "external", Label: label, Role: normalizeSpawnedWorkRole(opts.Role), Status: "running",
 				StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+				QueuedAt:     now.Format(time.RFC3339Nano),
 				OutputFile:   outputFile,
 				OriginLaneID: strings.TrimSpace(opts.OriginLaneID), OriginOperationID: strings.TrimSpace(opts.OriginOperationID),
 				OriginTurnID: strings.TrimSpace(opts.OriginTurnID),
@@ -280,7 +295,7 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	item, ackThrough := rec.Item, rec.SpoolSeq
 	m.spawnedWorkMu.Unlock()
 
-	m.commitSpawnedWorkChange(tabID, chatID)
+	m.commitProcessChildChange(tabID, chatID)
 	m.emitProcessChildLifecycle(lifecycle)
 	if item.Status != "running" {
 		// Retired here rather than only on the next reconcile tick, because a
@@ -399,6 +414,7 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 		if rec.Item.Owner == "" {
 			rec.Item.Owner = compactText(redactSensitiveText(spoolString(payload, "owner")), 240)
 		}
+		rec.Item.QueuedAt = earlierProcessStamp(rec.Item.QueuedAt, event.At)
 		rec.Item.UpdatedAt = event.At.Format(time.RFC3339Nano)
 	case procchild.KindQueued:
 		rec.Item.QueuePosition = spoolInt(payload, "position")
@@ -416,6 +432,7 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 			rec.Item.Isolation = isolation
 		}
 		rec.Item.QueuePosition = 0
+		rec.Item.ExecStartedAt = event.At.UTC().Format(time.RFC3339Nano)
 		rec.MissingSince = time.Time{}
 		rec.Item.UpdatedAt = event.At.Format(time.RFC3339Nano)
 	case procchild.KindStalled:
@@ -454,6 +471,9 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 			exitCode = &value
 		}
 		summary := compactText(redactSensitiveText(spoolString(payload, "summary")), 1000)
+		if ms, present := spoolIntPresent(payload, "elapsedMs"); present && ms > 0 && rec.Item.Status == "running" {
+			rec.Item.RunMs = int64(ms)
+		}
 		return m.settleProcessChildLocked(rec, outcome, exitCode, summary)
 	}
 	return ProcessLifecycleEvent{}, false
@@ -604,7 +624,7 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 		hadOutbox := rec.SpoolFile != ""
 		m.spawnedWorkMu.Unlock()
 		if len(events) > 0 {
-			m.commitSpawnedWorkChange(candidate.tabID, candidate.chatID)
+			m.commitProcessChildChange(candidate.tabID, candidate.chatID)
 			m.emitProcessChildLifecycle(events)
 		}
 		if terminal && hadOutbox {

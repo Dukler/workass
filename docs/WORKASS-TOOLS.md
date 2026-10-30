@@ -418,7 +418,6 @@ To START one on another machine, where you have no shell, ask that machine:
 ```sh
 "$WORKASS_TOOLS_COMMAND" tools call workass_start_process_child <<'JSON'
 {"machine_id":"m-91be04","label":"retrain ranker",
- "host_tab_id":"M~m-91be04~tab-1","host_chat_id":"M~m-91be04~chat-1",
  "cwd":"/srv/work","command":["python","train.py","--epochs","8"],
  "env":{"CUDA_VISIBLE_DEVICES":"0"},"resource":"gpu0",
  "max_runtime_ms":21600000,"operation_id":"retrain-ranker-2026-10-30"}
@@ -428,13 +427,18 @@ JSON
 That machine runs its own `workass run` — same preflight, same queue, same
 outcomes — with a credential minted for this one job and an environment built
 from nothing but PATH, HOME and the `env` you named, so no daemon's environment
-is lent to the job. `host_tab_id` + `host_chat_id` name a chat THERE that holds
-the job's local row, and the machine-tagged pair `workass_list_chats` hands you
-is exactly what to pass; the chat that called owns the outcome and gets the
-notice, for every terminal state including a preflight refusal.
+is lent to the job. No chat on that machine is needed or created: the chat that
+called owns the outcome and gets the notice, for every terminal state including
+a preflight refusal. A machine still on an older Workass refuses by name, and
+nothing starts until it is updated.
 There is no `command` shell: the program and each argument are separate
 strings. On your own machine the tool refuses and points at `workass run`,
 which is the right tool when you already have a shell.
+
+A job reads `status: "queued"` until its command starts, with `queued_at` and
+`queued_ms`; `started_at` is absent until then, and `stale_after` cannot fire
+during the wait. Its notice states `<run-time>` from exec, plus `<queued>` when
+it waited.
 
 Read and control it from any machine in the fleet:
 

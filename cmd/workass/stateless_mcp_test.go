@@ -32,12 +32,16 @@ func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 }
 
 func newStatelessMCPTestHarnessWithProviders(t *testing.T, providers []acp.ProviderConfig) statelessMCPTestHarness {
+	return newStatelessMCPTestHarnessWithOptions(t, providers, nil)
+}
+
+func newStatelessMCPTestHarnessWithOptions(t *testing.T, providers []acp.ProviderConfig, mutate func(*acp.Options)) statelessMCPTestHarness {
 	t.Helper()
 	root := repoRoot(t)
 	if len(providers) > 0 {
 		providers = append(providers, acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true})
 	}
-	manager := acp.NewManager(acp.Options{
+	options := acp.Options{
 		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"), RuntimeProfile: "test",
 		Provider: acp.ProviderConfig{
 			ID: "mock", Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")},
@@ -45,7 +49,11 @@ func newStatelessMCPTestHarnessWithProviders(t *testing.T, providers []acp.Provi
 		},
 		DefaultProviderID: "mock", RSSSampleInterval: time.Hour,
 		Providers: providers,
-	})
+	}
+	if mutate != nil {
+		mutate(&options)
+	}
+	manager := acp.NewManager(options)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
 	store := newSessionStore(filepath.Join(manager.StateDir(), sessionStateFilename))

@@ -71,14 +71,25 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(503, "authoritative chat state is unavailable")
 		return
 	}
+	// A hosted job's own credential names no chat, so it passes neither the
+	// actor fence nor the owner check below, and is good here for the one tool
+	// its job reports through. It is not a catalog reader.
+	hostedJob := false
+	if binding, isRun := h.manager.RunTokenFor(owner); isRun && binding.JobScoped() {
+		if chatID != "" || tabID != "" || r.Method != http.MethodPost {
+			fail(401, "unauthorized")
+			return
+		}
+		hostedJob = true
+	}
 	child := chatID == tabID && strings.HasPrefix(chatID, subagentTabPrefix) && strings.TrimPrefix(chatID, subagentTabPrefix) != ""
-	if !child {
+	if !child && !hostedJob {
 		if _, err := h.providerChats.exactActorFence(tabID, chatID); err != nil {
 			fail(401, "unauthorized")
 			return
 		}
 	}
-	if !h.ownerAuthorized(owner, chatID, tabID) {
+	if !hostedJob && !h.ownerAuthorized(owner, chatID, tabID) {
 		fail(401, "unauthorized")
 		return
 	}
@@ -117,6 +128,10 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		fail(400, "request must contain one JSON object")
+		return
+	}
+	if hostedJob && call.Name != "workass_register_process_child" {
+		fail(403, "this supervised-job credential authorizes only workass_register_process_child")
 		return
 	}
 	var tool map[string]any

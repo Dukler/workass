@@ -94,68 +94,24 @@ func TestAPeerBelowFullAccessMayReadAnotherMachinesJobsAndNotStopThem(t *testing
 	}
 }
 
-// B9. `workass_list_chats` hands an agent machine-TAGGED ids, because that is
-// how every other tool addresses a chat elsewhere. Passing those straight back
-// to `process.start` was refused with "a forwarded Workass tool call must
-// carry this machine's own ids" — true of the forwarded call and useless to the
-// caller, since the tagged pair was the only pair it had ever been given.
-func TestTheHostChatPairAcceptsTheTaggedIdsAnAgentIsActuallyGiven(t *testing.T) {
-	// On the way out: the router strips the destination's own tag, which is the
-	// law it already applied to the addressing pair.
+// A job id an agent was handed elsewhere reaches its home bare, and one naming a
+// third machine is refused rather than stripped into a different job.
+func TestAWorkIDIsReducedToTheDestinationsOwnID(t *testing.T) {
 	forwarded := map[string]any{
-		"host_tab_id":  "M~m-duklerver~tab-duklerver-codex-1",
-		"host_chat_id": "wa:m-duklerver/chat/conv-duklerver-codex-1",
-		"label":        "a label that is not an id",
+		"work_id": "M~m-duklerver~xwjob00000001",
+		"label":   "a label that is not an id",
 	}
 	if err := stripDestinationMachineTags(forwarded, "m-duklerver"); err != nil {
-		t.Fatalf("the destination's own tags must be stripped, got %v", err)
+		t.Fatalf("the destination's own tag must be stripped, got %v", err)
 	}
-	if forwarded["host_tab_id"] != "tab-duklerver-codex-1" {
-		t.Fatalf("host_tab_id = %#v, want the bare local id", forwarded["host_tab_id"])
-	}
-	if forwarded["host_chat_id"] != "conv-duklerver-codex-1" {
-		t.Fatalf("host_chat_id = %#v, want the bare local id", forwarded["host_chat_id"])
+	if forwarded["work_id"] != "xwjob00000001" {
+		t.Fatalf("work_id = %#v, want the bare local id", forwarded["work_id"])
 	}
 	if forwarded["label"] != "a label that is not an id" {
 		t.Fatal("only addressing ids are rewritten; a label is not one")
 	}
-	// A third machine is not a tag to strip but a different machine named, and
-	// no stripping could make it true.
-	third := map[string]any{"host_chat_id": "M~m-elsewhere~conv-1"}
-	err := stripDestinationMachineTags(third, "m-duklerver")
+	err := stripDestinationMachineTags(map[string]any{"work_id": "M~m-elsewhere~xwjob00000001"}, "m-duklerver")
 	if err == nil || !strings.Contains(err.Error(), "m-elsewhere") {
-		t.Fatalf("a third machine's chat must be refused by name, got %v", err)
-	}
-
-	// And at the destination, for a call that arrives with the tags still on:
-	// a tag naming THIS machine is accepted, one naming another is not.
-	tabID, chatID, err := processStartHostPair(map[string]any{
-		"host_tab_id": "M~m-duklerver~tab-1", "host_chat_id": "M~m-duklerver~conv-1",
-	}, "m-duklerver")
-	if err != nil || tabID != "tab-1" || chatID != "conv-1" {
-		t.Fatalf("this machine's own tagged pair must be accepted, got %q/%q/%v", tabID, chatID, err)
-	}
-	if _, _, err := processStartHostPair(map[string]any{
-		"host_tab_id": "M~m-elsewhere~tab-1", "host_chat_id": "M~m-elsewhere~conv-1",
-	}, "m-duklerver"); err == nil {
-		t.Fatal("a chat on a third machine cannot hold the local row for a job running here")
-	}
-	// Bare ids are what the local path always took, unchanged.
-	tabID, chatID, err = processStartHostPair(map[string]any{
-		"host_tab_id": "tab-1", "host_chat_id": "conv-1",
-	}, "m-duklerver")
-	if err != nil || tabID != "tab-1" || chatID != "conv-1" {
-		t.Fatalf("bare ids must still work, got %q/%q/%v", tabID, chatID, err)
-	}
-	// Half-tagged is unresolvable and says which half.
-	if _, _, err := processStartHostPair(map[string]any{
-		"host_tab_id": "M~m-duklerver~tab-1", "host_chat_id": "conv-1",
-	}, "m-duklerver"); err == nil {
-		t.Fatal("a half-tagged pair must be refused rather than guessed at")
-	}
-	// And the guidance survives for a caller that named neither.
-	if _, _, err := processStartHostPair(map[string]any{}, "m-duklerver"); err == nil ||
-		!strings.Contains(err.Error(), "workass_list_chats") {
-		t.Fatalf("a missing pair must say where to get one, got %v", err)
+		t.Fatalf("a third machine's job must be refused by name, got %v", err)
 	}
 }

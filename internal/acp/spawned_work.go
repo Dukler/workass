@@ -180,6 +180,13 @@ type SpawnedWorkItem struct {
 	// what silence is measured against. Declared rather than assumed, so one
 	// constant lives in one place.
 	HeartbeatMs int64 `json:"heartbeatMs,omitempty"`
+	// QueuedAt is when this job was asked for; ExecStartedAt is when its command
+	// actually started, absent until then. StartedAt stays when this row was
+	// first written, which every surface already sorts by. RunMs is the run time
+	// its supervisor measured from exec. processChildTimes reads the three.
+	QueuedAt      string `json:"queuedAt,omitempty"`
+	ExecStartedAt string `json:"execStartedAt,omitempty"`
+	RunMs         int64  `json:"runMs,omitempty"`
 }
 
 // Supervised reports whether this row is a process child with a supervisor of
@@ -219,6 +226,14 @@ type SpawnedWorkReceipt struct {
 	// indistinguishable from an ordinary failure five minutes later. Empty, and
 	// therefore absent, for everything that was never supervised.
 	Outcome string `json:"outcome,omitempty"`
+	// For a supervised job StartedAt is when its command started, absent if it
+	// never did, and ElapsedMs is its run time: the two facts a queue must not
+	// inflate. QueuedAt and QueuedMs state the wait separately. RunMs says that
+	// ElapsedMs means this: a receipt from a daemon that predates it carries an
+	// elapsed time that includes the queue, and is not called a run time.
+	QueuedAt string `json:"queuedAt,omitempty"`
+	QueuedMs int64  `json:"queuedMs,omitempty"`
+	RunMs    int64  `json:"runMs,omitempty"`
 }
 
 type spawnedWorkRecord struct {
@@ -493,12 +508,12 @@ func (m *Manager) providerForSpawnedWorkChat(tabID, chatID string) string {
 //
 // declaredProvider is the chat's DURABLE provider, supplied by the caller that
 // can read it, and it is consulted only when this manager holds no live session
-// binding for the chat. That case is not exotic: a supervised job's host chat
-// is a record holder, not a participant — nobody is running a turn in it — so
-// after a daemon restart `chatProviders` is empty for it and the registration
-// was refused "external work registration is unavailable for this Workass ACP
-// provider". Live, that refused every report four real jobs made. The binding
-// still wins when it exists, and an empty answer from both is still a refusal.
+// binding for the chat. That case is not exotic: a chat nobody is running a turn
+// in has no binding after a daemon restart, and the registration was refused
+// "external work registration is unavailable for this Workass ACP provider".
+// Live, that refused every report four real jobs made. The binding still wins
+// when it exists, and an empty answer from both is still a refusal. A job hosted
+// for another machine has no chat and never comes here (process_child_hosted.go).
 func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, requestedChatID, requestedTabID, declaredProvider string) (string, string, string, error) {
 	if !m.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
 		return "", "", "", errors.New("no running Workass turn owns this external work request")
@@ -2471,6 +2486,7 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 			m.spawnedWork[key] = rec
 		}
 	}
+	m.loadHostedProcessChildren()
 	orphanedPairs := map[[2]string]struct{}{}
 	for _, rec := range m.spawnedWork {
 		if rec == nil || rec.Item.Status != "running" {
@@ -2521,7 +2537,7 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 	if !started.IsZero() && !finished.IsZero() {
 		elapsed = finished.Sub(started).Milliseconds()
 	}
-	return SpawnedWorkReceipt{
+	receipt := SpawnedWorkReceipt{
 		ReceiptID: "spawned-" + item.TaskID, TaskID: item.TaskID, ToolCallID: item.ToolCallID,
 		TabID: item.TabID, ChatID: item.ChatID,
 		Kind: item.Kind, Label: publicItem.Label, Role: item.Role, Status: item.Status, ModelLabel: item.ModelLabel,
@@ -2530,6 +2546,12 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 		Summary: publicItem.Summary, OutputTail: tail, TailLimited: limited,
 		Outcome: item.Outcome,
 	}
+	if item.Supervised() {
+		times := processChildTimes(item, finished)
+		receipt.StartedAt, receipt.QueuedAt = times.StartedAt, times.QueuedAt
+		receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs = times.RunMs, times.RunMs, times.QueuedMs
+	}
+	return receipt
 }
 
 func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string, acceptedItems []SpawnedWorkItem) error {

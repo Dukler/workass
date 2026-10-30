@@ -124,13 +124,12 @@ func (m *Manager) ownerBinding(ownerKey, chatID, tabID string) (string, string, 
 		binding, ok = m.chatToolTokens[ownerKey]
 	}
 	if !ok {
-		// A one-shot supervised-job credential authenticates as the chat that
-		// holds its row — and ONLY for process.register, which is enforced at
-		// the single entry point that accepts it (agent_control.go). Resolving
-		// it here keeps that one method's authorization the same code every
-		// other caller goes through, rather than a second owner model beside
-		// it (run_tokens.go).
-		if run, isRun := m.runTokens[ownerKey]; isRun {
+		// A one-shot supervised-job credential minted when a chat held the row
+		// authenticates as that chat — and ONLY for process.register, which is
+		// enforced at the single entry point that accepts it (agent_control.go).
+		// One bound to its job and owner resolves to nobody: it has no chat to
+		// be, so no chat-authorized path can ever accept it (run_tokens.go).
+		if run, isRun := m.runTokens[ownerKey]; isRun && !run.JobScoped() {
 			binding, ok = agentOwnerBinding{ChatID: run.ChatID, TabID: run.TabID}, true
 		}
 	}
