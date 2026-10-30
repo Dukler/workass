@@ -30,16 +30,25 @@ type SubagentSpawnOptions struct {
 	RootJobIDHint     string `json:"rootJobIdHint,omitempty"`
 	OriginLaneID      string `json:"-"`
 	OriginOperationID string `json:"-"`
-	Prompt            string `json:"prompt"`
-	Label             string `json:"label,omitempty"`
-	ProviderID        string `json:"providerId,omitempty"`
-	ModelID           string `json:"modelId,omitempty"`
-	Effort            string `json:"effort,omitempty"`
-	ModeID            string `json:"modeId,omitempty"`
-	CWD               string `json:"cwd,omitempty"`
-	Profile           string `json:"profile,omitempty"`
-	PermissionIntent  string `json:"permissionIntent,omitempty"`
-	RetryOf           string `json:"retryOf,omitempty"`
+	// OriginMachine, OriginChatID and OriginTabID name the chat that ASKED,
+	// when that chat lives on another fleet machine (fleet-runtime §6's
+	// immutable origin stamp). They are set only for a spawn that arrived over
+	// a link: a child on another machine used to report into THAT machine's
+	// chat and never to the chat that asked (§1), and these three fields are
+	// what a monitor needs to send the outcome home instead.
+	OriginMachine    string `json:"-"`
+	OriginChatID     string `json:"-"`
+	OriginTabID      string `json:"-"`
+	Prompt           string `json:"prompt"`
+	Label            string `json:"label,omitempty"`
+	ProviderID       string `json:"providerId,omitempty"`
+	ModelID          string `json:"modelId,omitempty"`
+	Effort           string `json:"effort,omitempty"`
+	ModeID           string `json:"modeId,omitempty"`
+	CWD              string `json:"cwd,omitempty"`
+	Profile          string `json:"profile,omitempty"`
+	PermissionIntent string `json:"permissionIntent,omitempty"`
+	RetryOf          string `json:"retryOf,omitempty"`
 	// Fork starts the subagent as a native fork of the calling chat's provider
 	// session, so it remembers the conversation; false (default) starts fresh,
 	// as in Claude Code (user 2026-10-16).
@@ -225,6 +234,9 @@ type SubagentRun struct {
 	completionDeliveryInFlight bool
 	originLaneID               string
 	originOperationID          string
+	originMachine              string
+	originChatID               string
+	originTabID                string
 	forkSourceSessionID        string
 }
 
@@ -376,7 +388,10 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		Adopted: adopted, AdoptedAt: adoptedAt,
 		ParentSessionID: parentSessionID, RootSessionID: rootSessionID,
 		originLaneID: originLaneID, originOperationID: originOperationID,
-		StartedAt: now.Format(time.RFC3339Nano), LastActivityAt: now.Format(time.RFC3339Nano),
+		originMachine: strings.TrimSpace(opts.OriginMachine),
+		originChatID:  strings.TrimSpace(opts.OriginChatID),
+		originTabID:   strings.TrimSpace(opts.OriginTabID),
+		StartedAt:     now.Format(time.RFC3339Nano), LastActivityAt: now.Format(time.RFC3339Nano),
 		ProgressSequence: 1, cancel: cancel, done: make(chan struct{}), prompt: prompt,
 		parentChatID: ownerChatID, parentTabID: ownerTabID,
 		acceptingMessages: true,
@@ -652,9 +667,28 @@ func (m *Manager) notifySubagentPermissionForJob(job *Job, title string) {
 		mirrorPhase, mirrorActivity = run.Phase, run.LatestActivity
 		changed = true
 	}
+	attention := (*SubagentAttention)(nil)
+	label, originMachine, originChatID, originTabID, originLaneID, originOperationID := "", "", "", "", "", ""
+	if changed && run != nil {
+		copied := *run.Attention
+		attention = &copied
+		label = run.Label
+		originMachine, originChatID, originTabID = run.originMachine, run.originChatID, run.originTabID
+		originLaneID, originOperationID = run.originLaneID, run.originOperationID
+	}
 	m.mu.Unlock()
 	if changed {
 		m.updateSubagentSpawnedWork(tabID, chatID, job.SubagentID, mirrorPhase, mirrorActivity)
+		// attention{kind,title} on the same ordered stream as exit (§7). A
+		// permission request is the one event a watcher must see while the work
+		// is still running, and the whole reason a chat on another machine
+		// cannot be left to discover it by reading.
+		m.emitSubagentLifecycle(SubagentLifecycleEvent{
+			Kind: "attention", SubagentID: job.SubagentID, Label: label, Attention: attention,
+			ParentChatID: chatID, ParentTabID: tabID,
+			OriginMachine: originMachine, OriginChatID: originChatID, OriginTabID: originTabID,
+			OriginLaneID: originLaneID, OriginOperationID: originOperationID,
+		})
 	}
 }
 
@@ -906,7 +940,22 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	m.mu.Unlock()
 	m.settleSubagentSpawnedWork(parentTabID, parentChatID, receipt)
 	m.mu.Lock()
-	run.completionPending = eligibleCompletion && !run.completionSuppressed && !m.resetting
+	// A subagent spawned from a chat on another machine is owed its outcome
+	// THERE, and the owing is a monitor rather than this machine's in-process
+	// delivery (fleet-runtime §7). Suppressing the local notice is not a
+	// suppression of the event: the terminal receipt is still persisted and the
+	// lifecycle event below still carries it, so the chat that asked gets the
+	// exact same bytes the chat on this machine would have got.
+	remoteOrigin := strings.TrimSpace(run.originMachine) != ""
+	run.completionPending = eligibleCompletion && !run.completionSuppressed && !m.resetting && !remoteOrigin
+	waiterBlocked := m.subagentWaiterTurnBlockedLocked(run)
+	engineDied := m.resetting
+	lifecycle := SubagentLifecycleEvent{
+		Kind: "exit", SubagentID: run.ID, Label: run.Label,
+		ParentChatID: parentChatID, ParentTabID: parentTabID,
+		OriginMachine: run.originMachine, OriginChatID: run.originChatID, OriginTabID: run.originTabID,
+		OriginLaneID: run.originLaneID, OriginOperationID: run.originOperationID,
+	}
 	receipt = copySubagentRun(run)
 	receipt.parentChatID, receipt.parentTabID = parentChatID, parentTabID
 	deliverCompletion := run.completionPending
@@ -932,8 +981,42 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	m.signalSubagentWaitersLocked()
 	suppressed := run.completionSuppressed || m.resetting
 	m.mu.Unlock()
+	// The monitor stream, for every run and in one vocabulary: the home reports
+	// what happened and names its own suppression verdict, and the watcher — the
+	// same daemon for a local run, another one for a delegated one — decides
+	// whether that becomes a notice. An orphaned engine is never an outcome, so
+	// it is reported as suppressed rather than as a settle.
+	lifecycle.Outcome = subagentExitOutcome(status)
+	lifecycle.Receipt = receiptFromRun(receipt)
+	lifecycle.Receipt.ParentTabID, lifecycle.Receipt.ParentChatID = parentTabID, parentChatID
+	switch {
+	case !eligibleCompletion:
+		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "the parent cancelled this subagent"
+	case engineDied:
+		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "the provider engine died and orphaned this subagent"
+	case suppressed:
+		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "a waiter already consumed this result"
+	case waiterBlocked:
+		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "a live waiter will consume this result"
+	}
+	m.emitSubagentLifecycle(lifecycle)
 	if persisted && deliverCompletion && !suppressed {
 		m.tryDeliverSubagentCompletion(run)
+	}
+}
+
+// subagentExitOutcome maps a run status onto §7's exit vocabulary. `lost` and
+// `timed_out` are deliberately absent: they are a process child's outcomes and
+// arrive with P4, and inventing one here for a subagent would be exactly the
+// invented outcome this design exists to remove.
+func subagentExitOutcome(status string) string {
+	switch status {
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	default:
+		return "settled"
 	}
 }
 

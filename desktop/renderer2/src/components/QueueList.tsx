@@ -4,6 +4,7 @@ import { store } from '../store/store';
 import { messageImageSrc, queuedAttachmentsReady } from '../image-drafts';
 import { liveSteeringSupported, steerStatusLabel } from '../steering';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
+import { noticeWord } from '../notice-word.ts';
 
 // Minimalist message queue (redesign 2026-07-12): each queued follow-up is its
 // own box sized to its text. Double-click to edit in place (saves as you type,
@@ -111,7 +112,7 @@ export function QueueList({ chat }: { chat: Chat }) {
                     </span>
                   )}
                   {q.notice
-                    ? <span className="qtext qnotice">{q.notice.title?.trim() || 'Subagente'} {q.notice.status === 'failed' ? 'falló' : 'terminó'}</span>
+                    ? <span className="qtext qnotice">{q.notice.title?.trim() || 'Subagente'} {noticeWord(q.notice.status)}</span>
                     : <span className="qtext">{q.text}</span>}
                   {q.source === 'agent' && !q.notice && <span className="qattachstate">Enviado por agente</span>}
                   {q.attachmentState === 'preparing' && <span className="qattachstate">Preparando adjuntos…</span>}

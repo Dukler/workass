@@ -687,3 +687,192 @@ func TestCloseDoesNotWaitForTheNextHeartbeat(t *testing.T) {
 		t.Fatal("Close waited for a heartbeat interval instead of ending its supervisors")
 	}
 }
+
+// A handler for an inbound event may invoke back over the SAME link.
+//
+// P3's subscriber does exactly this: it applies the events a home pushed and
+// then acknowledges them, which is what finally lets a terminal event leave the
+// home's log (fleet-runtime §5). Called straight from the read loop, that
+// acknowledgement would wait for a reply only the read loop can deliver — a
+// deadlock that resolves when the invoke's own timeout expires, so it does not
+// hang forever, it just looks exactly like a peer that stopped answering.
+func TestAnEventHandlerMayInvokeBackOverTheSameLink(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	var mesh *Mesh
+	answered := make(chan error, 1)
+	mesh, store := newDialer(t, "m-away", secret, func(options *Options) {
+		options.OnEvent = func(peerID, channel string, payload any) {
+			if channel != "test:ping" {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := mesh.Invoke(ctx, peerID, "test:echo")
+			answered <- err
+		}
+	})
+	if _, err := store.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := mesh.EnsureLink(ctx, home.machineID); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	home.hub.SendToPeer("m-away", "test:ping", map[string]any{"n": 1})
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("an event handler could not invoke back over its own link: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an event handler invoking back over its own link never completed")
+	}
+	if home.echoes.Load() != 1 {
+		t.Fatalf("the home served %d echo(es)", home.echoes.Load())
+	}
+}
+
+// Events keep the order the peer published them in: the queue is drained by one
+// goroutine, because a monitor stream is ordered per entity (§8).
+func TestInboundEventsKeepTheirOrder(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	seen := make(chan int, 64)
+	mesh, store := newDialer(t, "m-away", secret, func(options *Options) {
+		options.OnEvent = func(_, channel string, payload any) {
+			if channel != "test:ordered" {
+				return
+			}
+			fields, _ := payload.(map[string]any)
+			value, _ := fields["n"].(float64)
+			if value == 0 {
+				if number, ok := fields["n"].(interface{ Int64() (int64, error) }); ok {
+					if parsed, err := number.Int64(); err == nil {
+						value = float64(parsed)
+					}
+				}
+			}
+			seen <- int(value)
+		}
+	})
+	if _, err := store.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := mesh.EnsureLink(ctx, home.machineID); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	for i := 1; i <= 8; i++ {
+		home.hub.SendToPeer("m-away", "test:ordered", map[string]any{"n": i})
+	}
+	for want := 1; want <= 8; want++ {
+		select {
+		case got := <-seen:
+			if got != want {
+				t.Fatalf("event %d arrived as %d; the stream is not ordered", want, got)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of 8 events arrived", want-1)
+		}
+	}
+}
+
+// SendToPeer addresses ONE peer. A monitor carries a capability naming its
+// watcher, so an entity's log must not reach another peer or a browser (§11).
+func TestSendToPeerReachesExactlyThatPeer(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	wrong := make(chan string, 8)
+	right := make(chan string, 8)
+	for _, pair := range []struct {
+		id   string
+		sink chan string
+	}{{"m-away", right}, {"m-other", wrong}} {
+		sink := pair.sink
+		mesh, store := newDialer(t, pair.id, secret, func(options *Options) {
+			options.OnEvent = func(_, channel string, _ any) {
+				if channel == "test:addressed" {
+					sink <- channel
+				}
+			}
+		})
+		if _, err := store.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+			t.Fatalf("add route: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if _, err := mesh.EnsureLink(ctx, home.machineID); err != nil {
+			cancel()
+			t.Fatalf("link %s: %v", pair.id, err)
+		}
+		cancel()
+	}
+	if delivered := home.hub.SendToPeer("m-away", "test:addressed", map[string]any{}); delivered != 1 {
+		t.Fatalf("SendToPeer reached %d socket(s), want exactly 1", delivered)
+	}
+	select {
+	case <-right:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the addressed peer never received the event")
+	}
+	select {
+	case <-wrong:
+		t.Fatal("another peer received an event addressed to m-away")
+	case <-time.After(250 * time.Millisecond):
+	}
+	// A peer with no link is simply not reached, with no timeout and no error:
+	// the subscriber asks again from its cursor on link up.
+	if delivered := home.hub.SendToPeer("m-nobody", "test:addressed", map[string]any{}); delivered != 0 {
+		t.Fatalf("SendToPeer reached %d socket(s) for an unlinked peer", delivered)
+	}
+	if delivered := home.hub.SendToPeer("", "test:addressed", map[string]any{}); delivered != 0 {
+		t.Fatalf("SendToPeer with no addressee reached %d socket(s)", delivered)
+	}
+}
+
+// Every beat reports, where OnState reports only a change. P3's `home_down` is
+// a duration threshold, so it has to be re-read as time passes — and the
+// heartbeat is the only timer the runtime has (§4, §16.3a).
+func TestEveryBeatReportsTheCurrentLinkState(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	beats := make(chan State, 32)
+	changes := make(chan State, 32)
+	mesh, store := newDialer(t, "m-away", secret, func(options *Options) {
+		options.OnBeat = func(state State) {
+			select {
+			case beats <- state:
+			default:
+			}
+		}
+		options.OnState = func(state State) {
+			select {
+			case changes <- state:
+			default:
+			}
+		}
+	})
+	if _, err := store.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	mesh.Start(ctx)
+	if _, err := mesh.EnsureLink(ctx, home.machineID); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// Three beats on a link whose state never changes: OnState would report once
+	// and then go quiet, which is exactly why OnBeat exists.
+	for i := 0; i < 3; i++ {
+		select {
+		case state := <-beats:
+			if state.Peer != home.machineID {
+				t.Fatalf("beat %d = %#v", i, state)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d beat(s) arrived on a steady link", i)
+		}
+	}
+}

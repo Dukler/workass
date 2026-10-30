@@ -39,7 +39,8 @@ func (r *providerChatRuntime) executeBackgroundAction(ctx context.Context, actio
 				OriginLaneID: string(action.Owner.LaneID), OriginOperationID: string(action.Owner.OperationID),
 				ProviderID: value.ProviderID, ModelID: value.ModelID, Effort: value.Effort,
 				ModeID: value.ModeID, CWD: value.CWD, Profile: value.Profile, PermissionIntent: value.PermissionIntent,
-				Fork: value.Fork,
+				Fork:          value.Fork,
+				OriginMachine: value.OriginMachine, OriginChatID: value.OriginChatID, OriginTabID: value.OriginTabID,
 			})
 		case chat.BackgroundMessageAgent:
 			return r.manager.MessageSubagent(ownerKey, action.ChatID, action.TabID, action.Message.WorkID, action.Message.Message)

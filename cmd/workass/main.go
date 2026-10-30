@@ -454,6 +454,12 @@ func main() {
 		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
 	}
 	agentControl.headlessUpdates = headlessUpdates
+	// P3: per-entity logs, cursor subscriptions and monitors. P2 let a command
+	// REACH another machine; this is what lets that machine report back — a
+	// subagent spawned from a chat here and hosted there settles INTO THIS CHAT,
+	// through a monitor, with no renderer anywhere (docs/specs/fleet-runtime.md
+	// §5, §7, §13 P3).
+	fleetMonitors := openFleetMonitors(stateDir, identity, hub, fleetMesh, acpManager, providerChats, agentControl, logger)
 	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID)
 	// The scheduled-message loop lives for the daemon's lifetime and is joined
 	// first on shutdown, so no delivery races the actors' detach below.
@@ -471,6 +477,9 @@ func main() {
 			stopImageStore()
 			imageStoreRun.Wait()
 			fleetMesh.Close()
+			// The links go first, then the resyncs they started are joined, so
+			// no delivery races the actors' detach below.
+			fleetMonitors.Close()
 			forkService.CancelAll()
 			// Durable chat actors own the disposable provider-lane attachments.
 			// Detach those actors before the manager tears down its bridge maps so

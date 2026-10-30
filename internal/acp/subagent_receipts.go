@@ -43,8 +43,14 @@ type SubagentReceipt struct {
 	ParentTabID       string `json:"parentTabId,omitempty"`
 	OriginLaneID      string `json:"originLaneId,omitempty"`
 	OriginOperationID string `json:"originOperationId,omitempty"`
-	DeliveryPending   bool   `json:"deliveryPending,omitempty"`
-	DeliveryError     string `json:"deliveryError,omitempty"`
+	// The origin stamp when this subagent was spawned from a chat on another
+	// fleet machine: additive fields, empty for every local run, so no existing
+	// receipt reader or projection sees a shape it did not see before.
+	OriginMachine   string `json:"originMachine,omitempty"`
+	OriginChatID    string `json:"originChatId,omitempty"`
+	OriginTabID     string `json:"originTabId,omitempty"`
+	DeliveryPending bool   `json:"deliveryPending,omitempty"`
+	DeliveryError   string `json:"deliveryError,omitempty"`
 }
 
 func receiptFromRun(run SubagentRun) SubagentReceipt {
@@ -57,6 +63,9 @@ func receiptFromRun(run SubagentRun) SubagentReceipt {
 		ResultTruncated: run.ResultTruncated, ErrorTruncated: run.ErrorTruncated,
 		OriginLaneID:      run.originLaneID,
 		OriginOperationID: run.originOperationID,
+		OriginMachine:     run.originMachine,
+		OriginChatID:      run.originChatID,
+		OriginTabID:       run.originTabID,
 	}
 }
 

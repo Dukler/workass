@@ -309,3 +309,37 @@ func (h *Hub) RevokePeerLink(peerID, by string) (bool, error) {
 		peerID, firstNonEmpty(strings.TrimSpace(by), "this machine"))
 	return found, nil
 }
+
+// SendToPeer admits one event to the sockets of exactly one peer daemon.
+//
+// It exists because P3's logs and monitors push rather than being polled
+// (docs/specs/fleet-runtime.md §5: "Nothing polls"), and a push has an
+// addressee: the ONE peer that subscribed. Broadcasting an entity's log to
+// every connected client would hand one peer's work to another peer and to
+// every browser on the LAN, which §11's blast radius forbids — a monitor
+// carries a capability naming the watcher, and nothing else may be read
+// through it.
+//
+// The frozen event envelope is unchanged; this is a narrower `include` over the
+// same `broadcastWhere` BroadcastLocalShell already uses. The returned count
+// lets the caller tell "the peer is not connected" from "sent", with no
+// timeout: an event that cannot be delivered now is simply not delivered, and
+// the subscriber asks again from its cursor on link up.
+func (h *Hub) SendToPeer(peerID, channel string, payload any) int {
+	peerID = strings.TrimSpace(peerID)
+	if h == nil || peerID == "" {
+		return 0
+	}
+	h.broadcastMu.Lock()
+	defer h.broadcastMu.Unlock()
+	started := time.Now()
+	delivered := h.broadcastWhere(channel, payload, func(c *client) bool {
+		if c == nil {
+			return false
+		}
+		device, paired := c.deviceSnapshot()
+		return paired && device.IsPeer() && device.Peer == peerID
+	})
+	h.recordEventEnqueue(time.Since(started))
+	return delivered
+}

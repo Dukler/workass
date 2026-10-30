@@ -134,6 +134,16 @@ type Options struct {
 	// OnState publishes link state locally, which is how everything above the
 	// mesh reads connecting | up | down without owning a timer of its own.
 	OnState func(State)
+	// OnBeat is called at the end of EVERY supervisor tick with the pair's
+	// current state, where OnState fires only when the state changes.
+	//
+	// P3's `home_down` needs this and OnState cannot give it: the threshold is a
+	// duration (§16.3a, ten minutes), so it has to be RE-READ as time passes,
+	// and a pair that has been down for an hour publishes no state change at
+	// all. Rather than let the watcher own a second timer — the heartbeat is the
+	// only timer in the runtime (§4) — the one timer that exists reports every
+	// beat and the watcher decides.
+	OnBeat func(State)
 	// Probe reads an address's identity card. Injectable so a test can serve a
 	// card without a TLS listener; production uses machinebook, which is the one
 	// reading of that document.
@@ -179,12 +189,13 @@ type Mesh struct {
 	invokeTimeout time.Duration
 	onEvent       func(peerID, channel string, payload any)
 	onState       func(State)
+	onBeat        func(State)
 	probe         func(ctx context.Context, address string) (machinebook.Card, error)
 	dial          func(ctx context.Context, opts DialRequest) (Invoker, error)
 
-	mu        sync.Mutex
-	links     map[string]Invoker
-	states    map[string]State
+	mu     sync.Mutex
+	links  map[string]Invoker
+	states map[string]State
 	// downSince is when each pair last stopped being up. It is kept apart from
 	// states because `down(since)` must mean "silent since then", not "since the
 	// most recent failed retry" — otherwise every retry resets the clock §16's
@@ -232,6 +243,7 @@ func New(opts Options) *Mesh {
 		invokeTimeout: opts.InvokeTimeout,
 		onEvent:       opts.OnEvent,
 		onState:       opts.OnState,
+		onBeat:        opts.OnBeat,
 		probe:         opts.Probe,
 		dial:          opts.Dial,
 		links:         make(map[string]Invoker),
@@ -809,6 +821,7 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 			_, err := link.Invoke(callCtx, heartbeatChannel, map[string]any{"machineId": m.selfID})
 			cancel()
 			if err == nil {
+				m.beat(peerID)
 				continue
 			}
 			// A heartbeat that does not come back is the pair going down. It is
@@ -834,7 +847,20 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 			m.logf("[fleet] link to %s is down: %v", peerID, err)
 		}
 		cancel()
+		m.beat(peerID)
 	}
+}
+
+// beat reports the pair's current state at the end of one tick. It is how a
+// duration threshold is re-read without a second timer anywhere.
+func (m *Mesh) beat(peerID string) {
+	m.mu.Lock()
+	beat := m.onBeat
+	m.mu.Unlock()
+	if beat == nil {
+		return
+	}
+	beat(m.State(peerID))
 }
 
 // Start begins supervising every peer already in the peer file and fixes the

@@ -28,6 +28,13 @@ type agentControlHandler struct {
 	selfMachineID string
 	forks         *acp.ForkService
 	validateOwner func(ownerKey, chatID, tabID string) bool
+	// fleetHome owns this machine's entity logs and the monitors it holds for
+	// other machines' watchers; fleetWatch owns the monitors this machine holds
+	// on other machines' entities. Both are nil on an install with no fleet
+	// key, which is exactly the P2 behaviour: no mesh, no monitors, nothing
+	// changed.
+	fleetHome  *fleetHome
+	fleetWatch *fleetWatcher
 }
 
 type agentControlRequest struct {
@@ -245,6 +252,10 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if h.chats == nil || h.chats.providerChats == nil {
 			return nil, errors.New("subagent spawn requires the durable chat actor")
 		}
+		spawnOrigin := fleetCommandOrigin{}
+		if work, forwarded := fleetForwardedWorkFrom(r.Context()); forwarded && !work.Origin.empty() {
+			spawnOrigin = work.Origin
+		}
 		return h.chats.providerChats.RunBackgroundAction(r.Context(), tabID, chatID, chat.BackgroundAction{
 			Kind: chat.BackgroundSpawnAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
 			Spawn: &chat.SpawnAgentAction{
@@ -254,6 +265,11 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 				CWD: fieldString(params, "cwd"), Profile: fieldString(params, "profile"),
 				PermissionIntent: fieldString(params, "permission_intent"),
 				Fork:             boolFieldValue(params, "fork"),
+				// The origin stamp, when this spawn arrived over a fleet link.
+				// A child used to report into the chat on the machine that HOSTS
+				// it; carrying the asking chat into the durable action is what
+				// lets a monitor send the outcome to the chat that asked.
+				OriginMachine: spawnOrigin.Machine, OriginChatID: spawnOrigin.ChatID, OriginTabID: spawnOrigin.TabID,
 			},
 		})
 	case "agent.list":
@@ -461,7 +477,21 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	if origin := h.callerFleetOrigin(ctx, params); !origin.empty() {
 		forwarded[fleetOriginParam] = origin.payload()
 	}
-	return h.remoteChats.Call(ctx, method, forwarded)
+	result, err := h.remoteChats.Call(ctx, method, forwarded)
+	if err != nil || method != "agent.spawn" {
+		return result, err
+	}
+	// The watcher's half of the monitor (§7: durable at BOTH ends). The home
+	// registered its side at spawn and returned the reference; recording it here
+	// is what makes the outcome survive THIS daemon restarting, and applying the
+	// slice it came with is what makes a child that finished while the reply
+	// travelled arrive anyway.
+	if h.fleetWatch.ready() && h.chats != nil && h.chats.providerChats != nil {
+		parentTabID, parentChatID := fieldString(params, "parent_tab_id"), fieldString(params, "parent_chat_id")
+		laneID, parentOperationID := h.chats.providerChats.watcherOrigin(parentTabID, parentChatID)
+		h.fleetWatch.WatchRemoteSubagent(ctx, machineID, result, parentTabID, parentChatID, laneID, parentOperationID)
+	}
+	return result, nil
 }
 
 // callerFleetLimit is the caller's own permission ceiling, in the read/edit/full

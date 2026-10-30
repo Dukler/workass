@@ -200,7 +200,7 @@ func homedChatRows(peerID string, result any) []any {
 // as it does today — which is the whole of §12's "mixed versions are a steady
 // state". A peer that understands it narrows by it.
 func meshControlPayload(machineID, method string, params map[string]any) map[string]any {
-	forwarded := copyAnyMap(params)
+	forwarded := stripFleetTargetTags(machineID, copyAnyMap(params))
 	limit := strings.TrimSpace(fieldString(forwarded, fleetLimitParam))
 	origin := mapFromAnyMain(forwarded[fleetOriginParam])
 	operationID := strings.TrimSpace(fieldString(forwarded, "operation_id"))
@@ -227,6 +227,39 @@ func meshControlPayload(machineID, method string, params map[string]any) map[str
 		payload["operation_id"] = operationID
 	}
 	return payload
+}
+
+// stripFleetTargetTags resolves every addressing id to the bare local id the
+// home itself uses.
+//
+// "The router strips its own tags on the way out" is the rule
+// `rejectMachineTaggedParams` is written against: a home refuses an id that
+// still names a machine, because resolving one locally would address the wrong
+// chat. The renderer relay has always done this stripping in JavaScript; a
+// daemon link had nobody doing it, so a chat-scoped command addressed the way
+// an agent actually reads an id out of workass_list_chats — a machine-tagged
+// pair — was refused by the home it was correctly routed to.
+//
+// Only an id naming THIS target is rewritten. An id naming a third machine is
+// left exactly as it is, so the home refuses it by name instead of this router
+// silently re-homing someone else's entity.
+func stripFleetTargetTags(machineID string, params map[string]any) map[string]any {
+	machineID = strings.TrimSpace(machineID)
+	if machineID == "" || len(params) == 0 {
+		return params
+	}
+	for _, field := range fleetAddressParamFields {
+		value := strings.TrimSpace(fieldString(params, field))
+		if value == "" {
+			continue
+		}
+		home, local, tagged, err := fleetid.Split(value, "")
+		if err != nil || !tagged || home != machineID || local == "" {
+			continue
+		}
+		params[field] = local
+	}
+	return params
 }
 
 // fleetTargetID names the entity a forwarded command is about, in the global

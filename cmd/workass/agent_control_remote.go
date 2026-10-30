@@ -132,8 +132,52 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 		}
 		return h.controllerChatCall(request, method, params, tabID, chatID)
 	default:
-		return h.controllerChatCall(request, method, params, fieldString(params, "tab_id"), fieldString(params, "chat_id"))
+		result, err := h.controllerChatCall(request, method, params, fieldString(params, "tab_id"), fieldString(params, "chat_id"))
+		if err != nil || method != "agent.spawn" {
+			return result, err
+		}
+		return h.monitorForwardedSpawn(forwarded, result), nil
 	}
+}
+
+// monitorForwardedSpawn registers the home-side monitor for a subagent spawned
+// from a chat on another machine, and hands the watcher the reference.
+//
+// At spawn, not at completion. A child that finishes while this very reply is
+// still on the wire has somewhere to report, because the monitor already exists
+// and its log already holds the event — and the watcher pulls from a cursor, so
+// the order those two things happened in changes nothing about what is
+// delivered. This is the whole of §1's "children on another machine report into
+// THAT machine's chat, never to the chat that asked", answered.
+//
+// The result is additive: a `monitor` block beside the fields agent.spawn
+// already returns. A caller that predates it reads the spawn exactly as it does
+// today, which is §12's mixed fleet.
+func (h *agentControlHandler) monitorForwardedSpawn(forwarded fleetForwardedWork, result any) any {
+	if h == nil || !h.fleetHome.ready() || forwarded.Origin.empty() {
+		return result
+	}
+	fields := mapFromAnyMain(result)
+	subagentID := strings.TrimSpace(fieldString(fields, "id"))
+	if subagentID == "" {
+		return result
+	}
+	row, ok := h.fleetHome.WatchSubagentForOrigin(forwarded.Origin, subagentID, fieldString(fields, "label"), forwarded.OperationID)
+	if !ok {
+		return result
+	}
+	slice, err := h.fleetHome.logs.Since(row.TargetID, 0, 0)
+	if err != nil {
+		return result
+	}
+	merged := copyAnyMap(fields)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	merged["monitor"] = map[string]any{
+		"ref": row.Ref, "targetId": row.TargetID, "label": row.Label, "slice": slicePayload(slice),
+	}
+	return merged
 }
 
 func (h *agentControlHandler) forkOwnerForController(method string, params map[string]any) (string, string, bool) {
