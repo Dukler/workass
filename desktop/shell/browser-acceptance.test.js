@@ -222,6 +222,26 @@ test('a native page never takes the focus when a new document commits', async ()
   manager.destroy();
 });
 
+test('a native page that crashes is reloaded in place, and its reload leaves the keyboard with the app', async () => {
+  const { manager, win } = viewHost();
+  const entry = manager.get('chat-crash');
+  assert.equal(await entry.ready, true);
+  const page = entry.view.webContents;
+  let reloads = 0;
+  let appFocused = 0;
+  page.reload = () => { reloads += 1; };
+  Object.assign(win.webContents, { isFocused: () => true, focus: () => { appFocused += 1; } });
+  manager.attachedView = entry.view;
+  page.emit('render-process-gone', {}, { reason: 'crashed' });
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(reloads, 1);
+  page.emit('focus');
+  assert.equal(appFocused, 1);
+  page.emit('focus');
+  assert.equal(appFocused, 1, 'only that once: the person may click into the page next');
+  manager.destroy();
+});
+
 // ---------------------------------------------------------------------------
 // A <webview> host (the 'webview' browser host, opt-in). The app
 // renderer is simulated: every page the shell publishes gets a guest mounted

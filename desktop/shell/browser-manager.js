@@ -617,7 +617,13 @@ class BrowserManager {
     });
     on('dom-ready', () => { entry.mainDocumentReady = true; entry.mainCommitPending = false; });
     on('did-start-loading', () => { entry.loading = true; entry.error = null; touchActivity(entry); this.publish(entry); });
+    on('focus', () => {
+      if (!entry.crashLeftAppFocused) return;
+      entry.crashLeftAppFocused = false;
+      try { this.win.webContents.focus(); } catch { /* the window is closing */ }
+    });
     on('did-stop-loading', () => {
+      entry.crashLeftAppFocused = false;
       touchActivity(entry);
       // A navigation that ended without a new document (a download, a 204,
       // a cancel) leaves the old one in place, still usable.
@@ -676,9 +682,12 @@ class BrowserManager {
       this.invalidateFrames(entry, null, 'renderer_lost');
       entry.error = `browser renderer stopped (${String(details && details.reason || 'unknown')})`;
       this.publish(entry);
-      // A hosted page's renderer that died is brought back in place (same tab,
-      // same URL), a few times a minute at most.
-      if (this.isHosted(entry) && String(details && details.reason || '') !== 'clean-exit') {
+      // A page's renderer that died is brought back in place (same tab, same
+      // URL), a few times a minute at most. Electron focuses a page on screen
+      // when it comes back from a crash, with no setting to refuse it: if the
+      // app had the keyboard, the app takes it back in that same task.
+      if (String(details && details.reason || '') !== 'clean-exit') {
+        try { entry.crashLeftAppFocused = this.attachedView === entry.view && this.win.webContents.isFocused() === true; } catch { entry.crashLeftAppFocused = false; }
         const now = Date.now();
         entry.crashReloads = (entry.crashReloads || []).filter((at) => now - at < 60000);
         if (entry.crashReloads.length < 3) {
