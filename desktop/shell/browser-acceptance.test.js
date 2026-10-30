@@ -189,8 +189,72 @@ function viewHost() {
 
 const PANE = { x: 700, y: 60, width: 480, height: 700 };
 
+// 2026-10-30: on a real window, a navigation of the page on screen moved the
+// person's keystrokes out of the composer: Chromium focuses a native page when
+// a new document commits. The app takes focus back, unless the person pressed
+// in the page, which is how they solve a captcha in it.
+function focusFixture(manager, win) {
+  const app = new EventEmitter();
+  let focused = 0;
+  Object.assign(win.webContents, { on: app.on.bind(app), focus: () => { focused += 1; } });
+  manager.appBlurredAt = 0;
+  win.webContents.on('blur', () => { manager.appBlurredAt = Date.now(); });
+  return { app, focusCalls: () => focused };
+}
+
+test('a native page on screen that takes the focus on its own gives it back to the app', async () => {
+  const { manager, win } = viewHost();
+  const { app, focusCalls } = focusFixture(manager, win);
+  const entry = manager.get('chat-focus');
+  assert.equal(await entry.ready, true);
+  manager.attachedView = entry.view;
+  const page = entry.view.webContents;
+  app.emit('blur');
+  page.emit('focus');
+  assert.equal(focusCalls(), 1, 'a document committing does not keep the focus');
+  // An agent's press is not the person's.
+  entry.pointerDown = { x: 1, y: 1, button: 'left' };
+  page.emit('before-mouse-event', {}, { type: 'mouseDown' });
+  entry.pointerDown = null;
+  app.emit('blur');
+  page.emit('focus');
+  assert.equal(focusCalls(), 2);
+  manager.destroy();
+});
+
+test('a person who presses in the page keeps the focus there, through its navigations', async () => {
+  const { manager, win } = viewHost();
+  const { app, focusCalls } = focusFixture(manager, win);
+  const entry = manager.get('chat-captcha');
+  assert.equal(await entry.ready, true);
+  manager.attachedView = entry.view;
+  const page = entry.view.webContents;
+  // macOS focuses the view first and hands it the mouse-down after.
+  let pageFocused = 0;
+  page.focus = () => { pageFocused += 1; };
+  app.emit('blur');
+  page.emit('focus');
+  page.emit('before-mouse-event', {}, { type: 'mouseDown' });
+  assert.equal(pageFocused, 1, 'the press gives the page the focus the app just took back');
+  const returned = focusCalls();
+  app.emit('blur');
+  page.emit('focus');
+  assert.equal(focusCalls(), returned, 'the press is how the page gets focus');
+  // The page already has it when its form submits: the app did not just lose it.
+  manager.appBlurredAt = Date.now() - 5000;
+  entry.personPressedAt = 0;
+  page.emit('focus');
+  assert.equal(focusCalls(), returned);
+  // A page in its hidden host never takes the app's focus back from anyone.
+  manager.attachedView = null;
+  app.emit('blur');
+  page.emit('focus');
+  assert.equal(focusCalls(), returned);
+  manager.destroy();
+});
+
 // ---------------------------------------------------------------------------
-// A <webview> host (the 'webview' browser host, macOS' default). The app
+// A <webview> host (the 'webview' browser host, opt-in). The app
 // renderer is simulated: every page the shell publishes gets a guest mounted
 // for it, as BrowserSurfaceHost does.
 

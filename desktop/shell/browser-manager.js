@@ -82,6 +82,13 @@ const AGENT_WORLD_ID = 1999;
 // take within this is given up on, and whatever it left pressed is released.
 const INPUT_COMMAND_TIMEOUT_MS = 5000;
 const INPUT_RELEASE_TIMEOUT_MS = 1000;
+// A native page that takes the window's focus right after the app lost it, and
+// not within this long of a person's press in that page, took it on its own.
+const FOCUS_TAKEN_FROM_APP_MS = 50;
+const PERSON_PRESS_FOCUS_MS = 1000;
+// macOS focuses a view for a click before it hands the view the mouse-down, so
+// a person's press this soon after the app took focus back was for the page.
+const FOCUS_RETURN_PRESS_MS = 250;
 // A one-line <select> opens a native menu: agent input cannot operate it,
 // and on macOS it holds the window's input until it closes.
 // Calls that only look at a page: they do not make it agent-driven (which
@@ -464,6 +471,8 @@ class BrowserManager {
     this.entries = new Map();
     this.activeId = null;
     this.attachedView = null;
+    this.appBlurredAt = 0;
+    try { win.webContents.on('blur', () => { this.appBlurredAt = Date.now(); }); } catch { /* a window without events */ }
     this.presentationChain = Promise.resolve();
     // Bumped when the renderer that presented the page goes away: a request it
     // sent before that never puts the page back on screen.
@@ -593,6 +602,28 @@ class BrowserManager {
     // reloads; a late event from the replaced one must not touch the tab.
     const current = () => entry.view.webContents === wc;
     const on = (name, handler) => wc.on(name, (...args) => { if (current()) handler(...args); });
+    // Chromium focuses a native page on screen whenever a new document commits
+    // (a navigation by anyone, a reload), which took the person's typing away
+    // from the composer. The app takes it back in the same task, before the OS
+    // can deliver another key. A press of the person's own in the page is how
+    // it is meant to get focus; an agent's press arrives with pointerDown set.
+    on('before-mouse-event', (_event, mouse) => {
+      if (!mouse || mouse.type !== 'mouseDown' || entry.pointerDown) return;
+      const now = Date.now();
+      entry.personPressedAt = now;
+      if (now - (entry.focusReturnedAt || 0) < FOCUS_RETURN_PRESS_MS) {
+        try { wc.focus(); } catch { /* the page is closing */ }
+      }
+    });
+    on('focus', () => {
+      if (this.attachedView !== entry.view || this.isHosted(entry)) return;
+      const now = Date.now();
+      if (now - this.appBlurredAt > FOCUS_TAKEN_FROM_APP_MS) return;
+      if (now - (entry.personPressedAt || 0) < PERSON_PRESS_FOCUS_MS) return;
+      entry.focusReturnedAt = now;
+      this.lifecycle(entry, 'page-focus-returned-to-app', {});
+      try { this.win.webContents.focus(); } catch { /* the window is closing */ }
+    });
     const syncURL = (_event, url) => {
       entry.url = String(url || wc.getURL() || DEFAULT_URL);
       entry.error = null;
