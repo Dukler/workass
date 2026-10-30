@@ -56,6 +56,34 @@ const reportGrace = 30 * time.Second
 // daemon stays unreachable. One line, not one per retry.
 const reportComplaintInterval = 5 * time.Minute
 
+// daemonTooOldMarkers recognise a daemon that REFUSED the report's shape
+// rather than failing to receive it.
+//
+// The difference matters twice. It is a different sentence — "this machine's
+// daemon is older than the supervised-job reporting contract" is actionable
+// where "unable to reach its daemon" sends somebody looking at the network —
+// and it is a different wait: a schema mismatch will not fix itself in the two
+// minutes a finished supervisor would otherwise spend retrying, so it stops
+// waiting and leaves the events queued for whenever the daemon is updated.
+// §14's rule for version skew is a structured refusal naming what is
+// supported, and this is its other half: the caller saying what it heard.
+var daemonTooOldMarkers = []string{
+	"is not a known argument",
+	"without acknowledging any event",
+	"unknown tool",
+}
+
+// daemonTooOld reports whether a failure is a refusal of this contract.
+func daemonTooOld(message string) bool {
+	lowered := strings.ToLower(message)
+	for _, marker := range daemonTooOldMarkers {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // settleReportDeadline bounds how long a finished supervisor keeps trying to
 // deliver its outcome before it exits saying it could not. It does not
 // matter that it is generous: the process has nothing else to do, and the
@@ -112,6 +140,10 @@ type ReportingHealth struct {
 	// Unreported is a run with no daemon to report to at all, which only
 	// happens when the operator asked for one explicitly.
 	Unreported bool
+	// Refused means the daemon answered and rejected the report's shape: it is
+	// older than this contract. Distinct from undelivered, because no amount
+	// of retrying fixes it and the action is to update that daemon.
+	Refused bool
 }
 
 // journal is the supervisor's recorder: one outbox, one reporter, and the
@@ -142,6 +174,9 @@ type journal struct {
 	lastError        string
 	unreported       bool
 	lastBeat         time.Time
+	// refused and saidTooOld separate "could not reach" from "was refused".
+	refused    bool
+	saidTooOld bool
 }
 
 func newJournal(childID string, outbox *Outbox, reporter Reporter, diagnostics io.Writer, now func() time.Time, facts func() Report, retry, deadline time.Duration) *journal {
@@ -278,14 +313,26 @@ func (j *journal) noteFailure(err error) {
 		j.complainedAt = now
 	}
 	message := j.lastError
-	j.mu.Unlock()
-	if complain {
-		// The operator's rule, literally: never silent. A job whose daemon
-		// cannot be reached says so, keeps running, and keeps trying.
-		fmt.Fprintf(j.diagnostics,
-			"workass run: NOT REPORTING — this job has been unable to reach its Workass daemon for %s (%s). The work continues and every event is queued in the outbox; the chat that asked will be told when the daemon answers.\n",
-			gap.Round(time.Second), message)
+	tooOld := daemonTooOld(message)
+	if tooOld && !j.saidTooOld {
+		j.saidTooOld, complain = true, true
 	}
+	j.refused = tooOld
+	j.mu.Unlock()
+	if !complain {
+		return
+	}
+	// The operator's rule, literally: never silent. A job whose daemon cannot
+	// be reached says so, keeps running, and keeps trying.
+	if tooOld {
+		fmt.Fprintf(j.diagnostics,
+			"workass run: NOT REPORTING — this machine's Workass daemon is older than the supervised-job reporting contract and refused this report (%s). The work continues and every event is queued in the outbox at %s; update the daemon on this machine and the backlog is delivered then.\n",
+			message, j.outbox.Path())
+		return
+	}
+	fmt.Fprintf(j.diagnostics,
+		"workass run: NOT REPORTING — this job has been unable to reach its Workass daemon for %s (%s). The work continues and every event is queued in the outbox; the chat that asked will be told when the daemon answers.\n",
+		gap.Round(time.Second), message)
 }
 
 func (j *journal) noteSuccess(ack Acknowledgement) {
@@ -300,7 +347,7 @@ func (j *journal) noteSuccess(ack Acknowledgement) {
 		j.unreachableSince = time.Time{}
 		j.complainedAt = time.Time{}
 	}
-	j.lastError = ""
+	j.lastError, j.refused = "", false
 	if ack.AckThrough > j.ackThrough {
 		j.ackThrough = ack.AckThrough
 	}
@@ -328,7 +375,9 @@ func (j *journal) settle() ReportingHealth {
 		}
 		return health
 	}
-	deadline := j.now().Add(j.deadline)
+	started := j.now()
+	deadline := started.Add(j.deadline)
+	refused := false
 	for {
 		j.flush()
 		pending, err := j.outbox.PendingCount(j.childID)
@@ -338,19 +387,40 @@ func (j *journal) settle() ReportingHealth {
 		if !j.now().Before(deadline) {
 			break
 		}
+		j.mu.Lock()
+		refused = j.refused
+		j.mu.Unlock()
+		if refused {
+			// A daemon that refused the shape of the report will refuse it
+			// again in five seconds. Waiting out the deadline would delay
+			// every job's exit for two minutes and change nothing.
+			break
+		}
 		time.Sleep(j.retry)
 	}
+	waited := j.now().Sub(started)
 	pending, _ := j.outbox.PendingCount(j.childID)
 	j.mu.Lock()
+	refused = refused || j.refused
 	health = ReportingHealth{
 		Delivered: pending == 0, Pending: pending,
-		Gap: j.longestGap, LastError: j.lastError,
+		Gap: j.longestGap, LastError: j.lastError, Refused: refused,
 	}
 	j.mu.Unlock()
 	if !health.Delivered {
-		fmt.Fprintf(j.diagnostics,
-			"workass run: THIS OUTCOME WAS NOT REPORTED — %d event(s) are still queued in the outbox after %s of trying (%s). The daemon will read them for this job when it next reconciles it; until then its chat shows the job as not reporting.\n",
-			health.Pending, j.deadline, health.LastError)
+		// Exactly what happened, in the words that are true of THIS run. A
+		// line claiming two minutes of trying after a twelve-millisecond
+		// refusal would be the same species of comfortable fiction as a spool
+		// nobody read.
+		if refused {
+			fmt.Fprintf(j.diagnostics,
+				"workass run: THIS OUTCOME WAS NOT REPORTED — this machine's Workass daemon refused the report (%s), so %d event(s) are queued in the outbox at %s. Nothing will deliver them until that daemon is updated.\n",
+				health.LastError, health.Pending, j.outbox.Path())
+		} else {
+			fmt.Fprintf(j.diagnostics,
+				"workass run: THIS OUTCOME WAS NOT REPORTED — %d event(s) are still queued in the outbox after %s of trying (%s). If this machine's daemon holds a row for this job it will read them for it; otherwise nothing will, and the chat that asked has not been told.\n",
+				health.Pending, waited.Round(time.Second), health.LastError)
+		}
 	}
 	return health
 }
