@@ -160,6 +160,46 @@ func TestADeadSupervisorsQueuedOutcomeIsRecoveredFromTheOutboxBeforeLostIsReache
 	}
 }
 
+func TestATerminalJobLeavesNoDirectoryAndNoQueuedEventsBehind(t *testing.T) {
+	manager := processChildManager(t, nil)
+	childID, _ := seedProcessChild(t, manager, "op-litter", os.Getpid(), nil)
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242})
+	if _, err := os.Stat(procchild.Dir(manager.opts.StateDir, childID)); err != nil {
+		t.Fatalf("a running job has a directory for its stop file: %v", err)
+	}
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
+		"outcome": procchild.OutcomeSettled, "exitCode": 0, "summary": "Finished with exit 0",
+	})
+	manager.ReconcileProcessChildren(time.Now().UTC())
+	if _, err := os.Stat(procchild.Dir(manager.opts.StateDir, childID)); !os.IsNotExist(err) {
+		// One empty directory per job, kept forever, is the litter the spool's
+		// own removal used to prevent.
+		t.Fatalf("a settled job must leave no directory behind: %v", err)
+	}
+	outbox, err := procchild.OpenOutboxForReading(manager.opts.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbox.Close()
+	if pending, err := outbox.PendingCount(childID); err != nil || pending != 0 {
+		// Nothing UNACKNOWLEDGED may be dropped: it would be the only copy of
+		// something nobody has been told.
+		t.Fatalf("a settled job leaves nothing queued, got %d / %v", pending, err)
+	}
+	// What can remain is a row the supervisor acknowledged after this daemon
+	// retired the rest — the delivered copy of its own last word, which
+	// retention prunes and which is the only record of what it said.
+	events, err := outbox.All(childID, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind != procchild.KindSettled {
+			t.Fatalf("only the acknowledged terminal event may remain, found %q", event.Kind)
+		}
+	}
+}
+
 func TestASupervisorThatIsGoneWithAnEmptyQueueIsLostAndNotRunning(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)
