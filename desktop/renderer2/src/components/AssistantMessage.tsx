@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
-import { store, useApp, useMsgVersion, useClock } from '../store/store';
+import { store, useApp, useMsgVersion, useClock, useSpawnedWork } from '../store/store';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolHtmlPages } from '../markdown/HtmlToolPages';
@@ -9,7 +9,7 @@ import { IcStampCopy, IcFork, IcWarnTri, IcRetryArc, IcThought, ActionGlyph } fr
 import { has } from '../wire/api';
 import { machineOf } from '../wire/machineIds';
 import { toolPresentation } from '../tool-names';
-import { isSubagentHeader } from '../subagent-layout';
+import { isSubagentHeader, subagentCardsWithWork } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
@@ -103,6 +103,16 @@ function RelStamp({ at }: { at: string | null }) {
   return <span>{relTime(at)}</span>;
 }
 
+// Subagent cards subscribe here, not in the message: a child ending must repaint
+// its card without re-rendering the transcript around it.
+function SubagentCards({ tabId, tools, revision }: { tabId: string; tools: ToolEvent[]; revision?: readonly unknown[] }) {
+  useSpawnedWork();
+  const chat = store.chat(tabId);
+  const cards = chat ? subagentCardsWithWork(tools, store.spawnedWork(chat)) : tools;
+  const statuses = cards.map((tool) => tool.status).join();
+  return <ToolGroup tabId={tabId} tools={cards} revision={revision ? [...revision, statuses] : undefined} />;
+}
+
 function AssistantSliceBody({
   tabId,
   msg,
@@ -193,7 +203,7 @@ function AssistantSliceBody({
             <Fragment key={s.key}>
               <ToolImageGallery tools={s.tools.filter((t) => !isSubagentHeader(t))} tabId={tabId} />
               <ToolHtmlPages tools={s.tools.filter((t) => !isSubagentHeader(t))} artifactOrigin={artifactOrigin} />
-              {tasks.length > 0 && <ToolGroup tabId={tabId} tools={tasks} revision={s.revision} />}
+              {tasks.length > 0 && <SubagentCards tabId={tabId} tools={tasks} revision={s.revision} />}
             </Fragment>
           );
         }

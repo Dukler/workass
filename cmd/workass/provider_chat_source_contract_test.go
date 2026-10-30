@@ -384,6 +384,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/fleet_monitors.go:openFleetMonitors:SetHostedWorkRouter":               {1, "the route from a hosted row to its host"},
 		"cmd/workass/provider_chat_background.go:executeBackgroundAction:StopHostedWork":    {1, "an agent's cancel of a child running on another machine"},
 		"cmd/workass/fleet_hosted_subagent.go:settleHostedSubagentRow:SettleHostedSubagent": {1, "the same row, settled from the monitor exit that the notice is about"},
+		"cmd/workass/fleet_hosted_subagent.go:settleHostedSubagentCard:HostedSubagentOriginOperation": {1, "which turn holds this child's card, read to correct that card from the same exit"},
 		// One job, one credential. Minting is fenced by the host chat and the
 		// operation id; consuming ends the grant with the single registration it
 		// authorized (fleet_process_start.go).

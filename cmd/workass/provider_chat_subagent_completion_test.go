@@ -11,6 +11,7 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/chat"
+	"workass/internal/fleetlog"
 	providercontract "workass/internal/provider"
 )
 
@@ -378,4 +379,112 @@ func trackedHumanWorkPresent(state chat.State) bool {
 		}
 	}
 	return false
+}
+
+// A child on another machine under a stopped parent ends the way a local one
+// does (PORT-SPEC §3.4c): it was never stopped, its row and card say how it ended,
+// and nobody is told. Then the same end arriving after this daemon restarted, when
+// the live event has no lane to travel on: the card must still be corrected, and
+// must stay corrected.
+func TestARemoteChildOfAStoppedTurnEndsLikeALocalOne(t *testing.T) {
+	runtime, manager, _, stateDir, info := newSteerRegressionFixture(t)
+	const tabID, chatID, parentOperation = "steer-regression-tab", "steer-regression-chat", "stopped-parent-operation"
+	if _, err := runtime.Start(context.Background(), map[string]any{
+		"kind": "app-chat", "tabId": tabID, "chatId": chatID, "sessionId": info.SessionID,
+		"operationId": parentOperation, "userMessageId": "parent-user", "assistantMessageId": "parent-assistant",
+		"prompt": "[mock:active-without-terminal] keep parent open",
+	}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	actor, err := runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	await := func(what string, ready func(chat.State) bool) chat.State {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			state := actor.engine.Snapshot()
+			if ready(state) {
+				return state
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never happened: foreground=%#v", what, state.Foreground)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	state := await("the parent's admission", func(s chat.State) bool {
+		return s.Foreground != nil && s.Foreground.OperationID == parentOperation && s.Foreground.Turn.NativeID != ""
+	})
+	register := func(id string) {
+		manager.RegisterHostedSubagent(tabID, chatID, acp.HostedSubagentRow{
+			SubagentID: id, Label: id, ProviderID: "codex", HostMachine: "m-host",
+			OriginLaneID: string(state.Foreground.LaneID), OriginOperationID: parentOperation,
+		})
+	}
+	register("child-before-restart")
+	register("child-across-restart")
+	card := func(s chat.State, id string) string {
+		status, _ := chat.SubagentCardStatus(s, parentOperation, id)
+		return status
+	}
+	await("the cards", func(s chat.State) bool {
+		return card(s, "child-before-restart") == "in_progress" && card(s, "child-across-restart") == "in_progress"
+	})
+	if result, handled, err := runtime.Cancel(context.Background(), state.Foreground.Turn.NativeID); err != nil || !handled || !result.Cancelled {
+		t.Fatalf("parent Stop = %#v handled=%v err=%v", result, handled, err)
+	}
+	await("the stopped turn", func(s chat.State) bool { return s.Foreground == nil })
+	await("the turn closing its cards", func(s chat.State) bool { return card(s, "child-before-restart") == "cancelled" })
+
+	exit := func(r *providerChatRuntime, id string) {
+		t.Helper()
+		if err := r.deliverFleetMonitorNotice(fleetMonitorNotice{
+			Kind: fleetlog.KindExit, TabID: tabID, ChatID: chatID, OriginOperationID: parentOperation, Label: id,
+			Receipt: acp.SubagentReceipt{ReceiptID: "subagent-" + id, SubagentID: id, Label: id, Status: "done", Result: "ok", FinishedAt: "2026-10-30T12:00:00Z"},
+		}); err != nil {
+			t.Fatalf("exit of %s: %v", id, err)
+		}
+	}
+	noNotice := func(s chat.State, id string) {
+		t.Helper()
+		operation := subagentCompletionOperationID(tabID, chatID, "subagent-"+id)
+		if _, exists := s.Operations[operation]; exists {
+			t.Fatalf("the end of %s under a stopped turn became a notice", id)
+		}
+	}
+	exit(runtime, "child-before-restart")
+	state = await("the card following the child", func(s chat.State) bool { return card(s, "child-before-restart") == "completed" })
+	noNotice(state, "child-before-restart")
+
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	restartedManager := acp.NewManager(acp.Options{RootDir: repoRoot(t), StateDir: stateDir, RuntimeProfile: "dev"})
+	t.Cleanup(func() { restartedManager.Reset() })
+	restarted := newProviderChatRuntimeBeforeProviderStartup(restartedManager, newSessionStore(filepath.Join(stateDir, sessionStateFilename)), stateDir)
+	t.Cleanup(func() { _ = restarted.Close(context.Background()) })
+	if err := restarted.StartupError(); err != nil {
+		t.Fatalf("reload actor runtime: %v", err)
+	}
+	actor, err = restarted.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := card(actor.engine.Snapshot(), "child-across-restart"); got != "cancelled" {
+		t.Fatalf("before its end the restarted card reads %q", got)
+	}
+	exit(restarted, "child-across-restart")
+	state = actor.engine.Snapshot()
+	if got := card(state, "child-across-restart"); got != "completed" {
+		t.Fatalf("after a restart the card reads %q, want completed", got)
+	}
+	noNotice(state, "child-across-restart")
+	row := restartedManager.ListSpawnedWork(tabID, chatID)
+	for _, item := range row {
+		if item.ID == "child-across-restart" && item.Status != "exited" {
+			t.Fatalf("row = %#v", item)
+		}
+	}
 }

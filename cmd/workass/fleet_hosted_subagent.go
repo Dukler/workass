@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
+	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
 )
 
 // Where it runs, and who owns it.
@@ -135,4 +139,46 @@ func (r *providerChatRuntime) settleHostedSubagentRow(tabID, chatID string, rece
 		return
 	}
 	r.manager.SettleHostedSubagent(tabID, chatID, receipt)
+	r.settleHostedSubagentCard(tabID, chatID, receipt)
+}
+
+// settleHostedSubagentCard makes the child's card in the turn that started it say
+// how the child ended.
+//
+// A child on another machine can outlive the turn and this daemon. A restart here
+// ends that turn as interrupted and every open tool in it as failed, the child's
+// card with them, and the live event that would correct it has no lane to travel
+// on: the row and the notice were right and the transcript said "falló" for good.
+func (r *providerChatRuntime) settleHostedSubagentCard(tabID, chatID string, receipt acp.SubagentReceipt) {
+	id := strings.TrimSpace(receipt.SubagentID)
+	// The monitor recorded the same turn when the child started, so the end still
+	// finds its card if the row is gone.
+	operationID := providercontract.NormalizeOperationID(firstNonEmptyString(r.manager.HostedSubagentOriginOperation(tabID, chatID, id), receipt.OriginOperationID))
+	if operationID == "" {
+		return
+	}
+	status := "completed"
+	switch strings.TrimSpace(receipt.Status) {
+	case "failed":
+		status = "failed"
+	case "cancelled":
+		status = "cancelled"
+	}
+	actor, err := r.actor(strings.TrimSpace(chatID))
+	if err != nil {
+		return
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	current, found := chat.SubagentCardStatus(actor.engine.ReadSnapshot(), operationID, id)
+	if !found || current == status {
+		return
+	}
+	tool := providercontract.ToolEvent{ToolCallID: id, Status: status}
+	if at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(receipt.FinishedAt)); err == nil {
+		tool.EndedAtUnixMS = at.UnixMilli()
+	}
+	if err := actor.engine.Apply(chat.SettleSubagentCard{OperationID: operationID, Tool: tool}); err != nil {
+		log.Printf("[fleet] could not correct the card of %s: %v", id, err)
+	}
 }

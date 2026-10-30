@@ -1862,3 +1862,42 @@ func TestOneOversizedContextEventFailsClosed(t *testing.T) {
 		t.Fatalf("oversized import did not fail closed: lane=%#v effects=%#v", state.Lanes[second.ID], effects)
 	}
 }
+
+// A child on another machine outlives the turn that started it. Its end corrects
+// the card in that turn's row, in whichever row of the turn the card landed.
+func TestSettleSubagentCardCorrectsOnlyTheCardOfThatTurn(t *testing.T) {
+	card := func(id, status string) TimelineEntry {
+		return TimelineEntry{Key: "timeline:tool:" + id, Kind: provider.EventToolUpdate, Tool: &provider.ToolEvent{
+			ToolCallID: id, Status: status, Title: "child", SubagentID: id, SubagentHeader: true,
+		}}
+	}
+	state := State{Ledger: []LedgerEvent{
+		{Role: "assistant", OperationID: "other", Timeline: []TimelineEntry{card("child", "failed")}},
+		{Role: "assistant", OperationID: "parent", Timeline: []TimelineEntry{card("child", "failed")}},
+		{Role: "assistant", OperationID: "parent", Text: "a later row of the same turn"},
+	}}
+	command := SettleSubagentCard{OperationID: "parent", Tool: provider.ToolEvent{ToolCallID: "child", Status: "completed", EndedAtUnixMS: 42}}
+	if err := reduceSettleSubagentCard(&state, command); err != nil {
+		t.Fatal(err)
+	}
+	if status, found := SubagentCardStatus(state, "parent", "child"); !found || status != "completed" {
+		t.Fatalf("card = %q %v", status, found)
+	}
+	tool := state.Ledger[1].Timeline[0].Tool
+	if tool.EndedAtUnixMS != 42 || tool.Title != "child" || !tool.SubagentHeader {
+		t.Fatalf("the correction lost the card: %#v", tool)
+	}
+	if status, _ := SubagentCardStatus(state, "other", "child"); status != "failed" {
+		t.Fatalf("another turn's card changed: %q", status)
+	}
+	// No card in that turn: nothing is added.
+	if err := reduceSettleSubagentCard(&state, SettleSubagentCard{OperationID: "parent", Tool: provider.ToolEvent{ToolCallID: "stranger", Status: "completed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := SubagentCardStatus(state, "parent", "stranger"); found {
+		t.Fatal("a card appeared for a child the turn never had")
+	}
+	if err := reduceSettleSubagentCard(&state, SettleSubagentCard{Tool: provider.ToolEvent{ToolCallID: "child"}}); err == nil {
+		t.Fatal("a correction with no turn was accepted")
+	}
+}
