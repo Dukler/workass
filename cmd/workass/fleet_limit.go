@@ -212,7 +212,7 @@ func fleetRefuseNarrowedSurface(method, limit string, params map[string]any) err
 // narrowed grant cannot be widened by passing through a third machine.
 //
 // Full-access work may chain: that is the operator's own fleet acting on their
-// behalf, and its storm guards are the per-peer rate limits and the notice cap,
+// behalf, and its storm guards are the per-peer rate limits and the notice window,
 // not an arbitrary depth counter.
 func fleetRefuseSecondHop(ctx context.Context, method string) error {
 	work, forwarded := fleetForwardedWorkFrom(ctx)

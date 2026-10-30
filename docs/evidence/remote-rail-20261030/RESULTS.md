@@ -93,6 +93,67 @@ children prove nothing. `p2` onward had it.
   this one is running.
 - Owner turn is still the mock, so neither a real Claude or Codex parent was stopped.
 
+## A remote child's end that told nobody
+
+Live on 2026-10-30, owner chat on the Mac: `wa-subagent-1793383430598-5` ended 18:04:11Z,
+row settled, receipt written, no notice.
+
+**Cause, from the production log and then reproduced:** the hourly notice cap.
+`15:04:11 [fleet] held a exit notice for chat-81716b9c...: this chat is at its 6-notice
+hourly cap`. Six successful remote ends had reached the chat in the previous hour
+(17:24:47, 17:24:52, 17:33:02, 17:39:43, 17:59:31, 18:02:20), and the seventh was held.
+The eighth at 18:14:21 was held too. By then the monitor's cursor had moved and it was
+consumed, so nothing could redeliver it. The owner's turn had ended at 18:03:56, 15s
+earlier, so the turn was not running, and timing was not the cause.
+
+Rig: dev daemon and real renderer on the Mac, scratch daemon on duklerver, real Codex
+children, the owner turn the mock, ended naturally. Baseline is unmodified 1339c91d.
+Commands are in `harness/notice/`, output in `notice-*.log`.
+
+Notices per child. The gap is the notice's stored time against the end of the parent turn.
+
+| Child ends | Remote, before | Remote, after | Local, before | Local, after | Gaps after the fix (remote, local) |
+|---|---|---|---|---|---|
+| Mid-turn | 1 | 1 | 1 | 1 | 6.3s, 6.4s before the end |
+| Last second of the turn | 1 | 1 | 1 | 1 | 0.19s, 0.27s before the end |
+| Just after the turn | 1 | 1 | 1 | 1 | 1.5s, 0.7s after the end |
+| No turn running | 1 | 1 | 1 | 1 | 16.8s, 17.8s after the end |
+| 5th to 8th in one hour, burst | **2 of 4** | 4 of 4 | 4 of 4 | 4 of 4 | |
+| 8 at once, rail open | **6 of 8**, twice | 8 of 8 | not run | not run | |
+| Remote job past the old count | not run | 1 | | | |
+| 8 local `workass run` jobs | | | **0 of 8** | **0 of 8** | see below |
+
+Every timing case gave exactly one notice on both builds. Only the count separates them:
+each baseline run lost exactly the seventh and eighth remote ends, each with a `held` line
+(`notice-baseline.log`, `notice-baseline-visual.log`), and the fixed build logged none.
+`notice-baseline-rail-settled` shows it plainly: eight rows finished, six in the queue.
+`notice-final-rail-settled` is the same moment with the fix. The baseline
+`l-none` first failed on a rig fault with no child at all, so `baseline-l-none2` is its
+rerun. Baseline `baseline-v*` ran twice with the same labels, so its tally reads 12 for 16.
+
+**Fix:** the cap is gone (spec §14h). It could only ever hold a successful end. The 60 s
+window for the same event stays. Two unit tests fail on the old code with the cap's own
+message and pass now.
+
+## Found by this run, not fixed
+
+- **A local `workass run` job gave no notice on either build**, 16 jobs of 16, with row and
+  receipt correct and no `held` line. Its monitor is recorded on the home side only, and
+  `IngestLocalEvent` looks in the watcher's registry, which has no row for it. Every monitor
+  in the real Mac's `watched.json` targets the host, so nothing there contradicts this. A
+  rig credential was used, so a job from a real agent shell has not been run this way.
+- A failed `deliver` is logged and the cursor still moves, so a notice the actor refuses is
+  lost the same way. Read from the code, not seen live.
+- Notices already lost stay lost: `wa-subagent-1793383430598-5` and `-1793384027131-6` are
+  consumed on the Mac and this build will not redeliver them.
+- Rig mistake, cleaned up: `workass run` without `--state-dir` fell back to the installed
+  state. Eight `sleep 2` jobs created `process-outbox.db` and 16 files under the real Mac
+  state, and no job reached the real daemon. All 24 rows were verified as those jobs', no
+  process had the file open, and those files were removed. `harness/notice/jobs.sh` now passes
+  the flag.
+
+Still unproven: a real Claude or Codex owner turn, and the same on Windows.
+
 ## Re-running
 
 `harness/remote-setup.sh` on duklerver, `harness/run-mac-daemon.sh` on the Mac, then

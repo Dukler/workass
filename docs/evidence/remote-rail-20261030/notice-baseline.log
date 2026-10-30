@@ -1,0 +1,273 @@
+### baseline 18:33:27.971 flag provided but not defined: -version
+{"value":"{\"ok\":true,\"m\":[[\"m-bca84b5a24134385b4ff15245544ece2\",\"ok\"]]}"}
+mesh link up after 1s
+{"adopted":true,"adoptedAt":"2026-10-30T18:33:38.013444809Z","cwd":"/tmp","effor
+
+RESULT|baseline-r-mid|remote|mid|settled=18:33:43.901|turn_at_settle=running|released_gap=6s
+{"adopted":true,"adoptedAt":"2026-10-30T18:33:54.840193794Z","cwd":"/tmp","effor
+
+RESULT|baseline-r-last|remote|last|settled=18:34:00.098|turn_at_settle=running|released_gap=18:34:00.145
+{"adopted":true,"adoptedAt":"2026-10-30T18:34:05.040268285Z","cwd":"/tmp","effor
+
+RESULT|baseline-r-none|remote|none|settled=18:34:23.216|turn_at_settle=IDLE|released_gap=turn-ended-18:34:06.239
+{"adopted":true,"adoptedAt":"2026-10-30T18:34:28.862901539Z","cwd":"/tmp","effor
+
+RESULT|baseline-r-after|remote|just-after|settled=18:34:39.912|turn_at_settle=IDLE|released_gap=released-18:34:38.950
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385285522-1","l
+
+RESULT|baseline-l-mid|local|mid|settled=18:34:52.200|turn_at_settle=running|released_gap=6s
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385303095-2","l
+
+RESULT|baseline-l-last|local|last|settled=18:35:09.783|turn_at_settle=running|released_gap=18:35:09.835
+{"error":"unknown Workass tool"}
+
+RESULT|baseline-l-none|local|none|settled=18:38:12.425|turn_at_settle=IDLE|released_gap=turn-ended-18:35:15.768
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385498035-3","l
+
+RESULT|baseline-l-after|local|just-after|settled=18:38:29.027|turn_at_settle=IDLE|released_gap=released-18:38:28.182
+{"adopted":true,"adoptedAt":"2026-10-30T18:38:34.76226235Z","cwd":"/tmp","effort
+
+{"adopted":true,"adoptedAt":"2026-10-30T18:38:35.045310515Z","cwd":"/tmp","effor
+
+{"adopted":true,"adoptedAt":"2026-10-30T18:38:35.297516515Z","cwd":"/tmp","effor
+
+{"adopted":true,"adoptedAt":"2026-10-30T18:38:35.539892873Z","cwd":"/tmp","effor
+
+RESULT|baseline-r5|remote|burst|settled=18:38:40.813|status=exited
+RESULT|baseline-r6|remote|burst|settled=18:38:41.379|status=exited
+RESULT|baseline-r7|remote|burst|settled=18:38:41.561|status=exited
+RESULT|baseline-r8|remote|burst|settled=18:38:41.737|status=exited
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385529874-4","l
+
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385529958-5","l
+
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385530045-6","l
+
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385530155-7","l
+
+RESULT|baseline-l5|local|burst|settled=18:38:56.389|status=exited
+RESULT|baseline-l6|local|burst|settled=18:38:58.359|status=exited
+RESULT|baseline-l7|local|burst|settled=18:38:58.537|status=exited
+RESULT|baseline-l8|local|burst|settled=18:39:00.130|status=exited
+### tally 18:39:11.331
+NOTICES|baseline-r-mid|1
+NOTICES|baseline-r-last|1
+NOTICES|baseline-r-none|1
+NOTICES|baseline-r-after|1
+NOTICES|baseline-l-mid|1
+NOTICES|baseline-l-last|1
+NOTICES|baseline-l-none|0
+NOTICES|baseline-l-after|1
+NOTICES|baseline-r5|1
+NOTICES|baseline-r6|0
+NOTICES|baseline-r7|0
+NOTICES|baseline-r8|1
+NOTICES|baseline-l5|1
+NOTICES|baseline-l6|1
+NOTICES|baseline-l7|1
+NOTICES|baseline-l8|1
+wa-subagent-1793384634442-1 completed Agent "probe-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793384940774-1 completed Agent "probe2-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385159262-1 completed Agent "probe3-r" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385159466-1 completed Agent "probe3-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385218013-2 completed Agent "baseline-r-mid" finished run=- queued=- elapsed=- err=- result=N-
+wa-subagent-1793385234840-3 completed Agent "baseline-r-last" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385245040-4 completed Agent "baseline-r-none" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385268862-5 completed Agent "baseline-r-after" finished run=- queued=- elapsed=- err=- result=
+wa-subagent-1793385285522-1 completed Agent "baseline-l-mid" finished run=- queued=- elapsed=- err=- result=N-
+wa-subagent-1793385303095-2 completed Agent "baseline-l-last" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385498035-3 completed Agent "baseline-l-after" finished run=- queued=- elapsed=- err=- result=
+wa-subagent-1793385514762-6 completed Agent "baseline-r5" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385515539-9 completed Agent "baseline-r8" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385530045-6 completed Agent "baseline-l7" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385529874-4 completed Agent "baseline-l5" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385529958-5 completed Agent "baseline-l6" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385530155-7 completed Agent "baseline-l8" finished run=- queued=- elapsed=- err=- result=N-DON
+### order
+18:23:50.249 user [mock:hold-tools]
+18:26:59.239 assistant Mock ACP turn 1: Workass tools
+18:24:01.767 user Agent "probe-l" finished
+18:26:59.326 assistant Mock ACP turn 2: Workass tools
+18:27:01.971 user [mock:hold-tools]
+18:27:06.551 assistant Mock ACP turn 3: Workass tools
+18:28:56.619 user [mock:hold-tools]
+18:32:04.415 assistant Mock ACP turn 4: Workass tools
+18:29:06.741 user Agent "probe2-l" finished
+18:32:04.501 assistant Mock ACP turn 5: Workass tools
+18:32:07.157 user [mock:hold-tools]
+18:32:11.529 assistant Mock ACP turn 6: Workass tools
+18:32:35.139 user [mock:hold-tools]
+18:32:51.514 assistant Mock ACP turn 7: Workass tools
+18:32:44.414 user Agent "probe3-r" finished
+18:32:51.600 assistant Mock ACP turn 8: Workass tools
+18:32:51.052 user Agent "probe3-l" finished
+18:32:51.685 assistant Mock ACP turn 9: Workass tools
+18:32:54.240 user [mock:hold-tools]
+18:32:58.530 assistant Mock ACP turn 10: Workass tool
+18:33:33.583 user [mock:hold-tools]
+18:33:50.034 assistant Mock ACP turn 11: Workass tool
+18:33:43.824 user Agent "baseline-r-mid" finished
+18:33:50.117 assistant Mock ACP turn 12: Workass tool
+18:33:50.724 user [mock:hold-tools]
+18:34:00.206 assistant Mock ACP turn 13: Workass tool
+18:33:59.907 user Agent "baseline-r-last" finished
+18:34:00.292 assistant Mock ACP turn 14: Workass tool
+18:34:00.916 user [mock:hold-tools]
+18:34:05.309 assistant Mock ACP turn 15: Workass tool
+18:34:22.980 user Agent "baseline-r-none" finished
+18:34:23.067 assistant Mock ACP turn 16: Workass tool
+18:34:24.740 user [mock:hold-tools]
+18:34:39.007 assistant Mock ACP turn 17: Workass tool
+18:34:39.756 user Agent "baseline-r-after" finished
+18:34:39.843 assistant Mock ACP turn 18: Workass tool
+18:34:41.439 user [mock:hold-tools]
+18:34:58.331 assistant Mock ACP turn 19: Workass tool
+18:34:51.971 user Agent "baseline-l-mid" finished
+18:34:58.414 assistant Mock ACP turn 20: Workass tool
+18:34:59.012 user [mock:hold-tools]
+18:35:09.892 assistant Mock ACP turn 21: Workass tool
+18:35:09.661 user Agent "baseline-l-last" finished
+18:35:09.980 assistant Mock ACP turn 22: Workass tool
+18:35:10.611 user [mock:hold-tools]
+18:35:14.831 assistant Mock ACP turn 23: Workass tool
+18:38:13.950 user [mock:hold-tools]
+18:38:28.236 assistant Mock ACP turn 24: Workass tool
+18:38:28.887 user Agent "baseline-l-after" finished
+18:38:28.972 assistant Mock ACP turn 25: Workass tool
+18:38:30.639 user [mock:hold-tools]
+18:38:44.839 assistant Mock ACP turn 26: Workass tool
+18:38:40.635 user Agent "baseline-r5" finished
+18:38:44.930 assistant Mock ACP turn 27: Workass tool
+18:38:40.932 user Agent "baseline-r8" finished
+18:38:45.034 assistant Mock ACP turn 28: Workass tool
+18:38:45.791 user [mock:hold-tools]
+18:39:03.229 assistant Mock ACP turn 29: Workass tool
+18:38:56.001 user Agent "baseline-l7" finished
+18:39:03.317 assistant Mock ACP turn 30: Workass tool
+18:38:56.148 user Agent "baseline-l5" finished
+18:39:03.405 assistant Mock ACP turn 31: Workass tool
+18:38:58.164 user Agent "baseline-l6" finished
+18:39:03.493 assistant Mock ACP turn 32: Workass tool
+18:38:59.965 user Agent "baseline-l8" finished
+18:39:03.580 assistant Mock ACP turn 33: Workass tool
+18:39:07.279 user [mock:hold-tools]
+ assistant 
+### monitors
+18:33:38 baseline-r-mid appliedSeq 1 consumed True
+18:33:54 baseline-r-last appliedSeq 1 consumed True
+18:34:05 baseline-r-none appliedSeq 1 consumed True
+18:34:28 baseline-r-after appliedSeq 1 consumed True
+18:38:34 baseline-r5 appliedSeq 1 consumed True
+18:38:35 baseline-r6 appliedSeq 1 consumed True
+18:38:35 baseline-r7 appliedSeq 1 consumed True
+18:38:35 baseline-r8 appliedSeq 1 consumed True
+### held lines
+2026/10/30 15:38:41 [fleet] held a exit notice for conv-mvvawd85-devtgu: this chat is at its 6-notice hourly cap; the work is still readable at its home
+2026/10/30 15:38:41 [fleet] held a exit notice for conv-mvvawd85-devtgu: this chat is at its 6-notice hourly cap; the work is still readable at its home
+{'label': 'baseline-r8', 'status': 'exited', 'phase': 'done', 'summary': 'Completed', 'model': 'GPT-5.6-Luna-low', 'host': 'duklerver', 'kind': 'subagent', 'result': 'N-D
+{'label': 'baseline-r7', 'status': 'exited', 'phase': 'done', 'summary': 'Completed', 'model': 'GPT-5.6-Luna-low', 'host': 'duklerver', 'kind': 'subagent', 'result': 'N-D
+### baseline rerun of the one case whose spawn was refused by the rig's stale tool context 18:39:48.492
+{"value":"{\"ok\":true,\"m\":[[\"m-bca84b5a24134385b4ff15245544ece2\",\"ok\"]]}"}
+mesh link up after 1s
+{"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793385598207-1","l
+
+RESULT|baseline-l-none2|local|none|settled=18:40:16.048|turn_at_settle=IDLE|released_gap=turn-ended-18:39:59.277
+### tally 18:40:21.646
+NOTICES|baseline-l-none2|1
+wa-subagent-1793384634442-1 completed Agent "probe-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793384940774-1 completed Agent "probe2-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385159262-1 completed Agent "probe3-r" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385159466-1 completed Agent "probe3-l" finished run=- queued=- elapsed=- err=- result=N-DONE
+wa-subagent-1793385218013-2 completed Agent "baseline-r-mid" finished run=- queued=- elapsed=- err=- result=N-
+wa-subagent-1793385234840-3 completed Agent "baseline-r-last" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385245040-4 completed Agent "baseline-r-none" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385268862-5 completed Agent "baseline-r-after" finished run=- queued=- elapsed=- err=- result=
+wa-subagent-1793385285522-1 completed Agent "baseline-l-mid" finished run=- queued=- elapsed=- err=- result=N-
+wa-subagent-1793385303095-2 completed Agent "baseline-l-last" finished run=- queued=- elapsed=- err=- result=N
+wa-subagent-1793385498035-3 completed Agent "baseline-l-after" finished run=- queued=- elapsed=- err=- result=
+wa-subagent-1793385514762-6 completed Agent "baseline-r5" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385515539-9 completed Agent "baseline-r8" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385530045-6 completed Agent "baseline-l7" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385529874-4 completed Agent "baseline-l5" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385529958-5 completed Agent "baseline-l6" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385530155-7 completed Agent "baseline-l8" finished run=- queued=- elapsed=- err=- result=N-DON
+wa-subagent-1793385598207-1 completed Agent "baseline-l-none2" finished run=- queued=- elapsed=- err=- result=
+### order
+18:23:50.249 user [mock:hold-tools]
+18:26:59.239 assistant Mock ACP turn 1: Workass tools
+18:24:01.767 user Agent "probe-l" finished
+18:26:59.326 assistant Mock ACP turn 2: Workass tools
+18:27:01.971 user [mock:hold-tools]
+18:27:06.551 assistant Mock ACP turn 3: Workass tools
+18:28:56.619 user [mock:hold-tools]
+18:32:04.415 assistant Mock ACP turn 4: Workass tools
+18:29:06.741 user Agent "probe2-l" finished
+18:32:04.501 assistant Mock ACP turn 5: Workass tools
+18:32:07.157 user [mock:hold-tools]
+18:32:11.529 assistant Mock ACP turn 6: Workass tools
+18:32:35.139 user [mock:hold-tools]
+18:32:51.514 assistant Mock ACP turn 7: Workass tools
+18:32:44.414 user Agent "probe3-r" finished
+18:32:51.600 assistant Mock ACP turn 8: Workass tools
+18:32:51.052 user Agent "probe3-l" finished
+18:32:51.685 assistant Mock ACP turn 9: Workass tools
+18:32:54.240 user [mock:hold-tools]
+18:32:58.530 assistant Mock ACP turn 10: Workass tool
+18:33:33.583 user [mock:hold-tools]
+18:33:50.034 assistant Mock ACP turn 11: Workass tool
+18:33:43.824 user Agent "baseline-r-mid" finished
+18:33:50.117 assistant Mock ACP turn 12: Workass tool
+18:33:50.724 user [mock:hold-tools]
+18:34:00.206 assistant Mock ACP turn 13: Workass tool
+18:33:59.907 user Agent "baseline-r-last" finished
+18:34:00.292 assistant Mock ACP turn 14: Workass tool
+18:34:00.916 user [mock:hold-tools]
+18:34:05.309 assistant Mock ACP turn 15: Workass tool
+18:34:22.980 user Agent "baseline-r-none" finished
+18:34:23.067 assistant Mock ACP turn 16: Workass tool
+18:34:24.740 user [mock:hold-tools]
+18:34:39.007 assistant Mock ACP turn 17: Workass tool
+18:34:39.756 user Agent "baseline-r-after" finished
+18:34:39.843 assistant Mock ACP turn 18: Workass tool
+18:34:41.439 user [mock:hold-tools]
+18:34:58.331 assistant Mock ACP turn 19: Workass tool
+18:34:51.971 user Agent "baseline-l-mid" finished
+18:34:58.414 assistant Mock ACP turn 20: Workass tool
+18:34:59.012 user [mock:hold-tools]
+18:35:09.892 assistant Mock ACP turn 21: Workass tool
+18:35:09.661 user Agent "baseline-l-last" finished
+18:35:09.980 assistant Mock ACP turn 22: Workass tool
+18:35:10.611 user [mock:hold-tools]
+18:35:14.831 assistant Mock ACP turn 23: Workass tool
+18:38:13.950 user [mock:hold-tools]
+18:38:28.236 assistant Mock ACP turn 24: Workass tool
+18:38:28.887 user Agent "baseline-l-after" finished
+18:38:28.972 assistant Mock ACP turn 25: Workass tool
+18:38:30.639 user [mock:hold-tools]
+18:38:44.839 assistant Mock ACP turn 26: Workass tool
+18:38:40.635 user Agent "baseline-r5" finished
+18:38:44.930 assistant Mock ACP turn 27: Workass tool
+18:38:40.932 user Agent "baseline-r8" finished
+18:38:45.034 assistant Mock ACP turn 28: Workass tool
+18:38:45.791 user [mock:hold-tools]
+18:39:03.229 assistant Mock ACP turn 29: Workass tool
+18:38:56.001 user Agent "baseline-l7" finished
+18:39:03.317 assistant Mock ACP turn 30: Workass tool
+18:38:56.148 user Agent "baseline-l5" finished
+18:39:03.405 assistant Mock ACP turn 31: Workass tool
+18:38:58.164 user Agent "baseline-l6" finished
+18:39:03.493 assistant Mock ACP turn 32: Workass tool
+18:38:59.965 user Agent "baseline-l8" finished
+18:39:03.580 assistant Mock ACP turn 33: Workass tool
+18:39:07.279 user [mock:hold-tools]
+18:39:11.790 assistant Mock ACP turn 34: Workass tool
+18:39:54.122 user [mock:hold-tools]
+18:39:58.334 assistant Mock ACP turn 35: Workass tool
+18:40:15.853 user Agent "baseline-l-none2" finished
+18:40:15.936 assistant Mock ACP turn 36: Workass tool
+18:40:17.594 user [mock:hold-tools]
+ assistant 
+### monitors
+### held lines
+2026/10/30 15:38:41 [fleet] held a exit notice for conv-mvvawd85-devtgu: this chat is at its 6-notice hourly cap; the work is still readable at its home
+2026/10/30 15:38:41 [fleet] held a exit notice for conv-mvvawd85-devtgu: this chat is at its 6-notice hourly cap; the work is still readable at its home

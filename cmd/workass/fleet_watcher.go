@@ -83,8 +83,6 @@ type fleetMonitorNotice struct {
 	Home      string
 	Since     time.Time
 	LastKnown []string
-	// Failure exempts a notice from the hourly cap (§16.3b).
-	Failure bool
 }
 
 // fleetWatcher holds this daemon's monitors on other machines' entities.
@@ -508,10 +506,6 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 			ChatID: group[0].WatcherChatID, TabID: group[0].WatcherTabID,
 			LaneID: group[0].OriginLaneID, OriginOperationID: group[0].OriginOperationID,
 			TargetID: group[0].TargetID, LastKnown: lastKnown,
-			// Unknown is not a failure. It is exempt from the cap for the same
-			// reason a failure is — a storm guard that hides the one event
-			// meaning "I cannot see this machine" would be worse than the storm.
-			Failure: true,
 		})
 	}
 }
@@ -550,7 +544,6 @@ func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) 
 			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
 			Label: firstNonEmptyString(receipt.Label, row.Label), Receipt: receipt,
-			Failure: receipt.Status == "failed",
 		})
 	case fleetlog.KindAttention:
 		w.emit(fleetMonitorNotice{
@@ -560,9 +553,6 @@ func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) 
 			Label:         firstNonEmptyString(fieldString(event.Payload, "label"), row.Label),
 			AttentionKind: fieldString(event.Payload, "attentionKind"),
 			AttentionText: fieldString(event.Payload, "title"),
-			// An attention is a decision somebody is waiting on; a cap that
-			// silenced it would strand the work it is about.
-			Failure: true,
 		})
 	}
 }
@@ -627,10 +617,6 @@ func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
 			Label:          firstNonEmptyString(receipt.Label, fieldString(event.Payload, "label"), row.Label),
 			ProcessReceipt: &receipt, Outcome: outcome,
-			// A failure, a timeout and a lost job are all exempt from the
-			// hourly cap: a storm guard that hid the one notice meaning "this
-			// did not work" would be worse than the storm.
-			Failure: outcome != fleetlog.OutcomeSettled,
 		})
 	case fleetlog.KindAttention:
 		w.emit(fleetMonitorNotice{
@@ -641,7 +627,6 @@ func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.
 			AttentionKind: fieldString(event.Payload, "attentionKind"),
 			AttentionText: fieldString(event.Payload, "title"),
 			Outcome:       "",
-			Failure:       true,
 		})
 	}
 }

@@ -8,61 +8,37 @@ import (
 	"workass/internal/fleetlog"
 )
 
-// The notice budget: §16.3b's two decided numbers, applied to the monitor
-// projection.
+// The notice budget: what is left of §16.3b once a child's end stopped being
+// capped (§14h).
 //
-// "Notices are coalesced per chat per 60 s, at most 6 per chat per hour, and
-// failures are always exempt from the cap" (docs/specs/fleet-runtime.md §7,
-// §16.3b). Both numbers are fixed rather than configurable, for the same reason
-// the ten-minute threshold is: the operator decided three numbers, and a knob
-// beside a decided number is how a decided number stops being one.
+// Coalescing collapses the SAME event arriving more than once inside the 60 s
+// window: a push that raced a reconnect's backlog, a redelivery after a failed
+// ack. It does not merge two DIFFERENT children's results into one line. A
+// result is content; dropping one to save a line in the transcript would lose
+// the thing the notice exists to carry.
 //
-// Two deliberate readings, because the difference matters and a reader of this
-// file should not have to guess which one it got:
-//
-//   - Coalescing here collapses the SAME event arriving more than once inside
-//     the window — a push that raced a reconnect's backlog, a redelivery after
-//     a failed ack. It does not merge two DIFFERENT children's results into one
-//     line. A result is content; dropping one to save a line in the transcript
-//     would lose the thing the notice exists to carry. Folding several distinct
-//     settles into one aggregate line is `delegation-fabric.md` P4's change and
-//     is gated by the projection-parity test, so it is not made here.
-//   - The cap drops; it does not queue. A queued notice needs a timer to flush
-//     it, and a notice that arrives an hour late is worse than a notice that
-//     never arrived and said so in the log — the work is still readable at its
-//     home, which is the whole point of events being log entries rather than
-//     assertions.
-//
-// Failures, attentions and `home_down` are exempt. A storm guard that silenced
-// "this failed", "something is waiting on you" or "I cannot see that machine"
-// would hide exactly the events a person needs, which is the opposite of what a
-// cap is for.
-const (
-	fleetNoticeWindow  = time.Minute
-	fleetNoticeCapHour = 6
-	fleetNoticeCapSpan = time.Hour
-)
+// There is no hourly cap. It held only successful ends, since failures,
+// attentions and home_down were all exempt, and what it held was gone: the
+// monitor's cursor had moved, its home had been acknowledged, and a local child
+// was never capped at all. Found live: a chat's seventh child in an hour settled
+// its row and told nobody. A chat receives one end per child it started, so the
+// bound on these notices is the work it asked for.
+const fleetNoticeWindow = time.Minute
 
 type fleetNoticeBudget struct {
 	window time.Duration
-	cap    int
-	span   time.Duration
 
 	mu     sync.Mutex
 	recent map[string][]fleetNoticeRecord
 }
 
 type fleetNoticeRecord struct {
-	key     string
-	at      time.Time
-	counted bool
+	key string
+	at  time.Time
 }
 
 func newFleetNoticeBudget() *fleetNoticeBudget {
-	return &fleetNoticeBudget{
-		window: fleetNoticeWindow, cap: fleetNoticeCapHour, span: fleetNoticeCapSpan,
-		recent: map[string][]fleetNoticeRecord{},
-	}
+	return &fleetNoticeBudget{window: fleetNoticeWindow, recent: map[string][]fleetNoticeRecord{}}
 }
 
 // admit decides whether one notice reaches its chat. The second result names
@@ -77,26 +53,19 @@ func (b *fleetNoticeBudget) admit(notice fleetMonitorNotice, now time.Time) (boo
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	kept := make([]fleetNoticeRecord, 0, len(b.recent[chat])+1)
-	counted := 0
+	duplicate := false
 	for _, record := range b.recent[chat] {
-		if now.Sub(record.at) > b.span {
+		if now.Sub(record.at) > b.window {
 			continue
 		}
-		if record.key == key && now.Sub(record.at) <= b.window {
-			b.recent[chat] = append(kept, b.recent[chat][len(kept):]...)
-			return false, fmt.Sprintf("the same %s notice already reached this chat inside the %s window", notice.Kind, b.window)
-		}
+		duplicate = duplicate || record.key == key
 		kept = append(kept, record)
-		if record.counted {
-			counted++
-		}
 	}
-	exempt := notice.Failure
-	if !exempt && counted >= b.cap {
+	if duplicate {
 		b.recent[chat] = kept
-		return false, fmt.Sprintf("this chat is at its %d-notice hourly cap; the work is still readable at its home", b.cap)
+		return false, fmt.Sprintf("the same %s notice already reached this chat inside the %s window", notice.Kind, b.window)
 	}
-	b.recent[chat] = append(kept, fleetNoticeRecord{key: key, at: now, counted: !exempt})
+	b.recent[chat] = append(kept, fleetNoticeRecord{key: key, at: now})
 	return true, ""
 }
 

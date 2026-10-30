@@ -330,8 +330,8 @@ chat only when it is actionable: `settled` (any outcome), `lost`, `timed_out`,
 `attention`, `stalled` past a threshold the delegation itself declared, and
 `host unreachable` past the threshold. `started`, `queued`, `resumed`, progress
 and output growth never notify — they are visible by reading (§3), which is
-exactly when freshness matters. Notices are coalesced per chat per 60 s, capped
-per hour with failures exempt, and suppressed when a live waiter will consume
+exactly when freshness matters. Notices are coalesced per chat per 60 s (the
+hourly cap is gone, fleet-runtime §14h), and suppressed when a live waiter will consume
 the result, when the parent turn was stopped, or when the parent cancelled the
 child (§7).
 
@@ -682,8 +682,8 @@ fleet-wide decisions live in `fleet-runtime.md` §16 and are not repeated here.
 3. **Three numbers, fixed** —
    (a) a machine silent for **10 min** produces **one** `home down` notice per
    host (the heartbeat is a fixed ≈1 min, derived from this);
-   (b) notices are **coalesced per chat per 60 s**, at most **6 per chat per
-   hour**, **failures exempt**;
+   (b) notices are **coalesced per chat per 60 s** (the cap of 6 per chat per
+   hour was removed, fleet-runtime §14h);
    (c) logs are kept **7 days or 1,000 events per delegation**, whichever comes
    first — also the grant lifetime, since grants are re-minted on every
    connect.
