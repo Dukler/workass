@@ -619,11 +619,17 @@ class BrowserManager {
     on('did-start-loading', () => { entry.loading = true; entry.error = null; touchActivity(entry); this.publish(entry); });
     on('focus', () => {
       if (!entry.crashLeftAppFocused) return;
+      // WebContents.focus() raises its window: never for one the person left.
+      try { if (this.win.isFocused()) this.win.webContents.focus(); } catch { /* the window is closing */ }
+    });
+    // macOS focuses the view for a click before it hands it the mouse-down, so
+    // the person's press gives the page the focus the app just took back.
+    on('before-mouse-event', (_event, mouse) => {
+      if (!mouse || mouse.type !== 'mouseDown' || entry.pointerDown || !entry.crashLeftAppFocused) return;
       entry.crashLeftAppFocused = false;
-      try { this.win.webContents.focus(); } catch { /* the window is closing */ }
+      try { wc.focus(); } catch { /* the page is closing */ }
     });
     on('did-stop-loading', () => {
-      entry.crashLeftAppFocused = false;
       touchActivity(entry);
       // A navigation that ended without a new document (a download, a 204,
       // a cancel) leaves the old one in place, still usable.
@@ -683,9 +689,10 @@ class BrowserManager {
       entry.error = `browser renderer stopped (${String(details && details.reason || 'unknown')})`;
       this.publish(entry);
       // A page's renderer that died is brought back in place (same tab, same
-      // URL), a few times a minute at most. Electron focuses a page on screen
-      // when it comes back from a crash, with no setting to refuse it: if the
-      // app had the keyboard, the app takes it back in that same task.
+      // URL), a few times a minute at most. Chromium focuses a page on screen
+      // when it comes back from a crash, with no setting to refuse it, and each
+      // later navigation then keeps that focus: if the app had the keyboard, it
+      // takes it back in the same task until the person presses in the page.
       if (String(details && details.reason || '') !== 'clean-exit') {
         try { entry.crashLeftAppFocused = this.attachedView === entry.view && this.win.webContents.isFocused() === true; } catch { entry.crashLeftAppFocused = false; }
         const now = Date.now();

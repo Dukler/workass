@@ -231,14 +231,20 @@ test('a native page that crashes is reloaded in place, and its reload leaves the
   let appFocused = 0;
   page.reload = () => { reloads += 1; };
   Object.assign(win.webContents, { isFocused: () => true, focus: () => { appFocused += 1; } });
+  win.isFocused = () => true;
   manager.attachedView = entry.view;
   page.emit('render-process-gone', {}, { reason: 'crashed' });
   await new Promise((resolve) => setTimeout(resolve, 450));
   assert.equal(reloads, 1);
   page.emit('focus');
-  assert.equal(appFocused, 1);
   page.emit('focus');
-  assert.equal(appFocused, 1, 'only that once: the person may click into the page next');
+  assert.equal(appFocused, 2, 'Chromium focuses it again while it comes back, and on later navigations');
+  let pageFocused = 0;
+  page.focus = () => { pageFocused += 1; };
+  page.emit('before-mouse-event', {}, { type: 'mouseDown' });
+  assert.equal(pageFocused, 1, 'the person clicking into the page wins');
+  page.emit('focus');
+  assert.equal(appFocused, 2);
   manager.destroy();
 });
 
