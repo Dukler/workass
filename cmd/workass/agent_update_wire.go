@@ -120,10 +120,32 @@ func runningJobsForUpdate(jobs []acp.JobSurvival) []headlessupdate.RunningJob {
 	return out
 }
 
-// withRunningJobs is annotateRunningJobs for the tool path.
-func (h *agentControlHandler) withRunningJobs(result any) any {
+// withRunningJobs is annotateRunningJobs for the tool path, for the machine the
+// status is about. Another machine's status already says what runs there, and
+// this machine's jobs laid over it read as that machine having none: found live,
+// with a job running on the machine that was asked about. A headless host says it
+// under diagnostics, and hosts already out there say it only there, so it is read
+// from either place. A host too old to say is reported as not having said, because
+// "none" is the one answer that would send someone on to update it.
+func (h *agentControlHandler) withRunningJobs(machineID string, result any) any {
 	if h == nil || h.manager == nil {
 		return result
 	}
-	return annotateRunningJobs(result, runningJobsForUpdate(h.manager.RunningJobSurvival()))
+	if strings.TrimSpace(machineID) == strings.TrimSpace(h.selfMachineID) {
+		return annotateRunningJobs(result, runningJobsForUpdate(h.manager.RunningJobSurvival()))
+	}
+	fields := mapFromAnyMain(result)
+	if _, stated := fields["runningJobs"]; stated || len(fields) == 0 {
+		return result
+	}
+	out := copyAnyMap(fields)
+	if jobs := mapFromAnyMain(mapFromAnyMain(fields["diagnostics"])["runningJobs"]); len(jobs) > 0 {
+		out["runningJobs"] = jobs
+		return out
+	}
+	out["runningJobs"] = map[string]any{
+		"known":   false,
+		"summary": "this machine did not say which jobs it is running, so whether an update would kill any is unknown",
+	}
+	return out
 }

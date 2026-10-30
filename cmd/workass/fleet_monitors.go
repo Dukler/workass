@@ -135,6 +135,7 @@ func openFleetMonitors(
 	// The home delivers to a watcher on this machine in process, through the
 	// watcher's own projection — one path, local and remote.
 	service.home.SetLocalDelivery(service.watcher.IngestLocalEvent)
+	service.watcher.localHome = service.home
 	if service.watcher.RegisterOfferChannel(hub) {
 		logger.Printf("[workass] registered the fleet monitor channel %s", fleetMonitorOfferChannel)
 	}
@@ -155,6 +156,14 @@ func openFleetMonitors(
 	// Retention is applied once at startup, where it costs nothing and is
 	// visible in the log, rather than on a timer of its own.
 	logs.Prune()
+	// What this machine's own chats are still owed: nothing else would ask, because
+	// a link coming up is what asks for everything else.
+	service.watcher.AdoptHeldLocal(service.home)
+	service.run.Add(1)
+	go func() {
+		defer service.run.Done()
+		service.watcher.drainLocal()
+	}()
 	return service
 }
 
@@ -182,6 +191,7 @@ func (s *fleetMonitorService) Close() {
 	if s == nil {
 		return
 	}
+	s.watcher.stopRetries()
 	s.run.Wait()
 }
 

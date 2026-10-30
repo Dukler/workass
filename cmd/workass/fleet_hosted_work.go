@@ -185,7 +185,7 @@ func (w *fleetWatcher) adoptHostedRows(ctx context.Context, peerID string) {
 			continue
 		}
 		w.logf("[fleet] %s no longer has %s and logged no end for it", peerID, item.ID)
-		w.project(row, fleetlog.Event{Kind: fleetlog.KindExit, Entity: target.String(), Payload: map[string]any{
+		w.applySynthesized(peerID, row, fleetlog.Event{Kind: fleetlog.KindExit, Entity: target.String(), Payload: map[string]any{
 			"outcome": fleetlog.OutcomeFailed, "label": item.Label,
 			"receipt": subagentReceiptPayload(acp.SubagentReceipt{
 				ReceiptID: "subagent-" + item.ID, SubagentID: item.ID, Label: item.Label, Status: "failed",
@@ -193,7 +193,6 @@ func (w *fleetWatcher) adoptHostedRows(ctx context.Context, peerID string) {
 				Error: "the machine running this subagent no longer has it and recorded no end, so what it did is unknown",
 			}),
 		}})
-		_, _ = w.monitors.Update(row.Ref, func(entry *fleetlog.Registration) { entry.Consumed = true })
 	}
 }
 
@@ -296,7 +295,12 @@ func (w *fleetWatcher) ingestState(peerID string, fields map[string]any) {
 // settleHostedRow ends the asking chat's row from the job or child's exit. It
 // runs before the notice decision, so a cancel, which notifies nobody, still
 // ends the row.
+//
+// A job on this machine is not hosted: its own report has already ended its row.
 func (w *fleetWatcher) settleHostedRow(row fleetlog.Registration, event fleetlog.Event) {
+	if row.TargetHome() == w.self {
+		return
+	}
 	if w.settleHosted != nil && event.Kind == fleetlog.KindExit {
 		w.settleHosted(row, event)
 	}

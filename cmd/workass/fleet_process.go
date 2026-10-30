@@ -354,10 +354,91 @@ func (w *fleetWatcher) IngestLocalEvent(event fleetlog.Event, head uint64) uint6
 		"targetId": event.Entity, "head": head,
 		"events": []any{eventPayload(event)},
 	})
-	if updated, found := w.monitors.Get(row.Ref); found {
-		return updated.AppliedSeq
+	updated, found := w.monitors.Get(row.Ref)
+	if !found {
+		return 0
 	}
-	return 0
+	if updated.AppliedSeq < head && !w.isRefused(row.Ref) {
+		// The event overtook an earlier one, and on this machine nothing else
+		// would ask for the gap.
+		w.drainLocalTarget(updated)
+		updated, _ = w.monitors.Get(row.Ref)
+	}
+	return updated.AppliedSeq
+}
+
+// WatchLocal is the watcher's half of a monitor on a job this machine runs for
+// a chat on this machine. The home's half says who is owed; this half is what
+// the in-process delivery looks up, and with only the home's half every local
+// job settled its row and told nobody. A job can end in the report that first
+// registers it, before this exists, so the log is read once it does.
+func (w *fleetWatcher) WatchLocal(held fleetlog.Registration) {
+	if !w.ready() || held.TargetHome() != w.self || held.WatcherHome() != w.self {
+		return
+	}
+	row, err := w.Record(fleetlog.Registration{
+		WatcherID: held.WatcherID, TargetID: held.TargetID, Kinds: held.Kinds, Label: held.Label,
+		WatcherChatID: held.WatcherChatID, WatcherTabID: held.WatcherTabID,
+		OriginLaneID: held.OriginLaneID, OriginOperationID: held.OriginOperationID,
+	})
+	if err != nil {
+		w.logf("[fleet] could not watch %s: %v", held.TargetID, err)
+		return
+	}
+	if !row.Consumed {
+		w.drainLocalTarget(row)
+	}
+}
+
+// drainLocalTarget applies everything one local monitor has not applied yet.
+func (w *fleetWatcher) drainLocalTarget(row fleetlog.Registration) {
+	if !w.localHome.ready() {
+		return
+	}
+	slice, err := w.localHome.logs.Since(row.TargetID, row.AppliedSeq, 0)
+	if err != nil {
+		w.logf("[fleet] could not read the log of %s: %v", row.TargetID, err)
+		return
+	}
+	if len(slice.Events) > 0 || slice.Truncated {
+		w.applySlice(context.Background(), w.self, row.Ref, slicePayload(slice))
+	}
+}
+
+// drainLocal does that for every local monitor still owed something.
+func (w *fleetWatcher) drainLocal() {
+	if !w.ready() {
+		return
+	}
+	for _, row := range w.monitors.ByTargetHome(w.self) {
+		if !row.Consumed {
+			w.drainLocalTarget(row)
+		}
+	}
+}
+
+// AdoptHeldLocal runs at boot, for the monitors a build before WatchLocal left
+// with no watcher half. A job still running gets one and is told about like any
+// other. One that already ended is only retired: a notice for it now, possibly
+// days late and one per old job, would be noise rather than news, and each would
+// start a turn in its chat.
+func (w *fleetWatcher) AdoptHeldLocal(home *fleetHome) {
+	if !w.ready() || !home.ready() {
+		return
+	}
+	for _, held := range home.monitors.All() {
+		if held.WatcherHome() != w.self || held.TargetHome() != w.self {
+			continue
+		}
+		if _, watched := w.monitors.Get(held.Ref); watched {
+			continue
+		}
+		if !home.hasExit(held.TargetID) {
+			w.WatchLocal(held)
+			continue
+		}
+		home.AckLocal(held.TargetID, home.logs.Head(held.TargetID))
+	}
 }
 
 // spawnedWorkReceiptPayload carries a process child's bounded terminal receipt
