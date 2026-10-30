@@ -1,0 +1,19 @@
+# Mac, CLI, 1000 rounds of 24
+RESULT bin=workass-before rounds=1000 n=24 jobs=24000 ran=23965 refused=35 bad_rounds=24 secs=132
+  19 workass run: supervised-job outbox OUTBOX is unusable: state database migration history does not match this build: recorded migration 1, want 1 of 0
+  11 workass run: supervised-job outbox OUTBOX is unusable: state database is locked by another process (is another Workass daemon using this state directory?): PRAGMA journal
+   5 workass run: supervised-job outbox OUTBOX is unusable: state database migration history does not match this build: database has tables but no migration history
+RESULT bin=workass-after rounds=1000 n=24 jobs=24000 ran=24000 refused=0 bad_rounds=0 secs=137
+# Mac, through a dev daemon, 40 rounds of 24
+model: {"value":"Mock deterministic"}
+chat conv-mvvjiztd-em9ajh
+DAEMON wanted=960 with_row_or_receipt=957 lost=3 receipt_status={'exited': 256} row_status={'exited': 957}
+LOST ['r28-8', 'r9-3', 'r9-4']
+RESULT tag=before rounds=40 n=24 jobs=960 refused=3 notreported=3 daemonHeldOutbox=1
+   2 workass run: supervised-job outbox OUTBOX is unusable: state database is locked by another process (is another Workass daemon using this st
+   1 workass run: supervised-job outbox OUTBOX is unusable: state database migration history does not match this build: database has tables but 
+model: {"value":"Mock deterministic"}
+chat conv-mvvjl4ca-3cmbkn
+DAEMON wanted=960 with_row_or_receipt=960 lost=0 receipt_status={'exited': 256} row_status={'exited': 960}
+LOST []
+RESULT tag=after rounds=40 n=24 jobs=960 refused=0 notreported=0 daemonHeldOutbox=1

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -387,3 +389,73 @@ func TestEmbeddedMigrationsAreContiguousAndNamed(t *testing.T) {
 }
 
 func itoa(value int) string { return strconv.Itoa(value) }
+
+var sharedRaceMigrations = []Migration{{Version: 1, Name: "one", SQL: `CREATE TABLE one (id INTEGER PRIMARY KEY)`}}
+
+// Another process creating a shared database while this one reads its version
+// and history must not make a good file read as a mismatch.
+func TestSharedOpenSurvivesACreatorBetweenVersionAndHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	open := func() (*DB, error) {
+		return Open(Options{Path: path, Shared: true, BinaryVersion: "test", Migrations: sharedRaceMigrations})
+	}
+	other := make(chan error, 1)
+	var fired atomic.Bool
+	migrateReadHook = func() {
+		if !fired.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			db, err := open()
+			if err == nil {
+				err = db.Close()
+			}
+			other <- err
+		}()
+		// Long enough for the other open to commit, if nothing holds it off.
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Cleanup(func() { migrateReadHook = nil })
+
+	db, err := open()
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	defer db.Close()
+	if err := <-other; err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	if db.SchemaVersion() != 1 {
+		t.Fatalf("schema version %d, want 1", db.SchemaVersion())
+	}
+}
+
+type busyExecer struct {
+	busy  int
+	calls int
+}
+
+func (e *busyExecer) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	e.calls++
+	if e.calls <= e.busy {
+		return nil, ErrLocked
+	}
+	return driver.ResultNoRows, nil
+}
+
+// SQLite can refuse a switch to WAL at once while another process holds the
+// file. A shared open waits that out; state.db's second daemon still fails fast.
+func TestPragmaWaitsOutBusyOnlyWhenAskedTo(t *testing.T) {
+	waited := &busyExecer{busy: 3}
+	if err := execPragma(context.Background(), waited, "PRAGMA journal_mode = WAL", time.Minute); err != nil || waited.calls != 4 {
+		t.Fatalf("shared: err %v after %d calls, want nil after 4", err, waited.calls)
+	}
+	exclusive := &busyExecer{busy: 3}
+	if err := execPragma(context.Background(), exclusive, "PRAGMA journal_mode = WAL", 0); !errors.Is(err, ErrLocked) || exclusive.calls != 1 {
+		t.Fatalf("exclusive: err %v after %d calls, want ErrLocked after 1", err, exclusive.calls)
+	}
+	bounded := &busyExecer{busy: 1 << 30}
+	if err := execPragma(context.Background(), bounded, "PRAGMA journal_mode = WAL", 30*time.Millisecond); !errors.Is(err, ErrLocked) {
+		t.Fatalf("bounded: err %v, want ErrLocked once the wait is over", err)
+	}
+}

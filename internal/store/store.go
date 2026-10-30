@@ -208,6 +208,9 @@ func Open(opts Options) (*DB, error) {
 		return nil, err
 	}
 	connector := &pragmaConnector{base: base, pragmas: connectionPragmas(busy, syncMode, opts.Shared)}
+	if opts.Shared {
+		connector.busyWait = busy
+	}
 	pool := sql.OpenDB(connector)
 	// One connection: EXCLUSIVE locking mode admits no second one, and one
 	// writer is the design anyway. It never idles out, so the lock and the
@@ -281,6 +284,11 @@ const newFileAutoVacuum = "PRAGMA auto_vacuum = INCREMENTAL"
 type pragmaConnector struct {
 	base    driver.Connector
 	pragmas []string
+	// busyWait is how long a pragma keeps trying while the file is busy. SQLite
+	// answers a journal_mode switch at once, without busy_timeout, when another
+	// connection holds the file, and on a SHARED database that is only the next
+	// process starting up. state.db leaves it zero: a second daemon fails fast.
+	busyWait time.Duration
 }
 
 func (c *pragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -304,7 +312,7 @@ func (c *pragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
 				continue
 			}
 		}
-		if _, err := execer.ExecContext(ctx, pragma, nil); err != nil {
+		if err := execPragma(ctx, execer, pragma, c.busyWait); err != nil {
 			_ = conn.Close()
 			return nil, classify(fmt.Errorf("%s: %w", pragma, err))
 		}
@@ -313,6 +321,17 @@ func (c *pragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
 }
 
 func (c *pragmaConnector) Driver() driver.Driver { return c.base.Driver() }
+
+func execPragma(ctx context.Context, execer driver.ExecerContext, pragma string, busyWait time.Duration) error {
+	deadline := time.Now().Add(busyWait)
+	for {
+		_, err := execer.ExecContext(ctx, pragma, nil)
+		if err == nil || !IsBusy(err) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func queryInt(ctx context.Context, conn driver.Conn, query string) (int64, error) {
 	queryer, ok := conn.(driver.QueryerContext)

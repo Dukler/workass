@@ -1021,6 +1021,16 @@ it describes, with `kind: "subagent"`, under `wouldDie`, whether tracked, hosted
 machine or native to a provider. It is the set a boot would settle as orphaned. Each machine
 reports its own: a row whose work runs on another machine is that machine's to list.
 
+## 14k. A burst on a fresh outbox loses no job (2026-10-30)
+
+Reproduced first. Evidence is in `docs/evidence/job-bugs-20261030/RESULTS-3.md`.
+
+Supervisors create the outbox together, so every read of its schema has to survive another process
+committing the schema at that moment. The version and the history are read in one transaction,
+and on a `Shared` database a pragma that answers busy is retried up to the busy timeout. `state.db`
+keeps failing fast, since a second daemon there is the error it reports. Refused jobs on a fresh
+outbox went from 58 of 43,200 on the Mac and 84 of 7,200 on Linux to none.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global
