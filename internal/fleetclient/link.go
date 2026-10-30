@@ -55,6 +55,23 @@ type Link struct {
 
 	onEvent func(peerID, channel string, payload any)
 	logf    func(string, ...any)
+
+	// events is the inbound event queue, drained by ONE goroutine so the order
+	// a peer published in is the order a handler sees.
+	//
+	// It exists because a handler may invoke back over this same link — P3's
+	// subscriber acknowledges the events it applied (§5) — and a handler called
+	// straight from the read loop would be waiting for a reply that only the
+	// read loop can deliver. That is a deadlock, and it resolves only when the
+	// invoke's own timeout expires, which is worse than slow: it looks like a
+	// peer that stopped answering.
+	events chan inboundEvent
+}
+
+// inboundEvent is one event frame, queued for the dispatcher.
+type inboundEvent struct {
+	channel string
+	payload any
 }
 
 // AccessState is the peer's verdict on this socket, if it stated one.
@@ -153,6 +170,13 @@ func dialLink(ctx context.Context, opts dialOptions) (*Link, error) {
 		pending: make(map[string]chan reply),
 		onEvent: opts.onEvent,
 		logf:    opts.logf,
+	}
+	if link.logf == nil {
+		link.logf = func(string, ...any) {}
+	}
+	if link.onEvent != nil {
+		link.events = make(chan inboundEvent, inboundEventQueue)
+		go link.dispatchEvents()
 	}
 	go link.readLoop()
 	return link, nil
@@ -298,9 +322,38 @@ func (l *Link) readLoop() {
 				l.accessReason, _ = state["reason"].(string)
 				l.mu.Unlock()
 			}
-			if l.onEvent != nil {
-				l.onEvent(l.peerID, frame.Channel, frame.Payload)
-			}
+			l.queueEvent(frame.Channel, frame.Payload)
+		}
+	}
+}
+
+// inboundEventQueue bounds what one peer may park in this daemon's memory. A
+// queue that is full DROPS the event and says so: a dropped push is a
+// postponement, because a subscriber asks again from its cursor on the next
+// sync and nothing in the design depends on a push arriving (§5). Blocking the
+// read loop instead would stall the replies this link also carries.
+const inboundEventQueue = 256
+
+func (l *Link) queueEvent(channel string, payload any) {
+	if l.onEvent == nil || l.events == nil {
+		return
+	}
+	select {
+	case l.events <- inboundEvent{channel: channel, payload: payload}:
+	case <-l.closed:
+	default:
+		l.logf("[fleet] dropped a %s event from %s: this link's event queue is full; the subscriber will ask again from its cursor", channel, l.peerID)
+	}
+}
+
+// dispatchEvents drains the queue in order, one handler at a time.
+func (l *Link) dispatchEvents() {
+	for {
+		select {
+		case <-l.closed:
+			return
+		case event := <-l.events:
+			l.onEvent(l.peerID, event.channel, event.payload)
 		}
 	}
 }

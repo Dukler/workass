@@ -72,16 +72,16 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	// each catalog natively. With the daemon able to dial, the fleet-wide chat
 	// list has to be answerable over a link too, or workass_list_chats would be
 	// the one tool that still needed the app open (§6, §10).
-	"chat.list": remoteAgentMachineScoped,
-	"agent.question":          remoteAgentLocalOnly,
-	"html.render":             remoteAgentLocalOnly,
-	"artifact.host":           remoteAgentLocalOnly,
-	"schedule.create":         remoteAgentLocalOnly,
-	"schedule.list":           remoteAgentLocalOnly,
-	"schedule.cancel":         remoteAgentLocalOnly,
-	"external.register":       remoteAgentLocalOnly,
-	"external.settle":         remoteAgentLocalOnly,
-	"obligation.get":          remoteAgentLocalOnly,
+	"chat.list":         remoteAgentMachineScoped,
+	"agent.question":    remoteAgentLocalOnly,
+	"html.render":       remoteAgentLocalOnly,
+	"artifact.host":     remoteAgentLocalOnly,
+	"schedule.create":   remoteAgentLocalOnly,
+	"schedule.list":     remoteAgentLocalOnly,
+	"schedule.cancel":   remoteAgentLocalOnly,
+	"external.register": remoteAgentLocalOnly,
+	"external.settle":   remoteAgentLocalOnly,
+	"obligation.get":    remoteAgentLocalOnly,
 }
 
 // remoteAgentLocalOnlyReasons says, per method, why another machine cannot be

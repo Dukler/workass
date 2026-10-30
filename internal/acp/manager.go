@@ -132,6 +132,8 @@ type Manager struct {
 	receiptMu                    sync.Mutex
 	subagentCompletionObserverMu sync.RWMutex
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
+	subagentLifecycle            func(SubagentLifecycleEvent)
+	subagentLifecycleMu          sync.RWMutex
 	harnessTurns                 *harnessTurnStore
 	spawnedWorkMu                sync.Mutex
 	spawnedWorkCommitMu          sync.Mutex

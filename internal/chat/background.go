@@ -58,6 +58,15 @@ type SpawnAgentAction struct {
 	PermissionIntent string
 	// Fork starts the subagent as a native fork of this chat's session.
 	Fork bool `json:",omitempty"`
+	// OriginMachine, OriginChatID and OriginTabID name the chat that ASKED when
+	// that chat lives on another fleet machine (fleet-runtime §6's immutable
+	// origin stamp). They are durable rather than read from the request context
+	// on purpose: the action may be drained by a later wake, and a replay that
+	// lost the origin would spawn a child that reports into the wrong chat —
+	// which is the exact failure the fleet runtime exists to remove.
+	OriginMachine string `json:",omitempty"`
+	OriginChatID  string `json:",omitempty"`
+	OriginTabID   string `json:",omitempty"`
 }
 
 type MessageAgentAction struct {

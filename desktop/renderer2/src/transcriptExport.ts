@@ -3,6 +3,7 @@
 // pasted into an issue, PR, or notes doc.
 
 import type { Chat, Msg, TimelineEvent, ToolEvent, PlanEvent, ThinkingEvent, RestoredEvent } from './store/types';
+import { noticeWord } from './notice-word.ts';
 
 const TOOL_STATUS: Record<string, string> = {
   in_progress: 'en curso', pending: 'pendiente', completed: 'listo', failed: 'falló', error: 'falló',
@@ -57,7 +58,7 @@ export function chatToMarkdown(chat: Chat): string {
     // A Workass wake-up notice is not the user speaking (review
     // wa-subagent-1792184734224-6, correction 5).
     if (m.notice) {
-      lines.push(`_${m.notice.title?.trim() || 'Subagente'} ${m.notice.status === 'failed' ? 'falló' : 'terminó'}_`, '');
+      lines.push(`_${m.notice.title?.trim() || 'Subagente'} ${noticeWord(m.notice.status)}_`, '');
       continue;
     }
     if (m.role === 'user') {

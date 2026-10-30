@@ -4,7 +4,14 @@ Status: SPEC v4 — **ACCEPTED 2026-10-30** (operator: "go"). §13 P1 (ids and
 homes) shipped in `bb517b99`; §13 P2 (the mesh) is built — `internal/fleetclient`
 dials, enrols with no human, keeps one heartbeat per pair, and `apply` to a
 non-self home travels over that link with the §6 envelope, the renderer relay
-demoted to the fallback §12 reserves it for. P3 onwards is unbuilt.
+demoted to the fallback §12 reserves it for. §13 P3 (logs, subscriptions,
+monitors) is built — `internal/fleetlog` is the per-entity append-only log and
+the durable monitor registry at both ends, subscriptions are cursors over the
+link with store-and-forward and dedup by seq, `home_down`/`home_up` are
+synthesized by the watcher's own daemon from the heartbeat, and subagents are
+the first client: a subagent spawned from a chat on one daemon and hosted on
+another reports its completion and attention INTO THE SPAWNING CHAT. P4 onwards
+is unbuilt.
 All §16 decisions are DECIDED, and five lessons from T3 Code's peer links
 are adopted (§4, §6, §11): per-link pairing that is individually revocable,
 narrowing-only permission forwarding with an immutable origin stamp and no

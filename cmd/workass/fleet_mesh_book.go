@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"workass/internal/fleet"
@@ -37,6 +38,13 @@ type fleetMeshService struct {
 	keyIDs func() []string
 	logger *log.Logger
 	ctx    context.Context
+
+	// P3's observers, set after construction: the mesh exists before the chat
+	// runtime does, and a mesh with none of them is the P2 daemon exactly.
+	observers sync.RWMutex
+	onEvent   func(peerID, channel string, payload any)
+	onBeat    func(fleetclient.State)
+	onUp      func(ctx context.Context, peerID string)
 }
 
 // Start begins supervising every peer already paired, then reads the book once.
@@ -191,6 +199,20 @@ func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Sto
 		Store:         peers,
 		Keys:          keys,
 		Logf:          logger.Printf,
+		OnEvent: func(peerID, channel string, payload any) {
+			// A peer's log pushes arrive here. Everything else a peer publishes
+			// is read off the socket and dropped, as it was before P3.
+			if onEvent, _, _ := service.monitorObservers(); onEvent != nil {
+				onEvent(peerID, channel, payload)
+			}
+		},
+		OnBeat: func(state fleetclient.State) {
+			// Every beat, not only every change: `home_down` is a duration
+			// threshold and has to be re-read as time passes (§16.3a).
+			if _, onBeat, _ := service.monitorObservers(); onBeat != nil {
+				onBeat(state)
+			}
+		},
 		OnState: func(state fleetclient.State) {
 			// Link state is a property of the pair, published locally as an
 			// event. It is the one vocabulary everything above the mesh reads:
@@ -200,6 +222,16 @@ func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Sto
 				"since": state.Since.UTC().Format(time.RFC3339), "address": state.Address,
 				"reason": redactedSessionString(state.Reason),
 			})
+			_, onBeat, onUp := service.monitorObservers()
+			if onBeat != nil {
+				onBeat(state)
+			}
+			if state.Status == fleetclient.StatusUp && onUp != nil && service.ctx != nil {
+				// The link came up: state the cursors and take the backlog. This
+				// is the only thing that happens on reconnect, and nothing polls
+				// in between (§5).
+				onUp(service.ctx, state.Peer)
+			}
 		},
 	})
 	hub.SetPeerLinks(service.Observe)

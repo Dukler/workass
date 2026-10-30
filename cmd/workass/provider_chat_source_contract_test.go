@@ -246,13 +246,17 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"SetChatEnvObserver":             {},
 	"SetChatEnvRestorer":             {},
 	"InstallSpawnedWorkObserver":     {},
-	"StartProviderDetection":         {},
-	"StartProviderStartup":           {},
-	"StartProviderUpdate":            {},
-	"StateDir":                       {},
-	"Stats":                          {},
-	"ToggleProvider":                 {},
-	"UpdateWorkInProgress":           {},
+	// One wiring setter, like SetChatEnvObserver beside it: the daemon hands the
+	// manager the observer that turns a subagent's life into entity-log events
+	// (fleet-runtime §7). It reads nothing and decides nothing about a chat.
+	"SetSubagentLifecycleObserver": {},
+	"StartProviderDetection":       {},
+	"StartProviderStartup":         {},
+	"StartProviderUpdate":          {},
+	"StateDir":                     {},
+	"Stats":                        {},
+	"ToggleProvider":               {},
+	"UpdateWorkInProgress":         {},
 }
 
 type phaseCManagerRule struct {
