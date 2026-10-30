@@ -151,6 +151,13 @@ type SpawnedWorkItem struct {
 	Isolation    string `json:"isolation,omitempty"`
 	// Stalled is the one-shot declared stall: a flag on running, never a state.
 	Stalled bool `json:"stalled,omitempty"`
+	// HostMachine and HostMachineName name the fleet machine a row's work runs
+	// on when that is NOT this machine (docs/specs/fleet-runtime.md §6: where it
+	// runs is a different fact from who owns it). Empty — which is every row
+	// this product has ever written — means this machine, so the projection is
+	// byte-identical for everything local.
+	HostMachine     string `json:"hostMachine,omitempty"`
+	HostMachineName string `json:"hostMachineName,omitempty"`
 	// The declarations the supervisor is enforcing, kept on the row so a reader
 	// can see what this job promised about itself.
 	MaxRuntimeMs int64 `json:"maxRuntimeMs,omitempty"`

@@ -154,3 +154,15 @@ func Do(ctx context.Context, config Config, name string, call *Call) (Response, 
 	}
 	return response, nil
 }
+
+// WriteConfig saves one tool-client configuration where only this user can read
+// it. The credential inside is why the mode is not negotiable: ResolveCredential
+// refuses a context file any other user could read, so writing one any other
+// way would produce a file the product then rejects.
+func WriteConfig(path string, config Config) error {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}

@@ -41,7 +41,20 @@ const (
 	maxOperationsSize = 256 * 1024
 )
 
-var operationIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,96}$`)
+// operationIDPattern is the headless updater's own check on a caller-stable
+// operation id. It accepts the SAME character set the product-wide contract
+// accepts (provider.ValidateOperationID) and the Electron shell's own
+// validator already accepted, which is what it should always have done: a
+// stricter alphabet here meant one updater half rejected an id the other half
+// took. `update-duklerver-0.1.237-20261030` was refused for its dots alone,
+// and the refusal did not say so.
+var operationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:/+=@-]{7,95}$`)
+
+// operationIDRequirement is the format, in the refusal itself. A caller that
+// is told only "invalid" has to guess which of length, alphabet and leading
+// character it broke; a caller that is told the rule fixes it in one try.
+const operationIDRequirement = "authorized update requires a valid caller-stable operation_id: " +
+	"8 to 96 characters, starting with a letter or digit, from A-Z a-z 0-9 and _ . : / + = @ -"
 
 // Options configures one Manager. Every external dependency is injectable so
 // the activation contract is testable off a Linux service host.
@@ -422,7 +435,7 @@ func (m *Manager) Apply(ctx context.Context, request ApplyRequest) (map[string]a
 	currentVersion := strings.TrimSpace(request.ExpectedCurrentVersion)
 	targetVersion := strings.TrimSpace(request.ExpectedTargetVersion)
 	if !operationIDPattern.MatchString(operationID) {
-		return nil, errors.New("authorized update requires a valid caller-stable operation_id")
+		return nil, errors.New(operationIDRequirement)
 	}
 	if machineID == "" {
 		return nil, errors.New("authorized update requires an exact machine_id")

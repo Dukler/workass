@@ -257,9 +257,15 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// touches a chat actor — a process child's authority is the machine that
 	// holds its pids and its files, and the owning chat is fenced before any of
 	// them is called.
-	"ListProcessChildren":    {},
-	"ResourceQueues":         {},
-	"ReadProcessChild":       {},
+	"ListProcessChildren": {},
+	"ResourceQueues":      {},
+	"ReadProcessChild":    {},
+	// Two reads beside them, for a supervised job started from another machine
+	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
+	// authorizes, and the endpoint template a context file is written from.
+	// Neither touches a chat actor, and neither mints anything.
+	"RunTokenFor":            {},
+	"ToolContextTemplate":    {},
 	"StartProviderDetection": {},
 	"StartProviderStartup":   {},
 	"StartProviderUpdate":    {},
@@ -347,6 +353,22 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// settles nothing: if the supervisor never returns, the row becomes
 		// `lost` through the ordinary verdict, which is the honest answer.
 		"cmd/workass/agent_control.go:call:CancelProcessChild": {1, "a cancel is recorded for the supervisor and settles nothing itself"},
+		// A subagent HOSTED here for a chat on another machine (fleet-runtime
+		// §6: where it runs is not who owns it). There is no chat actor here to
+		// go through — the owner is elsewhere and holds the row, the monitor and
+		// the notice — so this spawn is deliberately outside the outbox, exactly
+		// as the supervisor's own registration above is.
+		"cmd/workass/fleet_hosted_subagent.go:hostedSpawnForOrigin:SpawnSubagent": {1, "a subagent hosted here for a chat on another machine, whose owner holds the row"},
+		// The owner's half of the same separation: the row and its settle, in
+		// the chat that asked, keyed by the child's id at its home. Both are
+		// idempotent — one row per child — and neither starts a turn.
+		"cmd/workass/fleet_hosted_subagent.go:recordHostedSubagent:RegisterHostedSubagent":  {1, "the asking chat's own row for a child running on another machine"},
+		"cmd/workass/fleet_hosted_subagent.go:settleHostedSubagentRow:SettleHostedSubagent": {1, "the same row, settled from the monitor exit that the notice is about"},
+		// One job, one credential. Minting is fenced by the host chat and the
+		// operation id; consuming ends the grant with the single registration it
+		// authorized (fleet_process_start.go).
+		"cmd/workass/fleet_process_start.go:writeRunCredential:MintRunToken": {1, "one one-shot credential for one supervised job"},
+		"cmd/workass/agent_control.go:call:ConsumeRunToken":                  {1, "the job's credential ends with the report it authorized"},
 	}
 }
 
@@ -984,6 +1006,10 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		// cancelling one writes a stop file a supervisor acts on. Listing and
 		// reading are pure reads and carry no operation id.
 		"workass_register_process_child": {}, "workass_cancel_process_child": {},
+		// Asking another machine to START one is the same kind of commitment:
+		// it launches a supervisor there and mints the one credential that job
+		// will ever hold, so one operation id is one job (fleet-runtime §6).
+		"workass_start_process_child": {},
 	}
 	browserMutations := map[string]struct{}{
 		"workass_browser_open": {}, "workass_browser_navigate": {}, "workass_browser_click": {},

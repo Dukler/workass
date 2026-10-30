@@ -433,7 +433,11 @@ dropped watcher leaks no registration.
 Job object, spool-and-ingest, exit code), `lost`, `timed_out`, one-shot stall,
 refusal of evidence-less registration. Tests: child survives a daemon restart
 *and* a self-update; killing the supervisor yields `lost`, never `running`; the
-token never appears in argv.
+token never appears in argv. Plus §14b's `process.start`: refused below full
+access and refused locally, both by name; the job's environment contains
+nothing of the daemon's; one credential authorizes one registration and dies
+with it; the supervisor's argv names the asking chat as `--owner` and the
+credential only as a path.
 
 **P5 — waits and forks collapse.** Declared `waiting{conditions}` resumes the
 same native session; an undeclared wait raises `attention{ended-while-waiting}`
@@ -493,12 +497,72 @@ non-actionable event.
 | Clock disagreement | ordering is by seq; expiries are read only by their issuer |
 | UI showing stale fleet state | replicas carry watermarks; `fresh` reads are one call away |
 
+## 14b. What the first live P1–P4 test changed (2026-10-30)
+
+The operator drove duklerver from the Mac and reported five findings. Four were
+bugs in this lane's own code and are fixed where they were; two of them change
+what this document says, and both changes are recorded here rather than left as
+a difference between the spec and the product.
+
+**§6 gains a HOST TARGET on `agent.spawn`.** The spec already held that where an
+entity runs and who owns it are two facts, but the Agent API expressed only one
+of them: the single way to name a machine was the machine-tagged `tab_id` +
+`chat_id` of a chat on it — which also changed the OWNER. A subagent of the
+CALLING chat, hosted elsewhere, was therefore inexpressible, and the attempt
+produced a child of the other machine's chat: a row under a conversation that
+never asked for it, which the operator read, correctly, as "not a subagent, not
+even a child chat". `workass_spawn_subagent` now takes `machine_id` as the host
+while the owner stays the calling chat; the host registers no row and the asking
+chat holds the row, the monitor and the notice. A hosted subsession is REFUSED
+by name until P6 (a chat hosted elsewhere cannot be listed under its parent
+here), and a hosted fork is refused by §9 (a native session runs where its file
+is).
+
+**§9 and §15's "daemon-side spawning" non-goal is AMENDED, narrowly.** The
+non-goal's stated reason is that the daemon must never lend its environment to
+a child, and that reason stands. What the test found is that the non-goal also
+removed the only way to START supervised work on the machine that has the
+files: `workass run --owner <global chat id>` already reports into a chat on
+another machine, but registration is local by design, so somebody had to be
+standing on that machine to run it — and `workass run` from a plain shell there
+says so ("no Workass credential in this environment ... but no chat is told").
+`process.start` closes that gap under five conditions, all enforced:
+
+1. it is refused on a link below full access, naming the capability (§11);
+2. it is refused for the local machine, where the caller has its own shell —
+   which is where the non-goal's reason actually applies;
+3. the job's environment is BUILT, not inherited: PATH, HOME, the data root,
+   its own credential path, and the variables the caller named. Nothing of the
+   daemon's environment reaches it, so no secret can;
+4. the only credential it holds is a one-shot token good for exactly one
+   `process.register` with one operation id, consumed by that registration;
+5. it is still `workass run` that supervises, in its own process group, so the
+   child is not a child of the daemon and P4's `lost` verdict is unchanged.
+
+The three remaining findings needed no spec change: a self-addressed
+`update.status`/`update.apply` lost the `machine_id` the updater is addressed by
+all the way down (the strip that routes a self-addressed call locally was not
+undone for the renderer half); the headless updater's operation-id alphabet was
+stricter than the product-wide one and refused an id for its dots without
+saying so; and `workass fleet links` read a REDACTED peer and then asked
+"linked?", which is "has a token" — so every paired peer printed as unlinked
+while the link was up and heartbeating. The same display also showed nothing
+for the reverse direction, because a dialler never stated the port it listens
+on, so the receiving daemon learned no route back and could not dial or
+heartbeat the pair from its own side. All four are fixed with tests.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global
-transaction across entities; daemon-side spawning; a DAG engine; replicating
-secrets or large blobs by value; a cloud relay for peers that cannot see each
-other.
+transaction across entities; a DAG engine; replicating secrets or large blobs
+by value; a cloud relay for peers that cannot see each other.
+
+Amended 2026-10-30 (§14b): **daemon-side spawning** was a non-goal and is now
+one narrow, guarded capability — `process.start`, which starts the HOST's own
+`workass run` for a chat on another machine, under the five conditions §14b
+lists. It stays a non-goal for the local machine, where a caller has a shell of
+its own, and the rule it was protecting — the daemon never lends its
+environment to a child — is kept literally rather than relaxed.
 
 Removed by decision: `sandbox.max_depth` — replaced by narrowing-only
 permissions plus the no-chaining rule (§11), which is simpler and bounds

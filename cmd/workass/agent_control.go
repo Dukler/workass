@@ -123,6 +123,14 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	chatID := fieldString(params, "parent_chat_id")
 	tabID := fieldString(params, "parent_tab_id")
 	ownerKey := fieldString(params, "owner_key")
+	// A one-shot supervised-job credential is not a general one. It is minted by
+	// `process.start` for exactly one job (fleet_process_start.go) and it
+	// authorizes exactly one call: that job's own registration. The list is
+	// allow-only, so a method added later is refused until somebody decides it
+	// belongs here.
+	if err := h.fenceRunCredential(request.Method, ownerKey, tabID, chatID, params); err != nil {
+		return nil, err
+	}
 	// One authority decides whether this call addresses this machine or another
 	// fleet machine, for every tool, before any local state is touched.
 	if self := strings.TrimSpace(h.selfMachineID); self != "" && self == strings.TrimSpace(fieldString(params, "machine_id")) {
@@ -166,15 +174,22 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
 		}
+		// The updater is the one family that is addressed by machine_id all the
+		// way down, so the self-addressing strip above has to be undone before
+		// either half answers. Without this a packaged install refused its OWN
+		// machine — `workass_get_update_status` with the exact machine_id
+		// `workass_list_update_targets` had just printed came back "update
+		// status requires an exact machine_id", while every remote machine
+		// worked, because only the self case ever lost the field.
+		if request.Method != "update.targets" && strings.TrimSpace(fieldString(params, "machine_id")) == "" {
+			params = copyAnyMap(params)
+			params["machine_id"] = h.selfMachineID
+		}
 		// A headless daemon answers for itself; a packaged install asks its
 		// stamped renderer, which owns the transactional UpdateManager.
 		if h.headlessUpdates.available() {
 			if request.Method == "update.targets" {
 				return h.headlessUpdates.Targets(r.Context())
-			}
-			if strings.TrimSpace(fieldString(params, "machine_id")) == "" {
-				params = copyAnyMap(params)
-				params["machine_id"] = h.selfMachineID
 			}
 			return h.headlessUpdates.headlessUpdateCall(r.Context(), request.Method, params)
 		}
@@ -395,7 +410,20 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		// delivers an outcome immediately. Idempotency comes from the work id
 		// being derived from the operation id (§6), so a retry resolves to the
 		// row that already exists rather than creating a second one.
-		return h.registerProcessChild(ownerKey, tabID, chatID, params)
+		result, err := h.registerProcessChild(ownerKey, tabID, chatID, params)
+		if err == nil && h.manager != nil {
+			// The grant ends with the report it authorized. A token that leaks
+			// from the job's own file afterwards authorizes nothing.
+			if _, isRun := h.manager.RunTokenFor(ownerKey); isRun {
+				h.manager.ConsumeRunToken(ownerKey)
+			}
+		}
+		return result, err
+	case "process.start":
+		// Addressed to this machine, where the caller already has a shell. The
+		// daemon declines to be a job runner for a client standing next to it,
+		// which is exactly the reason §9 gives for the non-goal.
+		return nil, errors.New(processStartLocalReason)
 	case "process.list":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
 			return nil, err
@@ -512,6 +540,9 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	if origin := h.callerFleetOrigin(ctx, params); !origin.empty() {
 		forwarded[fleetOriginParam] = origin.payload()
 	}
+	// A host-targeted spawn names no chat on the home: the owner is the calling
+	// chat, so the pair is deliberately absent from the forwarded params.
+	hostedSpawn := hostedSpawnIsForThisMachine(method, forwarded)
 	result, err := h.remoteChats.Call(ctx, method, forwarded)
 	if err != nil || method != "agent.spawn" {
 		return result, err
@@ -521,10 +552,19 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	// is what makes the outcome survive THIS daemon restarting, and applying the
 	// slice it came with is what makes a child that finished while the reply
 	// travelled arrive anyway.
-	if h.fleetWatch.ready() && h.chats != nil && h.chats.providerChats != nil {
+	if h.chats != nil && h.chats.providerChats != nil {
 		parentTabID, parentChatID := fieldString(params, "parent_tab_id"), fieldString(params, "parent_chat_id")
 		laneID, parentOperationID := h.chats.providerChats.watcherOrigin(parentTabID, parentChatID)
-		h.fleetWatch.WatchRemoteSubagent(ctx, machineID, result, parentTabID, parentChatID, laneID, parentOperationID)
+		if h.fleetWatch.ready() {
+			h.fleetWatch.WatchRemoteSubagent(ctx, machineID, result, parentTabID, parentChatID, laneID, parentOperationID)
+		}
+		// The row, in the chat that asked, for as long as the child runs. The
+		// monitor above is what makes its OUTCOME survive a restart here; this
+		// is what makes the work visible before it is over, which is the half
+		// §6's separation of host from owner was missing.
+		if hostedSpawn {
+			h.recordHostedSubagent(machineID, parentTabID, parentChatID, laneID, parentOperationID, result)
+		}
 	}
 	return result, nil
 }

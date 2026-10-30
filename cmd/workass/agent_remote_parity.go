@@ -95,10 +95,15 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	// registration forwarded from elsewhere would carry a pid this machine
 	// cannot probe, which is exactly the evidence-less row P4 forbids.
 	"process.register": remoteAgentLocalOnly,
-	"process.list":     remoteAgentMachineScoped,
-	"process.read":     remoteAgentMachineScoped,
-	"process.cancel":   remoteAgentMachineScoped,
-	"obligation.get":   remoteAgentLocalOnly,
+	// Starting one is machine-scoped: the home is the machine with the files,
+	// the pids and the GPU, and routing already puts the command there. On THIS
+	// machine it is refused in favour of `workass run` in the caller's own
+	// shell, which is what keeps the daemon's environment out of a job (§9).
+	"process.start":  remoteAgentMachineScoped,
+	"process.list":   remoteAgentMachineScoped,
+	"process.read":   remoteAgentMachineScoped,
+	"process.cancel": remoteAgentMachineScoped,
+	"obligation.get": remoteAgentLocalOnly,
 }
 
 // remoteAgentLocalOnlyReasons says, per method, why another machine cannot be
@@ -114,7 +119,7 @@ var remoteAgentLocalOnlyReasons = map[string]string{
 	"schedule.cancel":   "scheduled messages are owned by the calling chat on this machine",
 	"external.register": "external work tracks a process on this machine and must stay in the exact calling chat; register it on the machine that runs the process",
 	"external.settle":   "external work tracks a process on this machine and must stay in the exact calling chat",
-	"process.register":  "a process child is registered by `workass run` on the machine that supervises it, whose pid is the evidence this machine probes; to run a job elsewhere, run `workass run --owner <this chat's global id>` on that machine, and watch it with workass_list_process_children --machine_id",
+	"process.register":  "a process child is registered by `workass run` on the machine that supervises it, whose pid is the evidence this machine probes; to run a job elsewhere, pass machine_id to workass_start_process_child, or run `workass run --owner <this chat's global id>` on that machine, and watch it with workass_list_process_children --machine_id",
 	"obligation.get":    "the obligation belongs to the calling chat's running turn on this machine",
 }
 
@@ -217,6 +222,15 @@ func remoteAgentMethodTarget(method string, params map[string]any) (string, bool
 	}
 	if tagged == "" {
 		if requested != "" {
+			if remoteAgentHostTargetable[method] {
+				// A bare machine_id on these methods names the HOST, not an
+				// incomplete chat address: the owner stays the calling chat.
+				return requested, true, nil
+			}
+			if reason := remoteAgentHostTargetRefusals[method]; reason != "" {
+				// A home that will not host a kind says what it lacks (§16.4).
+				return "", false, errors.New(reason)
+			}
 			// A bare machine_id cannot say WHICH chat on that machine owns the
 			// work. Workass never infers a target, so name the pair instead.
 			return "", false, errors.New(method + " addresses an exact chat: pass the machine-tagged tab_id and chat_id from workass_list_chats instead of machine_id")
@@ -224,6 +238,34 @@ func remoteAgentMethodTarget(method string, params map[string]any) (string, bool
 		return "", false, nil
 	}
 	return tagged, true, nil
+}
+
+// remoteAgentHostTargetable names the methods where a bare machine_id is a HOST
+// target rather than an incomplete chat address.
+//
+// For every other chat-scoped method the pair IS the thing being acted on, so a
+// machine with no chat named is genuinely unaddressable. A spawn is different in
+// kind: it CREATES an entity, and §6 holds that where it runs and who owns it
+// are two facts. They used to be one, so the only machine-targeting the schema
+// offered was the machine-tagged pair of some chat over there — and the child
+// then belonged to that chat. Asking for a subagent of the calling chat, hosted
+// elsewhere, was not expressible at all (operator, first live P1–P4 test,
+// 2026-10-30: the result "shows in the UI as a separate new chat").
+var remoteAgentHostTargetable = map[string]bool{"agent.spawn": true}
+
+// remoteAgentHostTargetRefusals answer the OTHER two creations an agent will
+// reach for next, by name and with the reason, rather than with a routing
+// error that reads like a mistake the caller made.
+//
+// A subsession is a permanent child chat LISTED UNDER its parent. A chat hosted
+// on another machine cannot be listed in this machine's sidebar until §13's P6
+// makes reads work across replicas, so hosting one there today would produce
+// exactly the orphan the hosted spawn exists to remove. A fork must run where
+// its native session file is (§9), which is a home capability and not a choice.
+var remoteAgentHostTargetRefusals = map[string]string{
+	"chat.subsession": "a subsession is a permanent child chat listed under its parent, and a chat hosted on another machine cannot be listed here until fleet-runtime P6 (read-anywhere) ships; for work that runs there and reports here pass machine_id to workass_spawn_subagent, or create a standalone chat on that machine with workass_create_chat machine_id",
+	"fork.create":     "a fork resumes a provider's native session file, so it can only be made on the machine that holds it (fleet-runtime §9); make the fork point on that machine's chat with its machine-tagged tab_id + chat_id",
+	"fork.run":        "a fork run executes the native session it was forked from, so it belongs to the machine that holds that session (fleet-runtime §9); address it with the machine-tagged fork_point_id from that machine",
 }
 
 // remoteAgentSubagentPair is the local guard for the subagent and background

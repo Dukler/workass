@@ -387,6 +387,9 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		Summary: item.Summary, OutputFile: item.OutputFile, PID: item.PID, LastToolName: item.LastToolName,
 		ModelLabel: item.ModelLabel, ResultExcerpt: item.ResultExcerpt, ParentTaskID: item.ParentTaskID,
 		Forked: item.Forked,
+		// Where it runs, for a child hosted on another fleet machine. Empty for
+		// every local row, which is what keeps the projection byte-identical.
+		HostMachine: item.HostMachine, HostMachineName: item.HostMachineName,
 	}
 }
 

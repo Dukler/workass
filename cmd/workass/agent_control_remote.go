@@ -123,6 +123,10 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 			// merged list here would double-count a shared peer and, between two
 			// daemons that each know the other, never terminate.
 			return h.chats.list()
+		case "process.start":
+			// The one command this daemon starts a process for, and the whole of
+			// why that is still §9-safe is in fleet_process_start.go.
+			return h.startProcessChildHere(ctx, forwarded, params)
 		}
 		return nil, errors.New("unknown machine-scoped agent control method")
 	case remoteAgentForkScoped:
@@ -132,6 +136,18 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 		}
 		return h.controllerChatCall(request, method, params, tabID, chatID)
 	default:
+		if hostedSpawnIsForThisMachine(method, params) {
+			// A host target: this machine runs the child, the chat that asked
+			// owns it (§6). There is no chat here to act for, so there is no
+			// actor fence to apply — authorization is the link's grant and the
+			// caller's own limit, already intersected above, and the child can
+			// only narrow it further.
+			result, err := h.hostedSpawnForOrigin(ctx, forwarded, params)
+			if err != nil {
+				return nil, err
+			}
+			return h.monitorForwardedSpawn(forwarded, result), nil
+		}
 		result, err := h.controllerChatCall(request, method, params, fieldString(params, "tab_id"), fieldString(params, "chat_id"))
 		if err != nil || method != "agent.spawn" {
 			return result, err

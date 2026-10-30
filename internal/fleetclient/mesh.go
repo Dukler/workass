@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,12 @@ import (
 // HeartbeatInterval is the one timer in the runtime. §16's ten-minute silence
 // threshold is what it is derived from, so this is not a second knob.
 const HeartbeatInterval = time.Minute
+
+// beatRecordInterval is how often a live link's heartbeat is written down. It
+// is deliberately much longer than the beat itself: what a reader needs is
+// "this link was alive within the last few minutes", not a timestamp accurate
+// to the second bought with a disk write per minute per peer.
+const beatRecordInterval = 5 * time.Minute
 
 // DialTimeout bounds one dial attempt, identity probe included.
 const DialTimeout = 20 * time.Second
@@ -120,6 +127,18 @@ type keyHolder interface {
 type Options struct {
 	SelfMachineID string
 	SelfName      string
+	// SelfPort is the port THIS daemon listens on, stated to a peer during
+	// enrolment so the receiving side can learn a route back.
+	//
+	// Without it a pair was duplex on one socket and one-directional on the
+	// record: the dialler kept a peer entry, and the receiver — which only ever
+	// learns an address from an inbound connection — kept none, so it could not
+	// dial back, could not heartbeat the pair itself, and `workass fleet links`
+	// there truthfully reported "this machine has dialled no peer" for a
+	// machine it was linked to. The peer never names the HOST (the receiver
+	// uses the socket's own ip, internal/wire/peer_links.go), so a peer cannot
+	// point this at anybody else.
+	SelfPort      int
 	Store         *Store
 	Keys          keyHolder
 	Logf          func(string, ...any)
@@ -179,6 +198,7 @@ type Invoker interface {
 type Mesh struct {
 	selfID   string
 	selfName string
+	selfPort int
 	store    *Store
 	keys     keyHolder
 	logf     func(string, ...any)
@@ -234,6 +254,7 @@ func New(opts Options) *Mesh {
 	mesh := &Mesh{
 		selfID:        strings.TrimSpace(opts.SelfMachineID),
 		selfName:      strings.TrimSpace(opts.SelfName),
+		selfPort:      opts.SelfPort,
 		store:         opts.Store,
 		keys:          opts.Keys,
 		logf:          opts.Logf,
@@ -625,7 +646,11 @@ func (m *Mesh) enroll(ctx context.Context, peer Peer, route Route, card machineb
 			"name":        m.linkName(),
 			// What marks this as a peer link rather than a browser: the receiving
 			// side records one revocable pairing record per machine id (§4).
-			"peer": map[string]any{"machineId": m.selfID, "name": m.selfName},
+			// The port is this daemon's own, and it is a CLAIM: the receiver
+			// joins it to the host this socket actually came from, so a route
+			// back is learned without anybody typing an address, and the pair
+			// is heartbeat by both ends rather than one.
+			"peer": m.peerEnrolmentPayload(),
 		})
 		if err != nil {
 			if errorCode(err) == "fleet:peer-revoked" {
@@ -821,6 +846,11 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 			_, err := link.Invoke(callCtx, heartbeatChannel, map[string]any{"machineId": m.selfID})
 			cancel()
 			if err == nil {
+				// Coalesced on purpose: a beat answered is worth recording, but
+				// not at the price of a disk write per minute per peer.
+				if m.store != nil {
+					_ = m.store.NoteBeat(peerID, beatRecordInterval)
+				}
 				m.beat(peerID)
 				continue
 			}
@@ -929,6 +959,17 @@ func (m *Mesh) publish(state State) {
 	if notify != nil && (!existed || previous != state) {
 		notify(state)
 	}
+}
+
+// peerEnrolmentPayload is how this daemon names itself to a peer it is
+// enrolling with. Nothing secret is in it, and nothing in it names a host:
+// the address a peer records is the one its own socket reports.
+func (m *Mesh) peerEnrolmentPayload() map[string]any {
+	payload := map[string]any{"machineId": m.selfID, "name": m.selfName}
+	if m.selfPort > 0 {
+		payload["port"] = strconv.Itoa(m.selfPort)
+	}
+	return payload
 }
 
 func (m *Mesh) linkName() string {

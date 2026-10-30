@@ -310,6 +310,20 @@ activation.
 There is no provider tool registration or MCP certificate injection. Ordinary
 chat lifecycle also performs no automatic Git capture before or after turns.
 
+## Delegating to another machine
+
+`workass_spawn_subagent` takes a `machine_id`: the machine that RUNS the child,
+while the calling chat keeps owning it. The child is listed under the calling
+chat with its host on the row, its progress and its outcome arrive there, and
+nothing appears under any other conversation. Pass `cwd` as an absolute path on
+that machine and any explicit `provider_id` / `model_id` from THAT machine's
+`workass_agent_catalog`; `fork` is unavailable, because a native session fork
+only runs where its session file is.
+
+A machine-tagged `tab_id` + `chat_id` is the other thing, and still works: it
+makes the child a subagent of that other chat, owned there. Choose by who
+should be told, not by where it runs.
+
 ## Delegation with one event-only wait
 
 Read `workass_agent_catalog` for exact provider/model/effort/mode ids. A
@@ -388,6 +402,27 @@ Nothing about that call polls, and nothing about it needs a watcher:
   notifies you.
 - **`--owner <global id>`** sends the outcome to a chat on another machine, so a
   job on the box with the GPU reports into the chat that asked for it.
+
+To START one on another machine, where you have no shell, ask that machine:
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_start_process_child <<'JSON'
+{"machine_id":"m-91be04","label":"retrain ranker",
+ "host_tab_id":"M~m-91be04~tab-1","host_chat_id":"M~m-91be04~chat-1",
+ "cwd":"/srv/work","command":["python","train.py","--epochs","8"],
+ "env":{"CUDA_VISIBLE_DEVICES":"0"},"resource":"gpu0",
+ "max_runtime_ms":21600000,"operation_id":"retrain-ranker-2026-10-30"}
+JSON
+```
+
+That machine runs its own `workass run` — same preflight, same queue, same
+outcomes — with a credential minted for this one job and an environment built
+from nothing but PATH, HOME and the `env` you named, so no daemon's environment
+is lent to the job. `host_tab_id` + `host_chat_id` name a chat THERE that holds
+the job's local row; the chat that called owns the outcome and gets the notice.
+There is no `command` shell: the program and each argument are separate
+strings. On your own machine the tool refuses and points at `workass run`,
+which is the right tool when you already have a shell.
 
 Read and control it from any machine in the fleet:
 

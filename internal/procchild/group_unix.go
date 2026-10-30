@@ -134,3 +134,18 @@ func PIDAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
+
+// DetachProcessGroup puts a supervisor this daemon starts into its own process
+// group, so the job it supervises is not in the daemon's group and a signal to
+// the daemon's group never reaches it. It is the same primitive newGroup uses
+// for the child itself, exported so `process.start` does not reimplement the
+// platform knowledge beside it.
+func DetachProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}

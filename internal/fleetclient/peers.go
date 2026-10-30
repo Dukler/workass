@@ -84,10 +84,20 @@ type Peer struct {
 	// so a retry would quietly undo a human's decision (§4).
 	RevokedByPeer bool   `json:"revokedByPeer,omitempty"`
 	RevokedAt     string `json:"revokedAt,omitempty"`
+	// Paired says a credential EXISTS for this peer without carrying it. It is
+	// set only by Redacted, and it is why Linked can still answer after the
+	// token has been removed: `workass fleet links` read a redacted copy and
+	// then asked Linked(), which is DeviceToken != "", so every paired peer
+	// printed "known, not linked" while the peer itself showed the link up.
+	// The display was the only thing wrong, and this is the field that makes
+	// a redacted peer answer honestly.
+	Paired bool `json:"-"`
 }
 
-// Linked reports whether this peer has a credential to dial with.
-func (p Peer) Linked() bool { return strings.TrimSpace(p.DeviceToken) != "" }
+// Linked reports whether this peer has a credential to dial with. A redacted
+// copy answers from Paired, so a reader that must not see the token still
+// reads the same truth.
+func (p Peer) Linked() bool { return strings.TrimSpace(p.DeviceToken) != "" || p.Paired }
 
 // OrderedRoutes is the preference order a dial tries. A refused address is left
 // out entirely; a cooling one is left out only while something else is worth
@@ -244,6 +254,7 @@ func (s *Store) Peer(machineID string) (Peer, bool) {
 func (s *Store) Redacted() []Peer {
 	peers := s.Peers()
 	for i := range peers {
+		peers[i].Paired = strings.TrimSpace(peers[i].DeviceToken) != ""
 		peers[i].DeviceToken = ""
 	}
 	return peers
@@ -360,6 +371,30 @@ func (s *Store) NoteSuccess(machineID, address string, latency time.Duration) er
 			peer.Routes[i].LatencyMS = int(latency / time.Millisecond)
 		}
 	}
+	return s.saveLocked()
+}
+
+// NoteBeat records that this pair's link answered a heartbeat, at most once per
+// `every`. The write is coalesced because the heartbeat is the only timer in
+// the runtime and a disk write per minute per peer would make it an expensive
+// one; what it buys is that `lastUseAt` means "this link was alive then"
+// instead of "this link was paired then", which is what made a live link read
+// as a dead one in `workass fleet links`.
+func (s *Store) NoteBeat(machineID string, every time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.indexLocked(strings.TrimSpace(machineID))
+	if index < 0 {
+		return nil
+	}
+	peer := &s.peers[index]
+	now := s.now().UTC()
+	if every > 0 && strings.TrimSpace(peer.LastUseAt) != "" {
+		if last, err := time.Parse(time.RFC3339, peer.LastUseAt); err == nil && now.Sub(last) < every {
+			return nil
+		}
+	}
+	peer.LastUseAt = now.Format(time.RFC3339)
 	return s.saveLocked()
 }
 

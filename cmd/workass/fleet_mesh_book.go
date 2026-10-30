@@ -174,7 +174,7 @@ func firstNonEmptyAddress(address string) string {
 // peer is addressed by machine id), a fleet key (membership is what lets it
 // enrol with no human), and a readable peer file (the credential store). A
 // daemon missing any of them keeps the renderer relay and says so.
-func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Store, book *machinebook.Book, hub *wire.Hub, logger *log.Logger) *fleetMeshService {
+func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Store, book *machinebook.Book, hub *wire.Hub, logger *log.Logger, selfPort int) *fleetMeshService {
 	service := &fleetMeshService{book: book, logger: logger}
 	if strings.TrimSpace(identity.MachineID) == "" {
 		logger.Printf("[workass] fleet mesh unavailable: this daemon has no machine id")
@@ -196,6 +196,7 @@ func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Sto
 	service.mesh = fleetclient.New(fleetclient.Options{
 		SelfMachineID: identity.MachineID,
 		SelfName:      identity.DisplayName,
+		SelfPort:      selfPort,
 		Store:         peers,
 		Keys:          keys,
 		Logf:          logger.Printf,

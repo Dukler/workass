@@ -239,7 +239,7 @@ func workassToolMutates(kind toolKind, name string) bool {
 		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission",
 		"workass_ask_user_question",
 		"workass_create_fork_point", "workass_fork_run", "workass_cancel_fork_child", "workass_retry_fork_child",
-		"workass_register_process_child", "workass_cancel_process_child":
+		"workass_register_process_child", "workass_start_process_child", "workass_cancel_process_child":
 		return true
 	default:
 		return false
