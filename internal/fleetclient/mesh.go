@@ -199,6 +199,10 @@ type Mesh struct {
 	// that does so must die with the daemon rather than with the tool call that
 	// happened to open the link.
 	lifetime context.Context
+	// stopped is closed by Close. Without it, shutdown would wait for every
+	// supervisor's NEXT tick to notice, which is up to a whole heartbeat — a
+	// minute of a daemon refusing to exit, for nothing.
+	stopped chan struct{}
 
 	run sync.WaitGroup
 }
@@ -235,6 +239,7 @@ func New(opts Options) *Mesh {
 		dialing:       make(map[string]*dialAttempt),
 		supervise:     make(map[string]struct{}),
 		downSince:     make(map[string]time.Time),
+		stopped:       make(chan struct{}),
 	}
 	if mesh.logf == nil {
 		mesh.logf = func(string, ...any) {}
@@ -727,6 +732,7 @@ func (m *Mesh) Close() {
 		return
 	}
 	m.closed = true
+	close(m.stopped)
 	links := make([]Invoker, 0, len(m.links))
 	for peerID, link := range m.links {
 		links = append(links, link)
@@ -786,6 +792,8 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-m.stopped:
 			return
 		case <-ticker.C:
 		}
