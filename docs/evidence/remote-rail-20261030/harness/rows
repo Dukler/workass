@@ -1,0 +1,9 @@
+#!/bin/sh
+# rows: what spawned-work:list says for the open chat, the exact read the rail makes.
+P=$(dirname "$0")
+TAB=$(python3 -I -c "import json;print(json.load(open('$P/ctx.json'))['tab_id'])"); CHAT=$(python3 -I -c "import json;print(json.load(open('$P/ctx.json'))['chat_id'])")
+$P/rail js "window.api.spawnedWorkList('$TAB','$CHAT').then(r=>JSON.stringify((r.items||r).map(i=>({label:i.label,status:i.status,phase:i.lastToolName,summary:(i.summary||'').slice(0,60),model:i.modelLabel,host:i.hostMachineName,kind:i.kind,queuedAt:i.queuedAt,exec:i.execStartedAt,runMs:i.runMs,exit:i.exitCode,result:(i.resultExcerpt||'').slice(0,60)}))))" | python3 -I -c "
+import sys,json
+d=json.loads(sys.stdin.read())
+for r in json.loads(d.get('value') or '[]'): print({k:v for k,v in r.items() if v not in (None,'')})
+if 'error' in d: print(d)"

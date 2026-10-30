@@ -1675,7 +1675,8 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .r-sa .r-fk svg { width: 12px; height: 12px; }
 .r-sa .r-el { flex: none; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--faint); }
 .r-sa .r-sasub { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.r-sa .r-mdl { flex: 0 1 auto; max-width: 62%; min-width: 0; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-sa .r-host { flex: none; font-size: 11px; color: var(--muted, inherit); opacity: .75; }
+.r-mdl { flex: 0 1 auto; max-width: 62%; min-width: 0; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .r-sa .r-sep { flex: none; color: var(--line2); }
 /* The subagent's live activity carries the action's own mark now (mock
    rail-actions): the glyph is fixed, the name ellipsizes inside its own span so

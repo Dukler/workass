@@ -295,7 +295,7 @@ func TestProcessChildTimesKeepTheWaitOutOfTheRun(t *testing.T) {
 	}, {
 		name: "an older row with a pid and no number: nothing can split it",
 		item: SpawnedWorkItem{StartedAt: stamp(queued), PID: &pid},
-		end:  end, startedAt: stamp(queued), runMs: end.Sub(queued).Milliseconds(), queuedMs: 0,
+		end:  end, startedAt: stamp(queued), runMs: 0, queuedMs: 0,
 	}} {
 		t.Run(test.name, func(t *testing.T) {
 			got := ProcessChildTimes(test.item, test.end)

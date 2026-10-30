@@ -430,3 +430,20 @@ func (m *Manager) CancelHostedSubagent(id, peer string) (map[string]any, error) 
 	}
 	return map[string]any{"ok": true, "cancelled": true}, nil
 }
+
+// RunningHostedRows is what this daemon shows as running on one other machine.
+func (m *Manager) RunningHostedRows(machineID string) []SpawnedWorkItem {
+	machineID = strings.TrimSpace(machineID)
+	out := []SpawnedWorkItem{}
+	if m == nil || machineID == "" {
+		return out
+	}
+	m.spawnedWorkMu.Lock()
+	defer m.spawnedWorkMu.Unlock()
+	for _, rec := range m.spawnedWork {
+		if rec != nil && rec.Item.Status == "running" && strings.TrimSpace(rec.Item.HostMachine) == machineID {
+			out = append(out, rec.Item)
+		}
+	}
+	return out
+}

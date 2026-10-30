@@ -467,7 +467,9 @@ func main() {
 	// through a monitor, with no renderer anywhere (docs/specs/fleet-runtime.md
 	// §5, §7, §13 P3).
 	fleetMonitors := openFleetMonitors(stateDir, identity, hub, fleetMesh, acpManager, providerChats, agentControl, logger)
-	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID)
+	runningJobs := func() []headlessupdate.RunningJob { return runningJobsForUpdate(acpManager.RunningJobSurvival()) }
+	headlessUpdates.SetRunningJobs(runningJobs)
+	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID, runningJobs)
 	// The scheduled-message loop lives for the daemon's lifetime and is joined
 	// first on shutdown, so no delivery races the actors' detach below.
 	var scheduledRun sync.WaitGroup

@@ -371,6 +371,10 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// idempotent — one row per child — and neither starts a turn.
 		"cmd/workass/fleet_hosted_subagent.go:recordHostedSubagent:RegisterHostedSubagent":  {1, "the asking chat's own row for a child running on another machine"},
 		"cmd/workass/agent_control_remote.go:callAsControllerFor:CancelHostedSubagent":      {1, "the stop on a row in the chat this child runs for; checked against the asking peer"},
+		"cmd/workass/agent_update_wire.go:withRunningJobs:RunningJobSurvival":               {1, "read-only: which jobs an update would kill"},
+		"cmd/workass/main.go:main:RunningJobSurvival":                                       {1, "read-only: which jobs an update would kill"},
+		"cmd/workass/fleet_hosted_work.go:settleHostedExit:ApplyHostedWorkState":            {1, "the row for a job first heard of as finished"},
+		"cmd/workass/fleet_monitors.go:openFleetMonitors:RunningHostedRows":                 {1, "read-only: rows this daemon shows as running on one machine"},
 		"cmd/workass/fleet_hosted_work.go:applyHostedState:ApplyHostedSubagentCall":         {1, "a hosted child's tool call, into the parent turn"},
 		"cmd/workass/fleet_hosted_work.go:applyHostedState:ApplyHostedWorkState":            {1, "the asking chat's row, from what its host states"},
 		"cmd/workass/fleet_hosted_work.go:recordHostedProcess:ApplyHostedWorkState":         {1, "the asking chat's row for a job it just started elsewhere"},

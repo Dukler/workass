@@ -759,6 +759,18 @@ func (m *Manager) observeSettledSubagentTool(jobID string, event map[string]any)
 		laneID, operationID = strings.TrimSpace(run.originLaneID), strings.TrimSpace(run.originOperationID)
 	}
 	m.mu.Unlock()
+	if run == nil {
+		// A child running on another machine has no run here. Its row carries the
+		// same origin, and its card must still settle after the parent turn has.
+		m.spawnedWorkMu.Lock()
+		for _, rec := range m.spawnedWork {
+			if rec != nil && rec.Item.ID == subagentID && hostedWorkItem(rec.Item) {
+				laneID, operationID = strings.TrimSpace(rec.Item.OriginLaneID), strings.TrimSpace(rec.Item.OriginOperationID)
+				break
+			}
+		}
+		m.spawnedWorkMu.Unlock()
+	}
 	if laneID == "" || operationID == "" {
 		return nil
 	}

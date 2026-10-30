@@ -1,0 +1,12 @@
+#!/bin/sh
+# spawn OPID LABEL TASK [model|-] [machine|-]
+P=$(dirname "$0")
+python3 -I - "$@" > $P/.spawn.json <<'PY'
+import json,sys
+a=sys.argv[1:]+['-','-']
+d=dict(operation_id=a[0],label=a[1],task=a[2],provider_id='codex',effort='low',permission_intent='full',cwd='/tmp')
+if a[3]!='-': d['model_id']=a[3]
+if a[4]!='-': d['machine_id']=a[4]
+print(json.dumps(d))
+PY
+$P/tool workass_spawn_subagent "$(cat $P/.spawn.json)"

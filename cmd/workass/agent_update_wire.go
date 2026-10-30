@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 
+	"workass/internal/acp"
+	"workass/internal/headlessupdate"
 	providercontract "workass/internal/provider"
 	"workass/internal/wire"
 )
@@ -27,7 +29,7 @@ var updateVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 // both channels instead. The channel names, payloads and authorization text
 // are identical either way: a controller on another machine cannot tell, and
 // does not need to, which half of the fleet answers.
-func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, headless *headlessUpdateService, selfMachineID string) {
+func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, headless *headlessUpdateService, selfMachineID string, runningJobs func() []headlessupdate.RunningJob) {
 	if hub == nil {
 		return
 	}
@@ -42,7 +44,11 @@ func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRout
 		if renderer == nil {
 			return nil, errors.New("Workass updater status requires the local Electron renderer")
 		}
-		return renderer.Call(context.Background(), "update.local.status", copyRemoteAgentRouteParams(params))
+		result, err := renderer.Call(context.Background(), "update.local.status", copyRemoteAgentRouteParams(params))
+		if err == nil && runningJobs != nil {
+			result = annotateRunningJobs(result, runningJobs())
+		}
+		return result, err
 	})
 	hub.Register("app:update-apply", func(args []any) (any, error) {
 		params := firstMapArg(args)
@@ -89,4 +95,35 @@ func validateAgentUpdateApply(params map[string]any, selfMachineID string) error
 		return errors.New("update authorization does not exactly match the machine and versions")
 	}
 	return nil
+}
+
+// annotateRunningJobs adds the machine's running jobs to a status the renderer
+// answered. The daemon holds the jobs and the renderer holds the updater, so this
+// is where the two facts meet on a packaged install. Additive: a status that is
+// not an object is passed through.
+func annotateRunningJobs(result any, jobs []headlessupdate.RunningJob) any {
+	fields := mapFromAnyMain(result)
+	if len(fields) == 0 {
+		return result
+	}
+	out := copyAnyMap(fields)
+	out["runningJobs"] = headlessupdate.DescribeRunningJobs(jobs)
+	return out
+}
+
+// runningJobsForUpdate reads this machine's running jobs in the updater's words.
+func runningJobsForUpdate(jobs []acp.JobSurvival) []headlessupdate.RunningJob {
+	out := make([]headlessupdate.RunningJob, 0, len(jobs))
+	for _, job := range jobs {
+		out = append(out, headlessupdate.RunningJob(job))
+	}
+	return out
+}
+
+// withRunningJobs is annotateRunningJobs for the tool path.
+func (h *agentControlHandler) withRunningJobs(result any) any {
+	if h == nil || h.manager == nil {
+		return result
+	}
+	return annotateRunningJobs(result, runningJobsForUpdate(h.manager.RunningJobSurvival()))
 }

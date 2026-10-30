@@ -72,6 +72,46 @@ type Options struct {
 	Now            func() time.Time
 	Log            func(format string, args ...any)
 	RequestRestart func()
+	// RunningJobs reads this machine's running jobs when the status is asked for.
+	RunningJobs func() []RunningJob
+}
+
+// RunningJob is one job an update would be applied over.
+type RunningJob struct {
+	WorkID    string `json:"workId"`
+	Label     string `json:"label"`
+	Owner     string `json:"owner,omitempty"`
+	Protected bool   `json:"protected"`
+	Note      string `json:"note"`
+}
+
+// DescribeRunningJobs is what an update status says about the work on a machine.
+// It is a statement and never a block: the operator decides, and needs to know
+// before deciding, which is the whole of what this adds.
+func DescribeRunningJobs(jobs []RunningJob) map[string]any {
+	protected, wouldDie := []RunningJob{}, []RunningJob{}
+	for _, job := range jobs {
+		if job.Protected {
+			protected = append(protected, job)
+		} else {
+			wouldDie = append(wouldDie, job)
+		}
+	}
+	summary := "no supervised job is running on this machine"
+	switch {
+	case len(wouldDie) > 0:
+		names := make([]string, 0, len(wouldDie))
+		for _, job := range wouldDie {
+			names = append(names, fmt.Sprintf("%s (%s)", job.Label, job.WorkID))
+		}
+		summary = fmt.Sprintf("applying an update now WOULD KILL %d running job(s): %s", len(wouldDie), strings.Join(names, ", "))
+		if len(protected) > 0 {
+			summary += fmt.Sprintf("; %d more would survive it", len(protected))
+		}
+	case len(protected) > 0:
+		summary = fmt.Sprintf("%d running job(s) are protected and would survive an update", len(protected))
+	}
+	return map[string]any{"total": len(jobs), "protected": protected, "wouldDie": wouldDie, "summary": summary}
 }
 
 type resolvedOptions struct {
@@ -88,6 +128,7 @@ type resolvedOptions struct {
 	now            func() time.Time
 	log            func(format string, args ...any)
 	requestRestart func()
+	runningJobs    func() []RunningJob
 }
 
 // Receipt is the durable record of one activation. It survives the restart it
@@ -206,7 +247,16 @@ func resolveOptions(options Options) resolvedOptions {
 		resolved.feedURL = strings.TrimSpace(resolved.env(FeedURLEnv))
 	}
 	resolved.requestRestart = options.RequestRestart
+	resolved.runningJobs = options.RunningJobs
 	return resolved
+}
+
+// SetRunningJobs installs the read behind the status's runningJobs. It is a setter
+// because the updater is built before the manager that holds the jobs.
+func (m *Manager) SetRunningJobs(read func() []RunningJob) {
+	m.mu.Lock()
+	m.options.runningJobs = read
+	m.mu.Unlock()
 }
 
 // Platform is the release platform token, matching the feed file name.
@@ -357,6 +407,14 @@ func (m *Manager) Run(ctx context.Context) {
 // mirrors UpdateManager.diagnostics() so one agent reads either platform. It
 // is a pure read of cached state: no feed fetch, no download, no staging.
 func (m *Manager) Status(_ context.Context) map[string]any {
+	// Read before this lock: the jobs answer from another package's locks.
+	m.mu.Lock()
+	readJobs := m.options.runningJobs
+	m.mu.Unlock()
+	var runningJobs map[string]any
+	if readJobs != nil {
+		runningJobs = DescribeRunningJobs(readJobs())
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	availableVersion := any(nil)
@@ -410,6 +468,9 @@ func (m *Manager) Status(_ context.Context) map[string]any {
 		"state":         state,
 		"receipt":       receiptValue(m.readReceipt()),
 		"replacedPaths": replacedPathNames(replacementPlan(m.options.goos, m.options.goarch)),
+	}
+	if runningJobs != nil {
+		out["runningJobs"] = runningJobs
 	}
 	if operations := m.operations(); len(operations) > 0 {
 		out["lastAgentAuthorization"] = operations[len(operations)-1]

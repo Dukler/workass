@@ -95,7 +95,7 @@ func TestHeadlessDaemonOwnsTheUpdateChannelsWithoutARenderer(t *testing.T) {
 	hub := wire.NewHub()
 	// The renderer router is present but has no shell behind it, exactly as on a
 	// headless host. The headless updater must answer anyway.
-	registerAgentUpdateWireHandlers(hub, &stubAgentChatRemoteRouter{result: map[string]any{"renderer": true}}, service, "m-duklerver")
+	registerAgentUpdateWireHandlers(hub, &stubAgentChatRemoteRouter{result: map[string]any{"renderer": true}}, service, "m-duklerver", nil)
 
 	result, err := hub.Invoke(agentUpdateStatusChannel, []any{map[string]any{"machine_id": "m-duklerver"}})
 	if err != nil {
@@ -131,7 +131,7 @@ func TestPackagedInstallKeepsTheRendererUpdaterPath(t *testing.T) {
 	// still reach the renderer's transactional UpdateManager unchanged.
 	router := &stubAgentChatRemoteRouter{result: map[string]any{"renderer": true}}
 	hub := wire.NewHub()
-	registerAgentUpdateWireHandlers(hub, router, nil, "machine-mac")
+	registerAgentUpdateWireHandlers(hub, router, nil, "machine-mac", nil)
 	result, err := hub.Invoke(agentUpdateStatusChannel, []any{map[string]any{"machine_id": "machine-mac"}})
 	if err != nil || mapFromAnyMain(result)["renderer"] != true || router.method != "update.local.status" {
 		t.Fatalf("result=%#v method=%q err=%v", result, router.method, err)

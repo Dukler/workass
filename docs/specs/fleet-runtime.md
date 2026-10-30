@@ -552,8 +552,9 @@ says so ("no Workass credential in this environment ... but no chat is told").
    that job is terminal — it lasts the job's life rather than one call,
    because §14c made reporting continuous rather than a closing poke. It names
    no chat, so it authenticates as nobody (§14e);
-5. it is still `workass run` that supervises, in its own process group, so the
-   child is not a child of the daemon and P4's `lost` verdict is unchanged.
+5. it is still `workass run` that supervises, and P4's `lost` verdict is unchanged.
+   (This said "in its own process group", as if that kept it from the daemon's
+   fate. Under a systemd service it did not: §14g.)
 
 The three remaining findings needed no spec change: a self-addressed
 `update.status`/`update.apply` lost the `machine_id` the updater is addressed by
@@ -883,6 +884,68 @@ only to a peer that had dialled it, so for a pair linked from the host's side
 every push was dropped and an outcome waited for the next sync. It now falls back
 to the link it dialled itself, through `fleet:push`, without ever dialling to
 deliver one.
+
+## 14g. A process group does not escape a cgroup (2026-10-30)
+
+A 3-hour training job started with `process.start` died at update 10,464 of 12,000
+when its machine updated. Its row said `isolation: process_group`, and this spec said
+that was what made a job survive a restart. On Linux under a systemd service it is
+not: when the daemon exits, the stock `KillMode=control-group` kills everything left
+in the unit's cgroup, and the supervisor was in it. Nothing in the product measured
+that, and the owner found out from a late `lost`.
+
+**The supervisor moves itself.** On Linux, inside a service's cgroup, `workass run`
+re-execs through `systemd-run --user --scope`, before it has done anything. That asks
+the user manager to adopt the calling process into a new cgroup and then execs the
+command, so it is the same pid throughout. It needs no root and no change to the unit.
+A machine with no reachable user manager cannot do this: the supervisor says NOT
+ISOLATED and runs anyway. On a unix without cgroups a run with no terminal leaves the
+caller's process group, which is all launchd and the app updater reach for. On Windows
+the updater stops every process running from the install's executable, so a supervisor
+the daemon starts runs from a private copy. The Windows half has been compiled, never
+run.
+
+**Survival is measured, never assumed.** `procchild.SurvivalOf` reads the real pid when
+asked: its cgroup against the daemon's and the unit's KillMode on Linux, its process
+group elsewhere, its image path on Windows. So the answer is also true of a supervisor
+from an older build. The job row carries `survives_restart` and `survival_note`, and
+`process.start` answers with them and a warning when a job is exposed.
+
+**The updater states it and does not block.** `update.status` gains `runningJobs`: what
+is protected, what would die, by name, and one sentence saying so. A person decides.
+
+**A `lost` reaches the owner in seconds.** The live delay was not the verdict. The
+owner's link supervisor looked only on its next tick, and a push went only to a peer
+that had dialled the host. A link now retries within a second of its socket dying and
+dials at once on boot, a push also uses a link this side dialled, and the grace before
+`lost` is one reconcile tick, because the outbox is drained before the verdict. A job
+whose supervisor died says so if its process is still running.
+
+**Exactly one notice, and no silent drop.** The exit goes to the log before the row is
+recorded, and the log refuses a second exit for one job. A monitor adopted from a sync
+gets its tab from this machine, because the admission fence drops a notice with no tab
+without a word.
+
+**§5's "nothing polls" is amended, narrowly.** While a monitor is still owed its outcome,
+a heartbeat asks the home for what it holds, at most every two minutes, and a new monitor
+asks once. A push can be lost in several ways nobody hears about, and "nothing polls" had
+no answer to that: an exit stayed in its home's log for as long as the link stayed up. It
+rides the existing heartbeat and costs nothing once every monitor has its outcome.
+
+**A row with no monitor adopts one.** Every remote subagent spawned before this had none,
+because the spawn path read its own answer wrongly. Registering returns the log from the
+start, so an exit already there arrives once. A home with neither the child nor an exit
+for it says so, and the row ends failed rather than running forever.
+
+**Run time.** A row that predates §14e reads when its command started from the outbox. With
+nothing there it claims no run time and reports `<elapsed>`, because a figure that includes
+the queue is not one. A chat's settled row is compacted into its receipt, and a read by id
+now answers from that receipt rather than "not tracked".
+
+**A child on a stopping host fails, with that reason.** It does not survive, and nobody
+asked for it to end, so it is neither Cancelled nor suppressed.
+
+Live proof: `docs/evidence/remote-rail-20261030/RESULTS.md`, which also says what is unproven.
 
 ## 15. Non-goals and deferred
 

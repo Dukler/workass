@@ -91,6 +91,11 @@ type fleetMonitorNotice struct {
 type fleetWatcher struct {
 	hostedState  func(peerID string, row fleetlog.Registration, fields map[string]any)
 	settleHosted func(row fleetlog.Registration, event fleetlog.Event)
+	hostedRows   func(peerID string) []acp.SpawnedWorkItem
+	applyMu      sync.Mutex
+	resyncMu     sync.Mutex
+	catchingUp   map[string]bool
+	lastResync   map[string]time.Time
 	self         string
 	monitors     *fleetlog.Monitors
 	mesh         fleetMonitorInvoker
@@ -135,9 +140,11 @@ type fleetWatcherOptions struct {
 	// the machine running the work says (fleet_hosted_work.go).
 	HostedState  func(peerID string, row fleetlog.Registration, fields map[string]any)
 	SettleHosted func(row fleetlog.Registration, event fleetlog.Event)
-	Threshold    time.Duration
-	Now          func() time.Time
-	Logf         func(string, ...any)
+	// HostedRows is what this daemon shows as running on one other machine.
+	HostedRows func(peerID string) []acp.SpawnedWorkItem
+	Threshold  time.Duration
+	Now        func() time.Time
+	Logf       func(string, ...any)
 }
 
 func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
@@ -145,7 +152,7 @@ func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
 		self: strings.TrimSpace(opts.Self), monitors: opts.Monitors, mesh: opts.Mesh,
 		deliver: opts.Deliver, budget: opts.Budget, chatExists: opts.ChatExists, chatTab: opts.ChatTab,
 		threshold: opts.Threshold, now: opts.Now, logf: opts.Logf,
-		hostedState: opts.HostedState, settleHosted: opts.SettleHosted,
+		hostedState: opts.HostedState, settleHosted: opts.SettleHosted, hostedRows: opts.HostedRows,
 		darkSince: map[string]time.Time{}, announced: map[string]bool{},
 	}
 	if watcher.threshold <= 0 {
@@ -203,6 +210,10 @@ func (w *fleetWatcher) WatchRemoteSubagent(ctx context.Context, peer string, res
 		w.logf("[fleet] could not record a monitor on %s: %v", targetID, err)
 		return
 	}
+	// The child may have ended before this monitor existed here, and a push that
+	// beat this line was dropped for having no monitor to land on. A child that
+	// fails in its first moments does exactly that, so the log is asked once more.
+	w.catchUp(peer)
 	if slice := mapFromAnyMain(monitor["slice"]); len(slice) > 0 {
 		w.applySlice(ctx, peer, row.Ref, slice)
 	}
@@ -251,6 +262,11 @@ func (w *fleetWatcher) monitorFor(peerID, targetID string) (fleetlog.Registratio
 // is an ack for something that was never applied, which is the only way an
 // event is lost.
 func (w *fleetWatcher) applySlice(ctx context.Context, peerID, ref string, slice map[string]any) {
+	// One at a time. A push and a sync, or two syncs, can carry the same seq, and
+	// the dedup below is only true if nothing else is between its read of the
+	// cursor and its write. Found live: one exit delivered twice.
+	w.applyMu.Lock()
+	defer w.applyMu.Unlock()
 	row, ok := w.monitors.Get(ref)
 	if !ok {
 		return
@@ -337,6 +353,8 @@ func (w *fleetWatcher) Resync(ctx context.Context, peerID string) error {
 	if !w.ready() || w.mesh == nil {
 		return nil
 	}
+	w.resyncMu.Lock()
+	defer w.resyncMu.Unlock()
 	peerID = strings.TrimSpace(peerID)
 	rows := w.monitors.ByTargetHome(peerID)
 	cursors := make([]any, 0, len(rows))
@@ -368,9 +386,15 @@ func (w *fleetWatcher) Resync(ctx context.Context, peerID string) error {
 			// A monitor the home holds and this daemon does not: the registration
 			// reply was lost. Adopt it rather than leaving the home pushing into
 			// nothing — the home is the one that knows what it owes.
+			// The home may not know this chat's tab, and a notice with no tab is
+			// dropped by the admission fence without a word. This machine knows it.
+			tabID := strings.TrimSpace(fieldString(entry, "watcherTabId"))
+			if tabID == "" && w.chatTab != nil {
+				tabID = strings.TrimSpace(w.chatTab(fieldString(entry, "watcherChatId")))
+			}
 			adopted, err := w.Record(fleetlog.Registration{
 				WatcherID: watcherID, TargetID: targetID, Label: fieldString(entry, "label"),
-				WatcherChatID: fieldString(entry, "watcherChatId"), WatcherTabID: fieldString(entry, "watcherTabId"),
+				WatcherChatID: fieldString(entry, "watcherChatId"), WatcherTabID: tabID,
 				OriginLaneID: fieldString(entry, "originLaneId"), OriginOperationID: fieldString(entry, "originOperationId"),
 			})
 			if err != nil {
@@ -399,6 +423,7 @@ func (w *fleetWatcher) Resync(ctx context.Context, peerID string) error {
 	for _, raw := range anySlice(fields["states"]) {
 		w.ingestState(peerID, mapFromAnyMain(raw))
 	}
+	w.adoptHostedRows(ctx, peerID)
 	return nil
 }
 
@@ -434,6 +459,7 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 		delete(w.darkSince, home)
 		delete(w.announced, home)
 		w.mu.Unlock()
+		w.resyncIfOwed(home)
 		if wasDark {
 			// home_up, then the backlog from the cursor. One stream, one
 			// vocabulary (§7).
@@ -497,6 +523,10 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 // notify — they are visible by reading, which is exactly when freshness
 // matters. A cancelled child never notifies either: the parent asked for that.
 func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) {
+	// A monitor already recorded without its tab, by a build that adopted one so.
+	if strings.TrimSpace(row.WatcherTabID) == "" && w.chatTab != nil {
+		row.WatcherTabID = strings.TrimSpace(w.chatTab(row.WatcherChatID))
+	}
 	w.settleHostedRow(row, event)
 	if fieldString(event.Payload, "entity") == "process" {
 		w.projectProcess(row, event)

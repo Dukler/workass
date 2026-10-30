@@ -1,0 +1,3 @@
+#!/bin/sh
+# tool NAME 'JSON'
+printf '%s' "$2" | /Users/dukler/Workspace/workass/.dev/rail-proof/workass-mac tools --context /Users/dukler/Workspace/workass/.dev/rail-proof/ctx.json call "$1"

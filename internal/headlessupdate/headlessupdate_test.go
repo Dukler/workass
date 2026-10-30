@@ -490,3 +490,21 @@ func TestVersionComparisonRejectsLooseVersions(t *testing.T) {
 		t.Fatal("version validation accepted a non-release string")
 	}
 }
+
+func TestDescribeRunningJobsNamesWhatWouldDie(t *testing.T) {
+	jobs := []RunningJob{
+		{WorkID: "xwa", Label: "train", Protected: false, Note: "shares the cgroup"},
+		{WorkID: "xwb", Label: "sleep", Protected: true, Note: "own scope"},
+	}
+	described := DescribeRunningJobs(jobs)
+	summary, _ := described["summary"].(string)
+	if !strings.Contains(summary, "WOULD KILL 1") || !strings.Contains(summary, "train (xwa)") || !strings.Contains(summary, "1 more would survive") {
+		t.Fatalf("summary: %q", summary)
+	}
+	if got := DescribeRunningJobs(jobs[1:])["summary"]; !strings.Contains(got.(string), "protected") {
+		t.Fatalf("summary: %v", got)
+	}
+	if got := DescribeRunningJobs(nil)["summary"]; !strings.Contains(got.(string), "no supervised job") {
+		t.Fatalf("summary: %v", got)
+	}
+}

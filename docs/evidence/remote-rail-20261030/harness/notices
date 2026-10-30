@@ -1,0 +1,13 @@
+#!/bin/sh
+# notices: every task-notification the owner chat received (needs a running turn for the credential).
+TAB=$(python3 -I -c "import json;print(json.load(open('/Users/dukler/Workspace/workass/.dev/rail-proof/ctx.json'))['tab_id'])"); CHAT=$(python3 -I -c "import json;print(json.load(open('/Users/dukler/Workspace/workass/.dev/rail-proof/ctx.json'))['chat_id'])")
+/Users/dukler/Workspace/workass/.dev/rail-proof/tool workass_read_chat "{\"tab_id\":\"$TAB\",\"chat_id\":\"$CHAT\",\"limit\":200}" | python3 -I -c "
+import sys,json,re
+d=json.loads(sys.stdin.read())
+if 'messages' not in d: print(d)
+g=lambda k,c:(re.search('<%s>(.*?)</%s>'%(k,k),c,re.S) or [None,'-'])[1]
+for m in d.get('messages',[]):
+    c=str(m.get('content') or m.get('text') or '')
+    if '<task-notification>' in c and m.get('role')=='user':
+        print(g('task-id',c),g('status',c),g('summary',c)[:60],'run='+g('run-time',c),'queued='+g('queued',c),'elapsed='+g('elapsed',c),'err='+g('error',c)[:70],'result='+g('result',c)[:40])
+"

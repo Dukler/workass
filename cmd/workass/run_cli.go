@@ -71,8 +71,11 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
   --token-file FILE        this run's credential; never passed on a command line
   --unreported             supervise with no chat told, and say so
 
-The job runs in its own process group, so it is not a child of the daemon and
-survives a daemon restart or a self-update. Every transition is REPORTED to
+The job runs apart from the daemon, so it survives a daemon restart or a
+self-update: on Linux under a systemd service the supervisor moves itself into a
+transient user scope, because a process group does not escape a unit's cgroup. A
+machine that cannot do that says NOT ISOLATED here and in the job's row, and the
+update status names the job. Every transition is REPORTED to
 this machine's daemon and acknowledged by it; the outbox (state/process-outbox.db)
 is the write-ahead copy, so a daemon that is down misses nothing and the backlog
 drains in order when it answers. A supervisor that cannot report says so on
@@ -95,6 +98,25 @@ no settled event means lost, not running.
 		return 2
 	}
 
+	// Before anything else, and before the credential is consumed: a move out of
+	// a service's cgroup re-execs this same pid with these same arguments. The id
+	// is settled here so the scope and the job agree on it across that exec.
+	id := strings.TrimSpace(*operationID)
+	if id == "" {
+		var err error
+		if id, err = randomOperationID(); err != nil {
+			fmt.Fprintf(stderr, "workass run: %v\n", err)
+			return procchild.ExitSupervisorFailed
+		}
+		args = append([]string{"--operation-id", id}, args...)
+	}
+	procchild.LeaveCallerProcessGroup()
+	if childID, err := procchild.IDForOperation(id); err == nil {
+		if executable, err := os.Executable(); err == nil {
+			procchild.EscapeServiceCgroup(childID, executable, append([]string{"run"}, args...), stderr)
+		}
+	}
+
 	resolvedStateDir, reporter, err := resolveRunContext(*tokenFile, *stateDir, *unreported, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
@@ -113,14 +135,6 @@ no settled event means lost, not running.
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %v\n", err)
 		return 2
-	}
-
-	id := strings.TrimSpace(*operationID)
-	if id == "" {
-		if id, err = randomOperationID(); err != nil {
-			fmt.Fprintf(stderr, "workass run: %v\n", err)
-			return procchild.ExitSupervisorFailed
-		}
 	}
 
 	diagnostics := io.Writer(stderr)

@@ -126,6 +126,15 @@ What it never touches: anything outside the install root. `/data/workass/pi`,
 `/data/workass/codex`, `/data/workass/state` and the unit file are not the
 release's to own.
 
+## Jobs across an update
+
+A supervised job survives this under the stock `KillMode=control-group`, with no
+change to the unit: `workass run` moves itself into a transient user scope,
+`workass-job-<id>.scope`, as it starts. `update.status` lists `runningJobs` and names
+any that would die, and never blocks. A job that cannot be protected says NOT ISOLATED
+when it starts and in its row (fleet-runtime §14g). A subagent runs inside a provider
+and does not survive: its row fails with that reason, and its owner gets one notice.
+
 ## Reading and driving it from another machine
 
 From the Mac, with duklerver mounted and paired:

@@ -1214,10 +1214,11 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 	visibleJobID := job.ID
 	eventToolCallID := toolCallID
 	terminalID := terminalIDFromContent(update["content"])
+	suppressed := false
 	if job.SubagentID != "" {
-		if job.suppressVisible.Load() {
-			return
-		}
+		// Nothing on this machine shows a child with no parent turn here. A child
+		// hosted for another machine still has one, over there.
+		suppressed = job.suppressVisible.Load()
 		visibleJobID = firstNonEmpty(job.VisibleJobID, job.ID)
 		parentToolCallID = job.SubagentID
 		if eventToolCallID != "" {
@@ -1273,7 +1274,9 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 			event["subagentModel"] = job.SubagentModel
 		}
 	}
-	b.manager.emit("job:event", map[string]any{"type": "acp", "id": visibleJobID, "event": event})
+	if !suppressed {
+		b.manager.emit("job:event", map[string]any{"type": "acp", "id": visibleJobID, "event": event})
+	}
 	if job.SubagentID != "" {
 		b.manager.forwardHostedSubagentCall(job.SubagentID, event)
 	}

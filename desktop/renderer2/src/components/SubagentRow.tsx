@@ -53,14 +53,14 @@ export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNod
                 as a native fork and remembers the conversation. */}
             {(n.work?.forked || n.forked) && <span className="r-fk" title="Bifurcado: recuerda la conversación del chat" aria-label="Subagente bifurcado"><IcFork /></span>}
             <span className="r-nm" title={label}>{label}</span>
+            {/* Where it runs, on the line that has room for it: the line below is
+                the same model and activity a local row has. */}
+            {host && <span className="r-host" title={`Corre en ${host}`}>{host}</span>}
             {dur && <span className="r-el">{dur}</span>}
           </span>
           <span className="r-sasub">
             {n.model && <span className="r-mdl">{n.model}</span>}
             {n.model && <span className="r-sep" aria-hidden="true">·</span>}
-            {/* Where it runs, beside what it is doing and never in place of it. */}
-            {host && <span className="r-mdl" title={`Corre en ${host}`}>{host}</span>}
-            {host && <span className="r-sep" aria-hidden="true">·</span>}
             {activity
               ? (
                 <span className="r-act">

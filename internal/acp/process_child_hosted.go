@@ -190,6 +190,9 @@ type ProcessTimes struct {
 	StartedAt string
 	QueuedMs  int64
 	RunMs     int64
+	// Unsplit is a job that started at a moment nobody recorded, whose wait and run
+	// are one number.
+	Unsplit bool
 }
 
 // ProcessChildTimes separates a job's wait from its run. end is when it ended,
@@ -212,13 +215,19 @@ func ProcessChildTimes(item SpawnedWorkItem, end time.Time) ProcessTimes {
 		out.StartedAt = exec.UTC().Format(time.RFC3339Nano)
 	case item.PID != nil:
 		// Started, at a moment nobody recorded. The row's first write is the
-		// nearest thing known and the wait cannot be told from the run.
+		// nearest thing known, and the wait cannot be told from the run, so no run
+		// time is claimed: a figure that includes the queue is not one. A receipt
+		// with none reports <elapsed>, which is what that number always was.
 		exec = queued
 		out.StartedAt = out.QueuedAt
+		out.Unsplit = true
 	}
 	out.RunMs = item.RunMs
-	if out.RunMs <= 0 && !exec.IsZero() && !end.IsZero() && end.After(exec) {
+	if out.RunMs <= 0 && !out.Unsplit && !exec.IsZero() && !end.IsZero() && end.After(exec) {
 		out.RunMs = end.Sub(exec).Milliseconds()
+	}
+	if out.Unsplit {
+		return out
 	}
 	waitedUntil := exec
 	if waitedUntil.IsZero() {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,5 +251,204 @@ func TestDisplayNameOfAPeer(t *testing.T) {
 		if got := fleetDisplayName(testCase.raw, testCase.id); got != testCase.want {
 			t.Fatalf("fleetDisplayName(%q) = %q, want %q", testCase.raw, got, testCase.want)
 		}
+	}
+}
+
+// The live failure: a child failed in 187ms, its exit reached its home's log, and
+// the push beat the spawn reply to the owner, who had no monitor to land it on. The
+// owner still showed it running eighteen minutes later and had been told nothing.
+func TestAnExitAlreadyInTheLogReachesTheOwnerAsARowAndANotice(t *testing.T) {
+	secret := newFleetTestSecret(t)
+	hosting := newStatelessMCPTestHarness(t)
+	home := serveMeshHome(t, "m-home", secret, hosting.handler.agentControl)
+	hostingFleet := installTestFleetHome(t, "m-home", hosting, home)
+
+	asking := newStatelessMCPTestHarness(t)
+	var watcher *fleetWatcher
+	mesh := monitorMeshDialer(t, "m-away", secret, func(peerID, channel string, payload any) {
+		watcher.Ingest(peerID, channel, payload)
+	})
+	watcher = installTestFleetWatcher(t, "m-away", asking, mesh)
+	watcher.settleHosted = asking.runtime.settleHostedExit
+	if err := mesh.AddRoute(home.machineID, "home", fleetclient.KindLAN, home.address, fleetclient.SourceManual); err != nil {
+		t.Fatalf("add route to the home: %v", err)
+	}
+	if _, err := mesh.EnsureLink(context.Background(), home.machineID); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	const childID = "wa-subagent-187-1"
+	target, err := fleetid.New("m-home", fleetid.Subagent, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcherID, err := fleetid.New("m-away", fleetid.Chat, "mcp-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := hostingFleet.register("m-away", fleetlog.Registration{
+		WatcherID: watcherID.String(), TargetID: target.String(), Label: "fails at once",
+		WatcherChatID: "mcp-chat", WatcherTabID: "mcp-tab",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child fails, and the push finds no monitor on the owner yet.
+	if _, err := hostingFleet.Append(target.String(), fleetlog.KindExit, map[string]any{
+		"outcome": "failed", "label": "fails at once",
+		"receipt": subagentReceiptPayload(acp.SubagentReceipt{
+			ReceiptID: "subagent-" + childID, SubagentID: childID, Label: "fails at once", Status: "failed",
+			Error: "model control: Unsupported Codex model: gpt-6.1-sol",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lane, operation, _ := hostedRowOwnerOrigin(asking)
+	asking.handler.agentControl.manager.RegisterHostedSubagent("mcp-tab", "mcp-chat", acp.HostedSubagentRow{
+		SubagentID: childID, Label: "fails at once", HostMachine: "m-home", OriginLaneID: lane, OriginOperationID: operation,
+	})
+	// Only now does the owner record the monitor, from a reply with no slice in it.
+	watcher.WatchRemoteSubagent(context.Background(), "m-home", map[string]any{
+		"monitor": map[string]any{"targetId": target.String(), "ref": row.Ref, "label": "fails at once"},
+	}, "mcp-tab", "mcp-chat", lane, operation)
+
+	ended := awaitRailRow(t, asking, childID, func(row map[string]any) bool { return fieldString(row, "status") != "running" })
+	if fieldString(ended, "status") != "failed" {
+		t.Fatalf("the row: %#v", ended)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(chatNotices(t, asking, "mcp-chat")) == 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if notices := chatNotices(t, asking, "mcp-chat"); len(notices) != 1 {
+		t.Fatalf("notices = %d, want exactly one", len(notices))
+	}
+	// And a monitor still owed a sync on an up link is asked again on a beat.
+	watcher.mu.Lock()
+	if watcher.lastResync == nil {
+		watcher.lastResync = map[string]time.Time{}
+	}
+	watcher.lastResync["m-home"] = time.Now().Add(-time.Hour)
+	watcher.mu.Unlock()
+	watcher.OnLinkState(fleetclient.State{Peer: "m-home", Status: fleetclient.StatusUp})
+	time.Sleep(fleetCatchUpDelay * 3)
+	if notices := chatNotices(t, asking, "mcp-chat"); len(notices) != 1 {
+		t.Fatalf("a later sync delivered it again: %d notices", len(notices))
+	}
+}
+
+// A push reaches a watcher over a link the home itself dialled.
+func TestAPushGoesOverTheLinkThisSideDialled(t *testing.T) {
+	sent := []string{}
+	pusher := &fleetPusher{
+		send: func(string, string, any) int { return 0 },
+		link: func(string) (func(context.Context, string, ...any) (any, error), bool) {
+			return func(_ context.Context, channel string, args ...any) (any, error) {
+				sent = append(sent, channel+":"+fieldString(firstMapArg(args), "channel"))
+				return map[string]any{"ok": true}, nil
+			}, true
+		},
+	}
+	if got := pusher.push("m-away", fleetLogEventChannel, map[string]any{}); got != 1 {
+		t.Fatalf("push = %d", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sent) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(sent) != 1 || sent[0] != fleetPushChannel+":"+fleetLogEventChannel {
+		t.Fatalf("sent = %v", sent)
+	}
+}
+
+// Found on the live rig: the spawn answered with the run itself, the monitor path
+// read that as a map with no id, and no remote subagent ever had a monitor. The
+// exit stayed in its home's log and nobody was told.
+func TestAHostTargetedSpawnGetsAMonitorFromTheRunItReturns(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	secret := newFleetTestSecret(t)
+	home := serveMeshHome(t, "m-home", secret, harness.handler.agentControl)
+	installTestFleetHome(t, "m-home", harness, home)
+	answer := harness.handler.agentControl.monitorForwardedSpawn(fleetForwardedWork{
+		Origin: fleetCommandOrigin{Machine: "m-away", ChatID: "mcp-chat", TabID: "mcp-tab"},
+	}, acp.SubagentRun{ID: "wa-subagent-5-1", Label: "hosted"})
+	monitor := mapFromAnyMain(mapFromAnyMain(answer)["monitor"])
+	if !strings.Contains(fieldString(monitor, "targetId"), "wa-subagent-5-1") {
+		t.Fatalf("a host-targeted spawn has no monitor: %#v", answer)
+	}
+}
+
+// Found live: a link-up resync and a catch-up ran together and one exit was
+// delivered twice.
+func TestConcurrentSyncsDeliverOneExitOnce(t *testing.T) {
+	asking := newStatelessMCPTestHarness(t)
+	watched, err := fleetlog.OpenMonitors(t.TempDir(), fleetlog.MonitorsWatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	delivered := 0
+	watcher := newFleetWatcher(fleetWatcherOptions{
+		Self: "m-away", Monitors: watched, ChatExists: asking.runtime.chatExists, ChatTab: asking.runtime.chatTab,
+		Deliver: func(fleetMonitorNotice) error {
+			mu.Lock()
+			delivered++
+			mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			return nil
+		},
+	})
+	row, err := watcher.Record(fleetlog.Registration{
+		WatcherID: "wa:m-away/chat/mcp-chat", TargetID: "wa:m-home/subagent/wa-subagent-2-1",
+		WatcherChatID: "mcp-chat", WatcherTabID: "mcp-tab",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slice := map[string]any{"events": []any{map[string]any{
+		"seq": 1, "kind": fleetlog.KindExit, "payload": map[string]any{
+			"receipt": subagentReceiptPayload(acp.SubagentReceipt{SubagentID: "wa-subagent-2-1", ReceiptID: "r", Status: "done"}),
+		},
+	}}}
+	var wait sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			watcher.applySlice(context.Background(), "m-home", row.Ref, slice)
+		}()
+	}
+	wait.Wait()
+	if delivered != 1 {
+		t.Fatalf("delivered %d times", delivered)
+	}
+}
+
+// Found on the live rig: a sync adopted a job's monitor before the local record,
+// with the empty tab the home has for a chat on another machine, and every notice
+// through it was dropped by the admission fence. The row settled and nobody was told.
+func TestANoticeThroughAMonitorAdoptedWithNoTabStillArrives(t *testing.T) {
+	asking := newStatelessMCPTestHarness(t)
+	watched, err := fleetlog.OpenMonitors(t.TempDir(), fleetlog.MonitorsWatched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher := newFleetWatcher(fleetWatcherOptions{
+		Self: "m-away", Monitors: watched, Deliver: asking.runtime.deliverFleetMonitorNotice,
+		ChatExists: asking.runtime.chatExists, ChatTab: asking.runtime.chatTab,
+	})
+	row, err := watcher.Record(fleetlog.Registration{
+		WatcherID: "wa:m-away/chat/mcp-chat", TargetID: "wa:m-home/process/xwNoTabJob0001", WatcherChatID: "mcp-chat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher.applySlice(context.Background(), "m-home", row.Ref, map[string]any{"events": []any{map[string]any{
+		"seq": 1, "kind": fleetlog.KindExit, "payload": map[string]any{
+			"entity": "process", "outcome": "failed", "label": "no tab",
+			"processReceipt": spawnedWorkReceiptPayload(acp.SpawnedWorkReceipt{ReceiptID: "spawned-xwNoTabJob0001", TaskID: "xwNoTabJob0001", Label: "no tab", Status: "failed"}),
+		},
+	}}})
+	if notices := chatNotices(t, asking, "mcp-chat"); len(notices) != 1 {
+		t.Fatalf("notices = %d, want one", len(notices))
 	}
 }

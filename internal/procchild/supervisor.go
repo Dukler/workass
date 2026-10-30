@@ -30,8 +30,9 @@ import (
 //     read a receipt: a refusal nobody is told is the same as a job that
 //     vanished.
 //  5. Take the resource hold, reporting queue position as it waits.
-//  6. Start the child in its own process group / scope / job object, so it is
-//     NOT a daemon child and survives a daemon restart and a self-update.
+//  6. Start the child in its own process group / scope / job object, which is what
+//     lets a stop reach the whole tree. Surviving the daemon is a separate matter,
+//     settled before Run by EscapeServiceCgroup and read back by SurvivalOf.
 //  7. Watch three things it declared — a runtime ceiling, an output-silence
 //     threshold, a stop-file — and act on each exactly once, reporting a
 //     heartbeat on the declared cadence meanwhile.
