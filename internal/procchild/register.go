@@ -2,11 +2,13 @@ package procchild
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,20 +190,46 @@ func (d *daemonReporter) Report(request Report) (Acknowledgement, error) {
 	if value, ok := fields["status"].(string); ok {
 		ack.Status = value
 	}
-	switch value := fields["ackThrough"].(type) {
-	case float64:
-		if value > 0 {
-			ack.AckThrough = uint64(value)
-		}
-	case int64:
-		if value > 0 {
-			ack.AckThrough = uint64(value)
-		}
-	}
+	ack.AckThrough = ackThroughOf(fields["ackThrough"])
 	// Whether the ack is sufficient is the journal's call, not this client's:
 	// one authority for "was this delivered", and it is the one that owns the
 	// queue (reporter.go).
 	return ack, nil
+}
+
+// ackThroughOf reads the acknowledgement out of the daemon's answer, in
+// whatever shape it arrives in.
+//
+// The tools endpoint decodes to float64 today, so this is tolerance rather
+// than a fix — but the cost of getting it wrong is not a wrong number, it is a
+// supervisor that reads 0, concludes its daemon is too old, and redelivers the
+// same batch forever while the daemon applies it every time. The same trap
+// already cost every exit code of every job reported over a link, where the
+// wire encodes numbers as strings, so it is worth refusing to fall into twice.
+func ackThroughOf(value any) uint64 {
+	switch typed := value.(type) {
+	case float64:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case int64:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case int:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
+			return uint64(parsed)
+		}
+	case string:
+		if parsed, err := strconv.ParseUint(strings.TrimSpace(typed), 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // eventArguments is the wire shape of one batch. It is the Event struct's own

@@ -2,6 +2,7 @@ package procchild
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -229,6 +230,24 @@ func TestAnUnreachableDaemonIsLoudOnStderrAndKeepsTrying(t *testing.T) {
 	health := record.health()
 	if health.Delivered || health.Pending != 1 || health.Gap <= 0 {
 		t.Fatalf("the health must say undelivered with a gap, got %+v", health)
+	}
+}
+
+func TestTheAcknowledgementIsReadInWhateverShapeItArrivesIn(t *testing.T) {
+	// The cost of getting this wrong is not a wrong number: it is a supervisor
+	// that reads 0, concludes its daemon is too old, and redelivers the same
+	// batch forever while the daemon applies it every time. The same trap cost
+	// every exit code of every job reported over a link, where the wire encodes
+	// numbers as strings.
+	for _, shape := range []any{float64(7), int64(7), int(7), json.Number("7"), "7"} {
+		if got := ackThroughOf(shape); got != 7 {
+			t.Fatalf("ackThrough from %T(%v) = %d, want 7", shape, shape, got)
+		}
+	}
+	for _, absent := range []any{nil, float64(0), "", "not a number", map[string]any{}} {
+		if got := ackThroughOf(absent); got != 0 {
+			t.Fatalf("ackThrough from %#v = %d, want 0", absent, got)
+		}
 	}
 }
 
