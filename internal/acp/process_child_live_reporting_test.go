@@ -54,8 +54,8 @@ func TestAHostChatWithNoLiveSessionStillRegistersItsSupervisedJob(t *testing.T) 
 		t.Fatalf("the report must be acknowledged through seq 1, got %#v", result["ackThrough"])
 	}
 	rows := manager.ListProcessChildren()
-	if len(rows) != 1 || rows[0].Status != "running" {
-		t.Fatalf("the job must be a visible running row, got %#v", rows)
+	if len(rows) != 1 || rows[0].Status != "queued" {
+		t.Fatalf("the job must be a visible row, queued until its command starts, got %#v", rows)
 	}
 }
 

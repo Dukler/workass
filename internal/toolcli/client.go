@@ -66,6 +66,10 @@ type Response struct {
 // what actually happened to their context.
 var ErrContextMissing = errors.New("Workass context file does not exist")
 
+// RunCredentialPrefix marks a one-shot supervised-job credential. It lives here
+// because this client has to recognise one, and internal/acp sits above it.
+const RunCredentialPrefix = "wrt_"
+
 func ReadConfig(path string) (Config, error) {
 	var config Config
 	info, err := os.Lstat(path)
@@ -99,7 +103,12 @@ func Do(ctx context.Context, config Config, name string, call *Call) (Response, 
 	if err != nil || u.Scheme != "https" || u.Hostname() != "tools.localhost" || u.Port() == "" || u.Path != "/workass/tools" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return Response{}, errors.New("invalid Workass tool endpoint")
 	}
-	if config.Credential == "" || strings.ContainsAny(config.Credential, "\r\n") || config.ChatID == "" || config.TabID == "" {
+	if config.Credential == "" || strings.ContainsAny(config.Credential, "\r\n") {
+		return Response{}, errors.New("Workass session context is incomplete")
+	}
+	if (config.ChatID == "" || config.TabID == "") && !strings.HasPrefix(config.Credential, RunCredentialPrefix) {
+		// A supervised job's own credential is the one that names no chat: the
+		// job belongs to its owner, wherever that is, and no chat here holds it.
 		return Response{}, errors.New("Workass session context is incomplete")
 	}
 	pem, err := os.ReadFile(config.CAFile)

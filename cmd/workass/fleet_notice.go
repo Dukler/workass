@@ -259,8 +259,15 @@ func formatFleetProcessExit(notice fleetMonitorNotice) string {
 	if receipt.ExitCode != nil {
 		fmt.Fprintf(&b, "<exit-code>%d</exit-code>\n", *receipt.ExitCode)
 	}
-	if receipt.ElapsedMs > 0 {
+	if receipt.RunMs > 0 {
+		fmt.Fprintf(&b, "<run-time>%s</run-time>\n", (time.Duration(receipt.RunMs) * time.Millisecond).Round(time.Second))
+	} else if receipt.ElapsedMs > 0 {
+		// From a host that predates the split, whose elapsed time includes any
+		// wait in a queue. It keeps its old name so it is not read as a run time.
 		fmt.Fprintf(&b, "<elapsed>%s</elapsed>\n", (time.Duration(receipt.ElapsedMs) * time.Millisecond).Round(time.Second))
+	}
+	if queued := (time.Duration(receipt.QueuedMs) * time.Millisecond).Round(time.Second); queued > 0 {
+		fmt.Fprintf(&b, "<queued>%s</queued>\n", queued)
 	}
 	if path := strings.TrimSpace(receipt.OutputFile); path != "" {
 		fmt.Fprintf(&b, "<output-file>%s</output-file>\n", path)

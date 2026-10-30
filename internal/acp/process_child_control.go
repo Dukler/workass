@@ -27,15 +27,24 @@ import (
 
 // ProcessChildView is one process child, as a reader sees it.
 type ProcessChildView struct {
-	WorkID     string `json:"work_id"`
-	Label      string `json:"label"`
-	Status     string `json:"status"`
-	Outcome    string `json:"outcome,omitempty"`
-	Role       string `json:"role,omitempty"`
-	Owner      string `json:"owner,omitempty"`
-	ChatID     string `json:"chat_id"`
-	TabID      string `json:"tab_id"`
-	StartedAt  string `json:"started_at"`
+	WorkID  string `json:"work_id"`
+	Label   string `json:"label"`
+	Status  string `json:"status"`
+	Outcome string `json:"outcome,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Owner   string `json:"owner,omitempty"`
+	// ChatID and TabID are absent for a job hosted for another machine: no chat
+	// here holds it, and Owner says whose it is.
+	ChatID string `json:"chat_id,omitempty"`
+	TabID  string `json:"tab_id,omitempty"`
+	// QueuedAt is when the job was asked for. StartedAt is when its command
+	// started, and is absent while Status is "queued": a job waiting for a
+	// resource has not started, however long it has been waiting. QueuedMs is
+	// how long it waited, or has waited so far. RunMs is set once it has ended.
+	QueuedAt   string `json:"queued_at,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	QueuedMs   int64  `json:"queued_ms,omitempty"`
+	RunMs      int64  `json:"run_ms,omitempty"`
 	UpdatedAt  string `json:"updated_at"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
@@ -88,6 +97,11 @@ func (m *Manager) ListProcessChildren() []ProcessChildView {
 		if rec == nil || !rec.Item.Supervised() {
 			continue
 		}
+		if rec.Item.Status != "running" && hostedProcessChild(rec.Item) {
+			// Kept so a read or a replayed start still finds it, and past this
+			// list exactly as a chat's settled row is once compacted.
+			continue
+		}
 		rows = append(rows, processChildView(rec.Item))
 		if rec.Item.Resource != "" {
 			resources[rec.Item.Resource] = struct{}{}
@@ -107,10 +121,10 @@ func (m *Manager) ListProcessChildren() []ProcessChildView {
 		rows[i].StopRequested = procchild.StopRequested(m.opts.StateDir, rows[i].WorkID)
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if (rows[i].Status == "running") != (rows[j].Status == "running") {
-			return rows[i].Status == "running"
+		if rows[i].active() != rows[j].active() {
+			return rows[i].active()
 		}
-		return rows[i].StartedAt > rows[j].StartedAt
+		return firstNonEmpty(rows[i].StartedAt, rows[i].QueuedAt) > firstNonEmpty(rows[j].StartedAt, rows[j].QueuedAt)
 	})
 	return rows
 }
@@ -252,11 +266,27 @@ func (m *Manager) CancelProcessChild(workID, reason string) (map[string]any, err
 	}, nil
 }
 
+// active reports a job that has not ended, whether or not it has started.
+func (v ProcessChildView) active() bool {
+	return v.Status == "running" || v.Status == processStatusQueued
+}
+
 func processChildView(item SpawnedWorkItem) ProcessChildView {
+	end, _ := time.Parse(time.RFC3339Nano, item.FinishedAt)
+	times := processChildTimes(item, end)
+	status := item.Status
+	if status == "running" && times.StartedAt == "" {
+		status = processStatusQueued
+	}
+	runMs := int64(0)
+	if item.Status != "running" {
+		runMs = times.RunMs
+	}
 	return ProcessChildView{
-		WorkID: item.ID, Label: item.Label, Status: item.Status, Outcome: item.Outcome,
+		WorkID: item.ID, Label: item.Label, Status: status, Outcome: item.Outcome,
 		Role: item.Role, Owner: item.Owner, ChatID: item.ChatID, TabID: item.TabID,
-		StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt,
+		QueuedAt: times.QueuedAt, StartedAt: times.StartedAt, QueuedMs: times.QueuedMs, RunMs: runMs,
+		UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt,
 		ExitCode: item.ExitCode, Summary: item.Summary, OutputFile: item.OutputFile,
 		PID: item.PID, SupervisorPID: item.SupervisorPID, ProcessGroup: item.ProcessGroup,
 		Isolation: item.Isolation, Resource: item.Resource, QueuePosition: item.QueuePosition,

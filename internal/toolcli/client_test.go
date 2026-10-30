@@ -125,3 +125,16 @@ func TestDoReportsRejectionStatus(t *testing.T) {
 		t.Fatalf("rejected request: status=%d error=%q", response.Status, response.Error)
 	}
 }
+
+// Only a supervised job's own credential may name no chat: an ordinary one with
+// a missing pair is still refused before anything reads the certificate.
+func TestOnlyAJobCredentialMayNameNoChat(t *testing.T) {
+	config := Config{Endpoint: "https://tools.localhost:1/workass/tools", CAFile: "/nonexistent", Credential: "owner-key"}
+	if _, err := Do(context.Background(), config, "", nil); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("an ordinary credential with no chat: %v", err)
+	}
+	config.Credential = RunCredentialPrefix + "abc"
+	if _, err := Do(context.Background(), config, "", nil); err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("a job credential must get past the context check, got %v", err)
+	}
+}

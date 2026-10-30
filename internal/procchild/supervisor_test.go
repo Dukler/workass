@@ -579,3 +579,50 @@ func TestARunWithNoLabelOrNoCommandIsRefusedBeforeAnythingHappens(t *testing.T) 
 		t.Fatal("a resource name that could escape its queue directory must be refused")
 	}
 }
+
+// Two claims about a job that waits for a resource: the stall clock starts at
+// exec, so stale_after cannot fire during the wait, and the run time its closing
+// report states does not include it.
+func TestWaitingForAResourceIsNeitherAStallNorRunTime(t *testing.T) {
+	state := t.TempDir()
+	holder, err := Acquire(AcquireRequest{StateDir: state, Resource: "gpu0", ChildID: "holder", Label: "holder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, reporter := fastSpec(t, state, "/bin/sh", "-c", "echo ran")
+	spec.Resource = "gpu0"
+	spec.StaleAfter = 10 * time.Millisecond
+	const wait = 700 * time.Millisecond
+	go func() {
+		time.Sleep(wait)
+		holder.Release()
+	}()
+	result, err := Run(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OutcomeSettled {
+		t.Fatalf("outcome = %q", result.Outcome)
+	}
+	if result.Elapsed >= wait {
+		t.Fatalf("the run time %s includes the %s wait", result.Elapsed, wait)
+	}
+	var created, started time.Time
+	for _, event := range spoolOf(t, reporter) {
+		switch event.Kind {
+		case KindStalled:
+			t.Fatalf("waiting in a queue was reported as a stall: %#v", event)
+		case KindCreated:
+			created = event.At
+		case KindStarted:
+			started = event.At
+		case KindSettled:
+			if ms, _ := event.Payload["elapsedMs"].(int64); time.Duration(ms)*time.Millisecond >= wait {
+				t.Fatalf("the settled report states %dms", ms)
+			}
+		}
+	}
+	if started.Sub(created) < wait/2 {
+		t.Fatalf("created %s and started %s do not carry the wait", created, started)
+	}
+}

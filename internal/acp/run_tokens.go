@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"workass/internal/durablefs"
+	"workass/internal/toolcli"
 )
 
 // A credential for exactly one supervised job, and nothing else.
@@ -23,17 +24,23 @@ import (
 //
 // `process.start` closes it without weakening the rule: H runs its OWN
 // `workass run` with an environment built from nothing, and the only credential
-// that job ever holds is this one — a token bound to one chat on H, one
-// operation id, and the single method `process.register`. It is consumed by the
-// first successful registration and it cannot be used for anything else, so a
-// job that reads its own token file gains nothing a job could not already do.
+// that job ever holds is this one — a token bound to one job, its one owner, one
+// operation id, and the single method `process.register`. It names no chat on H,
+// so it authenticates as nobody: ownerBinding does not resolve it, and only the
+// tool endpoint's own branch for it accepts it, for that one tool. It ends the
+// moment its job is terminal and it cannot be used for anything else, so a job
+// that reads its own token file gains nothing a job could not already do.
+//
+// A token minted before this was bound to a chat on H, which held the job's row.
+// Those jobs are still running somewhere and report with what they hold, so such
+// a record keeps working exactly as it did until its job ends; none is minted.
 //
 // The chat-tool token (chat_tool_token.go) is deliberately NOT reused here: it
 // authenticates as its chat for every tool, lives as long as the chat, and
 // handing one to arbitrary argv would be a far wider grant than the job needs.
 
 // runTokenPrefix marks a one-shot supervised-job credential.
-const runTokenPrefix = "wrt_"
+const runTokenPrefix = toolcli.RunCredentialPrefix
 
 // runTokenTTL bounds a credential that is IDLE. A job whose supervisor never
 // started must not leave a usable token behind forever — but a job that is
@@ -44,8 +51,10 @@ const runTokenTTL = 24 * time.Hour
 
 type runTokenRecord struct {
 	Token       string `json:"token"`
-	ChatID      string `json:"chatId"`
-	TabID       string `json:"tabId"`
+	WorkID      string `json:"workId,omitempty"`
+	Owner       string `json:"owner,omitempty"`
+	ChatID      string `json:"chatId,omitempty"`
+	TabID       string `json:"tabId,omitempty"`
 	OperationID string `json:"operationId"`
 	IssuedAt    string `json:"issuedAt"`
 	LastUsedAt  string `json:"lastUsedAt,omitempty"`
@@ -53,12 +62,22 @@ type runTokenRecord struct {
 
 // RunTokenBinding is what one run credential authorizes.
 type RunTokenBinding struct {
+	// WorkID and Owner are the job and the global id of the chat owed its
+	// outcome.
+	WorkID string
+	Owner  string
+	// ChatID and TabID are set only on a credential minted before jobs stopped
+	// needing a chat on their host; see the note at the top of this file.
 	ChatID      string
 	TabID       string
 	OperationID string
 	IssuedAt    time.Time
 	LastUsedAt  time.Time
 }
+
+// JobScoped reports a credential bound to a job and its owner rather than to a
+// chat on this machine.
+func (b RunTokenBinding) JobScoped() bool { return b.ChatID == "" && b.TabID == "" }
 
 // idleSince is the last moment this credential was either issued or used.
 func (b RunTokenBinding) idleSince() time.Time {
@@ -97,12 +116,16 @@ func (m *Manager) loadRunTokens() {
 	now := time.Now().UTC()
 	for _, record := range records {
 		token := strings.TrimSpace(record.Token)
-		if token == "" || strings.TrimSpace(record.ChatID) == "" || strings.TrimSpace(record.OperationID) == "" {
-			continue
-		}
 		binding := RunTokenBinding{
+			WorkID: strings.TrimSpace(record.WorkID), Owner: strings.TrimSpace(record.Owner),
 			ChatID: strings.TrimSpace(record.ChatID), TabID: strings.TrimSpace(record.TabID),
 			OperationID: strings.TrimSpace(record.OperationID),
+		}
+		if binding.JobScoped() && (binding.WorkID == "" || binding.Owner == "") {
+			continue
+		}
+		if token == "" || binding.OperationID == "" {
+			continue
 		}
 		if issued, err := time.Parse(time.RFC3339, record.IssuedAt); err == nil {
 			binding.IssuedAt = issued.UTC()
@@ -129,7 +152,8 @@ func (m *Manager) persistRunTokensLocked() {
 	records := make([]runTokenRecord, 0, len(m.runTokens))
 	for token, binding := range m.runTokens {
 		record := runTokenRecord{
-			Token: token, ChatID: binding.ChatID, TabID: binding.TabID,
+			Token: token, WorkID: binding.WorkID, Owner: binding.Owner,
+			ChatID: binding.ChatID, TabID: binding.TabID,
 			OperationID: binding.OperationID,
 			IssuedAt:    binding.IssuedAt.UTC().Format(time.RFC3339),
 		}
@@ -167,10 +191,10 @@ func (m *Manager) persistRunTokensLocked() {
 // MintRunToken issues the credential for one supervised job. Minting with an
 // operation id that already has one returns that one, so a replayed start does
 // not strand a second credential.
-func (m *Manager) MintRunToken(chatID, tabID, operationID string) string {
-	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+func (m *Manager) MintRunToken(workID, owner, operationID string) string {
+	workID, owner = strings.TrimSpace(workID), strings.TrimSpace(owner)
 	operationID = strings.TrimSpace(operationID)
-	if m == nil || chatID == "" || tabID == "" || operationID == "" {
+	if m == nil || workID == "" || owner == "" || operationID == "" {
 		return ""
 	}
 	m.mu.Lock()
@@ -179,7 +203,7 @@ func (m *Manager) MintRunToken(chatID, tabID, operationID string) string {
 		m.runTokens = map[string]RunTokenBinding{}
 	}
 	for token, binding := range m.runTokens {
-		if binding.OperationID == operationID && binding.ChatID == chatID && binding.TabID == tabID {
+		if binding.OperationID == operationID && binding.WorkID == workID && binding.Owner == owner {
 			return token
 		}
 	}
@@ -189,7 +213,7 @@ func (m *Manager) MintRunToken(chatID, tabID, operationID string) string {
 	}
 	token := runTokenPrefix + hex.EncodeToString(raw)
 	m.runTokens[token] = RunTokenBinding{
-		ChatID: chatID, TabID: tabID, OperationID: operationID, IssuedAt: time.Now().UTC(),
+		WorkID: workID, Owner: owner, OperationID: operationID, IssuedAt: time.Now().UTC(),
 	}
 	m.persistRunTokensLocked()
 	return token

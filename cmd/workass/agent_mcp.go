@@ -307,8 +307,6 @@ func agentMCPTools() []map[string]any {
 			"label":          str(agenttext.Get("schema.process.label")),
 			"command":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": maxProcessStartCommand, "description": agenttext.Get("schema.process.start_command")},
 			"cwd":            str(agenttext.Get("schema.process.start_cwd")),
-			"host_tab_id":    str(agenttext.Get("schema.process.start_host_tab_id")),
-			"host_chat_id":   str(agenttext.Get("schema.process.start_host_chat_id")),
 			"env":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": agenttext.Get("schema.process.start_env")},
 			"role":           enum(agenttext.Get("schema.agentMCPTools.guidance.63"), "work", "service"),
 			"resource":       str(agenttext.Get("schema.process.resource")),
@@ -318,7 +316,7 @@ func agentMCPTools() []map[string]any {
 			"max_runtime_ms": integer(agenttext.Get("schema.process.max_runtime_ms"), 0),
 			"stale_after_ms": integer(agenttext.Get("schema.process.stale_after_ms"), 0),
 			"max_hold_ms":    integer(agenttext.Get("schema.process.max_hold_ms"), 0),
-		}, "machine_id", "label", "command", "cwd", "host_tab_id", "host_chat_id"), false, true, true, true),
+		}, "machine_id", "label", "command", "cwd"), false, true, true, true),
 		tool("workass_list_process_children", agenttext.Get("tools.workass_list_process_children"), object(map[string]any{
 			"machine_id": str(agenttext.Get("schema.process.machine_id")),
 		}), true, false, true, false),
