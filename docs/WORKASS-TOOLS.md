@@ -385,15 +385,25 @@ Nothing about that call polls, and nothing about it needs a watcher:
 - **Preflight refuses in seconds.** Declared inputs must exist and be
   non-empty, symlink targets must resolve, the command must be on PATH, the
   output directory must be writable and the disk floor met. A missing input is
-  a refusal before the job queues, not a crash in hour three. A refused run
-  creates no row.
+  a refusal before the job queues, not a crash in hour three. A refusal is
+  REPORTED like any other outcome: a job started from another machine has a
+  chat waiting, and a refusal it never hears about is indistinguishable from a
+  job that vanished.
 - **`--resource` is a FIFO queue, visible to anyone.** Waiters report their
   position; the hold is tied to the supervisor process, so however the holder
   dies the resource frees. `--max-hold` is reported, never enforced by a kill.
 - **The job runs in its own process group** (a `systemd --user` scope on Linux,
   a Job object on Windows), so it is not a child of the daemon.
-- **Every transition is written to disk before it is reported**, so a daemon
-  that is restarting or updating itself misses nothing.
+- **Every transition is REPORTED to this machine's daemon and acknowledged**,
+  over the same authenticated tool surface you call — and written to the
+  machine's outbox first, so a daemon that is restarting or updating itself
+  misses nothing and the backlog drains in order when it answers.
+- **It is never silent about not reporting.** A supervisor that cannot reach
+  its daemon says so on stderr, keeps trying, and carries `reported`,
+  `pendingEvents`, `reportGapMs` and `reportError` in its receipt. Meanwhile
+  the job's row reads `reporting: "silent"` rather than looking healthy: the
+  work may be fine, but nothing here knows. A run with no credential at all is
+  refused — `--unreported` is how you ask for supervision with no chat told.
 - **`--operation-id` is one key for both sides.** The same id is the same job:
   a repeat cannot create a second one.
 - **The chat is told only what is actionable**: settled, failed, `timed_out`,
@@ -419,7 +429,9 @@ That machine runs its own `workass run` — same preflight, same queue, same
 outcomes — with a credential minted for this one job and an environment built
 from nothing but PATH, HOME and the `env` you named, so no daemon's environment
 is lent to the job. `host_tab_id` + `host_chat_id` name a chat THERE that holds
-the job's local row; the chat that called owns the outcome and gets the notice.
+the job's local row, and the machine-tagged pair `workass_list_chats` hands you
+is exactly what to pass; the chat that called owns the outcome and gets the
+notice, for every terminal state including a preflight refusal.
 There is no `command` shell: the program and each argument are separate
 strings. On your own machine the tool refuses and points at `workass run`,
 which is the right tool when you already have a shell.
