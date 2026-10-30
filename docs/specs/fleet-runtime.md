@@ -565,6 +565,19 @@ for the reverse direction, because a dialler never stated the port it listens
 on, so the receiving daemon learned no route back and could not dial or
 heartbeat the pair from its own side. All four are fixed with tests.
 
+**The reverse-direction fix needed a second pass (2026-10-30, later).** Stating
+the port inside `enroll` was not enough, because enrolment happens ONCE per
+peer lifetime: a pair that linked before a port was ever stated reconnects with
+its stored token, never re-enrols, and can never learn the route. The port
+therefore rides the HEARTBEAT, joined by the receiver to the host its own
+socket reports and never to anything the peer names — so every already-paired
+pair self-heals on the next beat. Two consequences are part of the fix: a route
+restated every minute must not be a disk write every minute, so `AddRoute`
+returns without saving when nothing changed; and once both ends can dial, the
+pair would hold two sockets, so a dialler asks whether the peer already has a
+live inbound link before dialling and publishes `up` for an inbound-only pair.
+One duplex link per pair, whichever side opened it, as §4 says.
+
 ## 14c. Reporting is a call, not a file (2026-10-30)
 
 The first live two-machine run of `process.start` started four jobs on
