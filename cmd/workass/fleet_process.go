@@ -66,6 +66,11 @@ func (h *fleetHome) ObserveProcess(event acp.ProcessLifecycleEvent) {
 			h.pushState(target, hostedStatePayload(*event.State))
 		}
 	case acp.ProcessLifecycleExit:
+		if h.hasExit(target) {
+			// One job, one exit. A daemon that stopped after writing this and
+			// before recording the row reaches the same verdict on its next boot.
+			return
+		}
 		payload := map[string]any{
 			"outcome": event.Outcome, "label": event.Label, "entity": "process",
 			"processReceipt": spawnedWorkReceiptPayload(event.Receipt),
@@ -311,6 +316,7 @@ func (w *fleetWatcher) RegisterOffer(peer string, params map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
+	w.catchUp(peer)
 	return map[string]any{"ok": true, "ref": row.Ref, "afterSeq": row.AppliedSeq}, nil
 }
 

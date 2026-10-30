@@ -218,7 +218,12 @@ func (m *Manager) SettleHostedSubagent(tabID, chatID string, receipt SubagentRec
 		return
 	}
 	id := strings.TrimSpace(receipt.SubagentID)
-	activity := "Finished"
+	// The same words a local child ends on (finishSubagent).
+	phase := strings.TrimSpace(receipt.Status)
+	activity := map[string]string{"done": "Completed", "failed": "Failed", "cancelled": "Cancelled"}[phase]
+	if activity == "" {
+		phase, activity = "done", "Completed"
+	}
 	parentJobID := m.hostedParentJob(strings.TrimSpace(tabID), strings.TrimSpace(chatID), id)
 	running := false
 	m.spawnedWorkMu.Lock()
@@ -241,7 +246,7 @@ func (m *Manager) SettleHostedSubagent(tabID, chatID string, receipt SubagentRec
 		Status:         strings.TrimSpace(receipt.Status),
 		Label:          receipt.Label,
 		ModelLabel:     receipt.ModelLabel,
-		Phase:          "finished",
+		Phase:          phase,
 		LatestActivity: activity,
 		Result:         receipt.Result,
 		Error:          receipt.Error,

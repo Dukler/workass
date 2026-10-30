@@ -128,6 +128,9 @@ func openFleetMonitors(
 			chats.applyHostedState(peerID, name, row, fields)
 		},
 		SettleHosted: chats.settleHostedExit,
+		HostedRows: func(peerID string) []acp.SpawnedWorkItem {
+			return manager.RunningHostedRows(peerID)
+		},
 	})
 	// The home delivers to a watcher on this machine in process, through the
 	// watcher's own projection — one path, local and remote.
@@ -136,6 +139,7 @@ func openFleetMonitors(
 		logger.Printf("[workass] registered the fleet monitor channel %s", fleetMonitorOfferChannel)
 	}
 	service.watcher.RegisterPushChannel(hub)
+	service.home.SettleSubagentsLostToRestart()
 	if control != nil {
 		control.fleetHome, control.fleetWatch = service.home, service.watcher
 		control.fleetMesh = mesh.Invoker()

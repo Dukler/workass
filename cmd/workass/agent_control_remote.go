@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -193,6 +194,15 @@ func (h *agentControlHandler) monitorForwardedSpawn(forwarded fleetForwardedWork
 		return result
 	}
 	fields := mapFromAnyMain(result)
+	if len(fields) == 0 {
+		// A host-targeted spawn answers with the run itself rather than decoded
+		// JSON. Reading that as "no id" returned here without a monitor, so no
+		// remote subagent's exit could ever reach the chat that asked.
+		raw, err := json.Marshal(result)
+		if err != nil || json.Unmarshal(raw, &fields) != nil {
+			return result
+		}
+	}
 	subagentID := strings.TrimSpace(fieldString(fields, "id"))
 	if subagentID == "" {
 		return result

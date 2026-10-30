@@ -1,9 +1,13 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"workass/internal/procchild"
@@ -80,6 +84,47 @@ type ProcessChildView struct {
 	// HeartbeatMs is the cadence the supervisor declared, so a reader can see
 	// what silence was measured against.
 	HeartbeatMs int64 `json:"heartbeat_ms,omitempty"`
+	// SurvivesRestart says whether stopping or updating this machine's daemon would
+	// kill the job, measured against its supervisor's real pid when read. Absent
+	// for a job that has ended. SurvivalNote says why, either way.
+	SurvivesRestart *bool  `json:"survives_restart,omitempty"`
+	SurvivalNote    string `json:"survival_note,omitempty"`
+}
+
+// measureSurvival fills in one active row's survival, for the moment it is read.
+func measureSurvival(view *ProcessChildView) {
+	if view == nil || !view.active() || view.SupervisorPID == nil {
+		return
+	}
+	survival := procchild.SurvivalOf(*view.SupervisorPID)
+	protected := survival.Protected
+	view.SurvivesRestart = &protected
+	view.SurvivalNote = firstNonEmpty(survival.How, survival.Why)
+}
+
+// JobSurvival is one running job as the updater reports it.
+type JobSurvival struct {
+	WorkID    string `json:"workId"`
+	Label     string `json:"label"`
+	Owner     string `json:"owner,omitempty"`
+	Protected bool   `json:"protected"`
+	Note      string `json:"note"`
+}
+
+// RunningJobSurvival is every active job on this machine and whether it would
+// outlive this daemon. It is the fact an update has to be applied in view of.
+func (m *Manager) RunningJobSurvival() []JobSurvival {
+	out := []JobSurvival{}
+	for _, row := range m.ListProcessChildren() {
+		if !row.active() || row.SurvivesRestart == nil {
+			continue
+		}
+		out = append(out, JobSurvival{
+			WorkID: row.WorkID, Label: row.Label, Owner: row.Owner,
+			Protected: *row.SurvivesRestart, Note: row.SurvivalNote,
+		})
+	}
+	return out
 }
 
 // ListProcessChildren reports every supervised child on this machine, newest
@@ -119,6 +164,7 @@ func (m *Manager) ListProcessChildren() []ProcessChildView {
 			rows[i].QueuePosition, rows[i].Holding = entry.Position, entry.Holding
 		}
 		rows[i].StopRequested = procchild.StopRequested(m.opts.StateDir, rows[i].WorkID)
+		measureSurvival(&rows[i])
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].active() != rows[j].active() {
@@ -157,9 +203,15 @@ func (m *Manager) ReadProcessChild(workID string, tailBytes int, afterSeq uint64
 	}
 	m.spawnedWorkMu.Unlock()
 	if !found {
+		// Not "unknown": a chat's settled row is compacted into its receipt, and a
+		// job must stay readable after it ends, which is when somebody asks.
+		if receipt, settled := m.findProcessChildReceipt(workID); settled {
+			return processChildReceiptAnswer(receipt, tailBytes, m), nil
+		}
 		return nil, fmt.Errorf("no process child %q is tracked on this machine", workID)
 	}
 	view := processChildView(item)
+	measureSurvival(&view)
 	view.StopRequested = procchild.StopRequested(m.opts.StateDir, workID)
 	if item.Resource != "" {
 		for _, entry := range procchild.Queue(m.opts.StateDir, item.Resource) {
@@ -293,5 +345,49 @@ func processChildView(item SpawnedWorkItem) ProcessChildView {
 		Stalled: item.Stalled, MaxRuntimeMs: item.MaxRuntimeMs,
 		StaleAfterMs: item.StaleAfterMs, MaxHoldMs: item.MaxHoldMs,
 		Reporting: item.Reporting, ReportGapMs: item.ReportGapMs, HeartbeatMs: item.HeartbeatMs,
+	}
+}
+
+// findProcessChildReceipt looks through every tab's receipts for one ended job. A
+// read by id names no chat, and the row that named one has been compacted away.
+func (m *Manager) findProcessChildReceipt(workID string) (SpawnedWorkReceipt, bool) {
+	stateDir := strings.TrimSpace(m.opts.StateDir)
+	if stateDir == "" {
+		return SpawnedWorkReceipt{}, false
+	}
+	paths, _ := filepath.Glob(filepath.Join(stateDir, "spawned-work-receipts", "*.jsonl"))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lines := boundedSpawnedReceiptLines(data)
+		for i := len(lines) - 1; i >= 0; i-- {
+			var receipt SpawnedWorkReceipt
+			if json.Unmarshal(lines[i], &receipt) == nil && normalizeSpawnedWorkTaskID(receipt.TaskID) == workID {
+				return receipt, true
+			}
+		}
+	}
+	return SpawnedWorkReceipt{}, false
+}
+
+// processChildReceiptAnswer is the shape a read of a live job has, from a receipt.
+func processChildReceiptAnswer(receipt SpawnedWorkReceipt, tailBytes int, m *Manager) map[string]any {
+	view := ProcessChildView{
+		WorkID: receipt.TaskID, Label: receipt.Label, Status: receipt.Status, Outcome: receipt.Outcome,
+		Role: receipt.Role, ChatID: receipt.ChatID, TabID: receipt.TabID,
+		QueuedAt: receipt.QueuedAt, StartedAt: receipt.StartedAt, QueuedMs: receipt.QueuedMs, RunMs: receipt.RunMs,
+		UpdatedAt: receipt.FinishedAt, FinishedAt: receipt.FinishedAt, ExitCode: receipt.ExitCode,
+		Summary: receipt.Summary, OutputFile: receipt.OutputFile, PID: receipt.PID,
+	}
+	tail, truncated, size := readProcessChildTail(receipt.OutputFile, tailBytes)
+	if tail == "" {
+		// The file may have been cleaned up since. The receipt kept its own tail.
+		tail, truncated = receipt.OutputTail, receipt.TailLimited
+	}
+	return map[string]any{
+		"ok": true, "child": view, "output_tail": tail, "output_bytes": size,
+		"output_truncated": truncated, "from_receipt": true,
 	}
 }

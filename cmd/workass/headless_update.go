@@ -50,6 +50,14 @@ func (s *headlessUpdateService) SetMachine(machineID, machineName string) {
 	s.name = strings.TrimSpace(machineName)
 }
 
+// SetRunningJobs tells the updater how to read this machine's running jobs. It
+// arrives here because the manager is built after the updater.
+func (s *headlessUpdateService) SetRunningJobs(read func() []headlessupdate.RunningJob) {
+	if s != nil && s.updates != nil {
+		s.updates.SetRunningJobs(read)
+	}
+}
+
 // SetRestart hands the updater the daemon's own graceful-shutdown authority.
 // The updater never kills a process and never calls systemctl restart: it
 // replaces files, asks for the ordinary shutdown, and lets the unit's

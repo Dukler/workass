@@ -39,9 +39,9 @@ import (
 //     credential, token or session path can;
 //   - the only credential it holds is a one-shot run token (acp/run_tokens.go)
 //     good for exactly one `process.register` with one operation id;
-//   - it is still `workass run` that supervises, in its own process group, so
-//     the child is not a child of the daemon and survives a restart or a
-//     self-update exactly as a hand-started one does;
+//   - it is still `workass run` that supervises, and that supervisor moves itself
+//     out of the daemon's reach (§14g), so the job survives a restart or a
+//     self-update and the answer below says whether it really did;
 //   - it is refused outright on a link below full access, and refused for this
 //     machine, where the agent has its own shell and should use it.
 //
@@ -124,7 +124,7 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 			"queuedAt":   existing.QueuedAt, "startedAt": existing.StartedAt,
 		}, nil
 	}
-	executable, err := os.Executable()
+	executable, err := procchild.SupervisorExecutable(h.manager.StateDir())
 	if err != nil {
 		return nil, fmt.Errorf("this daemon cannot locate its own executable, so it cannot start `workass run`: %w", err)
 	}
@@ -156,8 +156,10 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	// failure was written by a process with nowhere to write it. The file sits
 	// next to the job's own output, so a reader who has one has the other.
 	cmd.Stdout, cmd.Stderr = log, log
-	// Its own process group: the supervisor is not a child of the daemon's
-	// lifetime, which is what makes the job survive a restart or a self-update.
+	// Its own process group, which is all that launchd and the app's updater reach
+	// for. Under a systemd service that is not enough: a group does not escape a
+	// cgroup, so the supervisor moves itself into a scope as it starts, keeping
+	// this pid (procchild.EscapeServiceCgroup).
 	procchild.DetachProcessGroup(cmd)
 	startErr := cmd.Start()
 	// The child holds its own descriptor from here; this one has no further
@@ -205,8 +207,26 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	if monitor, ok := registration["monitor"]; ok {
 		result["monitor"] = monitor
 	}
+	// Measured, not assumed. A job this machine cannot protect still runs, because
+	// the caller asked for it, and the caller is told here rather than finding out
+	// from an update.
+	survival := procchild.AwaitSurvival(supervisorPID, processStartSurvivalWait)
+	if !procchild.PIDAlive(supervisorPID) {
+		// Already over, as a refused job is at once. Nothing is left to protect, and
+		// its outcome comes through its monitor.
+		return result, nil
+	}
+	result["survivesRestart"] = survival.Protected
+	if survival.Protected {
+		result["survival"] = survival.How
+	} else {
+		result["warning"] = "NOT ISOLATED: this job will die if this machine's Workass daemon stops or updates: " + survival.Why
+	}
 	return result, nil
 }
+
+// processStartSurvivalWait covers the moment a supervisor takes to move itself.
+const processStartSurvivalWait = 3 * time.Second
 
 // openSupervisorLog creates the file the supervisor's own stream goes into and
 // stamps what it is, so a reader who opens it mid-job knows whose it is.
@@ -411,6 +431,13 @@ func processStartEnvironment(params map[string]any) ([]string, error) {
 	}
 	if root := strings.TrimSpace(os.Getenv(procchild.DataRootEnvVar)); root != "" {
 		environment = append(environment, procchild.DataRootEnvVar+"="+root)
+	}
+	// Named one by one, and none is a secret: what the platform needs for the
+	// supervisor to reach its service manager, or for a process to start at all.
+	for _, name := range procchild.SupervisorEnvironmentNames() {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			environment = append(environment, name+"="+value)
+		}
 	}
 	declared := mapFromAnyMain(params["env"])
 	names := make([]string, 0, len(declared))

@@ -227,7 +227,8 @@ func (h *fleetHome) handleMonitor(caller wire.Caller, params map[string]any) (an
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "ref": row.Ref, "targetId": row.TargetID, "slice": slicePayload(slice)}, nil
+	_, running := h.stateFor(row.TargetID)
+	return map[string]any{"ok": true, "ref": row.Ref, "targetId": row.TargetID, "slice": slicePayload(slice), "running": running}, nil
 }
 
 // register is the home-side registration, used by the channel above and

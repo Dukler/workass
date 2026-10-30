@@ -1274,7 +1274,13 @@ func (m *Manager) settleSubagentSpawnedWork(tabID, chatID string, run SubagentRu
 	summary := compactText(redactSensitiveText(run.LatestActivity), 1000)
 	lastToolName := compactText(redactSensitiveText(run.Phase), 120)
 	modelLabel := compactText(redactSensitiveText(run.ModelLabel), 120)
-	excerpt := compactText(redactSensitiveText(firstNonEmpty(run.Result, run.Error)), maxSpawnedWorkResultExcerpt)
+	// A failed run's error is what a reader of the row needs, ahead of whatever
+	// partial text it had written before it failed.
+	excerptSource := firstNonEmpty(run.Result, run.Error)
+	if status == "failed" {
+		excerptSource = firstNonEmpty(run.Error, run.Result)
+	}
+	excerpt := compactText(redactSensitiveText(excerptSource), maxSpawnedWorkResultExcerpt)
 	changed := false
 	m.spawnedWorkMu.Lock()
 	rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, id)]
@@ -2581,7 +2587,11 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 	if item.Supervised() || hostedJobItem(item) {
 		times := ProcessChildTimes(item, finished)
 		receipt.StartedAt, receipt.QueuedAt = times.StartedAt, times.QueuedAt
-		receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs = times.RunMs, times.RunMs, times.QueuedMs
+		receipt.RunMs, receipt.QueuedMs = times.RunMs, times.QueuedMs
+		if !times.Unsplit {
+			// An unsplit job keeps the whole of its elapsed time, under that name.
+			receipt.ElapsedMs = times.RunMs
+		}
 	}
 	return receipt
 }

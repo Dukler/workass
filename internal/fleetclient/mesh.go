@@ -876,16 +876,39 @@ func (m *Mesh) superviseInterval(peerID string) time.Duration {
 	return m.heartbeat
 }
 
+// reconnectFirst and reconnectLast bound the quick retries after a link is lost.
+// A restart takes seconds and the heartbeat a minute or two, and what waits on the
+// link is an outcome somebody is owed. Past the last, the heartbeat is the retry.
+const (
+	reconnectFirst = time.Second
+	reconnectLast  = 16 * time.Second
+)
+
 func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 	ticker := time.NewTicker(m.superviseInterval(peerID))
 	defer ticker.Stop()
+	// At once on the way up, for the same reason: this machine has just restarted,
+	// and a peer may be waiting to hear what became of its work.
+	retry := time.NewTimer(0)
+	defer retry.Stop()
+	backoff := reconnectFirst
 	for {
+		var lost <-chan struct{}
+		m.mu.Lock()
+		if link := m.links[peerID]; link != nil {
+			lost = link.Done()
+		}
+		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.stopped:
 			return
 		case <-ticker.C:
+		case <-retry.C:
+		case <-lost:
+			// The socket went. Nothing else would look until the next beat.
+			backoff = reconnectFirst
 		}
 		m.mu.Lock()
 		closed := m.closed
@@ -942,6 +965,12 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 		dialCtx, cancel := context.WithTimeout(ctx, m.dialTimeout)
 		if _, err := m.EnsureLink(dialCtx, peerID); err != nil && !errors.Is(err, context.Canceled) {
 			m.logf("[fleet] link to %s is down: %v", peerID, err)
+			if backoff <= reconnectLast {
+				retry.Reset(backoff)
+				backoff *= 2
+			}
+		} else {
+			backoff = reconnectFirst
 		}
 		cancel()
 		m.beat(peerID)

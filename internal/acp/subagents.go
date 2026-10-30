@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"workass/internal/agenttext"
 )
@@ -264,9 +265,14 @@ type SubagentRun struct {
 	originLaneID               string
 	originOperationID          string
 	originMachine              string
-	originChatID               string
-	originTabID                string
-	forkSourceSessionID        string
+	// modelDefaulted is a model this machine chose rather than one the caller named.
+	modelDefaulted bool
+	// controlsReady closes once the child's model and mode are applied, or it ended.
+	controlsReady       chan struct{}
+	controlsOnce        *sync.Once
+	originChatID        string
+	originTabID         string
+	forkSourceSessionID string
 }
 
 // AgentCatalog exposes the exact daemon-owned provider/model/effort/mode
@@ -448,6 +454,8 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	snapshot := copySubagentRun(run)
 	m.mu.Unlock()
 
+	run.modelDefaulted = strings.TrimSpace(opts.ModelID) == ""
+	run.controlsReady, run.controlsOnce = make(chan struct{}), &sync.Once{}
 	if !opts.HostedForOrigin {
 		// A hosted run's row belongs to the chat that ASKED, on its own
 		// machine. Registering one here too is what made the child show up as
@@ -459,7 +467,36 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		m.emitSubagentHeader(rootJobID, id, label, brand, modelLabel, "in_progress", "", opts.Fork)
 	}
 	go m.runSubagent(runCtx, run, prompt, brand)
+	if opts.HostedForOrigin {
+		// The caller is on another machine and cannot see this one's catalog, so
+		// a model it named that is not on offer is answered here, as a refused spawn,
+		// rather than as a row that ends a moment after it appears.
+		return m.awaitHostedSubagentControls(ctx, run, snapshot)
+	}
 	return snapshot, nil
+}
+
+// hostedSpawnControlWait bounds that wait. A cold provider can take far longer to
+// open a session, and past this the spawn answers and any failure arrives as the
+// child's exit, through its monitor.
+const hostedSpawnControlWait = 20 * time.Second
+
+func (m *Manager) awaitHostedSubagentControls(ctx context.Context, run *SubagentRun, snapshot SubagentRun) (SubagentRun, error) {
+	timer := time.NewTimer(hostedSpawnControlWait)
+	defer timer.Stop()
+	select {
+	case <-run.controlsReady:
+	case <-timer.C:
+		return snapshot, nil
+	case <-ctx.Done():
+		return snapshot, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if run.Status == "failed" {
+		return SubagentRun{}, errors.New(firstNonEmpty(run.Error, "the subagent failed as it started"))
+	}
+	return copySubagentRun(run), nil
 }
 
 // subagentChatIDPrefix marks a chat that belongs to a delegated child rather
@@ -467,8 +504,16 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 // literal, and this only gives that literal a name.
 const subagentChatIDPrefix = "subagent:"
 
+// signalControlsReady wakes a spawn waiting on this run.
+func (r *SubagentRun) signalControlsReady() {
+	if r != nil && r.controlsReady != nil && r.controlsOnce != nil {
+		r.controlsOnce.Do(func() { close(r.controlsReady) })
+	}
+}
+
 func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, brand string) {
 	defer run.cancel()
+	defer run.signalControlsReady()
 	providerID, modelID, effort, modeID, cwd := run.ProviderID, run.ModelID, run.Effort, run.ModeID, run.CWD
 	rootJobID, rootSessionID, id, label := run.RootJobID, run.RootSessionID, run.ID, run.Label
 	m.updateSubagentActivity(id, "initializing", "Initializing ACP session")
@@ -526,9 +571,28 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 		selectedModel = modelID + "[" + effort + "]"
 	}
 	if _, err := bridge.ensureSessionControls(runCtx, info.SessionID, selectedModel, modeID); err != nil {
-		m.finishSubagent(run, nil, err)
-		return
+		if !run.modelDefaulted || !strings.Contains(err.Error(), "model control:") {
+			m.finishSubagent(run, nil, err)
+			return
+		}
+		// Nobody asked for that model. The catalog here picked it and the session
+		// that was actually opened does not offer it, which happens on a host whose
+		// provider failed to refresh its model list. What this session starts on is
+		// the host's own answer, so the child runs on that and the row says so.
+		if _, err := bridge.ensureSessionControls(runCtx, info.SessionID, "", modeID); err != nil {
+			m.finishSubagent(run, nil, err)
+			return
+		}
+		applied := bridge.currentSessionControlResult().CurrentModelID
+		m.opts.Logf("a subagent's default model was not on offer in its session; using the session's own", map[string]any{
+			"subagentId": id, "catalogModel": modelID, "sessionModel": applied,
+		})
+		modelID, selectedModel = applied, applied
+		m.mu.Lock()
+		run.ModelID, run.ModelLabel = applied, subagentModelLabel(applied, applied, "")
+		m.mu.Unlock()
 	}
+	run.signalControlsReady()
 
 	now := time.Now().UTC()
 	m.mu.Lock()
@@ -957,11 +1021,18 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	}
 	m.mu.Lock()
 	cancelled := run.cancelled
+	// A child hosted for another machine, ended because this daemon is stopping.
+	// Nobody asked for that, so it is not "cancelled", and the chat that asked has
+	// no other way to learn that its work died with this machine's restart.
+	hostStopped := m.resetting && strings.TrimSpace(run.originMachine) != ""
 	m.mu.Unlock()
 	if job != nil && strings.EqualFold(job.StopReason, "cancelled") {
 		cancelled = true
 	}
-	if cancelled {
+	if hostStopped {
+		status = "failed"
+		errorText = "the Workass daemon on the machine running this subagent stopped (a restart or an update), and a subagent does not survive that"
+	} else if cancelled {
 		status = "cancelled"
 	} else if runErr != nil {
 		status = "failed"
@@ -1044,9 +1115,9 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	switch {
 	case !eligibleCompletion:
 		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "the parent cancelled this subagent"
-	case engineDied:
+	case engineDied && !hostStopped:
 		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "the provider engine died and orphaned this subagent"
-	case suppressed:
+	case suppressed && !hostStopped:
 		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "a waiter already consumed this result"
 	case waiterBlocked:
 		lifecycle.NoticeSuppressed, lifecycle.SuppressReason = true, "a live waiter will consume this result"

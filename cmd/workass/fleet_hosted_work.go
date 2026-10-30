@@ -64,6 +64,182 @@ func (h *fleetHome) pushState(targetID string, fields map[string]any) {
 	}
 }
 
+// fleetResyncInterval is how often a beat asks a home for what this daemon is still
+// owed, while it is owed anything. A push is an optimisation and can be lost in
+// several ways that nobody hears about, and §5's "nothing polls" had no answer to
+// that: a child's exit stayed in its home's log for as long as the link stayed up.
+// It rides the heartbeat and costs nothing once every monitor has its outcome.
+const fleetResyncInterval = 2 * time.Minute
+
+// catchUp asks one home for what it holds, soon and once however many ask. The
+// short delay lets a burst of new monitors share one round trip.
+func (w *fleetWatcher) catchUp(peerID string) {
+	peerID = strings.TrimSpace(peerID)
+	if !w.ready() || w.mesh == nil || peerID == "" || peerID == w.self {
+		return
+	}
+	w.mu.Lock()
+	if w.catchingUp == nil {
+		w.catchingUp = map[string]bool{}
+	}
+	if w.catchingUp[peerID] {
+		w.mu.Unlock()
+		return
+	}
+	w.catchingUp[peerID] = true
+	w.mu.Unlock()
+	go func() {
+		time.Sleep(fleetCatchUpDelay)
+		w.mu.Lock()
+		delete(w.catchingUp, peerID)
+		if w.lastResync == nil {
+			w.lastResync = map[string]time.Time{}
+		}
+		w.lastResync[peerID] = w.now()
+		w.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := w.Resync(ctx, peerID); err != nil {
+			w.logf("[fleet] could not catch up with %s: %v", peerID, err)
+		}
+	}()
+}
+
+// fleetCatchUpDelay is the moment a catch-up waits for others to join it.
+const fleetCatchUpDelay = 100 * time.Millisecond
+
+// resyncIfOwed is the beat's half of catchUp.
+func (w *fleetWatcher) resyncIfOwed(home string) {
+	owed := false
+	for _, row := range w.monitors.ByTargetHome(home) {
+		if !row.Consumed {
+			owed = true
+			break
+		}
+	}
+	if !owed && w.hostedRows != nil {
+		owed = len(w.hostedRows(home)) > 0
+	}
+	if !owed {
+		return
+	}
+	w.mu.Lock()
+	due := w.now().Sub(w.lastResync[home]) >= fleetResyncInterval
+	w.mu.Unlock()
+	if due {
+		w.catchUp(home)
+	}
+}
+
+// adoptHostedRows gives a monitor to any row running on this machine that has none.
+//
+// Every remote subagent spawned before the monitor bug was found is one: its exit
+// sits in its home's log with nobody registered to hear it, and nothing else would
+// ever end the row. Registering now returns the log from the start, so an exit that
+// was already there arrives like any other. A home that has neither an exit nor the
+// child any more cannot say what it did, and the row says that rather than running
+// forever. A home too old to answer `running` is simply asked again next time.
+func (w *fleetWatcher) adoptHostedRows(ctx context.Context, peerID string) {
+	if w.hostedRows == nil || w.mesh == nil {
+		return
+	}
+	for _, item := range w.hostedRows(peerID) {
+		kind := fleetid.Process
+		if item.Kind == "subagent" {
+			kind = fleetid.Subagent
+		}
+		target, err := fleetid.New(peerID, kind, item.ID)
+		if err != nil {
+			continue
+		}
+		if _, held := w.monitorFor(peerID, target.String()); held {
+			continue
+		}
+		watcher, err := fleetid.New(w.self, fleetid.Chat, item.ChatID)
+		if err != nil {
+			continue
+		}
+		answer, err := w.mesh.Invoke(ctx, peerID, fleetMonitorChannel, map[string]any{
+			"watcher_id": watcher.String(), "target_id": target.String(), "label": item.Label,
+			"watcher_chat_id": item.ChatID, "watcher_tab_id": item.TabID,
+		})
+		if err != nil {
+			w.logf("[fleet] could not adopt %s on %s: %v", item.ID, peerID, err)
+			continue
+		}
+		fields := mapFromAnyMain(answer)
+		row, err := w.Record(fleetlog.Registration{
+			WatcherID: watcher.String(), TargetID: target.String(), Label: item.Label,
+			WatcherChatID: item.ChatID, WatcherTabID: item.TabID,
+			OriginLaneID: item.OriginLaneID, OriginOperationID: item.OriginOperationID,
+		})
+		if err != nil {
+			continue
+		}
+		slice := mapFromAnyMain(fields["slice"])
+		if len(slice) > 0 {
+			w.applySlice(ctx, peerID, row.Ref, slice)
+		}
+		running, stated := fields["running"].(bool)
+		if !stated || running || len(anySlice(slice["events"])) > 0 || kind != fleetid.Subagent {
+			continue
+		}
+		w.logf("[fleet] %s no longer has %s and logged no end for it", peerID, item.ID)
+		w.project(row, fleetlog.Event{Kind: fleetlog.KindExit, Entity: target.String(), Payload: map[string]any{
+			"outcome": fleetlog.OutcomeFailed, "label": item.Label,
+			"receipt": subagentReceiptPayload(acp.SubagentReceipt{
+				ReceiptID: "subagent-" + item.ID, SubagentID: item.ID, Label: item.Label, Status: "failed",
+				ModelLabel: item.ModelLabel, ProviderID: item.ProviderID, StartedAt: item.StartedAt,
+				Error: "the machine running this subagent no longer has it and recorded no end, so what it did is unknown",
+			}),
+		}})
+		_, _ = w.monitors.Update(row.Ref, func(entry *fleetlog.Registration) { entry.Consumed = true })
+	}
+}
+
+// hasExit reports whether a target's log already holds its end.
+func (h *fleetHome) hasExit(targetID string) bool {
+	if !h.ready() {
+		return false
+	}
+	slice, err := h.logs.Since(targetID, 0, 0)
+	if err != nil {
+		return false
+	}
+	for _, event := range slice.Events {
+		if event.Kind == fleetlog.KindExit {
+			return true
+		}
+	}
+	return false
+}
+
+// SettleSubagentsLostToRestart ends the children this machine was running for
+// other machines when it stopped. They ran inside the daemon's providers and did
+// not survive it, and nothing else will ever say so: with no exit in the log, the
+// row in the chat that asked would stay running forever.
+func (h *fleetHome) SettleSubagentsLostToRestart() {
+	if !h.ready() {
+		return
+	}
+	for _, row := range h.monitors.All() {
+		if row.Consumed || row.WatcherHome() == h.self {
+			continue
+		}
+		_, local, _, err := fleetid.Split(row.TargetID, fleetid.Subagent)
+		if err != nil || local == "" || h.hasExit(row.TargetID) || row.AckedSeq > 0 {
+			continue
+		}
+		_, _ = h.Append(row.TargetID, fleetlog.KindExit, map[string]any{
+			"outcome": fleetlog.OutcomeFailed, "label": row.Label,
+			"receipt": subagentReceiptPayload(acp.SubagentReceipt{
+				ReceiptID: "subagent-" + local, SubagentID: local, Label: row.Label, Status: "failed",
+				Error: "the Workass daemon on the machine running this subagent restarted, and a subagent does not survive that",
+			}),
+		})
+	}
+}
+
 // hostedStatePayload is one statement, in the words the wire carries.
 func hostedStatePayload(state acp.HostedWorkState) map[string]any {
 	payload := map[string]any{
@@ -208,6 +384,15 @@ func (r *providerChatRuntime) settleHostedExit(row fleetlog.Registration, event 
 	}
 	if fieldString(event.Payload, "entity") == "process" {
 		receipt := spawnedWorkReceiptFromPayload(mapFromAnyMain(event.Payload["processReceipt"]))
+		// A job this daemon first hears of as finished still gets its row, so the
+		// chat shows what its notice is about.
+		lane, operation, turn := r.hostedRowOrigin(chatID)
+		peerID := row.TargetHome()
+		r.manager.ApplyHostedWorkState(tabID, chatID, acp.HostedWorkState{
+			Kind: acp.HostedWorkProcess, WorkID: receipt.TaskID, Label: firstNonEmptyString(receipt.Label, row.Label),
+			QueuedAt: receipt.QueuedAt, StartedAt: firstNonEmptyString(receipt.QueuedAt, receipt.StartedAt),
+			HostMachine: peerID, OriginLaneID: lane, OriginOperationID: operation, OriginTurnID: turn,
+		})
 		r.manager.SettleHostedProcess(tabID, chatID, receipt, fieldString(event.Payload, "outcome"))
 		return
 	}
@@ -252,6 +437,13 @@ func (h *agentControlHandler) recordHostedProcess(machineID string, params map[s
 		HostMachine: strings.TrimSpace(machineID), HostMachineName: h.fleetPeerName(machineID),
 		OriginLaneID: lane, OriginOperationID: operation, OriginTurnID: turn,
 	})
+	// After the row, or a job that ended at once (a refusal does) settles nothing.
+	// The monitor came back with this reply. The host offers it too, but an offer
+	// needs the host to be able to dial here, which a pair linked from this side
+	// may not allow, and then no event of this job would ever be applied.
+	if h.fleetWatch.ready() {
+		h.fleetWatch.WatchRemoteSubagent(context.Background(), machineID, result, tabID, chatID, lane, operation)
+	}
 }
 
 // hostedWorkRouter is how a hosted row's stop and output reach its host.

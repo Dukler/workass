@@ -30,9 +30,9 @@ import (
 //     one from its report. It reads the outbox for exactly one case — a child
 //     it already holds a row for, whose supervisor has died with events still
 //     undelivered — and it looks that up by id.
-//   - This daemon never spawns the child and is never its parent (§9), so a
-//     daemon restart does not touch it. Re-attaching is the snapshot plus the
-//     spool cursor.
+//   - This daemon is never the child's parent (§9). Whether a daemon restart can
+//     reach it is measured for the real pid (procchild.SurvivalOf, §14g).
+//     Re-attaching is the snapshot plus the spool cursor.
 //   - A supervisor pid that is gone with no `settled` in the spool is `lost`.
 //     That is a verdict, not a guess, and it is the exact inverse of the
 //     marker-file design where absence meant "still running" and a finished
@@ -46,10 +46,14 @@ import (
 // a comparison nobody will re-run.
 
 // supervisorMissingGrace is how long a vanished supervisor is given before its
-// child is called `lost`. It is externalWorkMissingGrace, deliberately the
-// same number: both are "a pid this machine cannot find any more", and two
-// graces for one question is how they drift apart.
-const supervisorMissingGrace = externalWorkMissingGrace
+// child is called `lost`.
+//
+// Not externalWorkMissingGrace any more. That one guards a bare pid with nothing
+// else to read; here the outbox is drained BEFORE the verdict, so whatever a dead
+// supervisor managed to record has already been read and the wait buys nothing but
+// delay on a notice somebody is owed. One reconcile tick stays, as the one second
+// look at a pid that vanished.
+const supervisorMissingGrace = 2 * time.Second
 
 // ProcessChildRegistrationOptions is one `workass run` registration.
 //
@@ -313,8 +317,11 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	item, ackThrough := rec.Item, rec.SpoolSeq
 	m.spawnedWorkMu.Unlock()
 
-	m.commitProcessChildChange(tabID, chatID)
+	// The log first. Ending here between the two leaves an outcome the next boot
+	// finds again, which is deduplicated; the other order would leave a settled row
+	// whose outcome nobody was ever told.
 	m.emitProcessChildLifecycle(lifecycle)
+	m.commitProcessChildChange(tabID, chatID)
 	if item.Status == "running" && item.Owner != "" {
 		// Every report, a heartbeat included, so a row that missed a statement
 		// is right again within a beat.
@@ -644,8 +651,8 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 					rec.SupervisorMissingSince = now
 				}
 				if now.Sub(rec.SupervisorMissingSince) >= supervisorMissingGrace {
-					if event, ok := m.settleProcessChildLocked(rec, procchild.OutcomeLost, nil,
-						"Lost: its supervisor is gone and reported no outcome, so what the job did is unknown"); ok {
+					m.backfillProcessChildStart(rec)
+					if event, ok := m.settleProcessChildLocked(rec, procchild.OutcomeLost, nil, lostProcessChildSummary(rec)); ok {
 						events = append(events, event)
 						terminal = true
 					}
@@ -658,8 +665,9 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 		hadOutbox := rec.SpoolFile != ""
 		m.spawnedWorkMu.Unlock()
 		if len(events) > 0 {
-			m.commitProcessChildChange(candidate.tabID, candidate.chatID)
+			// The log first, for the reason RegisterProcessChild gives.
 			m.emitProcessChildLifecycle(events)
+			m.commitProcessChildChange(candidate.tabID, candidate.chatID)
 		}
 		if terminal && hadOutbox {
 			// The outcome is durable in the receipt and the entity log by now,
@@ -676,6 +684,41 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 		}
 	}
 	m.pruneProcessChildOutbox(now)
+}
+
+// lostProcessChildSummary says what is known about a job whose supervisor is gone.
+// Its child is a separate process and on Linux in a scope of its own, so it can
+// outlive the supervisor, and an owner deciding what to do next needs to know that.
+func lostProcessChildSummary(rec *spawnedWorkRecord) string {
+	summary := "Lost: its supervisor is gone and reported no outcome, so what the job did is unknown"
+	if rec != nil && rec.Item.PID != nil && procchild.PIDAlive(*rec.Item.PID) {
+		summary += fmt.Sprintf(". Its process (pid %d) is still running and nothing is watching it", *rec.Item.PID)
+	}
+	return summary
+}
+
+// backfillProcessChildStart recovers when a job's command started, for a row that
+// predates that fact or whose last report never arrived. The supervisor wrote it
+// to the outbox whether or not anybody heard, and it is what keeps a job's wait out
+// of its run time. The caller holds spawnedWorkMu; the outbox has its own locks.
+func (m *Manager) backfillProcessChildStart(rec *spawnedWorkRecord) {
+	if rec == nil || rec.Item.ExecStartedAt != "" {
+		return
+	}
+	outbox := m.processOutbox()
+	if outbox == nil {
+		return
+	}
+	events, err := outbox.All(rec.Item.ID, 0, 0)
+	if err != nil {
+		return
+	}
+	for _, event := range events {
+		if event.Kind == procchild.KindStarted {
+			rec.Item.ExecStartedAt = event.At.UTC().Format(time.RFC3339Nano)
+			return
+		}
+	}
 }
 
 // reportProcessChildSilenceLocked raises ONE notice for a supervisor that is
