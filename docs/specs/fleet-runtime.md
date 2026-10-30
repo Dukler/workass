@@ -1006,6 +1006,21 @@ over the answer, so the Mac reported duklerver as having none. It now keeps what
 said, reads it from `diagnostics.runningJobs` where a headless host of today states it, and a
 machine that said nothing reads `known: false`, never as none.
 
+## 14j. A row that says what its receipt says, and a status that counts subagents (2026-10-30)
+
+Both reproduced live first. Evidence is in `docs/evidence/job-bugs-20261030/RESULTS-2.md`.
+
+**A row is compacted only once the actor has accepted it settled.** A commit lists the rows,
+gives them to the actor, then drops what has settled. A row that settled between the list and
+the drop was accepted as running and dropped all the same, so the next snapshot omitted it and
+the actor, told that snapshot is complete, marked it orphaned. The receipt and the notice were
+right throughout. The row now stays until the commit its own settle is waiting to make.
+
+**An update status counts subagents.** `runningJobs` lists every running subagent on the machine
+it describes, with `kind: "subagent"`, under `wouldDie`, whether tracked, hosted for another
+machine or native to a provider. It is the set a boot would settle as orphaned. Each machine
+reports its own: a row whose work runs on another machine is that machine's to list.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global

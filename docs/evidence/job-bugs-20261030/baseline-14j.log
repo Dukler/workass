@@ -1,0 +1,107 @@
+### BASELINE orphaned bursts 21:03:10.314 head=e3dbfeb3 dirty=       0
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+NO MESH LINK
+no peer daemon has linked to this machine
+this machine has dialled no peer
+COMPARE|bl1-|rows=23|receipts=23|statuses={'exited': 23}|mismatch=0
+still busy
+COMPARE|bl2-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+COMPARE|bl3-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+still busy
+COMPARE|bl4-|rows=24|receipts=24|statuses={'exited': 23, 'orphaned': 1}|mismatch=1
+  MISMATCH ('bl4--23', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+COMPARE|bl5-|rows=24|receipts=24|statuses={'exited': 23, 'orphaned': 1}|mismatch=1
+  MISMATCH ('bl5--5', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+still busy
+COMPARE|bl6-|rows=24|receipts=24|statuses={'exited': 21, 'orphaned': 3}|mismatch=3
+  MISMATCH ('bl6--16', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+  MISMATCH ('bl6--22', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+  MISMATCH ('bl6--24', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+COMPARE|bl7-|rows=24|receipts=24|statuses={'exited': 23, 'orphaned': 1}|mismatch=1
+  MISMATCH ('bl7--7', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+still busy
+COMPARE|bl8-|rows=24|receipts=24|statuses={'exited': 23, 'orphaned': 1}|mismatch=1
+  MISMATCH ('bl8--14', 'row', 'orphaned', 'receipt', 'exited', 'settled', 'rowsummary', 'sleep 2', 'receiptsummary', 'Finished with exit 0 after 2s')
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+{"error":"remote-chat MCP method is not supported: process.start"}
+COMPARE|bh1-|rows=0|receipts=0|statuses={}|mismatch=0
+COMPARE|bh2-|rows=0|receipts=0|statuses={}|mismatch=0
+### BASELINE hosted bursts + status 21:15:25.829 head=e3dbfeb3, binaries from before the fix
+
+mesh link up after 1s
+
+COMPARE|bh3-|rows=0|receipts=0|statuses={}|mismatch=0
+models  
+== nothing running
+COMPARE|bl|rows=0|receipts=191|statuses={}|mismatch=0
+COMPARE|bh|rows=0|receipts=0|statuses={}|mismatch=0
+### end 21:15:46.745
+  NOT JSON: 
+job 
+hosted: 
+local: 
+claude chat  
+
+NO REPLY 
+host sleeps in the scratch cgroup:
+local sleeps:        0
+-- asked from the Mac about duklerver
+  NOT JSON: 
+-- asked from the Mac about itself
+  NOT JSON: 
+-- asked on duklerver about itself, with the job's own credential
+  NO runningJobs: {"error": "Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll \u2014 ask the chat to use workass_schedule_message"}
+COMPARE|bh-|rows=0|receipts=0|statuses={}|mismatch=0
+### end 21:20:45.233
+### BASELINE hosted bursts + status 21:20:56.360 head=e3dbfeb3, binaries from before the fix
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+models gpt-6-luna haiku
+== nothing running
+  summary: no supervised job is running on this machine
+  total 0 known None
+job xwijLsDdV7f3qM
+hosted: {"adopted":true,"adoptedAt":"2026-10-30T21:21:13.937432555Z","cwd":"/tmp","effort":"low","elapsedMs":177,"id":"wa-subagent-1793395273937-1",
+local: {"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793395274155-1","label":"bs-local","lastActivityAt":"2026-10-30T21:21:14.15582
+claude chat tab-f8669e29e6d8a49c25475727 chat-2a6e5df1edfde832a62f236d
+{"agentQueueRevision":1,"delivery":"queue","operationId":"s-728348637054","position":1,"queueId":"q:s-728348637054:fa865be73bff475aba4cca903e9d8bbf252cd34d032d4
+
+reply OKAG after 5s
+host sleeps in the scratch cgroup:
+scratch sleep 176998 sleep 110 
+local sleeps:        2
+{'label': 'bs-local', 'status': 'running', 'phase': 'tool', 'summary': "/bin/zsh -lc 'sleep 110'", 'model': 'G
+{'label': 'bs-hosted', 'status': 'running', 'phase': 'tool', 'summary': "/bin/bash -lc 'sleep 110'", 'model': 
+{'label': 'bs-job', 'status': 'running', 'summary': 'sleep 120', 'host': 'duklerver', 'kind': 'external', 'que
+{'label': 'bs-idlejob', 'status': 'exited', 'summary': 'Finished with exit 0 after 1s', 'host': 'duklerver', '
+-- asked from the Mac about duklerver
+  summary: 1 running job(s) are protected and would survive an update
+  total 1 known None
+   protected | None | bs-job | xwijLsDdV7f3qM | owner wa:m-5bb5a5b543746e55eb54c3f3c9df0154/chat/conv-mvvgldui-2ir1dz | it runs in its own cgroup, workass-job-xwijLsDdV7f3qM.scope
+-- asked from the Mac about itself
+  summary: no supervised job is running on this machine
+  total 0 known None
+-- asked on duklerver about itself, with the job's own credential
+  NO runningJobs: {"error": "Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll \u2014 ask the chat to use workass_schedule_message"}
+COMPARE|bh-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+### end 21:23:33.526
+### BASELINE hosted bursts, started together 21:24:01.263
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+COMPARE|bp1-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+still busy
+COMPARE|bp2-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+COMPARE|bp3-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+still busy
+COMPARE|bp4-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+### end 21:28:52.190

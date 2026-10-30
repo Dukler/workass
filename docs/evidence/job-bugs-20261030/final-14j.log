@@ -1,0 +1,94 @@
+### FINAL local bursts fa 21:29:15.288 tree=e3dbfeb3+fix
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+COMPARE|fa1-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+still busy
+COMPARE|fa2-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+COMPARE|fa3-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+still busy
+COMPARE|fa4-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+### end 21:34:36.542
+### FINAL local bursts fb 21:34:48.724 tree=e3dbfeb3+fix
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+COMPARE|fb1-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+still busy
+COMPARE|fb2-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+COMPARE|fb3-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+still busy
+COMPARE|fb4-|rows=24|receipts=24|statuses={'exited': 24}|mismatch=0
+NOTICES last round: 24 lines for 24 jobs; statuses:   24 done 
+### end 21:40:10.598
+### FINAL status and hosted burst 21:40:27.859 tree=e3dbfeb3+fix
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+COMPARE|fp1-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+still busy
+COMPARE|fp2-|rows=12|receipts=12|statuses={'exited': 12}|mismatch=0
+models gpt-6-luna haiku
+== nothing running
+  summary: no job or subagent is running on this machine
+  total 0 known None
+job xwBA_sD-RG9O-A
+hosted: {"adopted":true,"adoptedAt":"2026-10-30T21:42:43.013979725Z","cwd":"/tmp","effort":"low","elapsedMs":183,"id":"wa-subagent-1793396563013-1",
+local: {"cwd":"/tmp","effort":"low","elapsedMs":0,"id":"wa-subagent-1793396563309-1","label":"fs-local","lastActivityAt":"2026-10-30T21:42:43.30965
+claude chat tab-b14f493dca53387ced4c0e8b chat-448bd652d50896e1c1820033
+{"agentQueueRevision":1,"delivery":"queue","operationId":"s-149198850144","position":1,"queueId":"q:s-149198850144:21302c8124f8a4855779cd556e18d9b5b91829ecfa295
+
+reply OKAG after 5s
+host sleeps in the scratch cgroup:
+scratch sleep 179186 sleep 110 
+local sleeps:        2
+{'label': 'fs-local', 'status': 'running', 'phase': 'tool', 'summary': "/bin/zsh -lc 'sleep 110'", 'model': 'G
+{'label': 'fs-hosted', 'status': 'running', 'phase': 'tool', 'summary': "/bin/bash -lc 'sleep 110'", 'model': 
+{'label': 'fs-job', 'status': 'running', 'summary': 'sleep 120', 'host': 'duklerver', 'kind': 'external', 'que
+{'label': 'fs-idlejob', 'status': 'exited', 'summary': 'Finished with exit 0 after 1s', 'host': 'duklerver', '
+-- asked from the Mac about duklerver
+  summary: applying an update now WOULD KILL 1 running job(s) or subagent(s): fs-hosted (wa-subagent-1793396563013-1); 1 more would survive it
+  total 2 known None
+   protected | job | fs-job | xwBA_sD-RG9O-A | owner wa:m-5bb5a5b543746e55eb54c3f3c9df0154/chat/conv-mvvgldui-2ir1dz | it runs in its own cgroup, workass-job-xwBA_sD-RG9O-A.scope
+   wouldDie | subagent | fs-hosted | wa-subagent-1793396563013-1 | owner m-5bb5a5b543746e55eb54c3f3c9df0154 | it runs inside a provider process that ends with this daemon
+-- asked from the Mac about itself
+  summary: applying an update now WOULD KILL 1 running job(s) or subagent(s): fs-local (wa-subagent-1793396563309-1)
+  total 1 known None
+   wouldDie | subagent | fs-local | wa-subagent-1793396563309-1 | owner None | it runs inside a provider process that ends with this daemon
+-- asked on duklerver about itself, with the hosted child's credential
+  NO runningJobs: {"error": "durable chat actor does not exist"}
+== does the status tell the truth: restart the scratch daemon, stock unit, as an update would
+active
+host sleeps left: 
+job's scope: active
+{'label': 'fs-job', 'status': 'running', 'summary': 'sleep 120', 'host': 'duklerver', 'kind': 'external', 'queuedAt': '2026-10-30T21:42:41.567647762Z', 'exec': '2026-10-30T21:42:41.614148154Z'}
+{'label': 'fs-hosted', 'status': 'failed', 'phase': 'failed', 'summary': 'Failed', 'model': 'GPT-6-Luna-low', 'host': 'duklerver', 'kind': 'subagent', 'result': 'the Workass daemon on the machine runn
+== same on the owner
+owner down 21:43:32
+owner up 21:43:42
+{'label': 'fs-local', 'status': 'orphaned', 'phase': 'orphaned', 'summary': 'Orphaned after daemon restart: the tracked subagent process ', 'model': 'GPT-6-Luna-low', 'kind': 'subagent'}
+claude chat keys ['chatId', 'cwd', 'messageCount', 'messages', 'modeId', 'modelId', 'providerId', 'running', 'tabId', 'title', 'truncated']
+receipt fs-native-agent agent exited None
+receipt fs-local subagent orphaned Orphaned after daemon restart: the tracked subagent process cannot survive daemon replacement.
+{"error":"this Workass shell does not support MCP updater diagnostics"}
+  NOT JSON: 
+== once the job ended
+{'label': 'fs-job', 'status': 'exited', 'summary': 'Finished with exit 0 after 2m0s', 'host': 'duklerver', 'kind': 'external', 'queuedAt': '2026-10-30T21:42:41.
+  summary: no job or subagent is running on this machine
+  total 0 known None
+### end 21:45:20.205
+### FINAL native Claude agent 21:46:04.366 tree=e3dbfeb3+fix
+{"value":"{\"ok\":true,\"m\":[[\"m-44ab956ffbda8d647a0c0952d051ac2f\",\"ok\"]]}"}
+mesh link up after 1s
+{"agentQueueRevision":1,"delivery":"queue","operationId":"s-669466198347","position":1,"queueId":"q:s-669466198347:20db2106b2f53a1c809fa308af36e819b11f0fca285bd
+
+reply OKAG after 5s
+agent's process:        3
+-- asked from the Mac about itself
+  summary: applying an update now WOULD KILL 1 running job(s) or subagent(s): fn-native-agent (a5650df37baac7f16)
+  total 1 known None
+   wouldDie | subagent | fn-native-agent | a5650df37baac7f16 | owner None | it runs inside a provider process that ends with this daemon
+-- asked from the Mac about duklerver
+  summary: no job or subagent is running on this machine
+  total 0 known None
+owner down 21:46:32
+owner up 21:46:42
+receipt fn-native-agent agent orphaned Orphaned after daemon restart: it ran inside the provider process, which ended with the previous daemon. elapsedMs 16746
+### end 21:46:45.503

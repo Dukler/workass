@@ -106,13 +106,18 @@ func measureSurvival(view *ProcessChildView) {
 type JobSurvival struct {
 	WorkID    string `json:"workId"`
 	Label     string `json:"label"`
+	Kind      string `json:"kind,omitempty"`
 	Owner     string `json:"owner,omitempty"`
 	Protected bool   `json:"protected"`
 	Note      string `json:"note"`
 }
 
-// RunningJobSurvival is every active job on this machine and whether it would
-// outlive this daemon. It is the fact an update has to be applied in view of.
+// subagentSurvivalNote is why no subagent survives: nothing supervises one apart
+// from this daemon, and boot settles whatever was left running as orphaned.
+const subagentSurvivalNote = "it runs inside a provider process that ends with this daemon"
+
+// RunningJobSurvival is every active job and subagent on this machine and whether
+// it would outlive this daemon. It is the fact an update has to be applied in view of.
 func (m *Manager) RunningJobSurvival() []JobSurvival {
 	out := []JobSurvival{}
 	for _, row := range m.ListProcessChildren() {
@@ -120,10 +125,46 @@ func (m *Manager) RunningJobSurvival() []JobSurvival {
 			continue
 		}
 		out = append(out, JobSurvival{
-			WorkID: row.WorkID, Label: row.Label, Owner: row.Owner,
+			WorkID: row.WorkID, Label: row.Label, Kind: "job", Owner: row.Owner,
 			Protected: *row.SurvivesRestart, Note: row.SurvivalNote,
 		})
 	}
+	return append(out, m.runningSubagentSurvival()...)
+}
+
+// runningSubagentSurvival reads the subagents running here: the registry, which
+// holds a hosted run with no row on this machine, and the rows boot would orphan,
+// which hold what a provider runs natively. A row whose work runs on another
+// machine is that machine's to report.
+func (m *Manager) runningSubagentSurvival() []JobSurvival {
+	byID := map[string]JobSurvival{}
+	m.mu.Lock()
+	for id, run := range m.subagents {
+		if run != nil && run.Status == "running" {
+			byID[id] = JobSurvival{WorkID: id, Label: run.Label, Kind: "subagent", Owner: run.originMachine, Note: subagentSurvivalNote}
+		}
+	}
+	m.mu.Unlock()
+	m.spawnedWorkMu.Lock()
+	for _, rec := range m.spawnedWork {
+		if rec == nil || rec.Item.Status != "running" {
+			continue
+		}
+		class := spawnedWorkLivenessClassFor(rec.Item)
+		if class != spawnedWorkLivenessSubagent && class != spawnedWorkLivenessInProcess {
+			continue
+		}
+		id := firstNonEmpty(rec.Item.ID, rec.Item.TaskID)
+		if _, known := byID[id]; !known {
+			byID[id] = JobSurvival{WorkID: id, Label: rec.Item.Label, Kind: "subagent", Note: subagentSurvivalNote}
+		}
+	}
+	m.spawnedWorkMu.Unlock()
+	out := make([]JobSurvival, 0, len(byID))
+	for _, entry := range byID {
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].WorkID < out[j].WorkID })
 	return out
 }
 

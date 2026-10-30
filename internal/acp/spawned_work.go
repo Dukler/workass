@@ -1820,14 +1820,14 @@ func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, o
 			}
 		}
 	}
-	accepted := make(map[string]struct{}, len(items))
+	accepted := make(map[string]string, len(items))
 	for _, item := range items {
 		if strings.TrimSpace(item.TabID) != tabID || strings.TrimSpace(item.ChatID) != chatID {
 			continue
 		}
 		workID := firstNonEmpty(strings.TrimSpace(item.ID), strings.TrimSpace(item.TaskID))
 		if workID != "" {
-			accepted[workID] = struct{}{}
+			accepted[workID] = item.Status
 		}
 	}
 	m.spawnedWorkMu.Lock()
@@ -1841,8 +1841,14 @@ func (m *Manager) commitActorSpawnedWorkProjectionLocked(tabID, chatID string, o
 				continue
 			}
 		}
-		_, owned := accepted[workID]
-		settled := !strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten
+		acceptedStatus, owned := accepted[workID]
+		// Settled as the actor accepted it, not only as it stands now. A row that
+		// settled after this commit's list was taken is running in the actor, and
+		// dropping it here leaves the next snapshot without it, which the actor reads
+		// as the work having vanished and marks orphaned. The commit its own settle
+		// is waiting to make compacts it (seen live: 1 in 12 in a burst of jobs).
+		settled := !strings.EqualFold(strings.TrimSpace(rec.Item.Status), "running") && rec.ReceiptWritten &&
+			!strings.EqualFold(strings.TrimSpace(acceptedStatus), "running")
 		if !owned || settled {
 			if owned && settled {
 				m.rememberSettledSpawnedWorkLocked(key, rec.Item)
