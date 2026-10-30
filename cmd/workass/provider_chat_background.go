@@ -47,6 +47,12 @@ func (r *providerChatRuntime) executeBackgroundAction(ctx context.Context, actio
 		case chat.BackgroundRetryAgent:
 			return r.manager.RetrySubagent(ctx, ownerKey, action.ChatID, action.TabID, action.Retry.WorkID, action.Retry.Message)
 		case chat.BackgroundCancelAgent:
+			if result, hosted := r.manager.StopHostedWork(action.TabID, action.ChatID, action.Cancel.WorkID); hosted {
+				if result["ok"] != true {
+					return nil, errors.New(firstNonEmptyString(fieldString(result, "error"), "subagent is no longer cancellable"))
+				}
+				return result, nil
+			}
 			ok := r.manager.CancelSubagent(ownerKey, action.ChatID, action.TabID, action.Cancel.WorkID)
 			if !ok {
 				return nil, errors.New("subagent is no longer cancellable")
@@ -391,7 +397,7 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		// every local row, which is what keeps the projection byte-identical.
 		HostMachine: item.HostMachine, HostMachineName: item.HostMachineName,
 	}
-	if item.Supervised() {
+	if item.Supervised() || acp.IsHostedJob(item) {
 		times := acp.ProcessChildTimes(item, parseSpawnedWorkTime(item.FinishedAt))
 		event.QueuedAt, event.ExecStartedAt = times.QueuedAt, times.StartedAt
 		if item.Status != "running" {
@@ -487,6 +493,9 @@ func backgroundListRow(state chat.ActivitySnapshot, id string) map[string]any {
 		// stays set here, because this wire is frozen and a renderer that predates
 		// these fields reads any other status as finished.
 		"queuedAt": item.QueuedAt, "execStartedAt": item.ExecStartedAt,
+		// Where it runs, when that is another machine. Live updates carry it, so a
+		// list load must too or a reload would drop it.
+		"hostMachine": item.HostMachine, "hostMachineName": item.HostMachineName,
 	} {
 		if value != nil && fmt.Sprint(value) != "" {
 			row[key] = value

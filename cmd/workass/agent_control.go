@@ -445,6 +445,9 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		// daemon declines to be a job runner for a client standing next to it,
 		// which is exactly the reason §9 gives for the non-goal.
 		return nil, errors.New(processStartLocalReason)
+	case "agent.cancel_hosted":
+		// Only ever addressed by another machine, to the machine running the child.
+		return nil, errors.New("a hosted subagent is stopped by the machine it runs for, through its row")
 	case "process.list":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
 			return nil, err
@@ -590,6 +593,9 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	result, err := h.remoteChats.Call(ctx, method, forwarded)
 	if method == "process.start" {
 		err = processStartHostRefusal(machineID, err)
+	}
+	if err == nil && method == "process.start" {
+		h.recordHostedProcess(machineID, params, result)
 	}
 	if err != nil || method != "agent.spawn" {
 		return result, err

@@ -843,6 +843,47 @@ second supervisor over the first one's id, output file and stop file. It now
 answers with the job that exists, `replayed: true`, and an id already owned by
 another chat is refused.
 
+## 14f. Work on another machine is a row like any other (2026-10-30)
+
+§14e said the asking chat "does not yet hold a rail row". That was a regression,
+not a deferred surface: removing the host chat removed the only place the app
+showed a remote job, and the remote subagent's row said only "Running on
+<machine>". The operator's ruling: remote jobs and remote subagents show
+normally, the same row a local one has.
+
+**The row is the ordinary one, and the host states what it says.** The owner
+holds a row with `hostMachine` set; only the machine named there can say anything
+about its life, so nothing here probes its pid, opens its path, or orphans it on
+a restart. A hosted subagent uses the `subagent` row and a hosted job the
+`external` row, so avatar, label, time, status, model, activity and stop are the
+code that exists. The machine is shown beside the activity and never replaces it.
+
+**`fleet:state` is a value, not an event.** The host states the latest phase,
+activity, model and queue facts, and each tool call of a child. It is not written
+to the entity log, cannot become a notice and is not acknowledged: progress must
+not grow a log or wake anybody (§5). A statement lost to a dropped link is stated
+again in the answer to the sync that link's return causes, and a job restates
+itself on every report, heartbeats included. The log still carries the outcome.
+A child's calls go into the parent turn as the same events a local child emits.
+
+**The statement creates the row.** That covers a job this chat started, a job
+started on the other machine with `--owner` naming this chat, and a job that was
+already running when this daemon updated. The monitor is the authority, as it is
+for the log (§11), and a statement crossing the job's own end brings nothing back.
+
+**Stop and output go to the host.** The stop reaches the host's `process.cancel`,
+or `agent.cancel_hosted` for a child, which only the machine the child runs for
+may call. The row ends when the host says the work has, including a cancel, which
+notifies nobody. A stop that cannot reach the host answers with the reason and
+can be retried. It deliberately bypasses the chat actor's stable operation id,
+which would otherwise replay the first failure forever.
+
+**A push reaches a peer over either direction of the pair.** A home used to push
+only to a peer that had dialled it, so for a pair linked from the host's side
+every push was dropped and an outcome waited for the next sync. It now falls back
+to the link it dialled itself, through `fleet:push`, without ever dialling to
+deliver one.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global

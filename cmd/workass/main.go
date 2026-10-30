@@ -1653,6 +1653,12 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		if providerChats == nil {
 			return nil, errors.New("spawned-work:stop requires the durable chat actor")
 		}
+		// Work on another machine: the host decides, so nothing here changes until
+		// it says so, and a dark host is an answer this click can show and retry
+		// rather than a stable operation id stuck on its first failure.
+		if result, hosted := providerChats.stopHostedWork(tabID, chatID, id); hosted {
+			return result, nil
+		}
 		return providerChats.RunBackgroundAction(context.Background(), tabID, chatID, chat.BackgroundAction{
 			Kind: chat.BackgroundStopWork, OperationID: stableBackgroundOperationID(chat.BackgroundStopWork, tabID, chatID, id),
 			Stop: &chat.StopWorkAction{WorkID: id},

@@ -133,8 +133,13 @@ func TestHostedSubagentRowLivesInTheChatThatAsked(t *testing.T) {
 	if row.ChatID != "mcp-chat" || row.TabID != "mcp-tab" {
 		t.Fatalf("hosted row owner = %s/%s", row.TabID, row.ChatID)
 	}
-	if row.Status != "running" || row.HostMachine != "m-buildbox" || !strings.Contains(row.Summary, "buildbox") {
+	if row.Status != "running" || row.HostMachine != "m-buildbox" || row.HostMachineName != "buildbox" {
 		t.Fatalf("hosted row = %#v", row)
+	}
+	// What it is doing, like any other row. The machine is a fact of its own and
+	// never takes the activity's place.
+	if strings.Contains(row.Summary, "buildbox") || row.LastToolName != "starting" {
+		t.Fatalf("hosted row put the machine where the activity goes: %#v", row)
 	}
 	// The actor is the authority the UI reads, and the host travels with the
 	// row, so the chat shows the work AND where it is running.
@@ -160,7 +165,7 @@ func TestHostedSubagentRowLivesInTheChatThatAsked(t *testing.T) {
 	if finished.Event.Status == "running" {
 		t.Fatalf("hosted row stayed running after its monitor exit: %#v", finished.Event)
 	}
-	if !strings.Contains(finished.Event.Summary, "buildbox") {
+	if finished.Event.HostMachineName != "buildbox" {
 		t.Fatalf("settled hosted row lost the machine that ran it: %#v", finished.Event)
 	}
 }

@@ -27,7 +27,7 @@ func (m *Manager) chatHasLiveParkEvidence(tabID, chatID string) bool {
 				m.spawnedWorkMu.Unlock()
 				return true
 			}
-		case spawnedWorkLivenessSubagent, spawnedWorkLivenessInProcess:
+		case spawnedWorkLivenessSubagent, spawnedWorkLivenessInProcess, spawnedWorkLivenessHosted:
 			m.spawnedWorkMu.Unlock()
 			return true
 		default:

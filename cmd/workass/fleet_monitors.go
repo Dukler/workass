@@ -9,6 +9,7 @@ import (
 
 	"workass/internal/acp"
 	"workass/internal/fleetclient"
+	"workass/internal/fleetid"
 	"workass/internal/fleetlog"
 	"workass/internal/machineid"
 	"workass/internal/wire"
@@ -74,7 +75,32 @@ func openFleetMonitors(
 		return service
 	}
 	service.logs = logs
-	service.home = newFleetHome(identity.MachineID, logs, held, hub.SendToPeer, logger.Printf)
+	pusher := &fleetPusher{send: hub.SendToPeer, logf: logger.Printf, link: func(peerID string) (func(context.Context, string, ...any) (any, error), bool) {
+		if mesh == nil || mesh.mesh == nil {
+			return nil, false
+		}
+		link, linked := mesh.mesh.LiveLink(peerID)
+		if !linked {
+			return nil, false
+		}
+		return link.Invoke, true
+	}}
+	service.home = newFleetHome(identity.MachineID, logs, held, pusher.push, logger.Printf)
+	service.home.states = func(targetID string) (map[string]any, bool) {
+		kind := acp.HostedWorkProcess
+		_, local, _, err := fleetid.Split(targetID, fleetid.Process)
+		if err != nil || local == "" {
+			kind = acp.HostedWorkSubagent
+			if _, local, _, err = fleetid.Split(targetID, fleetid.Subagent); err != nil || local == "" {
+				return nil, false
+			}
+		}
+		state, running := manager.HostedWorkStateFor(kind, local)
+		if !running {
+			return nil, false
+		}
+		return hostedStatePayload(state), true
+	}
 	if service.home.Register(hub) {
 		logger.Printf("[workass] registered the fleet monitor channels %s, %s, %s, %s",
 			fleetMonitorChannel, fleetDemonitorChannel, fleetMonitorSyncChannel, fleetLogAckChannel)
@@ -94,6 +120,14 @@ func openFleetMonitors(
 		Self: identity.MachineID, Monitors: watched, Mesh: mesh.Invoker(),
 		Deliver: chats.deliverFleetMonitorNotice, Budget: newFleetNoticeBudget(),
 		ChatExists: chats.chatExists, ChatTab: chats.chatTab, Logf: logger.Printf,
+		HostedState: func(peerID string, row fleetlog.Registration, fields map[string]any) {
+			name := ""
+			if mesh != nil && mesh.mesh != nil {
+				name = fleetDisplayName(mesh.mesh.PeerDisplayName(peerID), peerID)
+			}
+			chats.applyHostedState(peerID, name, row, fields)
+		},
+		SettleHosted: chats.settleHostedExit,
 	})
 	// The home delivers to a watcher on this machine in process, through the
 	// watcher's own projection — one path, local and remote.
@@ -101,9 +135,11 @@ func openFleetMonitors(
 	if service.watcher.RegisterOfferChannel(hub) {
 		logger.Printf("[workass] registered the fleet monitor channel %s", fleetMonitorOfferChannel)
 	}
+	service.watcher.RegisterPushChannel(hub)
 	if control != nil {
 		control.fleetHome, control.fleetWatch = service.home, service.watcher
 		control.fleetMesh = mesh.Invoker()
+		manager.SetHostedWorkRouter(control.hostedWorkRouter())
 	}
 	mesh.SetMonitorObservers(service.watcher.Ingest, service.watcher.OnLinkState, service.resync)
 	if monitors := len(watched.All()); monitors > 0 {

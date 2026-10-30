@@ -17,6 +17,12 @@ import "strings"
 // is still the in-process call this manager has always made — which is exactly
 // §2's claim that the local API is the fleet API with home == self.
 
+// The two kinds a hosted child reports for its row rather than for its log.
+const (
+	SubagentLifecycleProgress = "progress"
+	SubagentLifecycleCall     = "call"
+)
+
 // SubagentLifecycleEvent is one event on one subagent's monitor stream.
 type SubagentLifecycleEvent struct {
 	// Kind is fleetlog's vocabulary: "exit" or "attention". It is a plain
@@ -33,6 +39,10 @@ type SubagentLifecycleEvent struct {
 	Receipt SubagentReceipt
 	// Attention is set for Kind "attention".
 	Attention *SubagentAttention
+	// State is set for Kind "progress", and Call for Kind "call". Neither is an
+	// event in the log: both are for the row in the chat that asked.
+	State *HostedWorkState
+	Call  map[string]any
 
 	ParentChatID string
 	ParentTabID  string

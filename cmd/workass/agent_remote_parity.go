@@ -103,7 +103,9 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"process.list":   remoteAgentMachineScoped,
 	"process.read":   remoteAgentMachineScoped,
 	"process.cancel": remoteAgentMachineScoped,
-	"obligation.get": remoteAgentLocalOnly,
+	// Not a tool: the stop on a hosted subagent's row in the chat that asked.
+	"agent.cancel_hosted": remoteAgentMachineScoped,
+	"obligation.get":      remoteAgentLocalOnly,
 }
 
 // remoteAgentMachineTaggedEntity names the machine-scoped methods that address
