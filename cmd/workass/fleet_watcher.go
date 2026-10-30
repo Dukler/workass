@@ -69,6 +69,12 @@ type fleetMonitorNotice struct {
 	Label             string
 	// Receipt is set for an exit, and is the exact record the local path uses.
 	Receipt acp.SubagentReceipt
+	// ProcessReceipt and Outcome are set for a PROCESS child's exit (P4). The
+	// two receipt types are kept apart rather than merged because each is the
+	// exact record its own projection already reads, and a merged one would be
+	// a third shape that neither surface renders today.
+	ProcessReceipt *acp.SpawnedWorkReceipt
+	Outcome        string
 	// Attention is set for an attention event.
 	AttentionKind string
 	AttentionText string
@@ -277,6 +283,13 @@ func (w *fleetWatcher) applySlice(ctx context.Context, peerID, ref string, slice
 // terminal event leave its log. A failed ack is harmless: the event stays owed
 // and is redelivered, and the projection deduplicates it.
 func (w *fleetWatcher) ack(ctx context.Context, peerID, targetID string, through uint64) {
+	if strings.TrimSpace(peerID) == w.self {
+		// A self-homed monitor has no link to acknowledge over: the home is in
+		// this process, and it retires the event through fleetHome.AckLocal
+		// after this returns. Invoking a peer named "me" would be a call to
+		// nobody, every time a local job settled.
+		return
+	}
 	if w.mesh == nil {
 		return
 	}
@@ -456,6 +469,10 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 // notify — they are visible by reading, which is exactly when freshness
 // matters. A cancelled child never notifies either: the parent asked for that.
 func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) {
+	if fieldString(event.Payload, "entity") == "process" {
+		w.projectProcess(row, event)
+		return
+	}
 	switch event.Kind {
 	case fleetlog.KindExit:
 		if boolFieldValue(event.Payload, "noticeSuppressed") {
@@ -524,4 +541,48 @@ func decodeFleetEvent(raw any) (fleetlog.Event, bool) {
 		event.At = at
 	}
 	return event, true
+}
+
+// projectProcess turns one process child's log event into at most one notice.
+//
+// The actionable filter is §7's, with this subsystem's two extra outcomes:
+// settled, failed, timed_out and lost notify; a declared stall and a decision
+// notify as attention; `created`, `queued`, `started` and a cancelled exit
+// never do. `queued` and `started` are visible by reading, which is exactly
+// when a queue position matters — somebody is already looking. A cancelled
+// exit was already marked suppressed by its home, because the party that would
+// be told is the party that asked.
+func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.Event) {
+	switch event.Kind {
+	case fleetlog.KindExit:
+		if boolFieldValue(event.Payload, "noticeSuppressed") {
+			w.logf("[fleet] process child %s settled without a notice: %s",
+				row.TargetID, fieldString(event.Payload, "suppressReason"))
+			return
+		}
+		outcome := strings.TrimSpace(fieldString(event.Payload, "outcome"))
+		receipt := spawnedWorkReceiptFromPayload(mapFromAnyMain(event.Payload["processReceipt"]))
+		w.emit(fleetMonitorNotice{
+			Kind: fleetlog.KindExit, TargetID: row.TargetID,
+			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
+			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
+			Label:          firstNonEmptyString(receipt.Label, fieldString(event.Payload, "label"), row.Label),
+			ProcessReceipt: &receipt, Outcome: outcome,
+			// A failure, a timeout and a lost job are all exempt from the
+			// hourly cap: a storm guard that hid the one notice meaning "this
+			// did not work" would be worse than the storm.
+			Failure: outcome != fleetlog.OutcomeSettled,
+		})
+	case fleetlog.KindAttention:
+		w.emit(fleetMonitorNotice{
+			Kind: fleetlog.KindAttention, TargetID: row.TargetID,
+			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
+			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
+			Label:         firstNonEmptyString(fieldString(event.Payload, "label"), row.Label),
+			AttentionKind: fieldString(event.Payload, "attentionKind"),
+			AttentionText: fieldString(event.Payload, "title"),
+			Outcome:       "",
+			Failure:       true,
+		})
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"workass/internal/durablefs"
+	"workass/internal/procchild"
 )
 
 const (
@@ -120,7 +121,50 @@ type SpawnedWorkItem struct {
 	OriginLaneID      string `json:"originLaneId,omitempty"`
 	OriginOperationID string `json:"originOperationId,omitempty"`
 	OriginTurnID      string `json:"originTurnId,omitempty"`
+
+	// The supervised process-child facts (docs/specs/fleet-runtime.md §13 P4).
+	// Every one is omitempty, so a row with no supervisor — which is every row
+	// this product has ever written — encodes byte for byte as it did before,
+	// which is the projection-parity gate the migration is held to.
+	//
+	// Outcome is the fleet runtime's verdict (settled | failed | lost |
+	// timed_out | cancelled) and Status stays the presentation lifecycle it has
+	// always been. They are two vocabularies on purpose: `lost` and
+	// `timed_out` are facts a chat needs, and widening Status to carry them
+	// would have changed the meaning of a field every surface already reads.
+	Outcome string `json:"outcome,omitempty"`
+	// Owner is the global fleet id of the chat or turn owed this child's
+	// outcome. It may name another machine, which is the whole point of P4.
+	Owner string `json:"owner,omitempty"`
+	// Resource and QueuePosition describe a held or awaited resource. A
+	// position of 1 is the holder.
+	Resource      string `json:"resource,omitempty"`
+	QueuePosition int    `json:"queuePosition,omitempty"`
+	// SupervisorPID is `workass run`'s own pid, and it is the liveness
+	// evidence for this row: a supervisor pid that is gone with no settled
+	// event in the spool is `lost`, never `running`. PID stays the CHILD's pid,
+	// unchanged, because that is what every existing surface shows.
+	SupervisorPID *int `json:"supervisorPid,omitempty"`
+	// ProcessGroup and Isolation record how the child was separated from its
+	// supervisor, so a stop knows what it can reach.
+	ProcessGroup int    `json:"processGroup,omitempty"`
+	Isolation    string `json:"isolation,omitempty"`
+	// Stalled is the one-shot declared stall: a flag on running, never a state.
+	Stalled bool `json:"stalled,omitempty"`
+	// The declarations the supervisor is enforcing, kept on the row so a reader
+	// can see what this job promised about itself.
+	MaxRuntimeMs int64 `json:"maxRuntimeMs,omitempty"`
+	StaleAfterMs int64 `json:"staleAfterMs,omitempty"`
+	MaxHoldMs    int64 `json:"maxHoldMs,omitempty"`
 }
+
+// Supervised reports whether this row is a process child with a supervisor of
+// its own, rather than the bare external work the adapter still registers.
+//
+// It is the one test that decides whether P4's behaviour applies — the lost
+// verdict, the spool, the notices — so the pre-P4 path stays exactly as it was
+// for every row that was never supervised.
+func (i SpawnedWorkItem) Supervised() bool { return i.SupervisorPID != nil }
 
 type SpawnedWorkReceipt struct {
 	ReceiptID   string `json:"receiptId"`
@@ -144,6 +188,13 @@ type SpawnedWorkReceipt struct {
 	// ModelLabel lets a resumed agent keep its model after the in-memory
 	// record of its earlier run is gone.
 	ModelLabel string `json:"modelLabel,omitempty"`
+	// Outcome is the fleet runtime's verdict for a supervised process child
+	// (P4): settled | failed | lost | timed_out | cancelled. It is on the
+	// receipt because the receipt outlives the row — a settled row is compacted
+	// out of the live registry, and without this a timed-out job would be
+	// indistinguishable from an ordinary failure five minutes later. Empty, and
+	// therefore absent, for everything that was never supervised.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 type spawnedWorkRecord struct {
@@ -164,6 +215,17 @@ type spawnedWorkRecord struct {
 	InterimSince     time.Time
 	ChildrenDoneAt   time.Time
 	ExternalDoneFile string
+	// SpoolFile and SpoolSeq are the supervisor's event spool and this daemon's
+	// cursor into it. The cursor is persisted with the snapshot, so a daemon
+	// that restarts mid-job resumes where it stopped reading instead of
+	// re-applying a settle it already applied.
+	SpoolFile string
+	SpoolSeq  uint64
+	// SupervisorMissingSince starts the grace before a vanished supervisor
+	// becomes `lost`. A grace, not an instant: a supervisor between fork and
+	// its own first write is briefly unprobeable on some hosts, and calling
+	// that lost would be the same guess this design exists to remove.
+	SupervisorMissingSince time.Time
 	// Service classification evidence, deliberately not persisted: after a
 	// daemon restart the dwell simply restarts, which costs one window of a
 	// wrong pill and can never restore a stale verdict.
@@ -175,6 +237,11 @@ type spawnedWorkRecord struct {
 type spawnedWorkSnapshotItem struct {
 	SpawnedWorkItem
 	DoneFile string `json:"doneFile,omitempty"`
+	// SpoolFile and SpoolSeq survive a restart with the row, so re-attaching
+	// to a supervised child is reading one more line of a file rather than
+	// reconstructing a lifecycle.
+	SpoolFile string `json:"spoolFile,omitempty"`
+	SpoolSeq  uint64 `json:"spoolSeq,omitempty"`
 }
 
 type ExternalWorkRegistrationOptions struct {
@@ -405,6 +472,22 @@ func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, 
 	return tabID, chatID, providerID, nil
 }
 
+// RegisterExternalWork is the pre-P4 registration, kept exactly as it was and
+// now the UNSUPERVISED adapter onto the same record a process child uses.
+//
+// docs/specs/fleet-runtime.md §13's M3 is explicit that no tool is removed or
+// renamed, and this is what that means in practice: `workass_register_external_work`
+// still mints its own id, still writes the same row, still settles from a done
+// marker or a vanished pid, and still reaches a chat in silence — because a
+// lane that nobody supervises has nothing that could honestly notify. What
+// separates it from a process child is one field: SupervisorPID, which
+// SpawnedWorkItem.Supervised() tests. Every P4 behaviour — the spool, the
+// `lost` verdict, the notices, the resource queue — hangs off that one test, so
+// a row registered here keeps byte-identical rows, cards and receipts, which is
+// the projection-parity gate the migration is held to.
+//
+// A caller that wants the supervision runs `workass run`, which is a different
+// program rather than a different registry.
 func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (map[string]any, error) {
 	if err := m.beginWorkAdmission(); err != nil {
 		return nil, err
@@ -1288,6 +1371,16 @@ func (m *Manager) reconcileSpawnedWork() {
 			done, exitCode := readExternalDoneFile(m.opts.StateDir, probe.doneFile)
 			m.spawnedWorkMu.Lock()
 			rec := m.spawnedWork[probe.key]
+			if rec != nil && rec.Item.Supervised() {
+				// A supervised child's liveness is its SUPERVISOR's pid and its
+				// outcome is the supervisor's spool, both handled by
+				// reconcileProcessChildren below. This branch would read the
+				// child's own pid and the done marker, which cannot tell a
+				// timed-out job from a finished one and cannot tell a dead
+				// supervisor from a quiet child.
+				m.spawnedWorkMu.Unlock()
+				continue
+			}
 			if rec != nil && rec.Item.Status == "running" && rec.Item.Kind == "external" {
 				tabID, chatID = rec.Item.TabID, rec.Item.ChatID
 				switch {
@@ -1380,6 +1473,7 @@ func (m *Manager) reconcileSpawnedWork() {
 			m.commitSpawnedWorkChange(tabID, chatID)
 		}
 	}
+	m.reconcileProcessChildren(now)
 	m.classifySpawnedWorkServices(now, pidsByPath)
 }
 
@@ -2147,7 +2241,10 @@ func (m *Manager) listSpawnedWorkSnapshotItems(tabID string) []spawnedWorkSnapsh
 		if rec == nil || rec.Item.TabID != tabID {
 			continue
 		}
-		out = append(out, spawnedWorkSnapshotItem{SpawnedWorkItem: rec.Item, DoneFile: rec.ExternalDoneFile})
+		out = append(out, spawnedWorkSnapshotItem{
+			SpawnedWorkItem: rec.Item, DoneFile: rec.ExternalDoneFile,
+			SpoolFile: rec.SpoolFile, SpoolSeq: rec.SpoolSeq,
+		})
 	}
 	m.spawnedWorkMu.Unlock()
 	sort.SliceStable(out, func(i, j int) bool {
@@ -2306,7 +2403,16 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 				ambiguous[key] = struct{}{}
 				continue
 			}
-			m.spawnedWork[key] = &spawnedWorkRecord{Item: item, SawPID: item.PID != nil, ExternalDoneFile: doneFile}
+			rec := &spawnedWorkRecord{Item: item, SawPID: item.PID != nil, ExternalDoneFile: doneFile}
+			if item.Supervised() {
+				// A supervised child's spool path is derived from its id, never
+				// trusted from the snapshot: the id is validated above, and a
+				// path read back from a file is a path somebody could have
+				// edited.
+				rec.SpoolFile = procchild.SpoolPath(m.opts.StateDir, taskID)
+				rec.SpoolSeq = stored.SpoolSeq
+			}
+			m.spawnedWork[key] = rec
 		}
 	}
 	orphanedPairs := map[[2]string]struct{}{}
@@ -2366,6 +2472,7 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 		StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ElapsedMs: elapsed,
 		OutputFile: publicItem.OutputFile, PID: item.PID, ExitCode: item.ExitCode,
 		Summary: publicItem.Summary, OutputTail: tail, TailLimited: limited,
+		Outcome: item.Outcome,
 	}
 }
 

@@ -48,6 +48,17 @@ func (r *providerChatRuntime) deliverFleetMonitorNotice(notice fleetMonitorNotic
 	}
 	switch notice.Kind {
 	case fleetlog.KindExit:
+		if notice.ProcessReceipt != nil {
+			// A process child has no pre-P4 local delivery to reuse: before
+			// this, a registered lane settled in silence and the chat found out
+			// by looking. So its notice is built here, through the SAME actor
+			// admission every other fleet notice goes through — the stopped-turn
+			// fence, the deleted-chat fence, the replayed-operation no-op — and
+			// with a task-notification body, never a user message.
+			return r.admitFleetNotice(tabID, chatID, notice,
+				fleetNoticeOperationID("process-exit", tabID, chatID, notice.ProcessReceipt.ReceiptID),
+				processNoticeStatus(notice.Outcome), formatFleetProcessExit(notice))
+		}
 		// The settle path is the local one, unchanged. Parity is not asserted
 		// about this call; it IS the call.
 		receipt := notice.Receipt
@@ -62,6 +73,15 @@ func (r *providerChatRuntime) deliverFleetMonitorNotice(notice fleetMonitorNotic
 		receipt.OriginOperationID = strings.TrimSpace(notice.OriginOperationID)
 		return r.deliverSubagentCompletion(tabID, chatID, receipt)
 	case fleetlog.KindAttention:
+		if notice.AttentionKind == "stalled" || notice.AttentionKind == "max_hold" {
+			// Non-terminal and one-shot: the job is still running, and the chat
+			// is told once because the job itself declared what silence — or a
+			// long hold — would mean. A stall that notified on every check
+			// would be a chat nobody reads.
+			return r.admitFleetNotice(tabID, chatID, notice,
+				fleetNoticeOperationID("process-"+notice.AttentionKind, tabID, chatID, notice.TargetID),
+				fleetNoticeStatusStalled, formatFleetProcessAttention(notice))
+		}
 		return r.admitFleetNotice(tabID, chatID, notice,
 			fleetNoticeOperationID("attention", tabID, chatID, notice.TargetID+"\x00"+notice.AttentionText),
 			"attention", formatFleetAttention(notice))
@@ -178,6 +198,110 @@ func formatFleetHomeDown(notice fleetMonitorNotice) string {
 		notice.Home, notice.Since.UTC().Format(time.RFC3339), len(known))
 	if len(known) > 0 {
 		fmt.Fprintf(&b, "<last-known>%s</last-known>\n", strings.Join(known, ", "))
+	}
+	b.WriteString("</task-notification>")
+	return redactedSessionString(b.String())
+}
+
+// fleetNoticeStatusStalled is a running job that said its silence would
+// matter. It is deliberately not an outcome word: the job has not ended, and a
+// status a reader could mistake for "finished" would be the same conversion
+// §7 forbids for home_down.
+const fleetNoticeStatusStalled = "stalled"
+
+// processNoticeStatus maps a process child's outcome onto the status the notice
+// line shows.
+//
+// `settled` becomes "done" and `failed` becomes "failed", which are the two
+// words the line has always carried. `timed_out` and `lost` are their own
+// words because neither is either of those: a job stopped at its ceiling did
+// not fail on its own terms, and a lost job's outcome is genuinely unknown —
+// rendering it as finished or as failed would be inventing the one fact nobody
+// has.
+func processNoticeStatus(outcome string) string {
+	switch strings.TrimSpace(outcome) {
+	case fleetlog.OutcomeSettled:
+		return "done"
+	case fleetlog.OutcomeTimedOut:
+		return fleetlog.OutcomeTimedOut
+	case fleetlog.OutcomeLost:
+		return fleetlog.OutcomeLost
+	case fleetlog.OutcomeCancelled:
+		return fleetlog.OutcomeCancelled
+	default:
+		return "failed"
+	}
+}
+
+// formatFleetProcessExit is the task-notification shape Claude Code uses for
+// its own background work, so the model reads it as a notification and never
+// as the user speaking.
+//
+// It states what happened and where to look, and nothing else: no imperative,
+// no instruction about what to do next, no language direction. The output file
+// is named because that is the actionable part — output is a file, read by a
+// bounded tail, never copied into a log (delegation-fabric.md §3).
+func formatFleetProcessExit(notice fleetMonitorNotice) string {
+	receipt := notice.ProcessReceipt
+	if receipt == nil {
+		return ""
+	}
+	label := firstNonEmptyString(notice.Label, receipt.Label, receipt.TaskID)
+	var b strings.Builder
+	b.WriteString("<task-notification>\n")
+	fmt.Fprintf(&b, "<task-id>%s</task-id>\n<status>%s</status>\n", receipt.TaskID, processNoticeStatus(notice.Outcome))
+	fmt.Fprintf(&b, "<summary>%s</summary>\n", processExitSummary(notice, label))
+	if receipt.ExitCode != nil {
+		fmt.Fprintf(&b, "<exit-code>%d</exit-code>\n", *receipt.ExitCode)
+	}
+	if receipt.ElapsedMs > 0 {
+		fmt.Fprintf(&b, "<elapsed>%s</elapsed>\n", (time.Duration(receipt.ElapsedMs) * time.Millisecond).Round(time.Second))
+	}
+	if path := strings.TrimSpace(receipt.OutputFile); path != "" {
+		fmt.Fprintf(&b, "<output-file>%s</output-file>\n", path)
+	}
+	if summary := strings.TrimSpace(receipt.Summary); summary != "" {
+		fmt.Fprintf(&b, "<result>%s</result>\n", summary)
+	}
+	b.WriteString("</task-notification>")
+	return redactedSessionString(b.String())
+}
+
+// processExitSummary says what happened in one sentence, and says UNKNOWN when
+// that is what it is. A lost job gets the only honest sentence available: its
+// supervisor is gone and wrote no outcome, so what the work did is not known —
+// which is a different sentence from "it failed", with a different fix.
+func processExitSummary(notice fleetMonitorNotice, label string) string {
+	switch strings.TrimSpace(notice.Outcome) {
+	case fleetlog.OutcomeSettled:
+		return fmt.Sprintf("Job %q finished", label)
+	case fleetlog.OutcomeTimedOut:
+		return fmt.Sprintf("Job %q was stopped at the max_runtime it declared; whether its work was complete is unknown", label)
+	case fleetlog.OutcomeLost:
+		return fmt.Sprintf("Job %q is lost: its supervisor is gone and wrote no outcome, so what it did is unknown, not finished", label)
+	case fleetlog.OutcomeCancelled:
+		return fmt.Sprintf("Job %q was stopped on request", label)
+	default:
+		return fmt.Sprintf("Job %q failed", label)
+	}
+}
+
+// formatFleetProcessAttention is the one-shot non-terminal notice: a declared
+// stall, or a resource held past the hold its holder declared. The job is
+// STILL RUNNING, and the wording says so, because a notice that read like an
+// ending would have somebody clean up after work that is still going.
+func formatFleetProcessAttention(notice fleetMonitorNotice) string {
+	var b strings.Builder
+	b.WriteString("<task-notification>\n")
+	fmt.Fprintf(&b, "<task-id>%s</task-id>\n<status>%s</status>\n", notice.TargetID, fleetNoticeStatusStalled)
+	switch notice.AttentionKind {
+	case "max_hold":
+		fmt.Fprintf(&b, "<summary>Job %q is still holding the resource it declared a shorter hold for; it has not been stopped</summary>\n", notice.Label)
+	default:
+		fmt.Fprintf(&b, "<summary>Job %q has gone quiet past the stale_after it declared; it is still running</summary>\n", notice.Label)
+	}
+	if text := strings.TrimSpace(notice.AttentionText); text != "" {
+		fmt.Fprintf(&b, "<evidence>%s</evidence>\n", text)
 	}
 	b.WriteString("</task-notification>")
 	return redactedSessionString(b.String())

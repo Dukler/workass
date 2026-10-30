@@ -84,14 +84,26 @@ func openFleetMonitors(
 	// is the watcher's decision, and for a self-homed watcher that is still the
 	// in-process delivery this daemon has always done.
 	manager.SetSubagentLifecycleObserver(service.home.ObserveSubagent)
+	// Process children are the second client (§13's M2 order). Every terminal,
+	// attention and declared stall becomes a log entry here; whether it becomes
+	// a notice is the watcher's decision, and for a self-homed owner that is
+	// the same decision, reached through the same projection.
+	manager.SetProcessLifecycleObserver(service.home.ObserveProcess)
 
 	service.watcher = newFleetWatcher(fleetWatcherOptions{
 		Self: identity.MachineID, Monitors: watched, Mesh: mesh.Invoker(),
 		Deliver: chats.deliverFleetMonitorNotice, Budget: newFleetNoticeBudget(),
 		ChatExists: chats.chatExists, Logf: logger.Printf,
 	})
+	// The home delivers to a watcher on this machine in process, through the
+	// watcher's own projection — one path, local and remote.
+	service.home.SetLocalDelivery(service.watcher.IngestLocalEvent)
+	if service.watcher.RegisterOfferChannel(hub) {
+		logger.Printf("[workass] registered the fleet monitor channel %s", fleetMonitorOfferChannel)
+	}
 	if control != nil {
 		control.fleetHome, control.fleetWatch = service.home, service.watcher
+		control.fleetMesh = mesh.Invoker()
 	}
 	mesh.SetMonitorObservers(service.watcher.Ingest, service.watcher.OnLinkState, service.resync)
 	if monitors := len(watched.All()); monitors > 0 {
