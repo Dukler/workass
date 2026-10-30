@@ -157,3 +157,90 @@ func TestHeartbeatRefusesAMismatchedPeerClaim(t *testing.T) {
 	}
 	_ = hub
 }
+
+// B8: a beat that states a port teaches this daemon the route back.
+//
+// Enrolment states the same port, but it happens once in a pair's lifetime — a
+// dialler enrols only when it holds no token — so a pair that linked before
+// diallers stated a port kept no peer record on this side at all, could not
+// dial back, and `workass fleet links` here reported "this machine has dialled
+// no peer" for a machine it was linked to the whole time. Learning it from the
+// beat is the only thing that heals an already-paired pair with no human.
+func TestABeatStatingAPortTeachesTheRouteBack(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		beat  string
+		want  string
+		learn bool
+	}{
+		{
+			name: "a port is joined to the host this socket came from",
+			beat: `{"machineId":"m-peer","port":"8788"}`,
+			want: "127.0.0.1:8788", learn: true,
+		},
+		{
+			// The pre-fix dialler. Nothing is learned and nothing is invented:
+			// a route with no port would be an address to nowhere.
+			name:  "a beat with no port teaches nothing",
+			beat:  `{"machineId":"m-peer"}`,
+			learn: false,
+		},
+		{
+			// The peer names only its own port. The host is read off the socket,
+			// so a peer cannot point a route at another machine.
+			name:  "a host in the claim is ignored",
+			beat:  `{"machineId":"m-peer","port":"8788","address":"10.0.0.9:1"}`,
+			want:  "127.0.0.1:8788",
+			learn: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := fleetAdminHub(t)
+			hub, manager, server := rig.hub, rig.manager, rig.server
+			if _, err := manager.EnrollPeerDevice("daemon m-peer", "127.0.0.1", "token-peer", "local", "key-1", "m-peer", ""); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			learned := make(chan PeerLinkEvent, 4)
+			hub.SetPeerLinks(func(event PeerLinkEvent) { learned <- event })
+
+			link := dialWSPath(t, server.URL, "/?deviceToken=token-peer&deviceName=daemon", "cGVlci1saW5rLXJvdXRlMTIzNA==")
+			defer link.conn.Close()
+			if approved := readEvent(t, link); approved.Payload["state"] != "approved" {
+				t.Fatalf("peer access event = %+v", approved)
+			}
+			link.sendText(t, `{"t":"invoke","id":1,"channel":"`+PeerLinkChannel+`","args":[`+tc.beat+`]}`)
+			if beat := readReply(t, link); beat.Error != nil {
+				t.Fatalf("heartbeat refused: %v", *beat.Error)
+			}
+
+			if !tc.learn {
+				select {
+				case event := <-learned:
+					t.Fatalf("a portless beat invented a route: %#v", event)
+				case <-time.After(250 * time.Millisecond):
+				}
+				return
+			}
+			select {
+			case event := <-learned:
+				if event.Kind != "paired" || event.Peer != "m-peer" {
+					t.Fatalf("the daemon was told %#v", event)
+				}
+				if event.Address != tc.want {
+					t.Fatalf("learned route = %q, want %q", event.Address, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("a beat stating a port taught this daemon nothing, so the pair stays one-directional on the record")
+			}
+			// The same socket is the evidence the mesh reads before dialling: one
+			// duplex link per pair means the outbound half must be able to see
+			// that the peer already dialled in.
+			if !hub.HasPeerSocket("m-peer") {
+				t.Fatal("a live peer socket is invisible to HasPeerSocket, so the supervisor would dial a second one")
+			}
+			if hub.HasPeerSocket("m-somebody-else") {
+				t.Fatal("HasPeerSocket answered for a peer with no socket at all")
+			}
+		})
+	}
+}

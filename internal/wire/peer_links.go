@@ -101,12 +101,23 @@ func readPeerEnrolment(arg map[string]any, ip string) (peerEnrolment, bool) {
 		return peerEnrolment{}, false
 	}
 	enrolment := peerEnrolment{MachineID: machineID, Name: stringField(raw, "name")}
-	// The port is the peer's claim about where it listens; the host is what this
-	// socket actually came from. A peer cannot name someone else's host this way.
-	if port := stringField(raw, "port"); port != "" && strings.TrimSpace(ip) != "" {
-		enrolment.Address = net.JoinHostPort(strings.TrimSpace(ip), port)
-	}
+	enrolment.Address = peerRouteFromClaim(ip, stringField(raw, "port"))
 	return enrolment, true
+}
+
+// peerRouteFromClaim joins the port a peer claims for itself to the host this
+// socket actually came from.
+//
+// The split is the security property, and it is why the join lives in one
+// function now that two channels perform it: the host is OBSERVED and the port
+// is CLAIMED, so a peer can only ever point a route at itself, and §4 ranks the
+// result below an address a human typed until it has worked once.
+func peerRouteFromClaim(ip, port string) string {
+	ip, port = strings.TrimSpace(ip), strings.TrimSpace(port)
+	if ip == "" || port == "" {
+		return ""
+	}
+	return net.JoinHostPort(ip, port)
 }
 
 // handlePeerLinkChannel serves the three link channels. The caller has already
@@ -186,6 +197,7 @@ func (h *Hub) peerLinksPayload() map[string]any {
 func (h *Hub) handlePeerHeartbeat(c *client, args []any) (any, error) {
 	_, machineID := h.fleetSnapshot()
 	device, paired := c.deviceSnapshot()
+	arg := firstMapArg(args)
 	payload := map[string]any{
 		"ok": true, "machineId": machineID, "at": time.Now().UTC().Format(time.RFC3339),
 		"instanceId": h.InstanceID(),
@@ -196,13 +208,68 @@ func (h *Hub) handlePeerHeartbeat(c *client, args []any) (any, error) {
 			payload["peer"] = device.Peer
 		}
 	}
-	if from := stringField(firstMapArg(args), "machineId"); from != "" && paired && device.IsPeer() && device.Peer != from {
+	if from := stringField(arg, "machineId"); from != "" && paired && device.IsPeer() && device.Peer != from {
 		// The record says this socket belongs to one peer and the beat claims
 		// another. Nothing good can come of answering it as if both were true.
 		return nil, structuredError("fleet:peer-mismatch",
 			fmt.Sprintf("this link belongs to %s, not %s", device.Peer, from), nil)
 	}
+	if paired && device.IsPeer() {
+		// The route back, restated on every beat, AFTER the mismatch check — a
+		// socket whose claim disagrees with its record must never be allowed to
+		// teach this daemon an address.
+		//
+		// Enrolment states the same port, but enrolment happens once in a pair's
+		// lifetime: a dialler only enrols when it holds no token. So a pair that
+		// linked before diallers stated their port kept no peer record on this
+		// side at all — it could not dial back, could not heartbeat the pair
+		// from here, and `workass fleet links` truthfully reported "this machine
+		// has dialled no peer" for a machine it was linked to the whole time.
+		// Learning it from the beat is what makes that self-heal with no
+		// re-enrolment and nobody typing an address.
+		if address := peerRouteFromClaim(c.ip, stringField(arg, "port")); address != "" {
+			h.notePeerLink(PeerLinkEvent{
+				Kind: "paired", Peer: device.Peer, Name: device.Name,
+				Address: address, DeviceID: device.ID, At: time.Now().UTC(),
+			})
+		}
+	}
 	return payload, nil
+}
+
+// HasPeerSocket reports whether one peer daemon currently holds a live socket
+// to this hub.
+//
+// It is deliberately the SAME test SendToPeer routes a push on — an approved
+// device of kind peer carrying that machine id — because "where a push would
+// go" and "is this pair's link up" are two readings of one fact, and a runtime
+// in which they can disagree will eventually push an event down a link it has
+// already declared down. The mesh consults it before dialling, so a pair the
+// peer dialled is not dialled a second time (fleetclient.Options.InboundUp).
+func (h *Hub) HasPeerSocket(peerID string) bool {
+	peerID = strings.TrimSpace(peerID)
+	if h == nil || peerID == "" {
+		return false
+	}
+	h.mu.RLock()
+	clients := make([]*client, 0, len(h.clients))
+	for c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.RUnlock()
+	for _, c := range clients {
+		if c == nil {
+			continue
+		}
+		// readySnapshot is not required here, and that difference is on purpose:
+		// a socket still completing its handshake is a link coming up, not a
+		// pair that is down, and treating it as down would make the supervisor
+		// dial the second socket this exists to prevent.
+		if device, paired := c.deviceSnapshot(); paired && device.IsPeer() && device.Peer == peerID {
+			return true
+		}
+	}
+	return false
 }
 
 // Caller is who is on the other end of one invoke.

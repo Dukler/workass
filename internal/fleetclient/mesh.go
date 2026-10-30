@@ -163,6 +163,22 @@ type Options struct {
 	// only timer in the runtime (§4) — the one timer that exists reports every
 	// beat and the watcher decides.
 	OnBeat func(State)
+	// InboundUp reports whether this daemon already holds a LIVE socket that the
+	// peer itself dialled in on.
+	//
+	// §4 gives each pair ONE duplex link and lets either side dial it. Without
+	// this predicate the outbound half cannot see the inbound socket, so a pair
+	// the peer dialled had two problems at once: this side published `down` for
+	// a link that was demonstrably carrying commands — and `down` past the
+	// threshold is what synthesizes home_down, so a reachable machine would be
+	// reported unknown — and the supervisor dialled back anyway, giving the pair
+	// two sockets where the design has one. The lower-machine-id interval only
+	// de-races two diallers; it does not stop both of them succeeding.
+	//
+	// It is injectable for the same reason Dial and Probe are, and production
+	// backs it with the same test Hub.SendToPeer routes pushes on, so "where a
+	// push would go" and "is this pair up" can never disagree.
+	InboundUp func(peerID string) bool
 	// Probe reads an address's identity card. Injectable so a test can serve a
 	// card without a TLS listener; production uses machinebook, which is the one
 	// reading of that document.
@@ -210,6 +226,7 @@ type Mesh struct {
 	onEvent       func(peerID, channel string, payload any)
 	onState       func(State)
 	onBeat        func(State)
+	inboundUp     func(peerID string) bool
 	probe         func(ctx context.Context, address string) (machinebook.Card, error)
 	dial          func(ctx context.Context, opts DialRequest) (Invoker, error)
 
@@ -265,6 +282,7 @@ func New(opts Options) *Mesh {
 		onEvent:       opts.OnEvent,
 		onState:       opts.OnState,
 		onBeat:        opts.OnBeat,
+		inboundUp:     opts.InboundUp,
 		probe:         opts.Probe,
 		dial:          opts.Dial,
 		links:         make(map[string]Invoker),
@@ -548,7 +566,7 @@ func (m *Mesh) dialRoute(ctx context.Context, peer Peer, route Route) (Invoker, 
 	// a closed socket. Clearing it here is what lets the next dial enrol afresh
 	// after the peer reinstalled — while a REVOKED link, which answers with its
 	// own code, is left alone.
-	if _, err := link.Invoke(dialCtx, heartbeatChannel, map[string]any{"machineId": m.selfID}); err != nil {
+	if _, err := link.Invoke(dialCtx, heartbeatChannel, m.peerBeatPayload()); err != nil {
 		state, reason := link.AccessState()
 		link.Close(err)
 		code := errorCode(err)
@@ -715,13 +733,21 @@ func (m *Mesh) handleRejection(peerID, code string, cause error) {
 
 // LearnRoute records an address a peer connected from, appended below every
 // human-entered route until it has worked once (§4).
-func (m *Mesh) LearnRoute(peerID, name, address string) {
+//
+// It reports whether the peer file actually gained something. The caller needs
+// that because this is now reached from every heartbeat and not only from an
+// enrolment: a log line per beat per peer would bury the one event an operator
+// is reading these logs for, which is the beat that taught a NEW address.
+func (m *Mesh) LearnRoute(peerID, name, address string) bool {
 	if m == nil || m.store == nil || strings.TrimSpace(address) == "" {
-		return
+		return false
 	}
+	before := m.store.Saves()
 	if _, err := m.store.AddRoute(peerID, name, KindLAN, address, SourceLearned); err != nil {
 		m.logf("[fleet] learn route %s for %s: %v", address, peerID, err)
+		return false
 	}
+	return m.store.Saves() != before
 }
 
 // AddRoute records an address for a peer. Manual is a human's claim about where
@@ -843,7 +869,7 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 		}
 		if link != nil {
 			callCtx, cancel := context.WithTimeout(ctx, m.heartbeat)
-			_, err := link.Invoke(callCtx, heartbeatChannel, map[string]any{"machineId": m.selfID})
+			_, err := link.Invoke(callCtx, heartbeatChannel, m.peerBeatPayload())
 			cancel()
 			if err == nil {
 				// Coalesced on purpose: a beat answered is worth recording, but
@@ -868,6 +894,20 @@ func (m *Mesh) superviseLoop(ctx context.Context, peerID string) {
 				m.handleRejection(peerID, code, err)
 				continue
 			}
+		}
+		if m.inboundLive(peerID) {
+			// The peer dialled us and that socket is live, so the pair already
+			// has the one duplex link §4 gives it. Dialling back would open a
+			// second — the lower-machine-id interval only de-races two diallers,
+			// it does not stop them both succeeding — and would then heartbeat a
+			// connection the pair does not need. Publishing up is the whole job
+			// here: it keeps the pair's state true, which is what home_down is
+			// read from, without a second connection. Since is left zero so
+			// publish keeps the moment the pair came up rather than re-stamping
+			// it once a minute.
+			m.publish(State{Peer: peerID, Status: StatusUp})
+			m.beat(peerID)
+			continue
 		}
 		if !m.Linked(peerID) && !m.Known(peerID) {
 			continue
@@ -930,12 +970,39 @@ func (m *Mesh) superviseLink(peerID string) {
 }
 
 func (m *Mesh) publish(state State) {
+	// Link state is a property of the PAIR, not of this side's socket (§4), and
+	// either side may have dialled it. When the peer dialled, this daemon's
+	// outbound half holds nothing and would publish `down` for a link that is
+	// carrying commands right now — and `down` past the threshold is what
+	// synthesizes home_down, so a reachable machine would be announced as
+	// unknown and its running work shown as last-known. The inbound socket is
+	// the same evidence a push is routed on, so it is read rather than guessed.
+	//
+	// What this deliberately does NOT claim is that an outbound invoke will
+	// work: a pair that is up only inbound still has no route out, and that
+	// failure is reported where it happens, as ErrNoRoute, wrapped in
+	// ErrNotSent so the caller may safely retry over the renderer relay.
+	if state.Status != StatusUp && m.inboundLive(state.Peer) {
+		state.Status = StatusUp
+		state.Reason = ""
+		// The caller's timestamp described the failure it was reporting, which
+		// is not when this pair came up. Clearing it hands the question to the
+		// branch below, which keeps the moment the pair ACTUALLY came up.
+		state.Since = time.Time{}
+	}
 	m.mu.Lock()
 	previous, existed := m.states[state.Peer]
 	if state.Status == StatusUp {
 		delete(m.downSince, state.Peer)
 		if state.Since.IsZero() {
-			state.Since = m.now()
+			// An up link that is re-stated keeps the moment it came up. `up
+			// since` that moves while nothing changes is both a lie and a state
+			// CHANGE, so a pair re-stated every beat would notify every beat.
+			if existed && previous.Status == StatusUp && !previous.Since.IsZero() {
+				state.Since = previous.Since
+			} else {
+				state.Since = m.now()
+			}
 		}
 	} else {
 		// Connecting is not a recovery: a pair that is dialling is still not up,
@@ -970,6 +1037,39 @@ func (m *Mesh) peerEnrolmentPayload() map[string]any {
 		payload["port"] = strconv.Itoa(m.selfPort)
 	}
 	return payload
+}
+
+// peerBeatPayload is what this daemon states on every heartbeat: who it is, and
+// the port it listens on.
+//
+// The port is here and not only in the enrolment because enrolment happens ONCE
+// in a pair's lifetime — dialRoute enrols only when it holds no token — so a
+// pair that linked before this daemon stated a port could never learn the route
+// back, and no amount of reconnecting would fix it: the receiver only ever
+// learns an address from an inbound connection, and the only inbound thing it
+// sees after pairing is this beat. Restating it on every beat is what makes the
+// reverse direction self-heal with no re-enrolment and no human, which is the
+// only way an already-paired peer gets a route home.
+//
+// It stays a CLAIM about the port and nothing else: the receiver joins it to
+// the host its own socket reports (internal/wire/peer_links.go), so a peer
+// cannot point a route at anybody but itself.
+func (m *Mesh) peerBeatPayload() map[string]any {
+	payload := map[string]any{"machineId": m.selfID}
+	if m.selfPort > 0 {
+		payload["port"] = strconv.Itoa(m.selfPort)
+	}
+	return payload
+}
+
+// inboundLive asks whether the peer has a live socket of its own here. It is
+// read WITHOUT m.mu held: the predicate reaches into the hub, and holding the
+// mesh lock across another subsystem's lock is how a deadlock gets written.
+func (m *Mesh) inboundLive(peerID string) bool {
+	if m == nil || m.inboundUp == nil || strings.TrimSpace(peerID) == "" {
+		return false
+	}
+	return m.inboundUp(peerID)
 }
 
 func (m *Mesh) linkName() string {
