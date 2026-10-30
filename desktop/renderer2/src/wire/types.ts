@@ -416,6 +416,13 @@ export interface SpawnedWorkItem {
   lastToolName?: string;
   modelLabel?: string;
   resultExcerpt?: string;
+  // A supervised job's wait and run, apart. queuedAt is set on every supervised
+  // job and nothing else; execStartedAt is absent until its command starts, and
+  // runMs until it ends. Its status stays 'running' while it waits. Older daemons
+  // omit all three.
+  queuedAt?: string;
+  execStartedAt?: string;
+  runMs?: number;
 }
 // obligation is additive: what this chat still owes the user, which is a
 // different question from what is running. Older daemons omit it.

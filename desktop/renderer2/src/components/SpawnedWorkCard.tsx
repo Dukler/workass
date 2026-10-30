@@ -11,9 +11,22 @@ import { canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentW
 import { SubagentRow } from './SubagentRow';
 import type { ToolEvent } from '../store/types';
 
+// A supervised job waiting for a resource has not started, however long it has
+// been waiting (fleet-runtime §14e).
+function isQueuedWork(item: SpawnedWorkItem): boolean {
+  return item.status === 'running' && !!item.queuedAt && !item.execStartedAt;
+}
+
 function itemDuration(item: SpawnedWorkItem, nowMs: number): string {
-  const start = Date.parse(item.startedAt);
   const end = item.finishedAt ? Date.parse(item.finishedAt) : nowMs;
+  if (isQueuedWork(item)) {
+    const waited = Date.parse(item.queuedAt!);
+    return Number.isFinite(waited) ? `en cola ${fmtDur(Math.max(0, nowMs - waited))}` : 'en cola';
+  }
+  // The run alone. A supervised job that never ran has no run time to show.
+  if (item.runMs) return fmtDur(item.runMs);
+  if (item.queuedAt && !item.execStartedAt) return '';
+  const start = Date.parse(item.execStartedAt || item.startedAt);
   return Number.isFinite(start) && Number.isFinite(end) ? fmtDur(Math.max(0, end - start)) : '';
 }
 
@@ -123,7 +136,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
         )}
       </span>
       <span className="bgr-end">
-        <span className="r-pulse" aria-label="En curso" />
+        {!isQueuedWork(item) && <span className="r-pulse" aria-label="En curso" />}
         {canStop && (
           <button
             type="button"

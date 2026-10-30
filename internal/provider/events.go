@@ -237,6 +237,13 @@ type BackgroundEvent struct {
 	// row this product has ever published encodes byte for byte as before.
 	HostMachine     string `json:",omitempty"`
 	HostMachineName string `json:",omitempty"`
+	// QueuedAt, ExecStartedAt and RunMs keep a supervised job's wait apart from
+	// its run (fleet-runtime §14e). StartedAt stays when its row was first
+	// written. QueuedAt is set on every supervised job and on nothing else;
+	// ExecStartedAt is absent until its command starts, and RunMs until it ends.
+	QueuedAt      string `json:",omitempty"`
+	ExecStartedAt string `json:",omitempty"`
+	RunMs         int64  `json:",omitempty"`
 }
 
 type TransportHealthEvent struct {

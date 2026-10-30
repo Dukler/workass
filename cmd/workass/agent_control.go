@@ -415,16 +415,22 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		// id being derived from the operation id (§6) and from the per-event
 		// seq cursor, so a retry resolves to the row that already exists and
 		// re-applies nothing.
+		if h.manager != nil {
+			if binding, isRun := h.manager.RunTokenFor(ownerKey); isRun && binding.Closed() {
+				return closedJobReportAnswer(binding, params), nil
+			}
+		}
 		result, err := h.registerProcessChild(ownerKey, tabID, chatID, params)
 		if err == nil && h.manager != nil {
 			// The grant lasts as long as the job, because the job reports for
 			// as long as it runs — this used to end with the FIRST report,
 			// which was correct only while the spool was the real record. It
 			// ends the moment the job is terminal: a token that leaks after
-			// that authorizes nothing.
+			// that can only be told the job has ended.
 			if _, isRun := h.manager.RunTokenFor(ownerKey); isRun {
 				if processReportIsTerminal(result) {
-					h.manager.ConsumeRunToken(ownerKey)
+					answer := mapFromAnyMain(result)
+					h.manager.CloseRunToken(ownerKey, fieldString(answer, "status"), fieldString(answer, "outcome"))
 				} else {
 					// Still running, so the credential is still needed. The
 					// touch is what keeps the idle ceiling from expiring a job
@@ -771,6 +777,20 @@ func reportedProcessEvents(value any) []procchild.Event {
 func processReportIsTerminal(result any) bool {
 	status := strings.TrimSpace(fieldString(mapFromAnyMain(result), "status"))
 	return status != "" && status != "running"
+}
+
+// closedJobReportAnswer answers a report from a credential whose job has ended:
+// a retry of a closing report whose reply was lost. Nothing in it is applied. Its
+// events are acknowledged because a live row acknowledges them too once terminal:
+// the job's outcome is settled and the owner has been told, so nothing they could
+// say is still owed to anyone.
+func closedJobReportAnswer(binding acp.RunTokenBinding, params map[string]any) map[string]any {
+	workID := fieldString(params, "work_id")
+	return map[string]any{
+		"ok": true, "workId": workID, "taskId": workID, "status": binding.ClosedStatus,
+		"outcome": binding.ClosedOutcome, "created": false, "replayed": true,
+		"ackThrough": procchild.HighestSeq(reportedProcessEvents(params["events"])),
+	}
 }
 
 // processChildLocalStart is what only the daemon that LAUNCHED a supervisor

@@ -73,10 +73,12 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A hosted job's own credential names no chat, so it passes neither the
 	// actor fence nor the owner check below, and is good here for the one tool
-	// its job reports through. It is not a catalog reader.
+	// its job reports through. It is not a catalog reader. One whose job has ended
+	// is treated the same whichever kind it is: it resolves to no chat either, and
+	// may only hear that its job has ended.
 	hostedJob := false
-	if binding, isRun := h.manager.RunTokenFor(owner); isRun && binding.JobScoped() {
-		if chatID != "" || tabID != "" || r.Method != http.MethodPost {
+	if binding, isRun := h.manager.RunTokenFor(owner); isRun && (binding.JobScoped() || binding.Closed()) {
+		if chatID != binding.ChatID || tabID != binding.TabID || r.Method != http.MethodPost {
 			fail(401, "unauthorized")
 			return
 		}

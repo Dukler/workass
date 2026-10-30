@@ -191,9 +191,15 @@ func TestRunCredentialAuthorizesOnlyItsOwnRegistration(t *testing.T) {
 	if err := control.fenceRunCredential("chat.send", "mcp-owner", "mcp-tab", "mcp-chat", map[string]any{}); err != nil {
 		t.Fatalf("the fence rejected an ordinary owner key: %v", err)
 	}
-	harness.manager.ConsumeRunToken(token)
-	if _, live := harness.manager.RunTokenFor(token); live {
-		t.Fatal("a consumed job credential is still live")
+	harness.manager.CloseRunToken(token, "exited", procchild.OutcomeSettled)
+	if binding, live := harness.manager.RunTokenFor(token); !live || !binding.Closed() {
+		t.Fatalf("a closed job credential reads %#v, %v", binding, live)
+	}
+	if err := control.fenceRunCredential("chat.send", token, "", "", map[string]any{"operation_id": "start-1"}); err == nil {
+		t.Fatal("a closed job credential authorized another method")
+	}
+	if harness.manager.ValidateAgentOwner(token, "", "") {
+		t.Fatal("a closed job credential authenticated as a chat")
 	}
 }
 

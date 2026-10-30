@@ -82,3 +82,14 @@ type Event struct {
 	Kind    string         `json:"kind"`
 	Payload map[string]any `json:"payload,omitempty"`
 }
+
+// HighestSeq is the latest event in a batch, and zero for an empty one.
+func HighestSeq(events []Event) uint64 {
+	highest := uint64(0)
+	for _, event := range events {
+		if event.Seq > highest {
+			highest = event.Seq
+		}
+	}
+	return highest
+}

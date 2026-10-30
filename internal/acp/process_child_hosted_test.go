@@ -298,10 +298,92 @@ func TestProcessChildTimesKeepTheWaitOutOfTheRun(t *testing.T) {
 		end:  end, startedAt: stamp(queued), runMs: end.Sub(queued).Milliseconds(), queuedMs: 0,
 	}} {
 		t.Run(test.name, func(t *testing.T) {
-			got := processChildTimes(test.item, test.end)
+			got := ProcessChildTimes(test.item, test.end)
 			if got.StartedAt != test.startedAt || got.RunMs != test.runMs || got.QueuedMs != test.queuedMs {
 				t.Fatalf("got %+v, want started %q run %d queued %d", got, test.startedAt, test.runMs, test.queuedMs)
 			}
 		})
+	}
+}
+
+// A retry of a closing report whose reply was lost, after the chat's actor
+// accepted the settled row and it left the live registry. The supervisor has
+// nothing to tell it from any other report, and the owner has been told.
+func TestARetriedClosingReportDoesNotReviveACompactedJob(t *testing.T) {
+	lifecycle := &recordedLifecycle{}
+	manager := processChildManager(t, lifecycle)
+	childID, err := procchild.IDForOperation("op-closing-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	now := time.Now().UTC()
+	options := ProcessChildRegistrationOptions{
+		OwnerKey: "owner-proc", ParentChatID: "chat-proc", ParentTabID: "tab-proc",
+		WorkID: childID, Label: "closing retry", SupervisorPID: &pid,
+		OutputFile: liveOutputPath(t, manager.opts.StateDir, childID),
+		Events: []procchild.Event{
+			{Seq: 1, At: now, Kind: procchild.KindCreated},
+			{Seq: 2, At: now, Kind: procchild.KindSettled, Payload: map[string]any{"outcome": procchild.OutcomeSettled, "exitCode": 0}},
+		},
+	}
+	if _, err := manager.RegisterProcessChild(options); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CommitActorSpawnedWorkProjection("tab-proc", "chat-proc", manager.ListSpawnedWork("tab-proc", "chat-proc")); err != nil {
+		t.Fatal(err)
+	}
+	if rows := manager.ListSpawnedWork("tab-proc", "chat-proc"); len(rows) != 0 {
+		t.Fatalf("the settled row was not compacted: %#v", rows)
+	}
+
+	retry, err := manager.RegisterProcessChild(options)
+	if err != nil {
+		t.Fatalf("the retry was refused: %v", err)
+	}
+	if retry["ackThrough"] != uint64(2) || retry["status"] == "running" {
+		t.Fatalf("the retry answered %#v", retry)
+	}
+	if got := lifecycle.kinds(); got != "exit:settled" {
+		t.Fatalf("lifecycle = %q; the owner must be told once", got)
+	}
+	if rows := manager.ListSpawnedWork("tab-proc", "chat-proc"); len(rows) != 0 {
+		t.Fatalf("the retry brought a finished job back: %#v", rows)
+	}
+}
+
+func TestAClosedJobCredentialAnswersOnlyForItsOwnReportAndExpires(t *testing.T) {
+	state := t.TempDir()
+	manager := newHostedTestManager(t, state)
+	token := manager.MintRunToken("xwclosedjob01", "wa:m-away/chat/c", "op-closed")
+	if !manager.CloseRunToken(token, "exited", procchild.OutcomeSettled) {
+		t.Fatal("the credential did not close")
+	}
+	binding, ok := manager.RunTokenFor(token)
+	if !ok || !binding.Closed() || binding.ClosedStatus != "exited" || binding.ClosedOutcome != procchild.OutcomeSettled {
+		t.Fatalf("binding = %#v, %v", binding, ok)
+	}
+	if replacement := manager.MintRunToken("xwclosedjob01", "wa:m-away/chat/c", "op-closed"); replacement == token {
+		t.Fatal("a new start with the same operation was handed the closed credential")
+	}
+	manager.Reset()
+
+	restarted := newHostedTestManager(t, state)
+	if binding, ok := restarted.RunTokenFor(token); !ok || !binding.Closed() {
+		t.Fatalf("a restart forgot the job had closed: %#v, %v", binding, ok)
+	}
+	restarted.mu.Lock()
+	aged := restarted.runTokens[token]
+	aged.ClosedAt = time.Now().UTC().Add(-2 * runTokenClosedGrace)
+	restarted.runTokens[token] = aged
+	restarted.persistRunTokensLocked()
+	restarted.mu.Unlock()
+	if _, ok := restarted.RunTokenFor(token); ok {
+		t.Fatal("a closed credential answered past its grace")
+	}
+	restarted.Reset()
+	expired := newHostedTestManager(t, state)
+	if _, ok := expired.RunTokenFor(token); ok {
+		t.Fatal("a closed credential outlived its grace")
 	}
 }

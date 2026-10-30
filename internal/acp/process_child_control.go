@@ -268,15 +268,15 @@ func (m *Manager) CancelProcessChild(workID, reason string) (map[string]any, err
 
 // active reports a job that has not ended, whether or not it has started.
 func (v ProcessChildView) active() bool {
-	return v.Status == "running" || v.Status == processStatusQueued
+	return v.Status == "running" || v.Status == ProcessStatusQueued
 }
 
 func processChildView(item SpawnedWorkItem) ProcessChildView {
 	end, _ := time.Parse(time.RFC3339Nano, item.FinishedAt)
-	times := processChildTimes(item, end)
+	times := ProcessChildTimes(item, end)
 	status := item.Status
 	if status == "running" && times.StartedAt == "" {
-		status = processStatusQueued
+		status = ProcessStatusQueued
 	}
 	runMs := int64(0)
 	if item.Status != "running" {

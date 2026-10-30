@@ -379,7 +379,7 @@ func backgroundOwnerProviderMatches(state chat.State, owner chat.ProviderActivit
 }
 
 func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.BackgroundEvent {
-	return providercontract.BackgroundEvent{
+	event := providercontract.BackgroundEvent{
 		ProviderID: item.ProviderID, AssistantBrand: item.AssistantBrand,
 		WorkID: workID, TaskID: item.TaskID, ToolCallID: item.ToolCallID, Title: item.Label,
 		Kind: item.Kind, Role: item.Role, Status: item.Status, StartedAt: item.StartedAt,
@@ -391,6 +391,20 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		// every local row, which is what keeps the projection byte-identical.
 		HostMachine: item.HostMachine, HostMachineName: item.HostMachineName,
 	}
+	if item.Supervised() {
+		times := acp.ProcessChildTimes(item, parseSpawnedWorkTime(item.FinishedAt))
+		event.QueuedAt, event.ExecStartedAt = times.QueuedAt, times.StartedAt
+		if item.Status != "running" {
+			event.RunMs = times.RunMs
+		}
+	}
+	return event
+}
+
+// parseSpawnedWorkTime is a row's stamp, and zero when it has none.
+func parseSpawnedWorkTime(stamp string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(stamp))
+	return parsed
 }
 
 // exactActivitySnapshot preserves the same immutable tab/chat ownership checks
@@ -469,10 +483,17 @@ func backgroundListRow(state chat.ActivitySnapshot, id string) map[string]any {
 		// on the next live event (user 2026-10-16); without the parent, an
 		// agent's own shells stopped nesting under it.
 		"assistantBrand": item.AssistantBrand, "parentTaskId": item.ParentTaskID,
+		// A supervised job's wait and run. Status stays "running" and startedAt
+		// stays set here, because this wire is frozen and a renderer that predates
+		// these fields reads any other status as finished.
+		"queuedAt": item.QueuedAt, "execStartedAt": item.ExecStartedAt,
 	} {
 		if value != nil && fmt.Sprint(value) != "" {
 			row[key] = value
 		}
+	}
+	if item.RunMs > 0 {
+		row["runMs"] = item.RunMs
 	}
 	return row
 }

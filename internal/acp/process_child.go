@@ -205,6 +205,24 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 			}, nil
 		}
 	}
+	if !opts.HostedForOwner && reportCarriesSettle(events) {
+		// A closing report arriving for a job with no row and a receipt is a retry
+		// whose reply was lost: the actor accepted the settled row and it was
+		// compacted. Taken as new, it would bring back a finished job and tell its
+		// owner a second time.
+		m.spawnedWorkMu.Lock()
+		_, live := m.spawnedWork[key]
+		m.spawnedWorkMu.Unlock()
+		if !live {
+			if receipt, settled := m.findSpawnedWorkReceipt(tabID, chatID, workID); settled {
+				return map[string]any{
+					"ok": true, "workId": workID, "taskId": workID, "status": receipt.Status,
+					"outcome": receipt.Outcome, "created": false, "replayed": true,
+					"ackThrough": procchild.HighestSeq(events),
+				}, nil
+			}
+		}
+	}
 	m.spawnedWorkMu.Lock()
 	rec := m.spawnedWork[key]
 	created := rec == nil
@@ -311,6 +329,16 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 		"outcome": item.Outcome, "outputFile": outputFile, "doneFile": doneFile,
 		"spoolFile": spoolFile, "created": created, "ackThrough": ackThrough,
 	}, nil
+}
+
+// reportCarriesSettle reports whether a batch carries the job's outcome.
+func reportCarriesSettle(events []procchild.Event) bool {
+	for _, event := range events {
+		if event.Kind == procchild.KindSettled {
+			return true
+		}
+	}
+	return false
 }
 
 // reportCarriesLifecycle reports whether a batch says anything about the job
