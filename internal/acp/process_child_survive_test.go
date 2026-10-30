@@ -127,3 +127,43 @@ func TestRunningJobSurvivalMeasuresEachLiveSupervisor(t *testing.T) {
 		t.Fatalf("measured %v, reported %v", survival.Protected, jobs[0].Protected)
 	}
 }
+
+// A subagent never survives its daemon, whichever way it runs here: tracked, hosted
+// for another machine, or native to a provider. Work another machine runs is not
+// this machine's to report, and a job keeps its own measurement.
+func TestRunningJobSurvivalCountsEverySubagentAsDying(t *testing.T) {
+	manager := NewManager(Options{StateDir: t.TempDir(), Logf: func(string, map[string]any) {}})
+	manager.mu.Lock()
+	manager.subagents["wa-local"] = &SubagentRun{ID: "wa-local", Label: "local", Status: "running"}
+	manager.subagents["wa-hosted"] = &SubagentRun{ID: "wa-hosted", Label: "hosted", Status: "running", originMachine: "m-owner"}
+	manager.subagents["wa-ended"] = &SubagentRun{ID: "wa-ended", Label: "ended", Status: "completed"}
+	manager.mu.Unlock()
+	row := func(id, kind, status, host string) {
+		manager.spawnedWork[spawnedWorkKey("tab", "chat", id)] = &spawnedWorkRecord{Item: SpawnedWorkItem{
+			ID: id, TaskID: id, TabID: "tab", ChatID: "chat", Kind: kind, Label: id, Status: status, HostMachine: host,
+		}}
+	}
+	manager.spawnedWorkMu.Lock()
+	row("wa-local", trackedSubagentSpawnedWorkKind, "running", "")
+	row("native", "agent", "running", "")
+	row("native-ended", "agent", "exited", "")
+	row("elsewhere", trackedSubagentSpawnedWorkKind, "running", "m-host")
+	row("lane", "external", "running", "")
+	manager.spawnedWorkMu.Unlock()
+
+	got := map[string]JobSurvival{}
+	for _, job := range manager.RunningJobSurvival() {
+		got[job.WorkID] = job
+	}
+	if len(got) != 3 {
+		t.Fatalf("listed: %#v", got)
+	}
+	for _, id := range []string{"wa-local", "wa-hosted", "native"} {
+		if job := got[id]; job.Kind != "subagent" || job.Protected || job.Note == "" {
+			t.Fatalf("%s: %#v", id, job)
+		}
+	}
+	if got["wa-hosted"].Owner != "m-owner" {
+		t.Fatalf("hosted owner: %#v", got["wa-hosted"])
+	}
+}

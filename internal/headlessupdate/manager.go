@@ -76,10 +76,11 @@ type Options struct {
 	RunningJobs func() []RunningJob
 }
 
-// RunningJob is one job an update would be applied over.
+// RunningJob is one job or subagent an update would be applied over.
 type RunningJob struct {
 	WorkID    string `json:"workId"`
 	Label     string `json:"label"`
+	Kind      string `json:"kind,omitempty"`
 	Owner     string `json:"owner,omitempty"`
 	Protected bool   `json:"protected"`
 	Note      string `json:"note"`
@@ -97,14 +98,14 @@ func DescribeRunningJobs(jobs []RunningJob) map[string]any {
 			wouldDie = append(wouldDie, job)
 		}
 	}
-	summary := "no supervised job is running on this machine"
+	summary := "no job or subagent is running on this machine"
 	switch {
 	case len(wouldDie) > 0:
 		names := make([]string, 0, len(wouldDie))
 		for _, job := range wouldDie {
 			names = append(names, fmt.Sprintf("%s (%s)", job.Label, job.WorkID))
 		}
-		summary = fmt.Sprintf("applying an update now WOULD KILL %d running job(s): %s", len(wouldDie), strings.Join(names, ", "))
+		summary = fmt.Sprintf("applying an update now WOULD KILL %d running job(s) or subagent(s): %s", len(wouldDie), strings.Join(names, ", "))
 		if len(protected) > 0 {
 			summary += fmt.Sprintf("; %d more would survive it", len(protected))
 		}

@@ -504,7 +504,7 @@ func TestDescribeRunningJobsNamesWhatWouldDie(t *testing.T) {
 	if got := DescribeRunningJobs(jobs[1:])["summary"]; !strings.Contains(got.(string), "protected") {
 		t.Fatalf("summary: %v", got)
 	}
-	if got := DescribeRunningJobs(nil)["summary"]; !strings.Contains(got.(string), "no supervised job") {
+	if got := DescribeRunningJobs(nil)["summary"]; !strings.Contains(got.(string), "no job or subagent") {
 		t.Fatalf("summary: %v", got)
 	}
 }

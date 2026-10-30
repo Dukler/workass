@@ -102,6 +102,44 @@ func TestSpawnedWorkCommitDoesNotPersistBeforeActorAcceptance(t *testing.T) {
 	}
 }
 
+// A burst of jobs: one settles while another's commit is between its list and its
+// compaction. The actor accepted it as running, so it may not be compacted yet; if
+// it is, the next snapshot omits it and the actor marks it orphaned over a receipt
+// that says it finished.
+func TestSpawnedWorkCommitKeepsARowThatSettledAfterItsSnapshot(t *testing.T) {
+	manager := NewManager(Options{StateDir: t.TempDir(), RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
+	defer manager.Reset()
+	const tabID, chatID = "tab", "chat"
+	addExternalRecordForTest(manager, tabID, chatID, "burst", "burst", nil, "", "", "running", "")
+
+	seen := [][]SpawnedWorkItem{}
+	if err := manager.InstallSpawnedWorkObserver(func(_ string, _ string, items []SpawnedWorkItem) (SpawnedWorkActorProjection, error) {
+		seen = append(seen, items)
+		if len(seen) == 1 {
+			manager.spawnedWorkMu.Lock()
+			rec := manager.spawnedWork[spawnedWorkKey(tabID, chatID, "burst")]
+			if !manager.settleSpawnedWorkLocked(rec, "exited", nil) {
+				t.Error("the row did not settle")
+			}
+			manager.spawnedWorkMu.Unlock()
+		}
+		return SpawnedWorkActorProjection{Items: items}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.commitSpawnedWorkChange(tabID, chatID)
+	if got := manager.ListSpawnedWork(tabID, chatID); len(got) != 1 || got[0].Status != "exited" {
+		t.Fatalf("row after the commit that saw it running = %#v", got)
+	}
+	manager.commitSpawnedWorkChange(tabID, chatID)
+	if len(seen) != 2 || len(seen[1]) != 1 || seen[1][0].Status != "exited" {
+		t.Fatalf("the actor never saw the row settle: %#v", seen)
+	}
+	if got := manager.ListSpawnedWork(tabID, chatID); len(got) != 0 {
+		t.Fatalf("settled row survived the commit that accepted it: %#v", got)
+	}
+}
+
 func containsSpawnedWorkReceipt(data []byte, receiptID string) bool {
 	for _, line := range boundedSpawnedReceiptLines(data) {
 		var receipt SpawnedWorkReceipt
