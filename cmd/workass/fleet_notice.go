@@ -71,6 +71,11 @@ func (r *providerChatRuntime) deliverFleetMonitorNotice(notice fleetMonitorNotic
 		// lane does.
 		receipt.OriginLaneID = strings.TrimSpace(notice.LaneID)
 		receipt.OriginOperationID = strings.TrimSpace(notice.OriginOperationID)
+		// A hosted child's row lives HERE, in the chat that asked (§6). Settling
+		// it before the notice is what keeps the row and the card telling the
+		// same story; a row with no hosted counterpart is untouched, so every
+		// local completion behaves exactly as it did.
+		r.settleHostedSubagentRow(tabID, chatID, receipt)
 		return r.deliverSubagentCompletion(tabID, chatID, receipt)
 	case fleetlog.KindAttention:
 		if notice.AttentionKind == "stalled" || notice.AttentionKind == "max_hold" {

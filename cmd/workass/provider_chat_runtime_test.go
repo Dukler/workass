@@ -29,6 +29,34 @@ func newTestProviderChatRuntime(t *testing.T, manager *acp.Manager, store *sessi
 	return runtime
 }
 
+// waitForActorQuiescence blocks until one chat actor has stopped changing, so a
+// test that compares two actor revisions is comparing its own command and not a
+// background observation that happened to land between them. It is a barrier on
+// an observable fact — the revision — and never a fixed wait: a quiet actor
+// returns on the second read.
+func waitForActorQuiescence(t *testing.T, runtime *providerChatRuntime, chatID string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	last := uint64(0)
+	stable := 0
+	for time.Now().Before(deadline) {
+		state, ok := runtime.Snapshot(chatID)
+		if !ok {
+			t.Fatalf("actor snapshot is missing for %s", chatID)
+		}
+		if state.Revision == last {
+			stable++
+			if stable >= 2 {
+				return
+			}
+		} else {
+			last, stable = state.Revision, 0
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("actor %s never stopped changing", chatID)
+}
+
 func TestLoadedActorLookupDoesNotSnapshotActorState(t *testing.T) {
 	stateDir := t.TempDir()
 	engine, err := chat.NewEngine("lookup-chat")
@@ -498,6 +526,14 @@ func TestRuntimeControlsCommitToActorBeforeProviderAndApplyOnlyAtTurnBoundary(t 
 	if !ok {
 		t.Fatal("attached provider session is not live")
 	}
+	// Attaching a lane makes the manager observe this chat's environment, and
+	// that observation is an actor command of its own, applied on the manager's
+	// own goroutine. Both assertions below compare one actor revision with
+	// another, so they are about THIS operation only once nothing else is still
+	// landing: without the barrier the env observation sometimes arrived between
+	// the two saves and the replay looked like it had advanced the actor
+	// (first=6 second=8), which it never did.
+	waitForActorQuiescence(t, runtime, "controls-chat")
 	state, ok := runtime.Snapshot("controls-chat")
 	if !ok {
 		t.Fatal("actor snapshot is missing")

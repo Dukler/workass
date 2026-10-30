@@ -213,3 +213,19 @@ func PIDAlive(pid int) bool {
 	}
 	return state == uint32(syscall.WAIT_TIMEOUT)
 }
+
+// DetachProcessGroup puts a supervisor this daemon starts into its own process
+// group, and breaks it out of any Job object the daemon itself is in, so the
+// job it supervises outlives a daemon restart or a self-update. It is the same
+// primitive the child's own isolation uses, exported so `process.start` does
+// not reimplement the platform knowledge beside it.
+func DetachProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= createNewProcessGroup
+	cmd.SysProcAttr.CreationFlags |= createBreakawayFromJob
+}

@@ -432,7 +432,7 @@ func main() {
 	// sockets, so the renderer was the fleet's only bridge and closing the app
 	// closed the fleet (docs/specs/fleet-runtime.md §1). With a mesh, a command
 	// for another home travels over a link this daemon dialled itself.
-	fleetMesh := openFleetMesh(stateDir, identity, fleetKeys, machineBook, hub, logger)
+	fleetMesh := openFleetMesh(stateDir, identity, fleetKeys, machineBook, hub, logger, *port)
 	handler.Metrics = func() map[string]any {
 		out := daemonMetrics(providerChats, stateDir, hub, acpManager)
 		out["imageStore"] = imageStore.metrics()

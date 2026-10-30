@@ -29,9 +29,16 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// renders inline (user-approved mock html-render, t3code's html_render).
 	// 2026-10-30: +4 process-child tools (register, list, read, cancel), the
 	// record and control for `workass run` (fleet-runtime §13 P4). Starting one
-	// is a command, not a tool: the daemon never spawns work.
-	if len(tools) != 45 {
-		t.Fatalf("tool count = %d, want 45", len(tools))
+	// on THIS machine is a command, not a tool: the daemon never spawns work.
+	// 2026-10-30: +1 workass_start_process_child, which asks ANOTHER machine to
+	// run one. The gap it closes was found in the first live P1-P4 test: an
+	// agent could OWN a job on the box with the files and never start one
+	// there, because registration is local by design and nothing on that
+	// machine was listening. The daemon still lends no environment — the job's
+	// is built from nothing — and on this machine the tool refuses and points
+	// at `workass run` in the caller's own shell.
+	if len(tools) != 46 {
+		t.Fatalf("tool count = %d, want 46", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

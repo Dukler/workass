@@ -44,8 +44,12 @@ type Manager struct {
 	nativeSessions            *nativeSessionLedger
 	agentOwners               map[string]agentOwnerBinding
 	// chatToolTokens outlive engines; see chat_tool_token.go.
-	chatToolTokens          map[string]agentOwnerBinding
-	chatToolTokenByChat     map[string]string
+	chatToolTokens      map[string]agentOwnerBinding
+	chatToolTokenByChat map[string]string
+	// runTokens are the one-shot supervised-job credentials (run_tokens.go).
+	// Kept apart from every other credential on purpose: each one authorizes
+	// exactly one process.register, for one operation id, and nothing else.
+	runTokens               map[string]RunTokenBinding
 	agentOwnerBySession     map[string]string
 	providers               map[string]*providerRuntime
 	providerOrder           []string
@@ -402,6 +406,7 @@ func NewManager(opts Options) *Manager {
 	m.emitMockAppUpdateFromEnv()
 	m.loadSpawnedWorkSnapshots()
 	m.loadChatToolTokens()
+	m.loadRunTokens()
 	m.pruneToolBootstrap()
 	m.startManagerLoop(m.lifecycleLoop)
 	m.startManagerLoop(m.rssLoop)

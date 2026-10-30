@@ -204,6 +204,10 @@ func agentMCPTools() []map[string]any {
 				"fork":              boolean(agenttext.Get("schema.agentMCPTools.subagent.fork")),
 				"tab_id":            str(agenttext.Get("schema.remote.owner_tab_id")),
 				"chat_id":           str(agenttext.Get("schema.remote.owner_chat_id")),
+				// Where it runs, which §6 holds to be a different fact from who
+				// owns it. Before this the only machine-targeting on offer was
+				// the pair above, which also changed the owner.
+				"machine_id": str(agenttext.Get("schema.remote.host_machine_id")),
 			},
 		}, false, true, false, true),
 		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(ownerPair(map[string]any{})), true, false, true, false),
@@ -272,6 +276,28 @@ func agentMCPTools() []map[string]any {
 			"tab_id":         str(agenttext.Get("schema.agentMCPTools.guidance.67")),
 			"chat_id":        str(agenttext.Get("schema.agentMCPTools.guidance.68")),
 		}, "work_id", "label", "pid", "output_file"), false, false, true, true),
+		// Starting one on ANOTHER machine. On this machine `workass run` in the
+		// agent's own shell is still the only way, which is what keeps the
+		// daemon's environment out of a job (fleet-runtime §9); there, the
+		// caller has no shell at all, and before this there was no supported
+		// way to start supervised work on the machine that has the files.
+		tool("workass_start_process_child", agenttext.Get("tools.workass_start_process_child"), mutationObject(map[string]any{
+			"machine_id":     str(agenttext.Get("schema.process.start_machine_id")),
+			"label":          str(agenttext.Get("schema.process.label")),
+			"command":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": maxProcessStartCommand, "description": agenttext.Get("schema.process.start_command")},
+			"cwd":            str(agenttext.Get("schema.process.start_cwd")),
+			"host_tab_id":    str(agenttext.Get("schema.process.start_host_tab_id")),
+			"host_chat_id":   str(agenttext.Get("schema.process.start_host_chat_id")),
+			"env":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": agenttext.Get("schema.process.start_env")},
+			"role":           enum(agenttext.Get("schema.agentMCPTools.guidance.63"), "work", "service"),
+			"resource":       str(agenttext.Get("schema.process.resource")),
+			"inputs":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 32, "description": agenttext.Get("schema.process.start_inputs")},
+			"min_free_disk":  str(agenttext.Get("schema.process.start_min_free_disk")),
+			"output_file":    str(agenttext.Get("schema.agentMCPTools.guidance.65")),
+			"max_runtime_ms": integer(agenttext.Get("schema.process.max_runtime_ms"), 0),
+			"stale_after_ms": integer(agenttext.Get("schema.process.stale_after_ms"), 0),
+			"max_hold_ms":    integer(agenttext.Get("schema.process.max_hold_ms"), 0),
+		}, "machine_id", "label", "command", "cwd", "host_tab_id", "host_chat_id"), false, true, true, true),
 		tool("workass_list_process_children", agenttext.Get("tools.workass_list_process_children"), object(map[string]any{
 			"machine_id": str(agenttext.Get("schema.process.machine_id")),
 		}), true, false, true, false),
@@ -450,6 +476,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "external.register"
 	case "workass_settle_external_work":
 		method = "external.settle"
+	case "workass_start_process_child":
+		method = "process.start"
 	case "workass_register_process_child":
 		method = "process.register"
 	case "workass_list_process_children":

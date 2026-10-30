@@ -231,6 +231,12 @@ type BackgroundEvent struct {
 	ParentTaskID string `json:",omitempty"`
 	// Forked marks an agent started as a native fork of its parent.
 	Forked bool `json:",omitempty"`
+	// HostMachine and HostMachineName name the fleet machine this work RUNS on
+	// when that is not the chat's own machine (fleet-runtime §6: where it runs
+	// is a different fact from who owns it). Additive and omitempty, so every
+	// row this product has ever published encodes byte for byte as before.
+	HostMachine     string `json:",omitempty"`
+	HostMachineName string `json:",omitempty"`
 }
 
 type TransportHealthEvent struct {

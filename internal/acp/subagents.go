@@ -36,9 +36,27 @@ type SubagentSpawnOptions struct {
 	// a link: a child on another machine used to report into THAT machine's
 	// chat and never to the chat that asked (§1), and these three fields are
 	// what a monitor needs to send the outcome home instead.
-	OriginMachine    string `json:"-"`
-	OriginChatID     string `json:"-"`
-	OriginTabID      string `json:"-"`
+	OriginMachine string `json:"-"`
+	OriginChatID  string `json:"-"`
+	OriginTabID   string `json:"-"`
+	// HostedForOrigin marks a spawn that named THIS machine as the host while
+	// its owner stays the chat that asked, on another machine. It is the half
+	// of §6 that was missing: "where it runs" and "who owns it" were one fact,
+	// so the only way to name a machine was to name a chat on it, and the child
+	// then belonged to THAT chat — a row under a different conversation
+	// (operator, 2026-10-30: "not a subagent, not even a child chat").
+	//
+	// A hosted run has no owning chat here on purpose. It inherits this
+	// machine's own defaults rather than a chat's, it registers no row here —
+	// the row belongs to the chat that asked — and it reports through the
+	// monitor the origin stamp already carries.
+	HostedForOrigin bool `json:"-"`
+	// LimitIntent is the forwarded caller's own permission ceiling in the
+	// read/edit/full vocabulary (§6). It can only narrow: a hosted child never
+	// gets a permission the asking chat did not hold, and `inherit` resolves to
+	// it, because across machines the caller's ceiling IS what there is to
+	// inherit.
+	LimitIntent      string `json:"-"`
 	Prompt           string `json:"prompt"`
 	Label            string `json:"label,omitempty"`
 	ProviderID       string `json:"providerId,omitempty"`
@@ -104,6 +122,17 @@ func (m *Manager) ownerBinding(ownerKey, chatID, tabID string) (string, string, 
 	if !ok {
 		// A chat tool token authenticates as its chat, engine or no engine.
 		binding, ok = m.chatToolTokens[ownerKey]
+	}
+	if !ok {
+		// A one-shot supervised-job credential authenticates as the chat that
+		// holds its row — and ONLY for process.register, which is enforced at
+		// the single entry point that accepts it (agent_control.go). Resolving
+		// it here keeps that one method's authorization the same code every
+		// other caller goes through, rather than a second owner model beside
+		// it (run_tokens.go).
+		if run, isRun := m.runTokens[ownerKey]; isRun {
+			binding, ok = agentOwnerBinding{ChatID: run.ChatID, TabID: run.TabID}, true
+		}
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -278,13 +307,31 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	if prompt == "" {
 		return SubagentRun{}, errors.New("subagent prompt is required")
 	}
-	ownerChatID, ownerTabID, parent, ownerOK := m.subagentOwnerContext(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID)
-	if !ownerOK {
-		return SubagentRun{}, errors.New("no running Workass turn owns this subagent request")
+	var (
+		ownerChatID string
+		ownerTabID  string
+		parent      *Job
+	)
+	if opts.HostedForOrigin {
+		ownerChatID, ownerTabID = HostedSubagentOwner(opts.OriginMachine, opts.OriginChatID)
+		if ownerChatID == "" {
+			return SubagentRun{}, errors.New("a hosted subagent needs the exact machine and chat that asked")
+		}
+		opts = narrowHostedSubagentIntent(opts)
+	} else {
+		ownerOK := false
+		ownerChatID, ownerTabID, parent, ownerOK = m.subagentOwnerContext(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID)
+		if !ownerOK {
+			return SubagentRun{}, errors.New("no running Workass turn owns this subagent request")
+		}
 	}
 	defaults := parent
 	if defaults == nil {
-		defaults = m.subagentParentDefaults(ownerChatID, ownerTabID)
+		if opts.HostedForOrigin {
+			defaults = m.hostedSubagentDefaults(ctx, ownerChatID, ownerTabID)
+		} else {
+			defaults = m.subagentParentDefaults(ownerChatID, ownerTabID)
+		}
 	}
 
 	providerID, modelID, effort, modeID, err := m.resolveSubagentSelection(ctx, defaults, opts)
@@ -401,7 +448,12 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	snapshot := copySubagentRun(run)
 	m.mu.Unlock()
 
-	m.registerSubagentSpawnedWork(ownerTabID, ownerChatID, snapshot)
+	if !opts.HostedForOrigin {
+		// A hosted run's row belongs to the chat that ASKED, on its own
+		// machine. Registering one here too is what made the child show up as
+		// work of a conversation that never asked for it.
+		m.registerSubagentSpawnedWork(ownerTabID, ownerChatID, snapshot)
+	}
 	brand := brandForProvider(providerID)
 	if rootJobID != "" {
 		m.emitSubagentHeader(rootJobID, id, label, brand, modelLabel, "in_progress", "", opts.Fork)

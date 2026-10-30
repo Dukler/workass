@@ -111,3 +111,24 @@ func (m *Manager) removeToolContext(owner string) {
 		delete(m.toolContexts, owner)
 	}
 }
+
+// ToolContextTemplate is the endpoint and certificate every Workass tools
+// client on this machine uses, with no credential in it.
+//
+// It exists so a caller that mints its OWN credential — a one-shot supervised
+// job token, for instance (run_tokens.go) — writes a context file that is
+// byte-identical in every other respect to the ones a chat's own helpers get.
+// Two ways of describing the same endpoint would be two ways of getting it
+// wrong.
+func (m *Manager) ToolContextTemplate() (toolcli.Config, error) {
+	if m == nil || strings.TrimSpace(m.opts.WorkassToolsOrigin) == "" {
+		return toolcli.Config{}, errors.New("this Workass daemon has no tools endpoint, so it cannot hand a job a credential")
+	}
+	if !filepath.IsAbs(m.opts.WorkassToolsCAFile) {
+		return toolcli.Config{}, errors.New("Workass tools require an absolute certificate path")
+	}
+	return toolcli.Config{
+		Endpoint: strings.TrimRight(m.opts.WorkassToolsOrigin, "/") + "/workass/tools",
+		CAFile:   m.opts.WorkassToolsCAFile,
+	}, nil
+}
