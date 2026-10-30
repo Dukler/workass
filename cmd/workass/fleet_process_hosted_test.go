@@ -466,10 +466,20 @@ func TestTheNoticeStatesRunTimeAndQueueTimeApart(t *testing.T) {
 // jobCredentialRequest is the supervisor's own request: its token, no chat.
 func jobCredentialRequest(t *testing.T, harness statelessMCPTestHarness, method, token, chatID, tabID string, body map[string]any) (int, map[string]any) {
 	t.Helper()
+	status, response, err := tryJobCredentialRequest(harness, method, token, chatID, tabID, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status, response
+}
+
+// tryJobCredentialRequest hands back a transport error. A supervisor retries one,
+// and a busy machine does produce them: an idle connection closed under a POST.
+func tryJobCredentialRequest(harness statelessMCPTestHarness, method, token, chatID, tabID string, body map[string]any) (int, map[string]any, error) {
 	encoded, _ := json.Marshal(body)
 	request, err := http.NewRequest(method, harness.server.URL+toolsPath, bytes.NewReader(encoded))
 	if err != nil {
-		t.Fatal(err)
+		return 0, nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	if chatID != "" {
@@ -479,12 +489,12 @@ func jobCredentialRequest(t *testing.T, harness statelessMCPTestHarness, method,
 	request.Header.Set("Content-Type", "application/json")
 	reply, err := harness.client.Do(request)
 	if err != nil {
-		t.Fatal(err)
+		return 0, nil, err
 	}
 	defer reply.Body.Close()
 	var response map[string]any
 	_ = json.NewDecoder(reply.Body).Decode(&response)
-	return reply.StatusCode, response
+	return reply.StatusCode, response, nil
 }
 
 // 14b condition 4, rescoped and no wider: over the real endpoint, a job's
@@ -591,16 +601,18 @@ func TestAHostedJobsCredentialReportsThatJobAndNothingElse(t *testing.T) {
 // lossyReporter is the real daemon behind a link that drops the reply to one
 // closing report, after the daemon has applied it.
 type lossyReporter struct {
-	t       *testing.T
 	harness statelessMCPTestHarness
 	token   string
 	lost    atomic.Bool
 }
 
 func (r *lossyReporter) Report(request procchild.Report) (procchild.Acknowledgement, error) {
-	status, response := jobCredentialRequest(r.t, r.harness, http.MethodPost, r.token, "", "", map[string]any{
+	status, response, err := tryJobCredentialRequest(r.harness, http.MethodPost, r.token, "", "", map[string]any{
 		"name": "workass_register_process_child", "arguments": procchild.ReportArguments(request),
 	})
+	if err != nil {
+		return procchild.Acknowledgement{}, err
+	}
 	if status != http.StatusOK || response["error"] != nil {
 		return procchild.Acknowledgement{}, fmt.Errorf("status %d: %v", status, response["error"])
 	}
@@ -625,7 +637,7 @@ func TestALostReplyToAClosingReportIsStillAReportedOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reporter := &lossyReporter{t: t, harness: harness, token: harness.manager.MintRunToken(workID, owner, operation)}
+	reporter := &lossyReporter{harness: harness, token: harness.manager.MintRunToken(workID, owner, operation)}
 	var diagnostics bytes.Buffer
 	result, err := procchild.Run(procchild.Spec{
 		StateDir: harness.manager.StateDir(), OperationID: operation, Label: "lost reply", Owner: owner,
