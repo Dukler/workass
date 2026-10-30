@@ -662,6 +662,20 @@ func (m *Manager) drainProcessChildOutbox(workID string, cursor uint64) []procch
 	return events
 }
 
+// closeProcessOutbox releases the outbox handle. It matters beyond tidiness:
+// the handle is a SQLite connection with a WAL, and on Windows an open file is
+// a locked file — a manager that was reset without closing it would keep a
+// supervisor from writing.
+func (m *Manager) closeProcessOutbox() {
+	m.processOutboxMu.Lock()
+	outbox := m.processOutboxHandle
+	m.processOutboxHandle, m.processOutboxFailed = nil, false
+	m.processOutboxMu.Unlock()
+	if outbox != nil {
+		_ = outbox.Close()
+	}
+}
+
 func (m *Manager) forgetProcessChildOutbox(workID string) {
 	if outbox := m.processOutbox(); outbox != nil {
 		_ = outbox.Forget(workID)

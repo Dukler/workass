@@ -201,6 +201,12 @@ func TestASupervisorThatStopsReportingIsSaidToBeSilentExactlyOnceAndClearsOnTheN
 	if !strings.Contains(notices, "attention") {
 		t.Fatalf("silence must be news, got %q", notices)
 	}
+	// And a reader sees it, which is the whole requirement: the row must not
+	// READ as healthy.
+	rows := manager.ListProcessChildren()
+	if len(rows) != 1 || rows[0].Reporting != processReportingSilent {
+		t.Fatalf("the list must show the silence: %#v", rows)
+	}
 	manager.reconcileProcessChildren(silentAt.Add(procchild.SilenceThreshold * 4))
 	if lifecycle.kinds() != notices {
 		t.Fatal("silence must be said once, not once per reconcile tick")

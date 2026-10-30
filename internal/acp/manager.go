@@ -1104,6 +1104,7 @@ func (m *Manager) Reset() bool {
 	m.cancelAllSubagents(5 * time.Second)
 	m.killAllProviderUpdates()
 	m.cancelWorkassQuestionsForReset()
+	m.closeProcessOutbox()
 	m.mu.Lock()
 	bridges := make([]*Bridge, 0, len(m.bridges))
 	for _, bridge := range m.bridges {
