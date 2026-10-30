@@ -175,7 +175,16 @@ func (d *peerDaemon) peerLinks() []lease.Device { return d.lease.PeerLinks() }
 // dialer is one daemon's outbound half, with nothing mocked but the clock.
 func newDialer(t *testing.T, machineID, secret string, opts ...func(*Options)) (*Mesh, *Store) {
 	t.Helper()
-	stateDir := t.TempDir()
+	return newDialerIn(t, t.TempDir(), machineID, secret, opts...)
+}
+
+// newDialerIn is the same dialler over a state dir the caller names, so a test
+// can build a SECOND mesh over the first one's peer file. That is what a daemon
+// restarting onto a new build looks like to a pair that is already linked: the
+// credential is still there, so nothing re-enrols, and any fact that is only
+// ever stated at enrolment is now unstatable for the life of the pair.
+func newDialerIn(t *testing.T, stateDir, machineID, secret string, opts ...func(*Options)) (*Mesh, *Store) {
+	t.Helper()
 	store, err := Open(stateDir)
 	if err != nil {
 		t.Fatalf("dialer %s peer store: %v", machineID, err)
@@ -874,5 +883,187 @@ func TestEveryBeatReportsTheCurrentLinkState(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("only %d beat(s) arrived on a steady link", i)
 		}
+	}
+}
+
+// B8, the dialling half: the port rides every beat, not only the enrolment.
+//
+// The two phases are the bug exactly as it happened. A pair links under a build
+// that states no port, so the home learns no route and keeps no peer record.
+// Then the dialler restarts onto a build that does state one — and because it
+// still holds the credential, it never enrols again, so the enrolment payload
+// is a channel that is closed for the life of the pair. The beat is the only
+// thing the home will ever hear from it again.
+func TestTheBeatRestatesThePortSoAnAlreadyPairedPeerLearnsTheRouteBack(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	learned := make(chan wire.PeerLinkEvent, 8)
+	home.hub.SetPeerLinks(func(event wire.PeerLinkEvent) { learned <- event })
+	stateDir := t.TempDir()
+
+	// Phase one: the pre-fix dialler. It pairs, and the home is told about a
+	// link from "an unstated address" — which is a link it can never dial back.
+	portless, store := newDialerIn(t, stateDir, "m-away", secret, func(options *Options) {
+		options.SelfPort = 0
+	})
+	if err := portless.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if _, err := portless.EnsureLink(context.Background(), home.machineID); err != nil {
+		t.Fatalf("pair without a port: %v", err)
+	}
+	select {
+	case event := <-learned:
+		if event.Kind != "paired" || event.Address != "" {
+			t.Fatalf("a portless enrolment stated an address anyway: %#v", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the home was never told a peer linked in")
+	}
+	portless.Close()
+
+	// Phase two: the same peer file, a build that states its port, and no
+	// enrolment anywhere — the credential is already on disk.
+	if peer, ok := store.Peer(home.machineID); !ok || !peer.Linked() {
+		t.Fatalf("phase one left no credential to reuse: %#v", peer)
+	}
+	mesh, _ := newDialerIn(t, stateDir, "m-away", secret, func(options *Options) {
+		options.SelfPort = 7788
+	})
+	if _, err := mesh.EnsureLink(context.Background(), home.machineID); err != nil {
+		t.Fatalf("relink with a stated port: %v", err)
+	}
+	select {
+	case event := <-learned:
+		if event.Kind != "paired" || event.Peer != "m-away" {
+			t.Fatalf("the home was told %#v", event)
+		}
+		if _, port, err := net.SplitHostPort(event.Address); err != nil || port != "7788" {
+			t.Fatalf("the home learned %q, want the stated port 7788 joined to this socket's host", event.Address)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a beat from an already-paired peer taught the home nothing, so the pair stays one-directional forever")
+	}
+}
+
+// The no-op guard that makes the above affordable. A route restated on every
+// beat must not be a disk write on every beat: that is the cost
+// beatRecordInterval exists to keep off the one timer in the runtime.
+func TestRestatingAKnownRouteWritesNothing(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open peer store: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		name2  string
+		kind   string
+		addr   string
+		source string
+		writes bool
+	}{
+		{name: "the first sighting is a write", addr: "192.168.0.134:8788", source: SourceLearned, writes: true},
+		{name: "the same route from the same source is not", addr: "192.168.0.134:8788", source: SourceLearned, writes: false},
+		{name: "nor is it on the hundredth beat", addr: "192.168.0.134:8788", source: SourceLearned, writes: false},
+		// Standing is not nothing: a human typing an address this daemon had
+		// merely observed is an upgrade, and it has to reach the disk.
+		{name: "a human promoting it to manual is a write", addr: "192.168.0.134:8788", source: SourceManual, writes: true},
+		{name: "and a learned beat never demotes it back", addr: "192.168.0.134:8788", source: SourceLearned, writes: false},
+		{name: "a new address is a write", addr: "10.0.0.9:8788", source: SourceLearned, writes: true},
+		{name: "a changed name is a write", name2: "duklerver", addr: "10.0.0.9:8788", source: SourceLearned, writes: true},
+		{name: "the same name is not", name2: "duklerver", addr: "10.0.0.9:8788", source: SourceLearned, writes: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := store.Saves()
+			if _, err := store.AddRoute("m-duklerver", tc.name2, KindLAN, tc.addr, tc.source); err != nil {
+				t.Fatalf("add route: %v", err)
+			}
+			wrote := store.Saves() != before
+			if wrote != tc.writes {
+				t.Fatalf("wrote=%v, want %v (saves %d -> %d)", wrote, tc.writes, before, store.Saves())
+			}
+		})
+	}
+}
+
+// One duplex link per pair (§4). When the peer dialled in, this side must not
+// dial back — and must not call the pair down either, because `down` past the
+// threshold is what synthesizes home_down for a machine that is answering.
+func TestAnInboundLinkIsNotDialledASecondTime(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	var dials atomic.Int64
+	changes := make(chan State, 32)
+	mesh, store := newDialer(t, "m-away", secret, func(options *Options) {
+		// The peer is linked IN here, which is the whole premise: the hub holds
+		// its socket, so the outbound half has nothing to do.
+		options.InboundUp = func(peerID string) bool { return peerID == "m-home" }
+		options.Dial = func(ctx context.Context, opts DialRequest) (Invoker, error) {
+			dials.Add(1)
+			return defaultDial(ctx, opts)
+		}
+		options.OnState = func(state State) {
+			select {
+			case changes <- state:
+			default:
+			}
+		}
+	})
+	if _, err := store.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	mesh.Start(ctx)
+
+	select {
+	case state := <-changes:
+		if state.Peer != home.machineID || state.Status != StatusUp {
+			t.Fatalf("an inbound-only pair published %#v, want up", state)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an inbound-only pair published no state at all, so home_down would be synthesized for a reachable machine")
+	}
+	// Several supervisor intervals, so this is "never dials" and not "has not
+	// dialled yet".
+	time.Sleep(300 * time.Millisecond)
+	if count := dials.Load(); count != 0 {
+		t.Fatalf("the supervisor opened %d outbound socket(s) to a peer that had already dialled in", count)
+	}
+	if state := mesh.State(home.machineID); state.Status != StatusUp {
+		t.Fatalf("link state = %#v, want up", state)
+	}
+}
+
+// The same rule read straight off publish: a failure reported for a pair whose
+// peer is connected here is not that pair going down.
+func TestPublishReportsUpForAnInboundOnlyPair(t *testing.T) {
+	inbound := map[string]bool{"m-inbound": true}
+	mesh, _ := newDialer(t, "m-away", "", func(options *Options) {
+		options.InboundUp = func(peerID string) bool { return inbound[peerID] }
+	})
+	for _, status := range []string{StatusDown, StatusConnecting} {
+		mesh.publish(State{Peer: "m-inbound", Status: status, Since: time.Now(), Reason: "no route"})
+		state := mesh.State("m-inbound")
+		if state.Status != StatusUp {
+			t.Fatalf("publish(%s) for an inbound-only pair = %#v, want up", status, state)
+		}
+		if state.Reason != "" {
+			t.Fatalf("an up pair carries a failure reason: %#v", state)
+		}
+	}
+	first := mesh.State("m-inbound").Since
+	// `up since` must not move while nothing changes: a moving timestamp is both
+	// a lie and a state CHANGE, so a pair re-stated every beat would notify
+	// every beat and look like a link flapping.
+	mesh.publish(State{Peer: "m-inbound", Status: StatusDown, Since: time.Now().Add(time.Minute), Reason: "no route"})
+	if again := mesh.State("m-inbound").Since; !again.Equal(first) {
+		t.Fatalf("up since moved from %s to %s while the pair never changed", first, again)
+	}
+	// A pair with no inbound socket is untouched: the predicate is evidence, not
+	// a blanket excuse to call every pair up.
+	mesh.publish(State{Peer: "m-elsewhere", Status: StatusDown, Since: time.Now(), Reason: "no route"})
+	if state := mesh.State("m-elsewhere"); state.Status != StatusDown || state.Reason == "" {
+		t.Fatalf("a pair with no inbound socket = %#v, want down with its reason", state)
 	}
 }

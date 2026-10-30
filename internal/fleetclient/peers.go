@@ -193,6 +193,11 @@ type Store struct {
 
 	mu    sync.Mutex
 	peers []Peer
+	// saves counts completed writes. It exists so a test can assert that a
+	// no-op AddRoute wrote NOTHING, which is a claim about the disk that no
+	// amount of reading the resulting file back can prove: an identical save
+	// and no save leave identical bytes.
+	saves int
 }
 
 type storeFile struct {
@@ -227,6 +232,20 @@ func Open(stateDir string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// Saves is how many times this store has written the peer file since it was
+// opened.
+//
+// It is the one honest answer to "did that call change anything?". A writer
+// that saves an identical record leaves bytes indistinguishable from a writer
+// that saved nothing, so reading the file back cannot tell them apart — and
+// both the no-op guard in AddRoute and the log line in Mesh.LearnRoute depend
+// on telling them apart, now that a route is restated on every heartbeat.
+func (s *Store) Saves() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saves
 }
 
 // Peers returns every link, credentials included. Callers that publish a list
@@ -282,11 +301,20 @@ func (s *Store) AddRoute(machineID, name, kind, address, source string) (Peer, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	index := s.indexLocked(machineID)
+	// changed is tracked rather than assumed because this route is now restated
+	// on EVERY heartbeat (internal/wire/peer_links.go learns it from the beat),
+	// and the overwhelmingly common call is one that changes nothing. Writing
+	// an identical file anyway would turn the one timer in the runtime into a
+	// disk write per minute per peer — the exact cost beatRecordInterval exists
+	// to avoid one layer up.
+	changed := false
 	if index < 0 {
 		s.peers = append(s.peers, Peer{MachineID: machineID, Name: strings.TrimSpace(name)})
 		index = len(s.peers) - 1
-	} else if trimmed := strings.TrimSpace(name); trimmed != "" {
+		changed = true
+	} else if trimmed := strings.TrimSpace(name); trimmed != "" && s.peers[index].Name != trimmed {
 		s.peers[index].Name = trimmed
+		changed = true
 	}
 	peer := &s.peers[index]
 	for i := range peer.Routes {
@@ -300,6 +328,13 @@ func (s *Store) AddRoute(machineID, name, kind, address, source string) (Peer, e
 			peer.Routes[i].Source = SourceManual
 			peer.Routes[i].Refused, peer.Routes[i].RefusedReason = false, ""
 			peer.Routes[i].CooldownUntil = ""
+			changed = true
+		}
+		if !changed {
+			// This exact route, from this exact source, is already on file. The
+			// caller still gets the peer back, so a beat that teaches nothing new
+			// is indistinguishable from one that does — except on disk.
+			return *peer, nil
 		}
 		if err := s.saveLocked(); err != nil {
 			return Peer{}, err
@@ -531,5 +566,6 @@ func (s *Store) saveLocked() error {
 		os.Remove(name)
 		return err
 	}
+	s.saves++
 	return nil
 }

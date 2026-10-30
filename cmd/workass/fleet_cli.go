@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"workass/internal/fleet"
 	"workass/internal/fleetclient"
@@ -300,66 +302,203 @@ func readSecret(stdin io.Reader, stdout, stderr io.Writer) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// printFleetLinks shows both halves of this machine's mesh: the peers that
-// linked IN, which is the device store's view, and the peers this daemon
-// dialled OUT, which is the peer store's.
+// fleetLinkRow is ONE pair, with both of its halves and the verdict that can
+// only be read from the two of them together.
 //
-// Both are needed to read a problem. A link is one duplex connection per pair
-// in the design, but the two records are written by different events — an
-// inbound enrolment and an outbound dial — so a machine that appears on one
-// list and not the other is itself the finding.
+// It exists because this output was itself the B8 bug report. A link is one
+// duplex connection per pair (§4) and either side may have dialled it, but the
+// two records are written by different events — an inbound enrolment or beat,
+// and an outbound dial — and they used to print in two separate blocks with no
+// verdict in either. So a `lastUse` coalesced to five minutes (beatRecordInterval)
+// read as a dead link, while the inbound half twelve lines further down carried
+// a timestamp from thirty seconds ago and said the pair was fine. A format that
+// makes a human cross-reference two blocks to answer "is this up?" will be read
+// wrongly, and was.
+type fleetLinkRow struct {
+	peer     string
+	inbound  *lease.Device
+	outbound *fleetclient.Peer
+	cut      *lease.BlockedPeer
+}
+
+// label is the name a human recognises. The outbound half holds the machine
+// book's display name ("duklerver"); the inbound half holds the DEVICE name a
+// dialling daemon states for itself, which is "workass daemon <host> (<machine
+// id>)" and puts the machine id on the line twice. So the short one wins where
+// there is a choice, and the long one is better than nothing.
+func (row fleetLinkRow) label() string {
+	if row.outbound != nil && strings.TrimSpace(row.outbound.Name) != "" {
+		return strings.TrimSpace(row.outbound.Name)
+	}
+	if row.inbound != nil && strings.TrimSpace(row.inbound.Name) != "" {
+		return strings.TrimSpace(row.inbound.Name)
+	}
+	if row.cut != nil {
+		return strings.TrimSpace(row.cut.Name)
+	}
+	return ""
+}
+
+// fleetLinkVerdict is the headline: up, down, or cut, and how long the pair has
+// been silent.
+//
+// The evidence is whichever half was seen most recently, because a pair has one
+// link and either end may be the one keeping the record of it. The threshold is
+// the same ten minutes §16.3a gives home_down (fleetHomeDownThreshold), so what
+// this prints and what a watcher synthesizes cannot disagree — a CLI that calls
+// a pair up while the runtime is emitting home_down for it would be worse than
+// no verdict at all.
+func (row fleetLinkRow) verdict(now time.Time) string {
+	if row.cut != nil {
+		return "CUT"
+	}
+	seen, ok := row.lastSeen()
+	if !ok {
+		// Paired but never seen since: this daemon restarted and nothing has
+		// beaten yet, or the record predates any beat. Unknown is the honest
+		// answer and is not the same as down.
+		return "UNKNOWN  (no beat recorded yet)"
+	}
+	silent := now.Sub(seen)
+	if silent < 0 {
+		silent = 0
+	}
+	if silent < fleetHomeDownThreshold {
+		return fmt.Sprintf("UP  (silent %s)", silent.Round(time.Second))
+	}
+	return fmt.Sprintf("DOWN  (silent %s, past the %s threshold)",
+		silent.Round(time.Second), fleetHomeDownThreshold)
+}
+
+// lastSeen is the freshest evidence either half holds for this pair.
+func (row fleetLinkRow) lastSeen() (time.Time, bool) {
+	best, ok := time.Time{}, false
+	consider := func(stamp string) {
+		at, err := time.Parse(time.RFC3339, strings.TrimSpace(stamp))
+		if err != nil {
+			return
+		}
+		if !ok || at.After(best) {
+			best, ok = at, true
+		}
+	}
+	if row.inbound != nil {
+		consider(row.inbound.LastSeen)
+	}
+	if row.outbound != nil {
+		consider(row.outbound.LastUseAt)
+	}
+	return best, ok
+}
+
+// printFleetLinks shows this machine's mesh one pair at a time: the verdict
+// first, then the inbound half (the device store's view) and the outbound half
+// (the peer store's) indented as its evidence.
+//
+// Every pair prints both halves even when one of them is missing, because a
+// machine that appears on one side and not the other is itself the finding —
+// that absence is exactly what B8 was.
 func printFleetLinks(stateDir string, stdout io.Writer) error {
 	leases, err := lease.NewManager(lease.Options{StateDir: stateDir})
 	if err != nil {
 		return err
 	}
-	inbound := leases.PeerLinks()
-	if len(inbound) == 0 {
-		fmt.Fprintf(stdout, "no peer daemon has linked to this machine\n")
-	}
-	for _, device := range inbound {
-		grant := strings.TrimSpace(device.Grant)
-		if grant == "" {
-			grant = "full"
-		}
-		fmt.Fprintf(stdout, "in   %s  name=%q  key=%s  grant=%s  lastSeen=%s\n",
-			device.Peer, device.Name, device.KeyID, grant, device.LastSeen)
-	}
-	for _, blocked := range leases.BlockedPeers() {
-		fmt.Fprintf(stdout, "cut  %s  name=%q  revoked=%s  (it cannot link again until it is approved)\n",
-			blocked.MachineID, blocked.Name, blocked.RevokedAt)
-	}
 	peers, err := fleetclient.Open(stateDir)
 	if err != nil {
 		return err
 	}
+	inbound := leases.PeerLinks()
 	outbound := peers.Redacted()
+	blocked := leases.BlockedPeers()
+
+	rows := map[string]*fleetLinkRow{}
+	order := []string{}
+	at := func(peerID string) *fleetLinkRow {
+		peerID = strings.TrimSpace(peerID)
+		row, seen := rows[peerID]
+		if !seen {
+			row = &fleetLinkRow{peer: peerID}
+			rows[peerID] = row
+			order = append(order, peerID)
+		}
+		return row
+	}
+	for i := range inbound {
+		at(inbound[i].Peer).inbound = &inbound[i]
+	}
+	for i := range outbound {
+		at(outbound[i].MachineID).outbound = &outbound[i]
+	}
+	for i := range blocked {
+		at(blocked[i].MachineID).cut = &blocked[i]
+	}
+	sort.Strings(order)
+
+	// The two sentences a machine with an empty mesh needs, kept verbatim: they
+	// are what an operator greps for, and "nobody has linked to me" and "I have
+	// dialled nobody" are different facts about different halves.
+	if len(inbound) == 0 {
+		fmt.Fprintf(stdout, "no peer daemon has linked to this machine\n")
+	}
 	if len(outbound) == 0 {
 		fmt.Fprintf(stdout, "this machine has dialled no peer\n")
 	}
-	for _, peer := range outbound {
-		state := "paired"
-		switch {
-		case peer.RevokedByPeer:
-			state = "revoked by that peer"
-		case !peer.Linked():
-			state = "known, not linked"
-		}
-		fmt.Fprintf(stdout, "out  %s  name=%q  %s  lastUse=%s\n", peer.MachineID, peer.Name, state, peer.LastUseAt)
-		for _, route := range peer.Routes {
-			note := ""
-			switch {
-			case route.Refused:
-				note = "  REFUSED: " + route.RefusedReason
-			case route.CooldownUntil != "":
-				note = "  cooling until " + route.CooldownUntil
+	now := time.Now().UTC()
+	for _, peerID := range order {
+		row := rows[peerID]
+		fmt.Fprintf(stdout, "pair %s  name=%q  %s\n", row.peer, row.label(), row.verdict(now))
+		if device := row.inbound; device != nil {
+			grant := strings.TrimSpace(device.Grant)
+			if grant == "" {
+				grant = "full"
 			}
-			fmt.Fprintf(stdout, "       %s  %s  %s  lastSuccess=%s%s\n",
-				route.Kind, route.Address, route.Source, firstNonEmptyCLI(route.LastSuccessAt, "never"), note)
+			fmt.Fprintf(stdout, "     in   linked  key=%s  grant=%s  lastSeen=%s\n",
+				device.KeyID, grant, firstNonEmptyCLI(device.LastSeen, "never"))
+		} else {
+			fmt.Fprintf(stdout, "     in   this peer has not linked in\n")
+		}
+		if peer := row.outbound; peer != nil {
+			state := "paired"
+			switch {
+			case peer.RevokedByPeer:
+				state = "revoked by that peer"
+			case !peer.Linked():
+				state = "known, not linked"
+			}
+			// The window is named on the line that carries the timestamp. An
+			// operator who knows lastUse is written at most every five minutes
+			// cannot misread a five-minute-old one as silence, which is the
+			// misreading that opened B8.
+			fmt.Fprintf(stdout, "     out  %s  lastUse=%s  (recorded at most every %s)\n",
+				state, firstNonEmptyCLI(peer.LastUseAt, "never"), beatRecordWindow)
+			for _, route := range peer.Routes {
+				note := ""
+				switch {
+				case route.Refused:
+					note = "  REFUSED: " + route.RefusedReason
+				case route.CooldownUntil != "":
+					note = "  cooling until " + route.CooldownUntil
+				}
+				fmt.Fprintf(stdout, "          %s  %s  %s  lastSuccess=%s%s\n",
+					route.Kind, route.Address, route.Source, firstNonEmptyCLI(route.LastSuccessAt, "never"), note)
+			}
+		} else {
+			// Not cosmetic: with no peer record this daemon has no address for
+			// the machine and cannot dial it, which is the whole of B8 in one
+			// line. A pair can still be UP on the inbound half while this says so.
+			fmt.Fprintf(stdout, "     out  not dialled  (no peer record here, so this daemon cannot dial it)\n")
+		}
+		if cut := row.cut; cut != nil {
+			fmt.Fprintf(stdout, "     cut  revoked=%s  (it cannot link again until it is approved)\n", cut.RevokedAt)
 		}
 	}
 	return nil
 }
+
+// beatRecordWindow is how often a live link's heartbeat is written down, named
+// here only so the output can say so. The number itself belongs to
+// internal/fleetclient, which is the one place that decides it.
+var beatRecordWindow = time.Duration(fleetclient.BeatRecordInterval())
 
 func firstNonEmptyCLI(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {

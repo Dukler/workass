@@ -133,11 +133,18 @@ func (s *fleetMeshService) Observe(event wire.PeerLinkEvent) {
 	}
 	switch event.Kind {
 	case "paired":
+		learned := false
 		if event.Address != "" {
-			s.mesh.LearnRoute(event.Peer, event.Name, event.Address)
+			learned = s.mesh.LearnRoute(event.Peer, event.Name, event.Address)
 		}
 		s.supervise(event.Peer)
-		s.logger.Printf("[fleet] peer %s linked in from %s", event.Peer, firstNonEmptyAddress(event.Address))
+		// Logged on the enrolment and on any beat that teaches a NEW address,
+		// and silent otherwise. This arrives once per heartbeat per peer now
+		// that the route is restated on the beat, and a line a minute would bury
+		// the one line an operator reads these logs for.
+		if learned || event.Address == "" {
+			s.logger.Printf("[fleet] peer %s linked in from %s", event.Peer, firstNonEmptyAddress(event.Address))
+		}
 	case "revoked":
 		s.mesh.Drop(event.Peer)
 		s.logger.Printf("[fleet] dropped this daemon's own link to %s as well", event.Peer)
@@ -197,9 +204,15 @@ func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Sto
 		SelfMachineID: identity.MachineID,
 		SelfName:      identity.DisplayName,
 		SelfPort:      selfPort,
-		Store:         peers,
-		Keys:          keys,
-		Logf:          logger.Printf,
+		// One duplex link per pair (§4). The hub already knows which peers hold
+		// a socket here, so the outbound half asks it instead of dialling a
+		// second connection to a machine that is already connected — and
+		// instead of publishing `down`, which past the threshold would announce
+		// a reachable machine as home_down.
+		InboundUp: hub.HasPeerSocket,
+		Store:     peers,
+		Keys:      keys,
+		Logf:      logger.Printf,
 		OnEvent: func(peerID, channel string, payload any) {
 			// A peer's log pushes arrive here. Everything else a peer publishes
 			// is read off the socket and dropped, as it was before P3.
