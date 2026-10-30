@@ -189,6 +189,27 @@ function viewHost() {
 
 const PANE = { x: 700, y: 60, width: 480, height: 700 };
 
+// 2026-10-30: a click on a floating native page landed at (53, 74) of a page
+// whose target was at (12, 17), and reported success.
+test('a native page fitted into its frame takes pointer input at its scale', async () => {
+  const { manager } = viewHost();
+  const entry = manager.get('chat-fitted');
+  assert.equal(await entry.ready, true);
+  const debug = entry.view.webContents.debugger;
+  const tabId = manager.tabInfo(entry).id;
+  const sent = () => debug.calls.filter((call) => call.method === 'Input.dispatchMouseEvent').at(-1).params;
+  await manager.executeCDP({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: 100, y: 40 });
+  assert.deepEqual([sent().x, sent().y], [100, 40], 'at 1:1 nothing changes');
+  entry.presentationScale = 0.25;
+  await manager.executeCDP({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 100, y: 40, button: 'left', clickCount: 1 });
+  assert.deepEqual([sent().x, sent().y], [25, 10]);
+  assert.deepEqual([entry.pointerDown.x, entry.pointerDown.y], [25, 10], 'a stuck press is released where it was made');
+  // A cross-site frame's own session takes input in that frame's pixels.
+  await manager.boundedInput(entry, debug, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: 100, y: 40 }, 'child-session');
+  assert.deepEqual([sent().x, sent().y], [100, 40]);
+  manager.destroy();
+});
+
 // 2026-10-30: on a real window, a navigation of the page on screen moved the
 // person's keystrokes out of the composer: Chromium focuses a native page when
 // a new document commits. The app takes focus back, unless the person pressed
