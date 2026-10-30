@@ -359,7 +359,7 @@ func fleetToolFailureText(response map[string]any) string {
 func TestProcessStartArgumentsNameTheAskingChatAndNeverACredential(t *testing.T) {
 	arguments := processStartArguments(
 		"train the model", "wa:m-mac/chat/app-chat-1", "start-1", "/srv/work", "/var/run/cred/context.json",
-		"/data/workass/state",
+		"/data/workass/state", "/data/workass/state/external-work/xw1.output",
 		map[string]any{
 			"resource": "gpu0", "role": "work", "max_runtime_ms": 3600000,
 			"stale_after_ms": 600000, "inputs": []any{"/srv/work/in.bin"}, "min_free_disk": "50G",
@@ -368,7 +368,10 @@ func TestProcessStartArgumentsNameTheAskingChatAndNeverACredential(t *testing.T)
 	)
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
-		"run --quiet --label train the model --owner wa:m-mac/chat/app-chat-1",
+		// NOT --quiet: this daemon captures the supervisor's own stream to a
+		// file, and quiet threw away the one sentence that names a job nobody
+		// was told about.
+		"run --label train the model --owner wa:m-mac/chat/app-chat-1",
 		"--operation-id start-1", "--cwd /srv/work", "--token-file /var/run/cred/context.json",
 		"--role work", "--resource gpu0", "--min-free-disk 50G", "--inputs /srv/work/in.bin",
 		"--max-runtime 1h0m0s", "--stale-after 10m0s",
@@ -377,6 +380,9 @@ func TestProcessStartArgumentsNameTheAskingChatAndNeverACredential(t *testing.T)
 		// directory, and four jobs reported into /tmp/state where no daemon
 		// would ever look.
 		"--state-dir /data/workass/state",
+		// Resolved by the daemon, so the row it registers and the file the
+		// supervisor writes are one path rather than two agreeing defaults.
+		"--output-file /data/workass/state/external-work/xw1.output",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("supervisor argv is missing %q: %s", expected, joined)

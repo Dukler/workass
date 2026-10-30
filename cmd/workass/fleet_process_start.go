@@ -132,19 +132,39 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	if err != nil {
 		return nil, err
 	}
+	// The output path is resolved HERE, by the same function the supervisor
+	// uses, because this daemon registers the row before the first report
+	// arrives and the row must name the file that is actually being written.
+	outputFile, err := procchild.OutputPath(h.manager.StateDir(), childID, fieldString(params, "output_file"))
+	if err != nil {
+		return nil, err
+	}
+	logPath := procchild.SupervisorLogPath(outputFile)
+	log, err := openSupervisorLog(logPath, childID, label)
+	if err != nil {
+		return nil, err
+	}
 
-	arguments := processStartArguments(label, owner.String(), operationID, cwd, credentialPath, h.manager.StateDir(), params, command)
+	arguments := processStartArguments(label, owner.String(), operationID, cwd, credentialPath, h.manager.StateDir(), outputFile, params, command)
 	cmd := exec.Command(executable, arguments...)
 	cmd.Dir = cwd
 	cmd.Env = environment
 	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Captured, not discarded. The supervisor's stderr is where "NOT
+	// REPORTING" is said and its stdout is the closing receipt, and both went
+	// to /dev/null here: the one sentence that would have named the live
+	// failure was written by a process with nowhere to write it. The file sits
+	// next to the job's own output, so a reader who has one has the other.
+	cmd.Stdout, cmd.Stderr = log, log
 	// Its own process group: the supervisor is not a child of the daemon's
 	// lifetime, which is what makes the job survive a restart or a self-update.
 	procchild.DetachProcessGroup(cmd)
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("could not start `workass run` on this machine: %s", acp.RedactSensitiveText(err.Error()))
+	startErr := cmd.Start()
+	// The child holds its own descriptor from here; this one has no further
+	// use, and keeping it would hold the file open for the length of the job.
+	_ = log.Close()
+	if startErr != nil {
+		return nil, fmt.Errorf("could not start `workass run` on this machine: %s", acp.RedactSensitiveText(startErr.Error()))
 	}
 	supervisorPID := cmd.Process.Pid
 	// Reaped off-thread so this daemon leaves no zombie behind; the job's
@@ -152,12 +172,109 @@ func (h *agentControlHandler) startProcessChildHere(ctx context.Context, forward
 	// writes and the registration it makes.
 	go func() { _ = cmd.Wait() }()
 
-	return map[string]any{
+	// The row, written now rather than waited for. A supervisor whose every
+	// report is refused used to leave NOTHING behind — no row, so no silence
+	// notice, no `lost` verdict and no outbox drain, because every one of those
+	// hangs off a row — and the job looked, from the owner's side, like a job
+	// that had never been asked for. Registering here makes the launch itself
+	// the record: if the supervisor reports, its first report amends this row
+	// (same work id, §6); if it never does, the row goes `silent` within a beat
+	// and says where to read its complaint.
+	reporting := "pending"
+	registration, regErr := h.registerStartedProcessChild(startedProcessChild{
+		TabID: hostTabID, ChatID: hostChatID, ChildID: childID, Label: label,
+		Owner: owner.String(), SupervisorPID: supervisorPID, Command: command,
+		OutputFile: outputFile, SupervisorLog: logPath, Params: params,
+	})
+	if regErr != nil {
+		// Not a failed start: the job is running. It is a job this machine
+		// cannot promise to tell anybody about, which is exactly the thing that
+		// must never be reported as fine.
+		reporting = "unregistered: " + acp.RedactSensitiveText(regErr.Error())
+	}
+
+	result := map[string]any{
 		"ok": true, "workId": childID, "operationId": operationID,
 		"machineId": h.selfMachineID, "supervisorPid": supervisorPID,
 		"owner": owner.String(), "hostTabId": hostTabID, "hostChatId": hostChatID,
+		"outputFile": outputFile, "supervisorLog": logPath, "reporting": reporting,
 		"startedAt": time.Now().UTC().Format(time.RFC3339),
-	}, nil
+	}
+	if monitor, ok := registration["monitor"]; ok {
+		result["monitor"] = monitor
+	}
+	return result, nil
+}
+
+// openSupervisorLog creates the file the supervisor's own stream goes into and
+// stamps what it is, so a reader who opens it mid-job knows whose it is.
+func openSupervisorLog(path, childID, label string) (*os.File, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("this machine could not decide where to capture the supervisor's own output")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("this machine could not open %s to capture the supervisor's own output: %s", path, acp.RedactSensitiveText(err.Error()))
+	}
+	fmt.Fprintf(file, "# workass run: supervisor for %s (%s), started %s\n",
+		childID, label, time.Now().UTC().Format(time.RFC3339))
+	return file, nil
+}
+
+// startedProcessChild is one launch, as the row this daemon writes for it.
+type startedProcessChild struct {
+	TabID         string
+	ChatID        string
+	ChildID       string
+	Label         string
+	Owner         string
+	SupervisorPID int
+	Command       []string
+	OutputFile    string
+	SupervisorLog string
+	Params        map[string]any
+}
+
+// registerStartedProcessChild writes the launch's row in the host chat and
+// offers the owner its monitor, through the same registration a report uses.
+//
+// The same one deliberately: a second write path for "the daemon started it"
+// would be a second shape of row, and the first report amending this one is
+// what keeps a launch and its reports one job rather than two.
+func (h *agentControlHandler) registerStartedProcessChild(started startedProcessChild) (map[string]any, error) {
+	params := map[string]any{
+		"work_id": started.ChildID, "label": started.Label, "owner": started.Owner,
+		"pid": started.SupervisorPID, "output_file": started.OutputFile,
+		"done_file": started.OutputFile + ".done",
+		"command":   strings.Join(started.Command, " "),
+		// No isolation: the supervisor decides how it separates the child from
+		// itself (a systemd scope, a process group, a job object) and it is the
+		// only side that knows which it got. Its first report states it.
+		// The cadence the supervisor WILL report at, declared by the side that
+		// knows it, so the silence clock is running from the first second.
+		"heartbeat_ms": procchild.HeartbeatInterval.Milliseconds(),
+	}
+	for _, field := range []string{"role", "resource"} {
+		if value := strings.TrimSpace(fieldString(started.Params, field)); value != "" {
+			params[field] = value
+		}
+	}
+	for _, field := range []string{"max_runtime_ms", "stale_after_ms", "max_hold_ms"} {
+		if value := intField(started.Params, field); value > 0 {
+			params[field] = value
+		}
+	}
+	value, err := h.manager.WithActorOwner(started.ChatID, started.TabID, func(owner string) (any, error) {
+		return h.registerProcessChildWith(owner, started.TabID, started.ChatID, params,
+			processChildLocalStart{SupervisorLog: started.SupervisorLog, Awaiting: true})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mapFromAnyMain(value), nil
 }
 
 // writeRunCredential puts one job's one-shot credential where only that job can
@@ -281,13 +398,23 @@ func processStartCommand(params map[string]any) ([]string, error) {
 // PATH: a command line is readable by every process on the machine through ps
 // and lands in shell history, which is why no Workass credential has ever been
 // accepted in argv.
-func processStartArguments(label, owner, operationID, cwd, credentialPath, stateDir string, params map[string]any, command []string) []string {
-	arguments := []string{"run", "--quiet", "--label", label, "--owner", owner,
+func processStartArguments(label, owner, operationID, cwd, credentialPath, stateDir, outputFile string, params map[string]any, command []string) []string {
+	// NOT --quiet. Quiet discards the supervisor's diagnostics entirely, which
+	// is a reasonable thing for a caller reading only the receipt to ask for
+	// and the wrong thing for the one caller that cannot read anything: this
+	// daemon captures the stream to a file nobody is watching, so the only
+	// cost of the loud version is a few lines on disk and the only cost of the
+	// quiet one was a silent failure.
+	arguments := []string{"run", "--label", label, "--owner", owner,
 		"--operation-id", operationID, "--cwd", cwd, "--token-file", credentialPath,
 		// Belt and braces, and deliberately: the credential states it too, but
 		// a job must not be one unreadable file away from reporting into a
 		// directory nothing reads.
-		"--state-dir", stateDir}
+		"--state-dir", stateDir,
+		// Resolved by the daemon so the row it just wrote and the file the
+		// supervisor writes are the same path, never two defaults that agree
+		// by luck.
+		"--output-file", outputFile}
 	arguments = append(arguments, processStartDeclarations(params)...)
 	arguments = append(arguments, "--")
 	return append(arguments, command...)
@@ -321,9 +448,6 @@ func processStartDeclarations(params map[string]any) []string {
 		if value := intField(params, pair.field); value > 0 {
 			out = append(out, pair.flag, (time.Duration(value) * time.Millisecond).String())
 		}
-	}
-	if output := strings.TrimSpace(fieldString(params, "output_file")); output != "" {
-		out = append(out, "--output-file", output)
 	}
 	return out
 }

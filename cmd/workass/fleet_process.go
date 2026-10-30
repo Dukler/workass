@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -393,4 +396,149 @@ func intPointerPayload(value *int) any {
 		return nil
 	}
 	return *value
+}
+
+// watchedRemoteProcessChildren lists the supervised jobs one chat owns on other
+// machines, by asking the homes it already holds monitors on.
+//
+// The monitor is the authority on which jobs those are, and that is the whole
+// reason this is honest rather than a fleet-wide scan: a monitor exists because
+// THIS chat was registered as the watcher of THAT job (§7), so the set is
+// exactly this chat's own work and nothing else's. Each home is asked once,
+// through the ordinary route, and answers with its own rows; a row that the
+// home no longer holds is a settled job that has been compacted into its
+// receipt, so it is absent rather than invented here.
+func (h *agentControlHandler) watchedRemoteProcessChildren(
+	ctx context.Context, tabID, chatID string, params map[string]any,
+) ([]any, []any) {
+	targets := h.watchedRemoteProcessTargets(tabID, chatID)
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	machines := make([]string, 0, len(targets))
+	for machine := range targets {
+		machines = append(machines, machine)
+	}
+	sort.Strings(machines)
+	rows := []any{}
+	unreachable := []any{}
+	for _, machine := range machines {
+		wanted := targets[machine]
+		answer, err := h.forwardRemoteAgentCall(ctx, "process.list", machine, params)
+		if err != nil {
+			labels := make([]string, 0, len(wanted))
+			for _, label := range wanted {
+				labels = append(labels, label)
+			}
+			sort.Strings(labels)
+			jobs := make([]any, 0, len(labels))
+			for _, label := range labels {
+				jobs = append(jobs, label)
+			}
+			unreachable = append(unreachable, map[string]any{
+				"machine_id": machine, "jobs": jobs,
+				"reason": acp.RedactSensitiveText(err.Error()),
+			})
+			continue
+		}
+		for _, raw := range anySlice(mapFromAnyMain(answer)["children"]) {
+			row := mapFromAnyMain(cloneJSON(raw))
+			if row == nil {
+				continue
+			}
+			if _, ours := wanted[strings.TrimSpace(fieldString(row, "work_id"))]; !ours {
+				// Another chat's job on the same machine. The home answers
+				// machine-scoped because a resource queue is a machine's fact;
+				// what this chat is owed is still only its own work.
+				continue
+			}
+			// Where it runs, which is a different fact from who owns it (§6)
+			// and the one thing a merged list must not leave the reader to
+			// guess at.
+			row["host_machine"] = machine
+			normalizeRemoteProcessNumbers(row)
+			rows = append(rows, row)
+		}
+	}
+	return rows, unreachable
+}
+
+// watchedRemoteProcessTargets maps each other machine to the process ids this
+// chat watches there, with the label the monitor carries.
+func (h *agentControlHandler) watchedRemoteProcessTargets(tabID, chatID string) map[string]map[string]string {
+	if h == nil || h.fleetWatch == nil || h.fleetWatch.monitors == nil {
+		return nil
+	}
+	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	if chatID == "" {
+		return nil
+	}
+	targets := map[string]map[string]string{}
+	for _, row := range h.fleetWatch.monitors.All() {
+		if row.Consumed || strings.TrimSpace(row.WatcherChatID) != chatID {
+			continue
+		}
+		if tab := strings.TrimSpace(row.WatcherTabID); tab != "" && tabID != "" && tab != tabID {
+			continue
+		}
+		machine, local, homed, err := fleetid.Split(row.TargetID, fleetid.Process)
+		if err != nil || !homed || local == "" {
+			continue
+		}
+		if machine == "" || machine == strings.TrimSpace(h.selfMachineID) {
+			continue
+		}
+		if targets[machine] == nil {
+			targets[machine] = map[string]string{}
+		}
+		label := strings.TrimSpace(row.Label)
+		if label == "" {
+			label = local
+		}
+		targets[machine][local] = label
+	}
+	return targets
+}
+
+// remoteProcessNumberFields are the fields of a listed job that are numbers.
+//
+// They are named because a forwarded row's numbers are whatever the transport
+// made of them — a JSON number on one path, a decimal STRING on another — and
+// a merged list whose local rows carry 0 and whose remote rows carry "0" is a
+// list nobody can write one comparison against. The string encoding already
+// cost every exit code of every job reported over a link once.
+var remoteProcessNumberFields = []string{
+	"pid", "supervisor_pid", "process_group", "exit_code", "queue_position",
+	"max_runtime_ms", "stale_after_ms", "max_hold_ms", "heartbeat_ms", "report_gap_ms",
+}
+
+// normalizeRemoteProcessNumbers puts one forwarded row's numbers back in the
+// shape the local rows use. An absent field stays absent: a nil exit code that
+// arrived as nothing must not become a zero, which would claim success for a
+// job whose code nobody read.
+func normalizeRemoteProcessNumbers(row map[string]any) {
+	for _, field := range remoteProcessNumberFields {
+		value, present := row[field]
+		if !present {
+			continue
+		}
+		text := ""
+		switch typed := value.(type) {
+		case string:
+			text = strings.TrimSpace(typed)
+			if text == "" {
+				// An empty string is not a zero. It is a field the other side
+				// had no value for, and a zero exit code is a claim of success.
+				delete(row, field)
+				continue
+			}
+		case json.Number:
+			text = typed.String()
+		default:
+			continue
+		}
+		if number, err := strconv.ParseInt(text, 10, 64); err == nil {
+			row[field] = number
+		}
+	}
 }

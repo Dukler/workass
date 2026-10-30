@@ -679,6 +679,69 @@ reader accepted only `float64` and `int`, while the wire encodes numbers as
 strings, so every exit code of every job reported over a link was dropped: the
 one fact a finished job is judged by, absent, with nothing saying so.
 
+## 14d. The second live run: an empty string, and a chat with nobody in it (2026-10-30)
+
+The reporting rewrite of §14c was published as v0.1.239 and tested live on the
+same pair. Four jobs again, again all `ok` with the right owner, again every
+event correct in the outbox — and `delivered_at` NULL on every row. The daemon
+had acknowledged nothing. The repo's two-daemon end-to-end test passed
+throughout.
+
+**Two refusals in series.**
+
+The first was one empty string. `workass run` stated `role: ""` on every
+report, and `role` is an enum on the tool it calls (`work | service`), so that
+is not "no role" — it is a value outside the enum, and the daemon's own
+argument validator refused the WHOLE report before the registration was
+reached. Instantly, identically, every time. The supervisor read the refusal as
+"the daemon is unreachable", waited out its grace, and said so on stderr.
+
+The second was behind it. A registration resolves the owning chat's provider,
+and it asked only this daemon's LIVE session bindings — which a supervised
+job's host chat does not have. That chat is a record holder: nobody prompts in
+it, so after a restart nothing is bound to it, and the registration answered
+"external work registration is unavailable for this Workass ACP provider". The
+chat's DURABLE provider is now the fallback behind the live binding.
+
+**And the thing that hid both.** `process.start` gave the supervisor it
+launched no stdout and no stderr, and passed `--quiet`. So "NOT REPORTING" —
+the one sentence §14c promises is never missing — was written by a process with
+nowhere to write it, and the closing receipt went the same way. Three fixes,
+and they are the general lesson rather than this bug's detail:
+
+1. **The supervisor's own stream is captured.** `<output>.supervisor.log`, next
+   to the job's output, holding the diagnostics and the final receipt. Not
+   `--quiet`: the one caller that cannot read a receipt is the one that must
+   keep it.
+2. **The row exists from the LAUNCH, not from the first report.** Every way
+   this product notices a job that cannot report — the silence notice, the
+   `lost` verdict, the drain of a dead supervisor's outbox — hangs off a row,
+   so a supervisor whose every report was refused left nothing behind at all
+   and the job looked, from the owner's side, like one that had never been
+   asked for. The launch row loses every race it can lose: a receipt for that
+   work id means the job has already finished and nothing is resurrected.
+3. **Silence is measured against one beat for a job this daemon started.** A
+   supervisor reports as it starts, so a minute of nothing is already news; the
+   notice says it has never been heard from and names the log to read.
+
+**The test that would have caught it.** Every test built the report payload by
+hand, so they all spoke a dialect the daemon accepts while the supervisor spoke
+one it refuses. There is now one constructor — `procchild.ReportArguments` —
+and the daemon's own test asserts that ITS output passes the validator that
+refused it, for a declared role and for none.
+
+**And the owner's own list.** `workass_list_process_children` listed only rows
+homed on the machine it was called on, so a chat whose every job runs elsewhere
+— the case `workass_start_process_child` exists for — asked the one tool meant
+for watching them and was told it had none. It now folds in the jobs this chat
+owns on other machines, enumerated from the monitors it already holds (so the
+set is this chat's own work and nobody else's), each marked with the
+`host_machine` it runs on, with a home that cannot be asked NAMED rather than
+dropped. Forwarded numbers are normalised on arrival, because the transport
+hands some of them back as decimal strings and a list whose local rows carry
+`0` and whose remote rows carry `"0"` is one nobody can write a comparison
+against.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global

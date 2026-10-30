@@ -443,10 +443,30 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
 			return nil, err
 		}
-		return map[string]any{
-			"ok": true, "children": h.manager.ListProcessChildren(),
-			"resource_queues": h.manager.ResourceQueues(), "machine_id": h.selfMachineID,
-		}, nil
+		children := make([]any, 0, 8)
+		for _, row := range h.manager.ListProcessChildren() {
+			children = append(children, row)
+		}
+		answer := map[string]any{
+			"ok": true, "resource_queues": h.manager.ResourceQueues(), "machine_id": h.selfMachineID,
+		}
+		// The jobs this chat owns on OTHER machines, folded into the same
+		// answer. Unaddressed, this listed only local rows — so a chat whose
+		// every supervised job was running elsewhere, which is what
+		// `workass_start_process_child` is for, was told it had none, and the
+		// tool that exists to watch those jobs was the one tool that could not
+		// see them. A job's home still answers for it; this only asks the homes
+		// this chat is already watching.
+		remote, unreachable := h.watchedRemoteProcessChildren(r.Context(), tabID, chatID, params)
+		children = append(children, remote...)
+		answer["children"] = children
+		if len(unreachable) > 0 {
+			// Named, not dropped: a machine that cannot be asked is a gap in
+			// this answer, and an answer that looked complete while a machine
+			// was dark is the same lie as a job that reported to nobody.
+			answer["unreachable"] = unreachable
+		}
+		return answer, nil
 	case "process.read":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
 			return nil, err
@@ -753,7 +773,27 @@ func processReportIsTerminal(result any) bool {
 	return status != "" && status != "running"
 }
 
+// processChildLocalStart is what only the daemon that LAUNCHED a supervisor
+// knows about it, and it is empty for every registration that arrives as a
+// report. A supervisor reports facts about the job; these two are facts about
+// the launch, and conflating them would let a report claim it had never
+// reported.
+type processChildLocalStart struct {
+	// SupervisorLog is the file this daemon is capturing the supervisor's own
+	// stream into.
+	SupervisorLog string
+	// Awaiting marks the row as written before any report, which is what makes
+	// a supervisor that never reports visible instead of absent.
+	Awaiting bool
+}
+
 func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID string, params map[string]any) (any, error) {
+	return h.registerProcessChildWith(ownerKey, tabID, chatID, params, processChildLocalStart{})
+}
+
+func (h *agentControlHandler) registerProcessChildWith(
+	ownerKey, tabID, chatID string, params map[string]any, start processChildLocalStart,
+) (any, error) {
 	if h == nil || h.manager == nil || h.chats == nil || h.chats.providerChats == nil {
 		return nil, errors.New("process children require the durable chat actor")
 	}
@@ -794,6 +834,11 @@ func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID strin
 		ReportGapMs:   int64(intField(params, "report_gap_ms")),
 		Events:        reportedProcessEvents(params["events"]),
 		OriginLaneID:  laneID, OriginOperationID: operationID, OriginTurnID: turnID,
+		// The host chat's durable provider, because the registration needs one
+		// and a record-holder chat has no live session to be bound to.
+		ProviderID:          h.chats.providerChats.chatProviderID(tabID, chatID),
+		SupervisorLog:       start.SupervisorLog,
+		AwaitingFirstReport: start.Awaiting,
 	})
 	if err != nil {
 		return nil, err
