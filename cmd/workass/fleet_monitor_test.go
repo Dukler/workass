@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -604,8 +605,8 @@ func TestTheHomeSuppressionVerdictTravelsAndIsObeyed(t *testing.T) {
 	}
 }
 
-// §16.3b's two numbers, and the exemption that makes them safe.
-func TestTheNoticeBudgetCoalescesAndCapsWithFailuresExempt(t *testing.T) {
+// §16.3b's window, and no cap (§14h).
+func TestTheNoticeBudgetCoalescesAndNeverDropsADifferentEnd(t *testing.T) {
 	budget := newFleetNoticeBudget()
 	now := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	settle := func(id string) fleetMonitorNotice {
@@ -635,47 +636,56 @@ func TestTheNoticeBudgetCoalescesAndCapsWithFailuresExempt(t *testing.T) {
 		t.Fatal("a redelivery past the window was held")
 	}
 
-	// The cap: six ordinary notices an hour, and then held with a reason.
-	capped := newFleetNoticeBudget()
-	for i := 0; i < fleetNoticeCapHour; i++ {
-		if ok, reason := capped.admit(settle(string(rune('a'+i))), now.Add(time.Duration(i)*2*time.Minute)); !ok {
-			t.Fatalf("notice %d of the cap was held: %s", i, reason)
+	// No cap (§14h): every distinct end arrives, however many a chat has in an
+	// hour. The seventh is the one that was lost live.
+	busy := newFleetNoticeBudget()
+	for i := 0; i < 40; i++ {
+		if ok, reason := busy.admit(settle(fmt.Sprintf("end-%d", i)), now.Add(time.Duration(i)*time.Minute)); !ok {
+			t.Fatalf("end %d was held: %s", i, reason)
 		}
 	}
-	if ok, reason := capped.admit(settle("over"), now.Add(20*time.Minute)); ok {
-		t.Fatal("the cap did not hold the seventh notice")
-	} else if !strings.Contains(reason, "cap") || !strings.Contains(reason, "readable at its home") {
-		t.Fatalf("the cap's reason = %q", reason)
-	}
-	// Failures are always exempt, and so are the two events a cap must never
-	// silence: an attention and a home_down.
+	// Failures, attentions and home_down go through it the same way.
 	failure := settle("failed-one")
-	failure.Receipt.Status, failure.Failure = "failed", true
-	if ok, reason := capped.admit(failure, now.Add(21*time.Minute)); !ok {
-		t.Fatalf("a failure was capped: %s", reason)
+	failure.Receipt.Status = "failed"
+	if ok, reason := busy.admit(failure, now.Add(41*time.Minute)); !ok {
+		t.Fatalf("a failure was held: %s", reason)
 	}
-	attention := fleetMonitorNotice{Kind: fleetlog.KindAttention, TargetID: "wa:m-home/subagent/x", ChatID: testAwayChatID, TabID: testAwayTabID, AttentionText: "decide", Failure: true}
-	if ok, reason := capped.admit(attention, now.Add(22*time.Minute)); !ok {
-		t.Fatalf("an attention was capped: %s", reason)
+	attention := fleetMonitorNotice{Kind: fleetlog.KindAttention, TargetID: "wa:m-home/subagent/x", ChatID: testAwayChatID, TabID: testAwayTabID, AttentionText: "decide"}
+	if ok, reason := busy.admit(attention, now.Add(42*time.Minute)); !ok {
+		t.Fatalf("an attention was held: %s", reason)
 	}
-	dark := fleetMonitorNotice{Kind: fleetMonitorHomeDown, Home: testHomeMachine, ChatID: testAwayChatID, TabID: testAwayTabID, Failure: true}
-	if ok, reason := capped.admit(dark, now.Add(23*time.Minute)); !ok {
-		t.Fatalf("home_down was capped: %s", reason)
+	dark := fleetMonitorNotice{Kind: fleetMonitorHomeDown, Home: testHomeMachine, ChatID: testAwayChatID, TabID: testAwayTabID}
+	if ok, reason := busy.admit(dark, now.Add(43*time.Minute)); !ok {
+		t.Fatalf("home_down was held: %s", reason)
 	}
-	// An hour later the cap has rolled off.
-	if ok, reason := capped.admit(settle("after-the-hour"), now.Add(90*time.Minute)); !ok {
-		t.Fatalf("the cap never rolled off: %s", reason)
-	}
-	// Another chat has its own budget: a storm in one chat never silences
-	// another.
-	other := settle("elsewhere")
+	// The window is per chat: the same event in another chat is another notice.
+	other := settle("end-39")
 	other.ChatID = "another-chat"
-	if ok, reason := capped.admit(other, now.Add(23*time.Minute)); !ok {
-		t.Fatalf("one chat's cap silenced another: %s", reason)
+	if ok, reason := busy.admit(other, now.Add(39*time.Minute)); !ok {
+		t.Fatalf("one chat's window held another's notice: %s", reason)
 	}
 	var absent *fleetNoticeBudget
 	if ok, _ := absent.admit(settle("x"), now); !ok {
 		t.Fatal("a nil budget held a notice")
+	}
+}
+
+// The live loss: a seventh successful end in an hour settled its row, moved the
+// cursor, was acknowledged, and reached nobody.
+func TestEverySuccessfulEndInAnHourBecomesItsOwnNotice(t *testing.T) {
+	pair := newFleetTestPair(t)
+	pair.setLink(true)
+	for i := 0; i < 9; i++ {
+		id := fmt.Sprintf("end-%d", i)
+		if _, err := pair.home.Append(pair.target, fleetlog.KindExit, map[string]any{
+			"outcome": fleetlog.OutcomeSettled, "label": "reviewer",
+			"receipt": subagentReceiptPayload(acp.SubagentReceipt{ReceiptID: id, Status: "done", Result: "ok"}),
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if got := pair.notices(); len(got) != 9 {
+		t.Fatalf("%d ends produced %d notices: %#v", 9, len(got), got)
 	}
 }
 

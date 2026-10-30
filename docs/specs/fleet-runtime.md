@@ -270,7 +270,7 @@ The envelope around a forwarded command is small and fixed:
 - **Monitors are the only notification mechanism.** A chat notice is a
   projection of monitor events through the actionable filter (settled, lost,
   timed_out, attention, declared stall, `home_down`), coalesced per chat per
-  60 s, capped per hour with failures exempt, suppressed when a live waiter
+  60 s (the hourly cap is gone, §14h), suppressed when a live waiter
   will consume the result, when the parent turn was stopped, or when the parent
   cancelled the child — delivered as a task-notification notice, never a user
   message (the 2026-10-16 law and the five `aa53975e` anti-regressions, carried
@@ -501,7 +501,7 @@ non-actionable event.
 | Monitor leak / unbounded logs | monitors dropped with their watcher; logs compacted with `truncated` + resync |
 | Secret exposure across machines | secrets never replicate; reveal needs a local client (§9) |
 | Oversized blob or leaked text | by-reference blobs, byte caps, redaction on send and on arrival |
-| Notification storms | actionable filter, 60 s coalescing, hourly cap, one notice per home |
+| Notification storms | actionable filter, 60 s coalescing, one end per child, one notice per home (§14h) |
 | Escalation through a third machine | narrowed work may not use the receiving daemon's own links (§11) |
 | A paired peer must be cut off | revoke that one link; fleet key and other links unaffected (§4) |
 | An address impersonating a daemon | identity proof before any credential; a wrong id is a refusal, not a retry (§4) |
@@ -947,6 +947,36 @@ asked for it to end, so it is neither Cancelled nor suppressed.
 
 Live proof: `docs/evidence/remote-rail-20261030/RESULTS.md`, which also says what is unproven.
 
+## 14h. A child's end is owed, not rationed (2026-10-30)
+
+§16.3(b) capped notices at 6 per chat per hour, failures exempt, and the
+builder's reading was that the cap drops rather than queues. In the first busy
+hour after the rows shipped, a remote subagent settled its row, wrote its receipt
+and told nobody; so did the next one. The operator noticed from the rail nine
+minutes later. The daemon's log held the reason, and the six successful ends of the
+hour before it account for the count exactly.
+
+Three things made that wrong rather than merely strict. With failures, attentions
+and `home_down` exempt, the only notice the cap could ever hold was a child's
+successful end, which is the one a parent is usually waiting on. What it held was
+lost: the cursor advanced, the home was acknowledged, the monitor was consumed, and
+nothing would ever redeliver it. And a local child was never capped, so the seventh
+remote child and the seventh local one behaved differently, against §7's "local and
+remote identical".
+
+**The cap is removed.** A held notice could not be queued instead: waiting for the
+hour to roll would have delivered this one twenty minutes late, to an agent stopped
+and waiting for it. A chat gets one end per child it started, so the work it asked
+for is what bounds those notices. The 60 s window stays, because it collapses the
+same event arriving twice and costs no result.
+
+This reverses half of an operator decision, made by a builder with the operator
+unavailable. To restore a cap, make over-cap ends fold into a later notice rather
+than vanish. Fan-out aggregation (16.5) remains the planned answer to many children.
+
+Not changed, and a known gap: a failed `deliver` is logged and the cursor still
+moves, so a notice the actor refuses is lost the same way. It has not been seen live.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global
@@ -987,8 +1017,8 @@ questions; a builder implements them as written.
    (a) A machine silent for **10 minutes** produces **one** `home_down` notice
    per host, listing its affected children (the heartbeat itself is a fixed
    ≈1 min, derived from this, not a separate knob).
-   (b) Notices are **coalesced per chat per 60 s**, at most **6 per chat per
-   hour**, and **failures are always exempt** from the cap.
+   (b) Notices are **coalesced per chat per 60 s**. *The "at most 6 per chat per
+   hour, failures exempt" half was removed on 2026-10-30, see §14h.*
    (c) Logs are retained **7 days or 1,000 events per entity**, whichever comes
    first; terminal logs survive the cap until acked, and eviction is logged.
 4. **A home may refuse a kind**, immediately and structurally, **naming the
