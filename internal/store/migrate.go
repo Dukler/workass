@@ -120,6 +120,22 @@ func migrate(db *DB, migrations []Migration, backupDir string) (int, error) {
 	for _, migration := range migrations[current:] {
 		migration := migration
 		err := db.Write(context.Background(), func(tx *Tx) error {
+			// Re-read under the write lock, which _txlock=immediate took at
+			// BEGIN. For state.db this is redundant — one daemon holds the
+			// file exclusively — but a SHARED database can be opened by two
+			// processes at the same instant on a machine where it does not
+			// exist yet, and both would read user_version 0 outside any
+			// transaction. The loser then applied a migration whose table the
+			// winner had already created, and `workass run` refused to start
+			// with "table process_events already exists". Whoever gets the
+			// lock second sees the committed version and skips.
+			var applied int
+			if err := tx.QueryRow("PRAGMA user_version").Scan(&applied); err != nil {
+				return err
+			}
+			if applied >= migration.Version {
+				return nil
+			}
 			if _, err := tx.Exec(schemaMigrationsDDL); err != nil {
 				return err
 			}

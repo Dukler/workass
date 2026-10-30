@@ -52,7 +52,7 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
 	operationID := flags.String("operation-id", "", "stable id for this job; a repeat with the same id is the same job, never a second one")
 	tokenFile := flags.String("token-file", "", "file holding this run's Workass credential; defaults to WORKASS_RUN_TOKEN_FILE, then WORKASS_TOOL_CONTEXT")
 	stateDir := flags.String("state-dir", "", "daemon state directory; resolved from the credential or WORKASS_DATA_ROOT by default, and never from the working directory")
-	unreported := flags.Bool("unreported", false, "run with no chat told: supervise, queue the events and print the receipt, but report to no daemon")
+	unreported := flags.Bool("unreported", false, "run with no chat told: supervise, queue the events and print the receipt, but report to no daemon even if a credential is in the environment")
 	workDir := flags.String("cwd", "", "working directory for the job")
 	outputFile := flags.String("output-file", "", "absolute path for the job's combined output; defaults to this machine's external-work directory")
 	quiet := flags.Bool("quiet", false, "print only the final JSON receipt")
@@ -162,6 +162,11 @@ no settled event means lost, not running.
 	if result.Reporting.LastError != "" {
 		receipt["reportError"] = acp.RedactSensitiveText(result.Reporting.LastError)
 	}
+	if result.Reporting.Refused {
+		// Named separately because the action is different: an unreachable
+		// daemon is waited for, a refusing one is updated.
+		receipt["daemonTooOld"] = true
+	}
 	if len(result.Refusals) > 0 {
 		refusals := make([]map[string]string, 0, len(result.Refusals))
 		for _, refusal := range result.Refusals {
@@ -195,6 +200,13 @@ func resolveRunContext(tokenFile, stateDirOverride string, unreported bool, stde
 	reporter, credentialPath, err := procchild.ResolveCredential(tokenFile)
 	if err != nil {
 		return "", nil, err
+	}
+	if unreported && reporter != nil {
+		// --unreported means it, even when a credential is sitting in the
+		// environment. Every Workass-launched process holds WORKASS_TOOL_CONTEXT,
+		// so a run started from an agent's own shell finds one whether or not
+		// the operator wanted this job reported.
+		reporter = nil
 	}
 	stateDir := strings.TrimSpace(stateDirOverride)
 	if stateDir == "" && credentialPath != "" {

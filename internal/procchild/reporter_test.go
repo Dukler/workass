@@ -232,6 +232,51 @@ func TestAnUnreachableDaemonIsLoudOnStderrAndKeepsTrying(t *testing.T) {
 	}
 }
 
+func TestADaemonOlderThanThisContractIsNamedAsSuchAndNotWaitedOutForTwoMinutes(t *testing.T) {
+	state := t.TempDir()
+	childID, err := IDForOperation("op-" + t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := OpenOutbox(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbox.Close()
+	if _, err := outbox.Append(childID, KindSettled, map[string]any{"outcome": OutcomeSettled}); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := &bytes.Buffer{}
+	// The exact refusal a v0.1.238 daemon answers with, observed live on this
+	// Mac against the installed app on 2026-10-30.
+	reporter := &recordingReporter{fail: errors.New("arguments.events is not a known argument")}
+	// A deadline long enough that waiting it out would be the failure.
+	record := newJournal(childID, outbox, reporter, diagnostics, time.Now,
+		func() Report { return Report{ChildID: childID} }, time.Millisecond, time.Hour)
+	started := time.Now()
+	health := record.settle()
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		// A schema mismatch will not fix itself while a finished supervisor
+		// waits, and the wait would delay every job's exit for the deadline.
+		t.Fatalf("a refused report must not be retried to the deadline; it took %s", elapsed)
+	}
+	if !health.Refused || health.Delivered || health.Pending != 1 {
+		t.Fatalf("a refusal must be reported as a refusal, got %+v", health)
+	}
+	complaint := diagnostics.String()
+	if !strings.Contains(complaint, "older than the supervised-job reporting contract") {
+		// "Unable to reach its daemon" would send somebody to look at the
+		// network for a version skew.
+		t.Fatalf("the complaint must name the version skew, got %q", complaint)
+	}
+	if !strings.Contains(complaint, "until that daemon is updated") {
+		t.Fatalf("the complaint must name the action, got %q", complaint)
+	}
+	if strings.Contains(complaint, "of trying") {
+		t.Fatalf("it must not claim a wait it did not perform, got %q", complaint)
+	}
+}
+
 func TestAHeartbeatIsReportedOnTheDeclaredCadenceAndIsNotALifecycleEvent(t *testing.T) {
 	state := t.TempDir()
 	childID, err := IDForOperation("op-" + t.Name())
