@@ -86,7 +86,7 @@ func installTestFleetWatcher(t *testing.T, machineID string, harness statelessMC
 	watcher := newFleetWatcher(fleetWatcherOptions{
 		Self: machineID, Monitors: watched, Mesh: mesh,
 		Deliver: harness.runtime.deliverFleetMonitorNotice, Budget: newFleetNoticeBudget(),
-		ChatExists: harness.runtime.chatExists, Logf: t.Logf,
+		ChatExists: harness.runtime.chatExists, ChatTab: harness.runtime.chatTab, Logf: t.Logf,
 	})
 	harness.handler.agentControl.fleetWatch = watcher
 	harness.handler.agentControl.selfMachineID = machineID

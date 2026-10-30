@@ -35,8 +35,11 @@ import (
 // runTokenPrefix marks a one-shot supervised-job credential.
 const runTokenPrefix = "wrt_"
 
-// runTokenTTL bounds a credential that is never used. A job whose supervisor
-// never started must not leave a usable token behind forever.
+// runTokenTTL bounds a credential that is IDLE. A job whose supervisor never
+// started must not leave a usable token behind forever — but a job that is
+// still reporting must not lose its credential at a birthday either, which is
+// what an age-based ceiling would do to anything that runs for more than a day.
+// So the clock is "since last used", and a report is a use.
 const runTokenTTL = 24 * time.Hour
 
 type runTokenRecord struct {
@@ -45,6 +48,7 @@ type runTokenRecord struct {
 	TabID       string `json:"tabId"`
 	OperationID string `json:"operationId"`
 	IssuedAt    string `json:"issuedAt"`
+	LastUsedAt  string `json:"lastUsedAt,omitempty"`
 }
 
 // RunTokenBinding is what one run credential authorizes.
@@ -52,6 +56,16 @@ type RunTokenBinding struct {
 	ChatID      string
 	TabID       string
 	OperationID string
+	IssuedAt    time.Time
+	LastUsedAt  time.Time
+}
+
+// idleSince is the last moment this credential was either issued or used.
+func (b RunTokenBinding) idleSince() time.Time {
+	if b.LastUsedAt.After(b.IssuedAt) {
+		return b.LastUsedAt
+	}
+	return b.IssuedAt
 }
 
 func (m *Manager) runTokensPath() string {
@@ -86,13 +100,20 @@ func (m *Manager) loadRunTokens() {
 		if token == "" || strings.TrimSpace(record.ChatID) == "" || strings.TrimSpace(record.OperationID) == "" {
 			continue
 		}
-		if issued, err := time.Parse(time.RFC3339, record.IssuedAt); err == nil && now.Sub(issued) > runTokenTTL {
-			continue
-		}
-		m.runTokens[token] = RunTokenBinding{
+		binding := RunTokenBinding{
 			ChatID: strings.TrimSpace(record.ChatID), TabID: strings.TrimSpace(record.TabID),
 			OperationID: strings.TrimSpace(record.OperationID),
 		}
+		if issued, err := time.Parse(time.RFC3339, record.IssuedAt); err == nil {
+			binding.IssuedAt = issued.UTC()
+		}
+		if used, err := time.Parse(time.RFC3339, record.LastUsedAt); err == nil {
+			binding.LastUsedAt = used.UTC()
+		}
+		if since := binding.idleSince(); !since.IsZero() && now.Sub(since) > runTokenTTL {
+			continue
+		}
+		m.runTokens[token] = binding
 	}
 }
 
@@ -102,13 +123,20 @@ func (m *Manager) persistRunTokensLocked() {
 		return
 	}
 	dir := filepath.Dir(path)
-	issued := time.Now().UTC().Format(time.RFC3339)
+	// Each record keeps its OWN timestamps. Stamping every record with `now` on
+	// every persist made the idle ceiling mean "24h since this machine last
+	// minted any token", which is not a bound on anything.
 	records := make([]runTokenRecord, 0, len(m.runTokens))
 	for token, binding := range m.runTokens {
-		records = append(records, runTokenRecord{
+		record := runTokenRecord{
 			Token: token, ChatID: binding.ChatID, TabID: binding.TabID,
-			OperationID: binding.OperationID, IssuedAt: issued,
-		})
+			OperationID: binding.OperationID,
+			IssuedAt:    binding.IssuedAt.UTC().Format(time.RFC3339),
+		}
+		if !binding.LastUsedAt.IsZero() {
+			record.LastUsedAt = binding.LastUsedAt.UTC().Format(time.RFC3339)
+		}
+		records = append(records, record)
 	}
 	data, err := json.Marshal(records)
 	if err != nil || os.MkdirAll(dir, 0o700) != nil {
@@ -160,7 +188,9 @@ func (m *Manager) MintRunToken(chatID, tabID, operationID string) string {
 		return ""
 	}
 	token := runTokenPrefix + hex.EncodeToString(raw)
-	m.runTokens[token] = RunTokenBinding{ChatID: chatID, TabID: tabID, OperationID: operationID}
+	m.runTokens[token] = RunTokenBinding{
+		ChatID: chatID, TabID: tabID, OperationID: operationID, IssuedAt: time.Now().UTC(),
+	}
 	m.persistRunTokensLocked()
 	return token
 }
@@ -193,5 +223,32 @@ func (m *Manager) ConsumeRunToken(token string) {
 		return
 	}
 	delete(m.runTokens, token)
+	m.persistRunTokensLocked()
+}
+
+// TouchRunToken records that a supervised job's credential was just used.
+//
+// It is what makes the idle ceiling an idle ceiling: a job reporting every
+// minute keeps its credential for as long as it runs, and a credential nothing
+// ever presents expires on the stated clock.
+func (m *Manager) TouchRunToken(token string) {
+	token = strings.TrimSpace(token)
+	if m == nil || token == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	binding, ok := m.runTokens[token]
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	if now.Sub(binding.idleSince()) < time.Hour {
+		// Coalesced: the ceiling is a day, so recording a use to the minute
+		// would be a disk write per report per job for no gain.
+		return
+	}
+	binding.LastUsedAt = now
+	m.runTokens[token] = binding
 	m.persistRunTokensLocked()
 }

@@ -106,6 +106,17 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"obligation.get": remoteAgentLocalOnly,
 }
 
+// remoteAgentMachineTaggedEntity names the machine-scoped methods that address
+// one entity by id, where a machine-tagged id names the destination.
+//
+// Not every machine-scoped method can: `chat.create` and `agent.catalog` name
+// no entity at all, so a tag in one of them is a caller mistake worth saying
+// so about. A supervised job has an id, and that id's home is where the job is.
+var remoteAgentMachineTaggedEntity = map[string]bool{
+	"process.read":   true,
+	"process.cancel": true,
+}
+
 // remoteAgentLocalOnlyReasons says, per method, why another machine cannot be
 // addressed and what to do instead. A tool description is the whole surface an
 // agent sees, so an explicit reason here is the difference between a retry and
@@ -190,6 +201,17 @@ func remoteAgentMethodTarget(method string, params map[string]any) (string, bool
 		return "", false, nil
 	}
 	if kind == remoteAgentMachineScoped {
+		if tagged != "" && remoteAgentMachineTaggedEntity[method] {
+			// The tag IS the machine here. These methods address ONE entity
+			// whose home is a machine, and an agent reads that entity's id from
+			// a listing that tagged it — refusing the only id it was given,
+			// while asking for a machine_id it would have to extract from that
+			// same id by hand, is a dead end dressed as a contract.
+			if requested != "" && requested != tagged {
+				return "", false, errors.New("machine_id does not match the machine that owns the requested ids")
+			}
+			return tagged, true, nil
+		}
 		if tagged != "" {
 			return "", false, errors.New(method + " takes machine_id, not a machine-tagged id")
 		}

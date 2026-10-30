@@ -93,7 +93,7 @@ func openFleetMonitors(
 	service.watcher = newFleetWatcher(fleetWatcherOptions{
 		Self: identity.MachineID, Monitors: watched, Mesh: mesh.Invoker(),
 		Deliver: chats.deliverFleetMonitorNotice, Budget: newFleetNoticeBudget(),
-		ChatExists: chats.chatExists, Logf: logger.Printf,
+		ChatExists: chats.chatExists, ChatTab: chats.chatTab, Logf: logger.Printf,
 	})
 	// The home delivers to a watcher on this machine in process, through the
 	// watcher's own projection — one path, local and remote.
@@ -160,6 +160,19 @@ func (r *providerChatRuntime) chatExists(tabID, chatID string) bool {
 		return false
 	}
 	return true
+}
+
+// chatTab is which tab a chat on this machine lives in, for an offer that
+// named the chat without one.
+func (r *providerChatRuntime) chatTab(chatID string) string {
+	if r == nil {
+		return ""
+	}
+	state, ok := r.Snapshot(strings.TrimSpace(chatID))
+	if !ok || state.Deleted {
+		return ""
+	}
+	return strings.TrimSpace(state.Presentation.TabID)
 }
 
 // watcherOrigin is the asking chat's own lane and running turn, which a monitor

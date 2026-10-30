@@ -97,14 +97,56 @@ func processChildManager(t *testing.T, lifecycle *recordedLifecycle) *Manager {
 	return manager
 }
 
-func appendSpool(t *testing.T, stateDir, childID, kind string, payload map[string]any) {
+// appendSpool keeps its name and now does what a supervisor really does:
+// queue the event in the outbox AND report it. The two together are one act —
+// write-ahead, then deliver — and a test that only wrote the file would be
+// testing the design the operator rejected.
+func appendSpool(t *testing.T, manager *Manager, childID, kind string, payload map[string]any) {
 	t.Helper()
-	spool, err := procchild.OpenSpool(procchild.SpoolPath(stateDir, childID))
+	outbox, err := procchild.OpenOutbox(manager.opts.StateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := spool.Append(kind, payload); err != nil {
+	defer outbox.Close()
+	event, err := outbox.Append(childID, kind, payload)
+	if err != nil {
 		t.Fatal(err)
+	}
+	result, err := manager.RegisterProcessChild(reportFor(t, manager, childID, event))
+	if err != nil {
+		t.Fatalf("report %s: %v", kind, err)
+	}
+	ack, _ := result["ackThrough"].(uint64)
+	if ack < event.Seq {
+		// The ack is the contract. A daemon that applied an event and did not
+		// say so would leave the supervisor unable to retire it.
+		t.Fatalf("the daemon must acknowledge through %d, got %d", event.Seq, ack)
+	}
+	if err := outbox.MarkDelivered(childID, ack); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reportFor is the registration facts a supervisor repeats on every report,
+// plus one event.
+func reportFor(t *testing.T, manager *Manager, childID string, events ...procchild.Event) ProcessChildRegistrationOptions {
+	t.Helper()
+	// The supervisor states its own pid on every report, so a test standing in
+	// for one must keep the pid the row was seeded with — otherwise it quietly
+	// re-points the row at the live test process and `lost` becomes
+	// unreachable.
+	pid := os.Getpid()
+	manager.spawnedWorkMu.Lock()
+	if rec := manager.spawnedWork[spawnedWorkKey("tab-proc", "chat-proc", childID)]; rec != nil && rec.Item.SupervisorPID != nil {
+		pid = *rec.Item.SupervisorPID
+	}
+	manager.spawnedWorkMu.Unlock()
+	return ProcessChildRegistrationOptions{
+		OwnerKey: "owner-proc", ParentChatID: "chat-proc", ParentTabID: "tab-proc",
+		WorkID: childID, Label: "test job", SupervisorPID: &pid,
+		OutputFile:  filepath.Join(manager.opts.StateDir, "external-work", childID+".output"),
+		HeartbeatMs: procchild.HeartbeatInterval.Milliseconds(),
+		Events:      events,
 	}
 }
 
@@ -146,15 +188,15 @@ func TestTheSpoolIsIngestedOnceAndASettleBecomesOneOutcome(t *testing.T) {
 	manager := processChildManager(t, lifecycle)
 	childID, _ := seedProcessChild(t, manager, "op-ingest", os.Getpid(), nil)
 
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindCreated, map[string]any{"label": "training run"})
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242, "group": "process_group"})
+	appendSpool(t, manager, childID, procchild.KindCreated, map[string]any{"label": "training run"})
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242, "group": "process_group"})
 	manager.reconcileProcessChildren(time.Now().UTC())
 	item := itemFor(t, manager, childID)
 	if item.PID == nil || *item.PID != 4242 || item.ProcessGroup != 4242 || item.Status != "running" {
 		t.Fatalf("a started event must land the child's pid and group, got %#v", item)
 	}
 
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeSettled, "exitCode": 0, "summary": "Finished with exit 0 after 2s",
 	})
 	manager.reconcileProcessChildren(time.Now().UTC())
@@ -179,7 +221,7 @@ func TestAVanishedSupervisorIsLostAndNeverRunning(t *testing.T) {
 	manager := processChildManager(t, lifecycle)
 	// A pid that cannot be alive: the supervisor is gone and wrote no outcome.
 	childID, _ := seedProcessChild(t, manager, "op-lost", 2, nil)
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242})
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242})
 
 	now := time.Now().UTC()
 	manager.reconcileProcessChildren(now)
@@ -211,7 +253,7 @@ func TestASpooledSettleOutranksAVanishedSupervisor(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)
 	childID, _ := seedProcessChild(t, manager, "op-settle-then-die", 2, nil)
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeFailed, "exitCode": 1, "summary": "Failed with exit 1 after 4s",
 	})
 	// The supervisor exited after writing its outcome, which is the ordinary
@@ -232,7 +274,7 @@ func TestMaxRuntimeKeepsItsOwnOutcomeWordOnTheRow(t *testing.T) {
 	childID, _ := seedProcessChild(t, manager, "op-timeout", os.Getpid(), func(opts *ProcessChildRegistrationOptions) {
 		opts.MaxRuntimeMs = (3 * time.Hour).Milliseconds()
 	})
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeTimedOut, "exitCode": 124, "summary": "Stopped at its declared max_runtime after 3h0m0s",
 	})
 	manager.reconcileProcessChildren(time.Now().UTC())
@@ -256,8 +298,8 @@ func TestADeclaredStallNotifiesOnceAndDoesNotEndTheJob(t *testing.T) {
 	childID, _ := seedProcessChild(t, manager, "op-stall", os.Getpid(), func(opts *ProcessChildRegistrationOptions) {
 		opts.StaleAfterMs = (40 * time.Minute).Milliseconds()
 	})
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStarted, map[string]any{"pid": 4242})
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStalled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242})
+	appendSpool(t, manager, childID, procchild.KindStalled, map[string]any{
 		"evidence": "no output for 41m0s, past the declared 40m0s (still running)",
 	})
 	manager.reconcileProcessChildren(time.Now().UTC())
@@ -267,7 +309,7 @@ func TestADeclaredStallNotifiesOnceAndDoesNotEndTheJob(t *testing.T) {
 	}
 	// A second stalled event — a spool re-read after a restart, say — must not
 	// produce a second notice.
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStalled, map[string]any{"evidence": "still quiet"})
+	appendSpool(t, manager, childID, procchild.KindStalled, map[string]any{"evidence": "still quiet"})
 	manager.reconcileProcessChildren(time.Now().UTC())
 	if got := lifecycle.kinds(); got != "stalled:stalled" {
 		t.Fatalf("lifecycle events = %q; a declared stall is said exactly once", got)
@@ -278,7 +320,7 @@ func TestACancelledJobIsSuppressedButStillRecorded(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)
 	childID, _ := seedProcessChild(t, manager, "op-cancel", os.Getpid(), nil)
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeCancelled, "exitCode": 130, "summary": "Stopped on request after 9s",
 	})
 	manager.reconcileProcessChildren(time.Now().UTC())
@@ -299,7 +341,7 @@ func TestAProcessChildReattachesAfterADaemonRestartWithoutLosingEvents(t *testin
 	manager := processChildManager(t, lifecycle)
 	stateDir := manager.opts.StateDir
 	childID, _ := seedProcessChild(t, manager, "op-restart", os.Getpid(), nil)
-	appendSpool(t, stateDir, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242})
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242, "pgid": 4242})
 	manager.reconcileProcessChildren(time.Now().UTC())
 	if err := manager.persistSpawnedWorkSnapshot("tab-proc"); err != nil {
 		t.Fatal(err)
@@ -307,7 +349,8 @@ func TestAProcessChildReattachesAfterADaemonRestartWithoutLosingEvents(t *testin
 
 	// The daemon is replaced — a restart, or a self-update. The child is not
 	// its child, so it is still running; what must survive is the row and the
-	// cursor into its spool.
+	// acknowledgement cursor, so the supervisor's next report applies what is
+	// new and re-applies nothing.
 	restarted := NewManager(Options{StateDir: stateDir, RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour})
 	t.Cleanup(func() { restarted.Reset() })
 	bindExternalWorkOwnerForTest(restarted, "owner-proc", "chat-proc", "tab-proc", "mock")
@@ -318,7 +361,7 @@ func TestAProcessChildReattachesAfterADaemonRestartWithoutLosingEvents(t *testin
 	if item.Status != "running" || !item.Supervised() {
 		t.Fatalf("a supervised child must survive a daemon restart as running, got %#v", item)
 	}
-	appendSpool(t, stateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, restarted, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeSettled, "exitCode": 0, "summary": "Finished with exit 0 after 11s",
 	})
 	restarted.reconcileProcessChildren(time.Now().UTC())
@@ -382,7 +425,7 @@ func TestRegisteringTheSameOperationTwiceIsOneChildAndOneRow(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)
 	childID, _ := seedProcessChild(t, manager, "op-idempotent", os.Getpid(), nil)
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindSettled, map[string]any{
+	appendSpool(t, manager, childID, procchild.KindSettled, map[string]any{
 		"outcome": procchild.OutcomeSettled, "exitCode": 0, "summary": "Finished",
 	})
 	// This is the supervisor's closing poke: the same registration, repeated
@@ -409,7 +452,7 @@ func TestReadAndCancelOneProcessChild(t *testing.T) {
 	childID, outputFile := seedProcessChild(t, manager, "op-read", os.Getpid(), func(opts *ProcessChildRegistrationOptions) {
 		opts.Resource = "gpu0"
 	})
-	appendSpool(t, manager.opts.StateDir, childID, procchild.KindStarted, map[string]any{"pid": 4242})
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242})
 	manager.reconcileProcessChildren(time.Now().UTC())
 
 	read, err := manager.ReadProcessChild(childID, 0, 0)

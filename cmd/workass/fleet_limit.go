@@ -199,6 +199,10 @@ func fleetRefuseNarrowedSurface(method, limit string, params map[string]any) err
 		}
 	case method == "chat.delete":
 		return fleetNarrowedCapabilityError("chat.delete", method, limit)
+	case method == "process.cancel":
+		// Reading another machine's jobs is a read; stopping one is not. A
+		// narrowed link may watch the fleet's work and may not end it.
+		return fleetNarrowedCapabilityError("process.cancel", method, limit)
 	}
 	return nil
 }

@@ -147,22 +147,37 @@ func (m *Manager) ReadProcessChild(workID string, tailBytes int, afterSeq uint64
 		"output_bytes": size, "output_truncated": truncated,
 	}
 	if spoolFile != "" {
-		events, err := procchild.ReadSpool(spoolFile)
-		if err == nil {
-			transitions := make([]map[string]any, 0, len(events))
-			for _, event := range events {
-				if event.Seq <= afterSeq {
-					continue
-				}
-				transitions = append(transitions, map[string]any{
-					"seq": event.Seq, "kind": event.Kind,
-					"at": event.At.UTC().Format(time.RFC3339Nano),
-				})
-			}
-			out["transitions"] = transitions
+		// The transitions a reader asks for come from the outbox, which holds
+		// what the supervisor REPORTED — delivered and not. Showing the
+		// undelivered ones is the point rather than an accident: a job whose
+		// reports are not arriving is exactly the job somebody is reading
+		// about, and its queue is the evidence of what it has been doing.
+		if events := m.readProcessChildTransitions(workID, afterSeq); events != nil {
+			out["transitions"] = events
 		}
 	}
 	return out, nil
+}
+
+// readProcessChildTransitions is one child's reported transitions past a
+// cursor, by id.
+func (m *Manager) readProcessChildTransitions(workID string, afterSeq uint64) []map[string]any {
+	outbox := m.processOutbox()
+	if outbox == nil {
+		return nil
+	}
+	events, err := outbox.All(workID, afterSeq, 0)
+	if err != nil {
+		return nil
+	}
+	transitions := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		transitions = append(transitions, map[string]any{
+			"seq": event.Seq, "kind": event.Kind,
+			"at": event.At.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return transitions
 }
 
 // CancelProcessChild asks one child to stop, gracefully first.

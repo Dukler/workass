@@ -1,10 +1,12 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,9 +21,15 @@ import (
 // about it. The division is deliberate and is the answer to every failure the
 // WIP note catalogued:
 //
-//   - The supervisor writes its transitions to a SPOOL on disk before it
-//     reports them, so this daemon can be restarting or mid-self-update and
-//     still lose nothing. Ingest is reading one more line of a file.
+//   - The supervisor REPORTS its transitions here, over the authenticated
+//     Agent API, and this daemon ACKNOWLEDGES each one by seq. The ack is what
+//     makes an event delivered, so nothing is lost to a daemon that was
+//     restarting: the supervisor's outbox holds the batch and the next report
+//     delivers it in order, exactly once.
+//   - This daemon never DISCOVERS a job by scanning anything. It learns about
+//     one from its report. It reads the outbox for exactly one case — a child
+//     it already holds a row for, whose supervisor has died with events still
+//     undelivered — and it looks that up by id.
 //   - This daemon never spawns the child and is never its parent (§9), so a
 //     daemon restart does not touch it. Re-attaching is the snapshot plus the
 //     spool cursor.
@@ -73,20 +81,31 @@ type ProcessChildRegistrationOptions struct {
 	MaxRuntimeMs  int64
 	StaleAfterMs  int64
 	MaxHoldMs     int64
+	// Events is this report's batch: every event the supervisor has not been
+	// acknowledged for, in seq order. Applying them is idempotent by seq.
+	Events []procchild.Event
+	// HeartbeatMs is the cadence the supervisor reports at, so this daemon
+	// decides what silence is from what the supervisor declared rather than
+	// from a second constant of its own.
+	HeartbeatMs int64
+	// ReportGapMs is how long the supervisor says it was unable to reach this
+	// daemon immediately before this batch.
+	ReportGapMs int64
 
 	OriginLaneID      string
 	OriginOperationID string
 	OriginTurnID      string
 }
 
-// RegisterProcessChild records (or re-reads) one supervised child and ingests
-// whatever its spool already holds.
+// RegisterProcessChild records one supervised child and applies the batch of
+// events its supervisor is reporting.
 //
-// Ingesting on every call is what makes the supervisor's closing poke work
-// without a second verb: the same registration, repeated with the same id
-// after the job ends, delivers the outcome immediately instead of one
-// reconcile tick later — and a registration that never gets repeated loses
-// nothing, because the tick reads the same file.
+// It is one call rather than two because the row and the events are one fact:
+// a daemon that restarted and lost its in-memory row rebuilds it from the same
+// message that delivers the backlog, and a job that finishes in the same second
+// its first report is still travelling needs no second verb for the outcome.
+// The answer carries `ackThrough`, which is the only thing that lets the
+// supervisor retire an event from its outbox.
 func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (map[string]any, error) {
 	if err := m.beginWorkAdmission(); err != nil {
 		return nil, err
@@ -120,12 +139,16 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	if doneFile, ok = validateExternalWorkPath(m.opts.StateDir, doneFile); !ok {
 		return nil, errors.New("process child done_file is not an allowed absolute path")
 	}
-	// The spool path is DERIVED, never taken from the caller: it is a function
-	// of the validated id, so a registration cannot point this daemon at an
+	// The outbox path is DERIVED, never taken from the caller: it is this
+	// machine's one outbox, so a report cannot point this daemon at an
 	// arbitrary file and have its contents applied as a lifecycle.
-	spoolFile := procchild.SpoolPath(m.opts.StateDir, workID)
+	spoolFile := procchild.OutboxPath(m.opts.StateDir)
 	if spoolFile == "" {
 		return nil, errors.New("this machine has no process-child state directory")
+	}
+	events, err := normalizeReportedEvents(opts.Events)
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -153,10 +176,28 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	// binds later settlement to the turn that asked, and rebinding it would let
 	// an outcome land on whichever turn happened to be live).
 	rec.Item.SupervisorPID = &supervisor
-	rec.Item.Owner = compactText(redactSensitiveText(opts.Owner), 240)
-	rec.Item.Resource = procchild.NormalizeResource(opts.Resource)
-	rec.Item.Isolation = strings.TrimSpace(opts.Isolation)
-	rec.Item.MaxRuntimeMs, rec.Item.StaleAfterMs, rec.Item.MaxHoldMs = opts.MaxRuntimeMs, opts.StaleAfterMs, opts.MaxHoldMs
+	// STATED facts overwrite; omitted ones are left alone. The difference
+	// matters now that a report arrives many times over a job's life rather
+	// than two or three: a later report that did not mention the resource must
+	// not erase which GPU the job is holding.
+	if owner := compactText(redactSensitiveText(opts.Owner), 240); owner != "" {
+		rec.Item.Owner = owner
+	}
+	if resource := procchild.NormalizeResource(opts.Resource); resource != "" {
+		rec.Item.Resource = resource
+	}
+	if isolation := strings.TrimSpace(opts.Isolation); isolation != "" && isolation != "none" {
+		rec.Item.Isolation = isolation
+	}
+	if opts.MaxRuntimeMs > 0 {
+		rec.Item.MaxRuntimeMs = opts.MaxRuntimeMs
+	}
+	if opts.StaleAfterMs > 0 {
+		rec.Item.StaleAfterMs = opts.StaleAfterMs
+	}
+	if opts.MaxHoldMs > 0 {
+		rec.Item.MaxHoldMs = opts.MaxHoldMs
+	}
 	if opts.ProcessGroup > 1 {
 		rec.Item.ProcessGroup = opts.ProcessGroup
 	}
@@ -165,18 +206,92 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 		// free text on the running row, not a tool identity.
 		rec.Item.Summary = firstNonEmptySpawnedWorkText(rec.Item.Summary, summary)
 	}
-	rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
-	events := m.ingestProcessChildSpoolLocked(rec)
-	item := rec.Item
+	if created || reportCarriesLifecycle(events) {
+		// A report of nothing but liveness does not change the row. One whose
+		// timestamp moved every minute would make every quiet job look busy in
+		// every surface that sorts or ages by it.
+		rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
+	}
+	if opts.HeartbeatMs > 0 {
+		rec.Item.HeartbeatMs = opts.HeartbeatMs
+	}
+	if opts.ReportGapMs > rec.Item.ReportGapMs {
+		rec.Item.ReportGapMs = opts.ReportGapMs
+	}
+	// Heard from, which is the fact the silence verdict is read against. It is
+	// set for an EMPTY report too: a supervisor with nothing to say still said
+	// it, and that is the whole point of the heartbeat.
+	rec.LastReportAt = now
+	if rec.Item.Reporting == processReportingSilent {
+		rec.Item.Reporting = ""
+		rec.ReportedSilent = false
+	}
+	lifecycle := m.applyReportedEventsLocked(rec, events)
+	item, ackThrough := rec.Item, rec.SpoolSeq
 	m.spawnedWorkMu.Unlock()
 
 	m.commitSpawnedWorkChange(tabID, chatID)
-	m.emitProcessChildLifecycle(events)
+	m.emitProcessChildLifecycle(lifecycle)
 	return map[string]any{
 		"ok": true, "workId": workID, "taskId": workID, "status": item.Status,
 		"outcome": item.Outcome, "outputFile": outputFile, "doneFile": doneFile,
-		"spoolFile": spoolFile, "created": created,
+		"spoolFile": spoolFile, "created": created, "ackThrough": ackThrough,
 	}, nil
+}
+
+// reportCarriesLifecycle reports whether a batch says anything about the job
+// as opposed to about the supervisor.
+func reportCarriesLifecycle(events []procchild.Event) bool {
+	for _, event := range events {
+		if event.Kind != procchild.KindHeartbeat {
+			return true
+		}
+	}
+	return false
+}
+
+// processReportingSilent is the one non-empty value of a row's Reporting field.
+const processReportingSilent = "silent"
+
+// maxReportedEventsPerCall bounds one batch. A supervisor that has been unable
+// to report for a day has a day of heartbeats queued, and it sends them in
+// order across as many calls as it takes rather than in one unbounded request.
+// MaxReportedEventsPerCall is the batch ceiling, exported because the tool
+// schema states it: an agent-facing bound that the validator and the
+// declaration disagreed about would be a refusal with no visible cause.
+const MaxReportedEventsPerCall = 512
+
+const maxReportedEventsPerCall = MaxReportedEventsPerCall
+
+// normalizeReportedEvents validates one batch and puts it in seq order.
+//
+// A batch is refused outright rather than partially applied: the events are a
+// SEQUENCE, and applying the readable half of a malformed report would advance
+// the cursor past something nobody looked at.
+func normalizeReportedEvents(events []procchild.Event) ([]procchild.Event, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	if len(events) > maxReportedEventsPerCall {
+		return nil, fmt.Errorf("a supervised-job report carries at most %d events; send the backlog in order across several reports", maxReportedEventsPerCall)
+	}
+	out := make([]procchild.Event, 0, len(events))
+	seen := make(map[uint64]struct{}, len(events))
+	for _, event := range events {
+		if event.Seq == 0 {
+			return nil, errors.New("every reported supervised-job event needs its outbox seq")
+		}
+		if strings.TrimSpace(event.Kind) == "" {
+			return nil, errors.New("every reported supervised-job event needs a kind")
+		}
+		if _, duplicate := seen[event.Seq]; duplicate {
+			return nil, fmt.Errorf("supervised-job event seq %d appears twice in one report", event.Seq)
+		}
+		seen[event.Seq] = struct{}{}
+		out = append(out, event)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out, nil
 }
 
 func firstNonEmptySpawnedWorkText(values ...string) string {
@@ -188,25 +303,23 @@ func firstNonEmptySpawnedWorkText(values ...string) string {
 	return ""
 }
 
-// ingestProcessChildSpoolLocked applies every spooled event past this record's
-// cursor and returns the lifecycle events that are worth telling a watcher
-// about. The caller holds spawnedWorkMu and must emit the returned events
-// after releasing it: delivery reaches the chat actor, and holding the registry
-// lock across that is how two subsystems deadlock.
-func (m *Manager) ingestProcessChildSpoolLocked(rec *spawnedWorkRecord) []ProcessLifecycleEvent {
-	if rec == nil || rec.SpoolFile == "" {
-		return nil
-	}
-	events, err := procchild.ReadSpool(rec.SpoolFile)
-	if err != nil || len(events) == 0 {
+// applyReportedEventsLocked applies every reported event past this record's
+// acknowledgement cursor and returns the lifecycle events that are worth
+// telling a watcher about. The caller holds spawnedWorkMu and must emit the
+// returned events after releasing it: delivery reaches the chat actor, and
+// holding the registry lock across that is how two subsystems deadlock.
+//
+// Dedup by seq is the whole of exactly-once. A supervisor that crashed between
+// its insert and its send, or that never got an ack it was owed, re-sends; the
+// cursor makes the re-application change nothing, so the retry is free and the
+// supervisor never has to decide whether it is safe.
+func (m *Manager) applyReportedEventsLocked(rec *spawnedWorkRecord, events []procchild.Event) []ProcessLifecycleEvent {
+	if rec == nil || len(events) == 0 {
 		return nil
 	}
 	out := make([]ProcessLifecycleEvent, 0, 2)
 	for _, event := range events {
 		if event.Seq <= rec.SpoolSeq {
-			// Dedup by seq, which is the whole of it: re-reading the spool is
-			// free, so a crash between applying and persisting the cursor costs
-			// one re-application that changes nothing.
 			continue
 		}
 		rec.SpoolSeq = event.Seq
@@ -268,6 +381,11 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 			AttentionKind: firstNonEmptySpawnedWorkText(spoolString(payload, "attentionKind"), "attention"),
 			AttentionText: compactText(redactSensitiveText(spoolString(payload, "title")), 400),
 		}), true
+	case procchild.KindHeartbeat:
+		// Deliberately nothing but the fact that it arrived, which the caller
+		// already recorded as LastReportAt. It is not a notice, not an entry in
+		// the entity log, and not even an UpdatedAt bump: a row whose timestamp
+		// moved every minute would make every quiet job look busy.
 	case procchild.KindCancelRequested:
 		rec.Item.UpdatedAt = event.At.Format(time.RFC3339Nano)
 	case procchild.KindSettled:
@@ -336,8 +454,17 @@ func normalizeProcessOutcome(value string) string {
 	}
 }
 
-// reconcileProcessChildren ingests spools and reaches the `lost` verdict. It
-// runs inside the existing reconcile pass rather than on a timer of its own.
+// reconcileProcessChildren reaches the two verdicts only this daemon can:
+// a supervisor that has stopped REPORTING, and a supervisor that is GONE.
+//
+// It runs inside the existing reconcile pass rather than on a timer of its own,
+// and it scans nothing: the rows it considers are the rows it already holds.
+// ReconcileProcessChildren runs one pass at a stated time. Exported so a test
+// can reach a time-based verdict — the `lost` grace, the silence threshold —
+// without waiting out a real grace, and so the reconcile loop and a test take
+// exactly the same path to it.
+func (m *Manager) ReconcileProcessChildren(now time.Time) { m.reconcileProcessChildren(now) }
+
 func (m *Manager) reconcileProcessChildren(now time.Time) {
 	type pending struct {
 		key, tabID, chatID string
@@ -362,28 +489,50 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 			m.spawnedWorkMu.Unlock()
 			continue
 		}
-		events := m.ingestProcessChildSpoolLocked(rec)
+		workID := rec.Item.ID
+		cursor := rec.SpoolSeq
+		supervisorGone := rec.Item.Status == "running" && rec.Item.SupervisorPID != nil &&
+			!procchild.PIDAlive(*rec.Item.SupervisorPID)
+		m.spawnedWorkMu.Unlock()
+
+		// The one read of the outbox this daemon performs, and only for the one
+		// case the report path cannot cover: the supervisor is dead, so nobody
+		// is left to re-send what it queued. A supervisor that crashed between
+		// writing its settle and delivering it is NOT lost, and reading the
+		// queue it left is the difference between the truth and a guess.
+		drained := []procchild.Event{}
+		if supervisorGone {
+			drained = m.drainProcessChildOutbox(workID, cursor)
+		}
+
+		m.spawnedWorkMu.Lock()
+		if rec = m.spawnedWork[candidate.key]; rec == nil {
+			m.spawnedWorkMu.Unlock()
+			continue
+		}
+		events := m.applyReportedEventsLocked(rec, drained)
 		terminal := rec.Item.Status != "running"
 		if !terminal && rec.Item.SupervisorPID != nil {
-			// The spool has been read to its end and still says running, so the
-			// only remaining question is whether the supervisor is there to
-			// finish it. Absence is evidence.
-			// procchild.PIDAlive rather than this package's externalPIDAlive,
-			// and deliberately: the two agree on darwin and linux (kill(pid, 0)
-			// with EPERM counting as alive), but externalPIDAlive answers
-			// "alive" unconditionally on every other platform, which would make
-			// `lost` unreachable on Windows — the one verdict P4 exists for. It
-			// is also the probe the resource queue uses, so the two can never
-			// disagree about the same pid.
 			if procchild.PIDAlive(*rec.Item.SupervisorPID) {
 				rec.SupervisorMissingSince = time.Time{}
+				m.reportProcessChildSilenceLocked(rec, now, &events)
 			} else {
+				// Its queue has been drained and still says running, so the
+				// only remaining question is whether the supervisor is there to
+				// finish it. Absence is evidence.
+				// procchild.PIDAlive rather than this package's externalPIDAlive,
+				// and deliberately: the two agree on darwin and linux (kill(pid, 0)
+				// with EPERM counting as alive), but externalPIDAlive answers
+				// "alive" unconditionally on every other platform, which would make
+				// `lost` unreachable on Windows — the one verdict P4 exists for. It
+				// is also the probe the resource queue uses, so the two can never
+				// disagree about the same pid.
 				if rec.SupervisorMissingSince.IsZero() {
 					rec.SupervisorMissingSince = now
 				}
 				if now.Sub(rec.SupervisorMissingSince) >= supervisorMissingGrace {
 					if event, ok := m.settleProcessChildLocked(rec, procchild.OutcomeLost, nil,
-						"Lost: its supervisor is gone and wrote no outcome, so what the job did is unknown"); ok {
+						"Lost: its supervisor is gone and reported no outcome, so what the job did is unknown"); ok {
 						events = append(events, event)
 						terminal = true
 					}
@@ -393,20 +542,19 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 		if !terminal && rec.Item.Resource != "" {
 			m.reportProcessChildHoldLocked(rec, now, &events)
 		}
-		spoolFile, workID := rec.SpoolFile, rec.Item.ID
+		hadOutbox := rec.SpoolFile != ""
 		m.spawnedWorkMu.Unlock()
 		if len(events) > 0 {
 			m.commitSpawnedWorkChange(candidate.tabID, candidate.chatID)
 			m.emitProcessChildLifecycle(events)
 		}
-		if terminal && spoolFile != "" {
+		if terminal && hadOutbox {
 			// The outcome is durable in the receipt and the entity log by now,
-			// so the spool has been consumed. Removing it is what keeps a busy
-			// week of jobs from leaving thousands of directories behind. The
+			// so this child's delivered events have served their purpose. The
 			// row itself may already be gone: a settled row is compacted out of
 			// the live registry once its chat actor has accepted it, and the
 			// receipt is the durable record from then on.
-			_ = procchild.RemoveSpool(m.opts.StateDir, workID)
+			m.forgetProcessChildOutbox(workID)
 			m.spawnedWorkMu.Lock()
 			if rec = m.spawnedWork[candidate.key]; rec != nil {
 				rec.SpoolFile = ""
@@ -414,56 +562,139 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 			m.spawnedWorkMu.Unlock()
 		}
 	}
-	m.sweepSpentProcessChildSpools()
+	m.pruneProcessChildOutbox(now)
 }
 
-// sweepSpentProcessChildSpools removes spool directories that no row refers to
-// and whose supervisor has already recorded a terminal event.
+// reportProcessChildSilenceLocked raises ONE notice for a supervisor that is
+// alive and has stopped reporting.
 //
-// The case it exists for is narrow and real: the commit that retires a settled
-// row and the removal of its spool are two steps, so a crash between them would
-// leave a directory nothing will ever read again. The condition is deliberately
-// strict — a spool with NO terminal event is left alone, because that is a job
-// whose supervisor is still running and whose registration simply has not
-// reached this daemon yet. Eviction is logged, never silent.
-func (m *Manager) sweepSpentProcessChildSpools() {
-	root := procchild.Root(m.opts.StateDir)
-	if root == "" {
+// This is the operator's rule where it is enforceable. A job's record must
+// never look healthy when nothing here has heard from it: three missed
+// heartbeats from a process that still exists means the reports are not
+// arriving, and that is news — not a verdict about the work, which may be going
+// perfectly. It settles nothing and it is one-shot; the next report clears it.
+func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now time.Time, events *[]ProcessLifecycleEvent) {
+	if rec == nil || rec.Item.Status != "running" || rec.ReportedSilent {
 		return
 	}
-	entries, err := os.ReadDir(root)
+	if rec.LastReportAt.IsZero() {
+		// Nothing has been heard yet in this daemon's lifetime, which after a
+		// restart is every job at once. The clock starts now rather than at a
+		// zero time, so a restart raises no alarm it has not earned.
+		rec.LastReportAt = now
+		return
+	}
+	threshold := procchild.SilenceThreshold
+	if rec.Item.HeartbeatMs > 0 {
+		declared := 3 * time.Duration(rec.Item.HeartbeatMs) * time.Millisecond
+		if declared > 0 {
+			threshold = declared
+		}
+	}
+	silent := now.Sub(rec.LastReportAt)
+	if silent < threshold {
+		return
+	}
+	rec.Item.Reporting = processReportingSilent
+	rec.ReportedSilent = true
+	rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
+	*events = append(*events, m.processLifecycleLocked(rec, ProcessLifecycleEvent{
+		Kind: ProcessLifecycleAttention, AttentionKind: "not_reporting",
+		AttentionText: compactText(fmt.Sprintf(
+			"Not reporting: its supervisor (pid %d) is still running but this machine has heard nothing from it for %s, so its progress and its outcome are unknown until it reports again.",
+			supervisorPIDOf(rec), silent.Round(time.Second)), 400),
+	}))
+}
+
+func supervisorPIDOf(rec *spawnedWorkRecord) int {
+	if rec == nil || rec.Item.SupervisorPID == nil {
+		return 0
+	}
+	return *rec.Item.SupervisorPID
+}
+
+// processOutbox opens this machine's supervised-job outbox, once, lazily.
+//
+// Lazily because a daemon on a machine that has never run a supervised job has
+// no outbox and should not create one, and once because the handle is a SQLite
+// connection: opening it per reconcile tick would be a file open per tick.
+func (m *Manager) processOutbox() *procchild.Outbox {
+	m.processOutboxMu.Lock()
+	defer m.processOutboxMu.Unlock()
+	if m.processOutboxHandle != nil {
+		return m.processOutboxHandle
+	}
+	if m.processOutboxFailed {
+		return nil
+	}
+	outbox, err := procchild.OpenOutboxForReading(m.opts.StateDir)
 	if err != nil {
-		return
-	}
-	tracked := map[string]struct{}{}
-	m.spawnedWorkMu.Lock()
-	for _, rec := range m.spawnedWork {
-		if rec != nil && rec.Item.Supervised() {
-			tracked[rec.Item.ID] = struct{}{}
-		}
-	}
-	m.spawnedWorkMu.Unlock()
-	for _, entry := range entries {
-		if !entry.IsDir() || !procchild.ValidID(entry.Name()) {
-			continue
-		}
-		if _, live := tracked[entry.Name()]; live {
-			continue
-		}
-		events, err := procchild.ReadSpool(procchild.SpoolPath(m.opts.StateDir, entry.Name()))
-		if err != nil || len(events) == 0 {
-			continue
-		}
-		if !procchild.Terminal(events[len(events)-1].Kind) {
-			continue
-		}
-		if err := procchild.RemoveSpool(m.opts.StateDir, entry.Name()); err == nil {
-			m.opts.Logf("removed a spent process-child spool no row refers to", map[string]any{
-				"workId": entry.Name(), "events": len(events),
+		if !errors.Is(err, os.ErrNotExist) {
+			// Loud once, never per tick. An unusable outbox means a dead
+			// supervisor's queued outcome cannot be recovered here, which is a
+			// real loss of evidence and not a detail.
+			m.processOutboxFailed = true
+			m.opts.Logf("this machine's supervised-job outbox could not be opened", map[string]any{
+				"path": procchild.OutboxPath(m.opts.StateDir), "error": redactSensitiveText(err.Error()),
 			})
 		}
+		return nil
+	}
+	m.processOutboxHandle = outbox
+	return outbox
+}
+
+// drainProcessChildOutbox reads one child's undelivered events past a cursor.
+// By id, never by listing: this daemon learns that a job exists from its
+// report, and this read only recovers what a dead supervisor left behind.
+func (m *Manager) drainProcessChildOutbox(workID string, cursor uint64) []procchild.Event {
+	outbox := m.processOutbox()
+	if outbox == nil {
+		return nil
+	}
+	events, err := outbox.All(workID, cursor, 0)
+	if err != nil {
+		m.opts.Logf("could not read a supervised job's outbox", map[string]any{
+			"workId": workID, "error": redactSensitiveText(err.Error()),
+		})
+		return nil
+	}
+	return events
+}
+
+func (m *Manager) forgetProcessChildOutbox(workID string) {
+	if outbox := m.processOutbox(); outbox != nil {
+		_ = outbox.Forget(workID)
 	}
 }
+
+// pruneProcessChildOutbox applies the retention window. It is the whole of
+// what replaced the old directory sweep: no listing, no per-child files, and
+// an undelivered event is never removed however old it is.
+func (m *Manager) pruneProcessChildOutbox(now time.Time) {
+	m.processOutboxMu.Lock()
+	due := m.processOutboxPrunedAt.IsZero() || now.Sub(m.processOutboxPrunedAt) >= processOutboxPruneInterval
+	if due {
+		m.processOutboxPrunedAt = now
+	}
+	m.processOutboxMu.Unlock()
+	if !due {
+		return
+	}
+	outbox := m.processOutbox()
+	if outbox == nil {
+		return
+	}
+	if removed, err := outbox.Prune(now); err == nil && removed > 0 {
+		m.opts.Logf("pruned delivered supervised-job events past the retention window", map[string]any{
+			"events": removed,
+		})
+	}
+}
+
+// processOutboxPruneInterval keeps retention off the hot path: once an hour is
+// far more often than a seven-day window needs.
+const processOutboxPruneInterval = time.Hour
 
 // reportProcessChildHoldLocked raises ONE attention for a holder past the hold
 // it declared. §16.7: max_hold is report-only — a host never kills a holder to
@@ -502,11 +733,21 @@ func spoolString(payload map[string]any, key string) string {
 	return value
 }
 
+// spoolInt is spoolIntPresent where absence and zero mean the same thing.
 func spoolInt(payload map[string]any, key string) int {
 	value, _ := spoolIntPresent(payload, key)
 	return value
 }
 
+// spoolIntPresent reads one number out of an event payload, in whatever shape
+// the journey here left it in.
+//
+// The shapes are not hypothetical. A payload built in process carries `int`; a
+// payload decoded from the report's JSON carries `float64` or `json.Number`
+// depending on the decoder; and the wire encodes numbers as strings, which is
+// how the FIRST version of this function silently dropped every exit code of
+// every job reported over a link — the one fact a finished job is judged by,
+// absent, with nothing anywhere saying so.
 func spoolIntPresent(payload map[string]any, key string) (int, bool) {
 	if payload == nil {
 		return 0, false
@@ -518,6 +759,12 @@ func spoolIntPresent(payload map[string]any, key string) (int, bool) {
 		return value, true
 	case int64:
 		return int(value), true
+	case json.Number:
+		parsed, err := value.Int64()
+		return int(parsed), err == nil
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		return parsed, err == nil
 	}
 	return 0, false
 }

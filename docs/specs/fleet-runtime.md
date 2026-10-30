@@ -430,14 +430,23 @@ home regardless of child count; a monitor survives both daemons restarting; a
 dropped watcher leaks no registration.
 
 **P4 — process children.** `workass run` (preflight, process group / scope /
-Job object, spool-and-ingest, exit code), `lost`, `timed_out`, one-shot stall,
-refusal of evidence-less registration. Tests: child survives a daemon restart
-*and* a self-update; killing the supervisor yields `lost`, never `running`; the
-token never appears in argv. Plus §14b's `process.start`: refused below full
-access and refused locally, both by name; the job's environment contains
-nothing of the daemon's; one credential authorizes one registration and dies
-with it; the supervisor's argv names the asking chat as `--owner` and the
-credential only as a path.
+Job object, report-and-acknowledge, exit code), `lost`, `timed_out`, one-shot
+stall, refusal of evidence-less registration. Tests: child survives a daemon
+restart *and* a self-update; killing the supervisor yields `lost`, never
+`running`; the token never appears in argv. Plus §14b's `process.start`:
+refused below full access and refused locally, both by name; the job's
+environment contains nothing of the daemon's; one credential authorizes that
+one job's reports and dies with its outcome; the supervisor's argv names the
+asking chat as `--owner`, the daemon's state directory as `--state-dir`, and
+the credential only as a path. Plus §14c's reporting gates: the daemon-up path
+delivers over the Agent API with an acknowledgement and reads no file; a
+daemon-down-then-up window replays the outbox in order exactly once; a crash
+between the insert and the send replays once; an unreachable daemon is loud on
+stderr AND in the receipt and keeps trying; a wrong or relative state
+directory is refused before anything runs; concurrent supervisors share one
+outbox without losing a seq; and **a remote start from a chat on P produces
+exactly one notice in that chat on P for each of settled, refused, timed_out,
+cancelled and lost.**
 
 **P5 — waits and forks collapse.** Declared `waiting{conditions}` resumes the
 same native session; an undeclared wait raises `attention{ended-while-waiting}`
@@ -474,7 +483,10 @@ non-actionable event.
 | Child finishes while nobody watches | monitor `exit` → actionable notice (§7) |
 | Child dies silently | its home sees a gone pid with no outcome ⇒ `lost` |
 | Supervisor itself dies | pid gone, no `settled` ⇒ `lost` |
-| Daemon restart or self-update mid-child | process children are not daemon children; events spool and are ingested |
+| Daemon restart or self-update mid-child | process children are not daemon children; events are queued in the outbox and replayed in order on reconnect |
+| Supervisor cannot reach its daemon | loud on stderr and in the receipt, retried forever, and the row reads `not reporting` rather than healthy (§14c) |
+| A job healthy and quiet vs a job whose reports are lost | the supervisor heartbeats on a declared cadence; three missed beats with a live pid is `not reporting`, which is news and never a verdict (§14c) |
+| Supervisor dies with an outcome still queued | its home drains that child's outbox by id before reaching `lost` (§14c) |
 | Home powered off, crashed, cut off | `home_down` on the monitor stream, one notice per home |
 | Stale `running` after a home goes dark | `home_down` means unknown; the UI shows `last known` (§7) |
 | Delivery interrupted | store-and-forward: unacked events stay owed (§5) |
@@ -534,8 +546,10 @@ says so ("no Workass credential in this environment ... but no chat is told").
 3. the job's environment is BUILT, not inherited: PATH, HOME, the data root,
    its own credential path, and the variables the caller named. Nothing of the
    daemon's environment reaches it, so no secret can;
-4. the only credential it holds is a one-shot token good for exactly one
-   `process.register` with one operation id, consumed by that registration;
+4. the only credential it holds is a token good for exactly one method
+   (`process.register`), one job and one chat on the host, revoked the moment
+   that job is terminal — it lasts the job's life rather than one call,
+   because §14c made reporting continuous rather than a closing poke;
 5. it is still `workass run` that supervises, in its own process group, so the
    child is not a child of the daemon and P4's `lost` verdict is unchanged.
 
@@ -550,6 +564,107 @@ while the link was up and heartbeating. The same display also showed nothing
 for the reverse direction, because a dialler never stated the port it listens
 on, so the receiving daemon learned no route back and could not dial or
 heartbeat the pair from its own side. All four are fixed with tests.
+
+## 14c. Reporting is a call, not a file (2026-10-30)
+
+The first live two-machine run of `process.start` started four jobs on
+duklerver from a chat on the Mac. All four returned `ok` with the right owner.
+All four ran to completion and recorded their whole lifecycle. **Not one notice
+ever reached the owning chat.**
+
+The proximate cause was a path: `workass run` resolved its state directory from
+a default that ended in a bare relative `state`, so with `cwd=/tmp` four jobs
+wrote `/tmp/state/process-children/<id>/events.jsonl`, where no daemon would
+ever look. But the operator's reading of it was the one that mattered — *"we
+are sending events THROUGH FILES INSTEAD OF A TOOL?"* — and it is correct. The
+spool had become the PRIMARY record, so a supervisor that never reached its
+daemon was indistinguishable, from the outside, from one that had. A wrong
+path was merely the first thing that could go wrong silently.
+
+So the direction is inverted. This supersedes §5's "events are appended to a
+spool directory; the daemon ingests the spool on start and on a tick" and the
+P4 line's "spool-and-ingest".
+
+**1. The primary path is the Agent API.** The supervisor reports every
+transition — `created`, `queued`, `started`, `stalled`, `attention`,
+`cancel_requested`, `settled`, and a `heartbeat` — to the daemon on the machine
+it is running on, through `workass_register_process_child`: the same
+authenticated tool surface an agent calls, with the credential minted for that
+one job. Each report carries the registration facts and the batch of events the
+daemon has not acknowledged; the daemon applies them in seq order, dedups by
+seq, and answers `ackThrough`. It then publishes them as P3 defines — the
+entity log, the monitors at both ends, the owning chat wherever it is. One
+verb: a restart that lost the in-memory row rebuilds it from the same message
+that delivers the backlog, and a job that ends while its first report is still
+travelling needs no second call.
+
+**2. The outbox is a write-ahead log, not a channel.** It is a SQLite
+transactional outbox at `state/process-outbox.db` — WAL, `busy_timeout`,
+`synchronous=FULL`, one small database per machine shared by every `workass
+run` on it, opened through the same `internal/store` that opens `state.db` and
+deliberately NOT `state.db` itself, which is the daemon's single-writer ledger
+and holds an exclusive lock a supervisor could not wait out. Each event is
+INSERTed with its per-child seq *inside the transaction that allocates it*
+before the report goes out; the daemon's acknowledgement marks the row
+delivered; anything undelivered is replayed in seq order on reconnect, exactly
+once. SQLite rather than another JSONL file because a queue cannot afford a
+torn last line, a reader that parses to find the end, a seq allocated outside
+the write that records it, or a directory listing standing in for an index.
+
+**The daemon never discovers a job by scanning anything.** It learns that a job
+exists from its report. It reads the outbox for exactly ONE case — a child it
+already holds a row for, whose supervisor has died with events still
+undelivered — and it looks that up by id, because a supervisor that crashed
+between recording its settle and delivering it is not `lost`, and reading the
+queue it left is the difference between the truth and a guess. The outbox path
+comes from the credential the daemon wrote or from `--state-dir`, never from
+the job's working directory: a relative state directory is refused before
+anything runs.
+
+**3. Never silent.** Three rules, and they are the whole point of the rewrite:
+
+- A supervisor unable to reach its daemon for longer than the grace says so on
+  stderr, in the words "NOT REPORTING", naming the gap and stating that the
+  work continues; it repeats that on an interval, not per retry; and it keeps
+  trying for as long as it lives.
+- Its receipt carries `reported`, `pendingEvents`, `reportGapMs` and
+  `reportError`. A run that finished perfectly and could tell nobody is a
+  different outcome from one that finished perfectly, and the receipt says
+  which. A finished supervisor keeps trying to deliver its outcome until a
+  deadline and, if it fails, says `THIS OUTCOME WAS NOT REPORTED`.
+- The owner-side row cannot look healthy about a supervisor nothing has heard
+  from. The supervisor heartbeats on a declared cadence (≈1 min, the link
+  heartbeat's, not a second knob); three missed beats with a live pid marks the
+  row `not reporting` and raises ONE `attention{not_reporting}`. It settles
+  nothing — the work may be going perfectly — and the next report clears it.
+  The gap the supervisor reports on reconnect is kept on the row, so one that
+  healed still shows that it happened.
+- A run with no credential is REFUSED rather than run quietly. `--unreported`
+  is the explicit opt-in for the supervision without a chat, and it says so.
+- A daemon that accepts a report without acknowledging any event is treated as
+  a failure, not an ack: it is older than this contract, and reading its
+  silence as agreement would retire the only copy of something nobody has been
+  told.
+
+**4. A refusal is news.** Preflight used to refuse synchronously and record
+nothing, on the reasoning that nothing started so no chat needed a row. That
+holds only when the caller is standing there reading the receipt. A job started
+from another machine has a chat waiting, and a refusal it never hears about is
+indistinguishable from a job that vanished. A refusal is now reported like any
+other outcome.
+
+**5. Three silent drops on the owner's side, found by the test this section
+required.** Each was its own instance of the same disease and each is fixed:
+a monitor offered for a chat on another machine carried no tab id, and the
+notice admission fence compares the tab exactly and dropped the mismatch
+without a word — the owner's own machine now fills its tab in, because it is
+the only machine that knows it. The host exported its OWN lane and turn ids as
+the owner's, and admission refuses a lane it cannot find — a remote owner now
+carries none of the host's local ids, and an absent lane falls through to the
+chat's desired lane exactly as a local completion does. And the event payload
+reader accepted only `float64` and `int`, while the wire encodes numbers as
+strings, so every exit code of every job reported over a link was dropped: the
+one fact a finished job is judged by, absent, with nothing saying so.
 
 ## 15. Non-goals and deferred
 
