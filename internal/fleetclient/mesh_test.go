@@ -656,3 +656,34 @@ func deadAddress(t *testing.T) string {
 	}
 	return address
 }
+
+// Shutdown must not wait for the next heartbeat. A supervisor that only
+// noticed the daemon was closing on its own tick would hold exit for up to a
+// whole interval, for nothing.
+func TestCloseDoesNotWaitForTheNextHeartbeat(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	mesh, _ := newDialer(t, "m-away", secret, func(opts *Options) {
+		opts.Heartbeat = time.Hour
+	})
+	if err := mesh.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mesh.Start(ctx)
+	if _, err := mesh.Invoke(ctx, home.machineID, "test:echo"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	mesh.Supervise(ctx, home.machineID)
+	done := make(chan struct{})
+	go func() {
+		mesh.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited for a heartbeat interval instead of ending its supervisors")
+	}
+}
