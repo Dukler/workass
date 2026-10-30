@@ -423,6 +423,10 @@ export interface SpawnedWorkItem {
   queuedAt?: string;
   execStartedAt?: string;
   runMs?: number;
+  // The fleet machine this work runs on, when that is not this one. Older daemons
+  // and every local row omit both.
+  hostMachine?: string;
+  hostMachineName?: string;
 }
 // obligation is additive: what this chat still owes the user, which is a
 // different question from what is running. Older daemons omit it.

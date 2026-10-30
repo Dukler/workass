@@ -135,6 +135,8 @@ type HostedSubagentRow struct {
 	HostMachine     string
 	HostMachineName string
 	StartedAt       string
+	Phase           string
+	Activity        string
 	OriginLaneID    string
 	// OriginOperationID binds the row to the parent turn that asked, exactly as
 	// a local subagent's row is bound, so the "parent turn was stopped"
@@ -168,16 +170,13 @@ func (m *Manager) RegisterHostedSubagent(tabID, chatID string, row HostedSubagen
 	if label == "" {
 		label = "Subagent"
 	}
-	host := strings.TrimSpace(row.HostMachineName)
-	if host == "" {
-		host = strings.TrimSpace(row.HostMachine)
-	}
-	// The host belongs in the row's own words, not in new chrome: `summary` is
-	// the line every subagent row already carries ("Starting subagent"), so a
-	// reader learns where the work runs from the text that is already there.
-	summary := "Running on " + host
-	if host == "" {
-		summary = "Starting subagent"
+	// What it is doing, as on any other row. Where it runs is a fact of its own,
+	// carried by HostMachineName, and is never written over the activity.
+	summary := firstNonEmpty(compactText(redactSensitiveText(row.Activity), 1000), "Starting subagent")
+	phase := firstNonEmpty(compactText(redactSensitiveText(row.Phase), 120), "starting")
+	parentJobID := ""
+	if job, running := m.RunningJobForChat(tabID, chatID); running {
+		parentJobID = strings.TrimSpace(asString(job["id"]))
 	}
 	item := SpawnedWorkItem{
 		ID: id, TaskID: id, TabID: tabID, ChatID: chatID,
@@ -186,6 +185,7 @@ func (m *Manager) RegisterHostedSubagent(tabID, chatID string, row HostedSubagen
 		Label:      label, Status: "running",
 		StartedAt: startedAt, UpdatedAt: startedAt,
 		Summary:           summary,
+		LastToolName:      phase,
 		OriginTurnID:      strings.TrimSpace(row.OriginTurnID),
 		OriginLaneID:      strings.TrimSpace(row.OriginLaneID),
 		OriginOperationID: strings.TrimSpace(row.OriginOperationID),
@@ -201,9 +201,13 @@ func (m *Manager) RegisterHostedSubagent(tabID, chatID string, row HostedSubagen
 		m.spawnedWorkMu.Unlock()
 		return
 	}
-	m.spawnedWork[key] = &spawnedWorkRecord{Item: item}
+	m.spawnedWork[key] = &spawnedWorkRecord{Item: item, HostedParentJobID: parentJobID}
 	m.spawnedWorkMu.Unlock()
 	m.commitSpawnedWorkChange(tabID, chatID)
+	if parentJobID != "" {
+		// The child's record in the parent's transcript, as a local child has.
+		m.emitSubagentHeader(parentJobID, id, label, brandForProvider(item.ProviderID), item.ModelLabel, "in_progress", "", row.Forked)
+	}
 }
 
 // SettleHostedSubagent settles the asking chat's row from the receipt its
@@ -214,17 +218,24 @@ func (m *Manager) SettleHostedSubagent(tabID, chatID string, receipt SubagentRec
 		return
 	}
 	id := strings.TrimSpace(receipt.SubagentID)
-	// The host stays in the settled row's own words for the same reason it was
-	// there while it ran: a reader of a finished row still needs to know which
-	// machine ran it, and the line that says so is the one already on the row.
 	activity := "Finished"
+	parentJobID := m.hostedParentJob(strings.TrimSpace(tabID), strings.TrimSpace(chatID), id)
+	running := false
 	m.spawnedWorkMu.Lock()
 	if rec := m.spawnedWork[spawnedWorkKey(strings.TrimSpace(tabID), strings.TrimSpace(chatID), id)]; rec != nil {
-		if host := firstNonEmpty(rec.Item.HostMachineName, rec.Item.HostMachine); host != "" {
-			activity = "Finished on " + host
-		}
+		running = rec.Item.Status == "running"
 	}
 	m.spawnedWorkMu.Unlock()
+	if running && parentJobID != "" {
+		status := "completed"
+		switch strings.TrimSpace(receipt.Status) {
+		case "failed":
+			status = "failed"
+		case "cancelled":
+			status = "cancelled"
+		}
+		m.emitSubagentHeader(parentJobID, id, receipt.Label, brandForProvider(receipt.ProviderID), receipt.ModelLabel, status, receipt.Error, false)
+	}
 	m.settleSubagentSpawnedWork(tabID, chatID, SubagentRun{
 		ID:             id,
 		Status:         strings.TrimSpace(receipt.Status),

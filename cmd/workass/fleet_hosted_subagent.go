@@ -104,6 +104,8 @@ func (h *agentControlHandler) recordHostedSubagent(machineID, tabID, chatID, lan
 		HostMachine:       strings.TrimSpace(machineID),
 		HostMachineName:   h.fleetPeerName(machineID),
 		StartedAt:         fieldString(fields, "startedAt"),
+		Phase:             fieldString(fields, "phase"),
+		Activity:          fieldString(fields, "latestActivity"),
 		OriginLaneID:      laneID,
 		OriginOperationID: operationID,
 		OriginTurnID:      fieldString(fields, "rootJobId"),
@@ -119,7 +121,7 @@ func (h *agentControlHandler) fleetPeerName(machineID string) string {
 	}
 	for _, state := range h.fleetMesh.States() {
 		if strings.TrimSpace(state.Peer) == machineID {
-			return strings.TrimSpace(state.Name)
+			return fleetDisplayName(state.Name, machineID)
 		}
 	}
 	return ""

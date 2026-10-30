@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { Chat } from '../store/types';
 import { store } from '../store/store';
 import { nodeState, nodeDuration, ToolDetail } from './messages';
-import { subagentActivity, type SubagentNode } from '../subagent-layout';
+import { subagentActivity, workHostName, type SubagentNode } from '../subagent-layout';
 import { spawnedWorkActivity } from '../tool-names';
 import { ActionGlyph, IcFork, IcStopSquare, ModelIcon } from '../icons';
 
@@ -40,6 +40,7 @@ export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNod
   // A group whose Agent call is out of reach (an earlier daemon's) has only its
   // raw tool id; never print that as a name.
   const label = n.label && n.label !== n.id ? n.label : 'Subagente';
+  const host = workHostName(n.work);
   return (<>
     <details className="r-sa" data-status={st} data-work-id={n.id}>
       <summary>
@@ -57,6 +58,9 @@ export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNod
           <span className="r-sasub">
             {n.model && <span className="r-mdl">{n.model}</span>}
             {n.model && <span className="r-sep" aria-hidden="true">·</span>}
+            {/* Where it runs, beside what it is doing and never in place of it. */}
+            {host && <span className="r-mdl" title={`Corre en ${host}`}>{host}</span>}
+            {host && <span className="r-sep" aria-hidden="true">·</span>}
             {activity
               ? (
                 <span className="r-act">

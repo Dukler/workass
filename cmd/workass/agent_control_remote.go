@@ -127,6 +127,11 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 			// The one command this daemon starts a process for, and the whole of
 			// why that is still §9-safe is in fleet_process_start.go.
 			return h.startProcessChildHere(ctx, forwarded, params)
+		case "agent.cancel_hosted":
+			// The stop button on the row of the chat this child runs for. It has no
+			// chat here to fence: the manager checks the asker is the machine the
+			// child runs for, from the socket rather than from the payload.
+			return h.manager.CancelHostedSubagent(fieldString(params, "id"), forwarded.Peer)
 		case "process.list", "process.read", "process.cancel":
 			// The reads and the stop for a job whose HOME is this machine.
 			//

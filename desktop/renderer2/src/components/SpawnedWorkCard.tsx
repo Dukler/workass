@@ -7,7 +7,7 @@ import { ActionGlyph, IcStopSquare, IcTerminal, ModelIcon } from '../icons';
 import { spawnedWorkActivity, spawnedWorkKindWord } from '../tool-names';
 import { displayDetail } from '../tool-display';
 import { startSerialPoll } from '../serial-poll';
-import { canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentWork, nestSpawnedWork, nodeForSpawnedWork, subagentWorkId } from '../subagent-layout';
+import { workHostName, canStopSpawnedWorkItem, currentTurnMessages, extractSubagents, isAgentWork, nestSpawnedWork, nodeForSpawnedWork, subagentWorkId } from '../subagent-layout';
 import { SubagentRow } from './SubagentRow';
 import type { ToolEvent } from '../store/types';
 
@@ -78,6 +78,7 @@ function RunningRow({ chat, item, nowMs }: { chat: Chat; item: SpawnedWorkItem; 
     item.kind === 'agent' ? item.providerId : '',
     item.modelLabel || '',
     item.pid ? `pid ${item.pid}` : '',
+    workHostName(item),
   ].filter(Boolean).join(' · ');
   // The live line is an ACTION like every other row in the rail: glyph + human
   // name + the exact evidence (approved mock rail-actions, 2026-07-27). It used

@@ -145,6 +145,9 @@ type Manager struct {
 	// external work did.
 	processLifecycle    func(ProcessLifecycleEvent)
 	processLifecycleMu  sync.RWMutex
+	hostedWorkRouter    atomic.Pointer[HostedWorkRouter]
+	hostedProgressMu    sync.Mutex
+	hostedProgress      map[string]hostedProgressMark
 	harnessTurns        *harnessTurnStore
 	spawnedWorkMu       sync.Mutex
 	spawnedWorkCommitMu sync.Mutex

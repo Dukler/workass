@@ -61,6 +61,10 @@ func (h *fleetHome) ObserveProcess(event acp.ProcessLifecycleEvent) {
 		return
 	}
 	switch event.Kind {
+	case acp.ProcessLifecycleState:
+		if event.State != nil {
+			h.pushState(target, hostedStatePayload(*event.State))
+		}
 	case acp.ProcessLifecycleExit:
 		payload := map[string]any{
 			"outcome": event.Outcome, "label": event.Label, "entity": "process",

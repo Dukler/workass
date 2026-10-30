@@ -35,6 +35,9 @@ const (
 	// ProcessLifecycleStalled is a declared stall: non-terminal, one-shot, and
 	// actionable precisely because the job itself said what silence would mean.
 	ProcessLifecycleStalled = "stalled"
+	// ProcessLifecycleState is the job's current state, for the row in the chat
+	// that owns it. It is not an event in the log and never a notice.
+	ProcessLifecycleState = "state"
 )
 
 // ProcessLifecycleEvent is one event on one process child's stream.
@@ -70,6 +73,8 @@ type ProcessLifecycleEvent struct {
 
 	AttentionKind string
 	AttentionText string
+	// State is set for Kind state.
+	State *HostedWorkState
 
 	// NoticeSuppressed carries this machine's own suppression verdict with its
 	// reason, so a watcher elsewhere applies the SAME conditions rather than a

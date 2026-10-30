@@ -89,11 +89,13 @@ type fleetMonitorNotice struct {
 
 // fleetWatcher holds this daemon's monitors on other machines' entities.
 type fleetWatcher struct {
-	self     string
-	monitors *fleetlog.Monitors
-	mesh     fleetMonitorInvoker
-	deliver  func(fleetMonitorNotice) error
-	budget   *fleetNoticeBudget
+	hostedState  func(peerID string, row fleetlog.Registration, fields map[string]any)
+	settleHosted func(row fleetlog.Registration, event fleetlog.Event)
+	self         string
+	monitors     *fleetlog.Monitors
+	mesh         fleetMonitorInvoker
+	deliver      func(fleetMonitorNotice) error
+	budget       *fleetNoticeBudget
 	// chatExists answers whether a watcher entity is still here. The home cannot
 	// know this, which is why dropping a monitor whose watcher is gone is the
 	// watcher's own job.
@@ -128,10 +130,14 @@ type fleetWatcherOptions struct {
 	// offer with no tab produced a monitor that recorded every event and
 	// delivered none of them. This machine knows its own chats; it fills the
 	// gap rather than inheriting it.
-	ChatTab   func(chatID string) string
-	Threshold time.Duration
-	Now       func() time.Time
-	Logf      func(string, ...any)
+	ChatTab func(chatID string) string
+	// HostedState and SettleHosted keep the row in the asking chat true to what
+	// the machine running the work says (fleet_hosted_work.go).
+	HostedState  func(peerID string, row fleetlog.Registration, fields map[string]any)
+	SettleHosted func(row fleetlog.Registration, event fleetlog.Event)
+	Threshold    time.Duration
+	Now          func() time.Time
+	Logf         func(string, ...any)
 }
 
 func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
@@ -139,6 +145,7 @@ func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
 		self: strings.TrimSpace(opts.Self), monitors: opts.Monitors, mesh: opts.Mesh,
 		deliver: opts.Deliver, budget: opts.Budget, chatExists: opts.ChatExists, chatTab: opts.ChatTab,
 		threshold: opts.Threshold, now: opts.Now, logf: opts.Logf,
+		hostedState: opts.HostedState, settleHosted: opts.SettleHosted,
 		darkSince: map[string]time.Time{}, announced: map[string]bool{},
 	}
 	if watcher.threshold <= 0 {
@@ -206,6 +213,10 @@ func (w *fleetWatcher) WatchRemoteSubagent(ctx context.Context, peer string, res
 // adopted: a monitor carries a capability naming the watcher, so an unsolicited
 // push is exactly what must not become a notice (§11).
 func (w *fleetWatcher) Ingest(peerID, channel string, payload any) {
+	if channel == fleetStateChannel {
+		w.ingestState(peerID, mapFromAnyMain(payload))
+		return
+	}
 	if !w.ready() || channel != fleetLogEventChannel {
 		return
 	}
@@ -384,6 +395,10 @@ func (w *fleetWatcher) Resync(ctx context.Context, peerID string) error {
 		}
 		w.applySlice(ctx, peerID, row.Ref, slice)
 	}
+	// Whatever a dropped link cost the rows, now that the monitors are settled.
+	for _, raw := range anySlice(fields["states"]) {
+		w.ingestState(peerID, mapFromAnyMain(raw))
+	}
 	return nil
 }
 
@@ -482,6 +497,7 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 // notify — they are visible by reading, which is exactly when freshness
 // matters. A cancelled child never notifies either: the parent asked for that.
 func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) {
+	w.settleHostedRow(row, event)
 	if fieldString(event.Payload, "entity") == "process" {
 		w.projectProcess(row, event)
 		return

@@ -67,7 +67,10 @@ type fleetHome struct {
 	// machine through the same projection it reads one on another machine. It
 	// is nil until the watcher exists, which is the P2 daemon exactly.
 	local func(event fleetlog.Event, head uint64) uint64
-	logf  func(string, ...any)
+	// states reads the current state of one thing this machine runs, for the
+	// answer to a sync (fleet_hosted_work.go).
+	states func(targetID string) (map[string]any, bool)
+	logf   func(string, ...any)
 
 	mu sync.Mutex
 }
@@ -312,8 +315,13 @@ func (h *fleetHome) handleSync(caller wire.Caller, params map[string]any) (any, 
 	}
 	monitors := make([]any, 0, len(held))
 	slices := make([]any, 0, len(held))
+	states := make([]any, 0, len(held))
 	for _, row := range held {
 		monitors = append(monitors, registrationPayload(row))
+		if state, running := h.stateFor(row.TargetID); running {
+			state["targetId"] = row.TargetID
+			states = append(states, state)
+		}
 		after, stated := cursors[row.TargetID]
 		if !stated {
 			after = row.AckedSeq
@@ -324,7 +332,7 @@ func (h *fleetHome) handleSync(caller wire.Caller, params map[string]any) (any, 
 		}
 		slices = append(slices, slicePayload(slice))
 	}
-	return map[string]any{"ok": true, "machineId": h.self, "monitors": monitors, "slices": slices}, nil
+	return map[string]any{"ok": true, "machineId": h.self, "monitors": monitors, "slices": slices, "states": states}, nil
 }
 
 // handleAck advances what this watcher has acknowledged, which is the only
@@ -366,6 +374,12 @@ func (h *fleetHome) ObserveSubagent(event acp.SubagentLifecycleEvent) {
 		return
 	}
 	switch event.Kind {
+	case acp.SubagentLifecycleProgress:
+		if event.State != nil {
+			h.pushState(target, hostedStatePayload(*event.State))
+		}
+	case acp.SubagentLifecycleCall:
+		h.pushState(target, map[string]any{"call": event.Call})
 	case "exit":
 		payload := map[string]any{
 			"outcome": event.Outcome, "label": event.Label,

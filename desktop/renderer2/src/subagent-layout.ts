@@ -113,6 +113,14 @@ export function nestSpawnedWork(items: readonly SpawnedWorkItem[]): { byParent: 
   return { byParent, nested };
 }
 
+// The machine a row's work runs on, when that is not this one. A row from a daemon
+// that stored the whole link name still reads as the machine's own name.
+export function workHostName(item?: Pick<SpawnedWorkItem, 'hostMachine' | 'hostMachineName'> | null): string {
+  if (!item?.hostMachine) return '';
+  const name = String(item.hostMachineName ?? '').replace(/^workass daemon\s*/, '').replace(/\s*\(m-[0-9a-f]+\)$/, '').trim();
+  return name || item.hostMachine;
+}
+
 export function canStopSpawnedWorkItem(item: Pick<SpawnedWorkItem, 'kind' | 'pid' | 'outputFile'>): boolean {
   // Native agents are observed only, even if a provider includes process metadata.
   return item.kind !== 'agent' && !(item.kind === 'workflow' && !item.pid && !item.outputFile);

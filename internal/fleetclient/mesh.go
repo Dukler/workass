@@ -398,6 +398,33 @@ func (m *Mesh) Invoke(ctx context.Context, peerID, channel string, args ...any) 
 	return nil, err
 }
 
+// LiveLink is the link this daemon already holds to one peer, without dialling.
+func (m *Mesh) LiveLink(peerID string) (Invoker, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	link := m.links[strings.TrimSpace(peerID)]
+	if link == nil {
+		return nil, false
+	}
+	select {
+	case <-link.Done():
+		return nil, false
+	default:
+		return link, true
+	}
+}
+
+// PeerDisplayName is the name a peer goes by, as this mesh last knew it.
+func (m *Mesh) PeerDisplayName(peerID string) string {
+	if m == nil {
+		return ""
+	}
+	return m.State(peerID).Name
+}
+
 // EnsureLink returns a live link to one peer, dialling if there is none.
 func (m *Mesh) EnsureLink(ctx context.Context, peerID string) (Invoker, error) {
 	peerID = strings.TrimSpace(peerID)

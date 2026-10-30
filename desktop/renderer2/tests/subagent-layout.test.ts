@@ -152,3 +152,36 @@ test('an agent\'s own shells and monitors nest under it; orphans and agents stay
   assert.deepEqual(byParent.get('agent-1')?.map((entry) => entry.id), ['shell-1', 'mon-1']);
   assert.deepEqual([...nested].sort(), ['mon-1', 'shell-1']);
 });
+
+test('a subagent on another machine reads like a local one, with the machine beside its activity', async () => {
+  const { nodeForSpawnedWork, workHostName } = await import('../src/subagent-layout.ts');
+  const { spawnedWorkActivity } = await import('../src/tool-names.ts');
+  const row = {
+    id: 'wa-subagent-1-1', taskId: 'wa-subagent-1-1', tabId: 't', chatId: 'c', kind: 'subagent',
+    label: 'remote test', status: 'running', startedAt: '2026-10-30T14:37:38Z', modelLabel: 'GPT-6.1-Sol-low',
+    assistantBrand: 'gpt', hostMachine: 'm-03d5', hostMachineName: 'duklerver',
+    lastToolName: 'working', summary: 'Working',
+  } as unknown as import('../src/wire/types.ts').SpawnedWorkItem;
+  const { nodes, liveIds } = reconcileSubagentWork([], [row]);
+  assert.equal(nodes.length, 1);
+  assert.ok(liveIds.has('wa-subagent-1-1'));
+  assert.equal(nodes[0].model, 'GPT-6.1-Sol-low');
+  assert.equal(nodes[0].provider, 'gpt');
+  assert.equal(canStopSpawnedWorkItem(row), true);
+  assert.equal(spawnedWorkActivity(row)?.label, 'Trabajando');
+  assert.equal(spawnedWorkActivity({ ...row, lastToolName: 'tool', summary: 'Read' })?.label, 'Leer un archivo');
+  assert.equal(workHostName(row), 'duklerver');
+  assert.equal(nodeForSpawnedWork(row).work?.hostMachineName, 'duklerver');
+  // A row a previous build wrote still names just the machine.
+  assert.equal(workHostName({ hostMachine: 'm-03d5', hostMachineName: 'workass daemon duklerver (m-03d5)' }), 'duklerver');
+  assert.equal(workHostName({ hostMachine: 'm-03d5' }), 'm-03d5');
+  assert.equal(workHostName({}), '');
+});
+
+test('a job on another machine waits as queued and names its machine', async () => {
+  const { workHostName } = await import('../src/subagent-layout.ts');
+  const job = { kind: 'external', status: 'running', queuedAt: '2026-10-30T14:00:00Z', hostMachine: 'm-03d5', hostMachineName: 'duklerver', outputFile: '/data/x.output' };
+  assert.equal(job.status === 'running' && !!job.queuedAt && !(job as { execStartedAt?: string }).execStartedAt, true);
+  assert.equal(canStopSpawnedWorkItem(job as never), true);
+  assert.equal(workHostName(job), 'duklerver');
+});

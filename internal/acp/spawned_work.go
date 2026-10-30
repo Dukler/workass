@@ -69,8 +69,11 @@ const serviceClassifyDwell = 90 * time.Second
 type spawnedWorkLivenessClass string
 
 const (
-	spawnedWorkLivenessExternal  spawnedWorkLivenessClass = "external"
-	spawnedWorkLivenessSubagent  spawnedWorkLivenessClass = "subagent"
+	spawnedWorkLivenessExternal spawnedWorkLivenessClass = "external"
+	spawnedWorkLivenessSubagent spawnedWorkLivenessClass = "subagent"
+	// spawnedWorkLivenessHosted is work on another machine. Only its host can
+	// say anything about its life, so nothing here probes or orphans it.
+	spawnedWorkLivenessHosted    spawnedWorkLivenessClass = "hosted"
 	spawnedWorkLivenessInProcess spawnedWorkLivenessClass = "in-process"
 	spawnedWorkLivenessProbed    spawnedWorkLivenessClass = "probed"
 )
@@ -263,6 +266,10 @@ type spawnedWorkRecord struct {
 	// every report with and what makes a replay exactly-once.
 	SpoolFile string
 	SpoolSeq  uint64
+	// HostedParentJobID is the turn that spawned a child running on another
+	// machine, which its events belong to. Not persisted: after a restart they
+	// go to the running turn, if there is one.
+	HostedParentJobID string
 	// LastReportAt is when this daemon last heard from the supervisor, by any
 	// event including a heartbeat. Not persisted: a daemon that just restarted
 	// has heard nothing yet from anybody, and treating that as silence would
@@ -433,6 +440,9 @@ func spawnedWorkKind(providerTool, taskType, subagentType string) string {
 // output/PID probed. A tracked subagent therefore never settles from parent
 // engine exit, foreground-turn silence, or an output-file probe.
 func spawnedWorkLivenessClassFor(item SpawnedWorkItem) spawnedWorkLivenessClass {
+	if hostedWorkItem(item) {
+		return spawnedWorkLivenessHosted
+	}
 	switch item.Kind {
 	case "external":
 		return spawnedWorkLivenessExternal
@@ -1224,6 +1234,11 @@ func (m *Manager) updateSubagentSpawnedWork(tabID, chatID, id, phase, activity s
 	}
 	summary := compactText(redactSensitiveText(activity), 1000)
 	lastToolName := compactText(redactSensitiveText(phase), 120)
+	if IsHostedSubagentOwner(chatID) {
+		// No row here: the chat that asked holds it, on its own machine.
+		m.forwardHostedSubagentProgress(id, lastToolName, summary)
+		return
+	}
 	changed := false
 	m.spawnedWorkMu.Lock()
 	rec := m.spawnedWork[spawnedWorkKey(tabID, chatID, id)]
@@ -1298,7 +1313,7 @@ func (m *Manager) hasRunningSpawnedWorkForChat(tabID, chatID string) bool {
 			continue
 		}
 		liveness := spawnedWorkLivenessClassFor(rec.Item)
-		if liveness != spawnedWorkLivenessExternal && liveness != spawnedWorkLivenessSubagent {
+		if liveness != spawnedWorkLivenessExternal && liveness != spawnedWorkLivenessSubagent && liveness != spawnedWorkLivenessHosted {
 			return true
 		}
 	}
@@ -1380,6 +1395,9 @@ func (m *Manager) reconcileSpawnedWork() {
 				// process ever holds its output file, so probing that file can
 				// only call a live agent dead. Its liveness is its session.
 				path = ""
+			}
+			if liveness == spawnedWorkLivenessHosted {
+				continue
 			}
 			if liveness == spawnedWorkLivenessSubagent {
 				// The in-memory subagent registry is the sole live authority.
@@ -1582,7 +1600,7 @@ func (m *Manager) classifySpawnedWorkServices(now time.Time, pidsByPath map[stri
 		}
 		// A tracked subagent is owned by the subagent registry and is work by
 		// construction, so it is never a classification candidate.
-		if spawnedWorkLivenessClassFor(rec.Item) == spawnedWorkLivenessSubagent {
+		if class := spawnedWorkLivenessClassFor(rec.Item); class == spawnedWorkLivenessSubagent || class == spawnedWorkLivenessHosted {
 			continue
 		}
 		// Quiescence is half the evidence, so a record with no output file to
@@ -1967,6 +1985,13 @@ func (m *Manager) ReadSpawnedWork(tabID, chatID, id string, tailBytes int) map[s
 		if tailBytes <= 0 || tailBytes > maxSpawnedWorkTailBytes {
 			tailBytes = defaultSpawnedWorkTailBytes
 		}
+		if hostedJobItem(item) {
+			tail, limited, err := m.readHostedWorkTail(item, tailBytes)
+			if err != nil {
+				return map[string]any{"ok": false, "error": redactSensitiveText(err.Error())}
+			}
+			return map[string]any{"ok": true, "item": publicSpawnedWorkItem(item), "tail": tail, "tailLimited": limited}
+		}
 		tail, limited := readSpawnedWorkTailForItem(m.opts.StateDir, item, tailBytes)
 		return map[string]any{"ok": true, "item": publicSpawnedWorkItem(item), "tail": tail, "tailLimited": limited}
 	}
@@ -1998,6 +2023,9 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 	id = normalizeSpawnedWorkTaskID(id)
 	if tabID == "" || chatID == "" || id == "" {
 		return map[string]any{"ok": false, "error": "spawned-work:stop requires {tabId, chatId, id}"}
+	}
+	if result, hosted := m.StopHostedWork(tabID, chatID, id); hosted {
+		return result
 	}
 	key, item, found := "", SpawnedWorkItem{}, false
 	m.spawnedWorkMu.Lock()
@@ -2240,6 +2268,10 @@ func readExternalWorkTail(stateDir, path string, limit int) (string, bool) {
 }
 
 func readSpawnedWorkTailForItem(stateDir string, item SpawnedWorkItem, limit int) (string, bool) {
+	if hostedWorkItem(item) {
+		// The path names a file on the host, and may name something else here.
+		return "", false
+	}
 	if item.Kind == "external" {
 		return readExternalWorkTail(stateDir, item.OutputFile, limit)
 	}
@@ -2441,7 +2473,7 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 			if taskID == "" || rawTaskID != taskID || strings.TrimSpace(item.ID) != taskID {
 				continue
 			}
-			if item.OutputFile != "" {
+			if item.OutputFile != "" && !hostedWorkItem(item) {
 				if item.Kind == "external" {
 					if safe, ok := validateExternalWorkPath(m.opts.StateDir, item.OutputFile); ok {
 						item.OutputFile = safe
@@ -2546,7 +2578,7 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 		Summary: publicItem.Summary, OutputTail: tail, TailLimited: limited,
 		Outcome: item.Outcome,
 	}
-	if item.Supervised() {
+	if item.Supervised() || hostedJobItem(item) {
 		times := ProcessChildTimes(item, finished)
 		receipt.StartedAt, receipt.QueuedAt = times.StartedAt, times.QueuedAt
 		receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs = times.RunMs, times.RunMs, times.QueuedMs

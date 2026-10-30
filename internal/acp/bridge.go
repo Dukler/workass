@@ -1274,6 +1274,9 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 		}
 	}
 	b.manager.emit("job:event", map[string]any{"type": "acp", "id": visibleJobID, "event": event})
+	if job.SubagentID != "" {
+		b.manager.forwardHostedSubagentCall(job.SubagentID, event)
+	}
 }
 
 func (b *Bridge) chatIdentity() (string, string) {

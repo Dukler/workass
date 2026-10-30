@@ -315,6 +315,12 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 
 	m.commitProcessChildChange(tabID, chatID)
 	m.emitProcessChildLifecycle(lifecycle)
+	if item.Status == "running" && item.Owner != "" {
+		// Every report, a heartbeat included, so a row that missed a statement
+		// is right again within a beat.
+		state := hostedWorkStateFromView(processChildView(item))
+		m.emitProcessChildLifecycle([]ProcessLifecycleEvent{{Kind: ProcessLifecycleState, ChildID: workID, Owner: item.Owner, State: &state}})
+	}
 	if item.Status != "running" {
 		// Retired here rather than only on the next reconcile tick, because a
 		// settled row is compacted out of the live registry once its chat actor
