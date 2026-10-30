@@ -164,12 +164,18 @@ func (s *headlessUpdateService) Status(ctx context.Context, params map[string]an
 	if err := s.requireThisMachine(params); err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	diagnostics := s.updates.Status(ctx)
+	out := map[string]any{
 		"machineId":   s.machine,
 		"local":       true,
 		"headless":    true,
-		"diagnostics": s.updates.Status(ctx),
-	}, nil
+		"diagnostics": diagnostics,
+	}
+	// Where a packaged install states it, so one reader serves both.
+	if jobs, stated := diagnostics["runningJobs"]; stated {
+		out["runningJobs"] = jobs
+	}
+	return out, nil
 }
 
 // Apply answers update.apply. Only a human order relayed for this exact

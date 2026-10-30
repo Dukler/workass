@@ -115,6 +115,15 @@ type fleetWatcher struct {
 	// been dark for a day produces one notice and not one per heartbeat.
 	darkSince map[string]time.Time
 	announced map[string]bool
+	// The deliveries a chat has refused and that are still owed (fleet_retry.go).
+	refused       map[string]int
+	retryTimers   map[string]*time.Timer
+	synthesized   map[string]fleetlog.Event
+	retriesClosed bool
+	retryBase     time.Duration
+	// localHome is this machine's own home, which holds the log a monitor on a
+	// local job reads. Nil until the daemon has wired the two halves together.
+	localHome *fleetHome
 }
 
 type fleetWatcherOptions struct {
@@ -152,6 +161,8 @@ func newFleetWatcher(opts fleetWatcherOptions) *fleetWatcher {
 		threshold: opts.Threshold, now: opts.Now, logf: opts.Logf,
 		hostedState: opts.HostedState, settleHosted: opts.SettleHosted, hostedRows: opts.HostedRows,
 		darkSince: map[string]time.Time{}, announced: map[string]bool{},
+		refused: map[string]int{}, retryTimers: map[string]*time.Timer{}, synthesized: map[string]fleetlog.Event{},
+		retryBase: fleetDeliveryRetryBase,
 	}
 	if watcher.threshold <= 0 {
 		watcher.threshold = fleetHomeDownThreshold
@@ -258,7 +269,8 @@ func (w *fleetWatcher) monitorFor(peerID, targetID string) (fleetlog.Registratio
 // so the projection's own operation id makes the second admission a no-op); a
 // crash between receive and apply re-receives and applies. What cannot happen
 // is an ack for something that was never applied, which is the only way an
-// event is lost.
+// event is lost. A notice the chat refused has not been applied: the cursor
+// stays on it, nothing after it overtakes it, and it is offered again.
 func (w *fleetWatcher) applySlice(ctx context.Context, peerID, ref string, slice map[string]any) {
 	// One at a time. A push and a sync, or two syncs, can carry the same seq, and
 	// the dedup below is only true if nothing else is between its read of the
@@ -301,7 +313,11 @@ func (w *fleetWatcher) applySlice(ctx context.Context, peerID, ref string, slice
 				peerID, event.Seq, row.TargetID, applied)
 			break
 		}
-		w.project(row, event)
+		if err := w.project(row, event); err != nil {
+			w.deliveryRefused(peerID, ref)
+			break
+		}
+		w.deliveryAdmitted(ref)
 		applied = event.Seq
 		if _, ok := w.monitors.Update(ref, func(entry *fleetlog.Registration) {
 			entry.AppliedSeq = applied
@@ -323,9 +339,9 @@ func (w *fleetWatcher) applySlice(ctx context.Context, peerID, ref string, slice
 func (w *fleetWatcher) ack(ctx context.Context, peerID, targetID string, through uint64) {
 	if strings.TrimSpace(peerID) == w.self {
 		// A self-homed monitor has no link to acknowledge over: the home is in
-		// this process, and it retires the event through fleetHome.AckLocal
-		// after this returns. Invoking a peer named "me" would be a call to
-		// nobody, every time a local job settled.
+		// this process. Invoking a peer named "me" would be a call to nobody,
+		// every time a local job settled.
+		w.localHome.AckLocal(targetID, through)
 		return
 	}
 	if w.mesh == nil {
@@ -461,7 +477,7 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 		if wasDark {
 			// home_up, then the backlog from the cursor. One stream, one
 			// vocabulary (§7).
-			w.emit(fleetMonitorNotice{Kind: fleetMonitorHomeUp, Home: home})
+			_ = w.emit(fleetMonitorNotice{Kind: fleetMonitorHomeUp, Home: home})
 		}
 		return
 	}
@@ -501,12 +517,18 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 			lastKnown = append(lastKnown, firstNonEmptyString(row.Label, row.TargetID))
 		}
 		sort.Strings(lastKnown)
-		w.emit(fleetMonitorNotice{
+		if err := w.emit(fleetMonitorNotice{
 			Kind: fleetMonitorHomeDown, Home: home, Since: since,
 			ChatID: group[0].WatcherChatID, TabID: group[0].WatcherTabID,
 			LaneID: group[0].OriginLaneID, OriginOperationID: group[0].OriginOperationID,
 			TargetID: group[0].TargetID, LastKnown: lastKnown,
-		})
+		}); err != nil {
+			// Unlatched, so the next beat says it again. A chat that already took
+			// it reads the same operation id and adds nothing.
+			w.mu.Lock()
+			w.announced[home] = false
+			w.mu.Unlock()
+		}
 	}
 }
 
@@ -516,15 +538,15 @@ func (w *fleetWatcher) OnLinkState(state fleetclient.State) {
 // stall, and home_down. `spawned`, `progress`, `waiting` and `resumed` never
 // notify — they are visible by reading, which is exactly when freshness
 // matters. A cancelled child never notifies either: the parent asked for that.
-func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) {
+// An error means a notice is still owed.
+func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) error {
 	// A monitor already recorded without its tab, by a build that adopted one so.
 	if strings.TrimSpace(row.WatcherTabID) == "" && w.chatTab != nil {
 		row.WatcherTabID = strings.TrimSpace(w.chatTab(row.WatcherChatID))
 	}
 	w.settleHostedRow(row, event)
 	if fieldString(event.Payload, "entity") == "process" {
-		w.projectProcess(row, event)
-		return
+		return w.projectProcess(row, event)
 	}
 	switch event.Kind {
 	case fleetlog.KindExit:
@@ -533,20 +555,20 @@ func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) 
 			// which one. Re-deciding them here with less information would be a
 			// weaker copy of a rule that already ran.
 			w.logf("[fleet] %s settled without a notice: %s", row.TargetID, fieldString(event.Payload, "suppressReason"))
-			return
+			return nil
 		}
 		receipt := subagentReceiptFromPayload(mapFromAnyMain(event.Payload["receipt"]))
 		if receipt.Status != "done" && receipt.Status != "failed" {
-			return
+			return nil
 		}
-		w.emit(fleetMonitorNotice{
+		return w.emit(fleetMonitorNotice{
 			Kind: fleetlog.KindExit, TargetID: row.TargetID,
 			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
 			Label: firstNonEmptyString(receipt.Label, row.Label), Receipt: receipt,
 		})
 	case fleetlog.KindAttention:
-		w.emit(fleetMonitorNotice{
+		return w.emit(fleetMonitorNotice{
 			Kind: fleetlog.KindAttention, TargetID: row.TargetID,
 			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
@@ -555,21 +577,28 @@ func (w *fleetWatcher) project(row fleetlog.Registration, event fleetlog.Event) 
 			AttentionText: fieldString(event.Payload, "title"),
 		})
 	}
+	return nil
 }
 
-func (w *fleetWatcher) emit(notice fleetMonitorNotice) {
+// emit hands one notice to its chat. Only a refusal is an error: a duplicate
+// inside the window has already reached the chat.
+func (w *fleetWatcher) emit(notice fleetMonitorNotice) error {
 	if w.deliver == nil {
-		return
+		return nil
 	}
 	if w.budget != nil {
 		if deferred, reason := w.budget.admit(notice, w.now()); !deferred {
 			w.logf("[fleet] held a %s notice for %s: %s", notice.Kind, notice.ChatID, reason)
-			return
+			return nil
 		}
 	}
 	if err := w.deliver(notice); err != nil {
+		// Never reached the chat, so it must not read as a duplicate of itself.
+		w.budget.forget(notice)
 		w.logf("[fleet] could not deliver a %s notice to %s: %v", notice.Kind, notice.ChatID, err)
+		return err
 	}
+	return nil
 }
 
 func decodeFleetEvent(raw any) (fleetlog.Event, bool) {
@@ -601,17 +630,17 @@ func decodeFleetEvent(raw any) (fleetlog.Event, bool) {
 // when a queue position matters — somebody is already looking. A cancelled
 // exit was already marked suppressed by its home, because the party that would
 // be told is the party that asked.
-func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.Event) {
+func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.Event) error {
 	switch event.Kind {
 	case fleetlog.KindExit:
 		if boolFieldValue(event.Payload, "noticeSuppressed") {
 			w.logf("[fleet] process child %s settled without a notice: %s",
 				row.TargetID, fieldString(event.Payload, "suppressReason"))
-			return
+			return nil
 		}
 		outcome := strings.TrimSpace(fieldString(event.Payload, "outcome"))
 		receipt := spawnedWorkReceiptFromPayload(mapFromAnyMain(event.Payload["processReceipt"]))
-		w.emit(fleetMonitorNotice{
+		return w.emit(fleetMonitorNotice{
 			Kind: fleetlog.KindExit, TargetID: row.TargetID,
 			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
@@ -619,7 +648,7 @@ func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.
 			ProcessReceipt: &receipt, Outcome: outcome,
 		})
 	case fleetlog.KindAttention:
-		w.emit(fleetMonitorNotice{
+		return w.emit(fleetMonitorNotice{
 			Kind: fleetlog.KindAttention, TargetID: row.TargetID,
 			ChatID: row.WatcherChatID, TabID: row.WatcherTabID,
 			LaneID: row.OriginLaneID, OriginOperationID: row.OriginOperationID,
@@ -629,4 +658,5 @@ func (w *fleetWatcher) projectProcess(row fleetlog.Registration, event fleetlog.
 			Outcome:       "",
 		})
 	}
+	return nil
 }

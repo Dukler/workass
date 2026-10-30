@@ -200,7 +200,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 		result, err := h.remoteChats.Call(r.Context(), request.Method, copyRemoteAgentRouteParams(params))
 		if err == nil && request.Method == "update.status" {
-			result = h.withRunningJobs(result)
+			result = h.withRunningJobs(fieldString(params, "machine_id"), result)
 		}
 		return result, err
 	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.subsession", "chat.rename", "chat.settle", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
@@ -900,6 +900,7 @@ func (h *agentControlHandler) registerProcessChildWith(
 			context.Background(), h.fleetMesh, owner, workID, fieldString(params, "label"),
 		); ok {
 			result["monitor"] = map[string]any{"ref": row.Ref, "targetId": row.TargetID}
+			h.fleetWatch.WatchLocal(row)
 		}
 	}
 	return result, nil

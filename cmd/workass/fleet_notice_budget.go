@@ -69,6 +69,25 @@ func (b *fleetNoticeBudget) admit(notice fleetMonitorNotice, now time.Time) (boo
 	return true, ""
 }
 
+// forget takes back one admission whose notice never reached its chat, so that
+// offering it again is not read as the same notice arriving twice.
+func (b *fleetNoticeBudget) forget(notice fleetMonitorNotice) {
+	if b == nil {
+		return
+	}
+	chat := notice.TabID + "\x00" + notice.ChatID
+	key := noticeIdentity(notice)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.recent[chat][:0]
+	for _, record := range b.recent[chat] {
+		if record.key != key {
+			kept = append(kept, record)
+		}
+	}
+	b.recent[chat] = kept
+}
+
 // noticeIdentity is what makes two arrivals the same notice: the chat is
 // already the bucket, so identity is the event — its kind, its entity, and the
 // durable receipt or home the event is about.

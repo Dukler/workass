@@ -974,8 +974,37 @@ This reverses half of an operator decision, made by a builder with the operator
 unavailable. To restore a cap, make over-cap ends fold into a later notice rather
 than vanish. Fan-out aggregation (16.5) remains the planned answer to many children.
 
-Not changed, and a known gap: a failed `deliver` is logged and the cursor still
-moves, so a notice the actor refuses is lost the same way. It has not been seen live.
+A failed `deliver` used to be logged with the cursor still moving, which lost a notice
+the same way. §14i closes that.
+
+## 14i. A local job's end, a refused notice and the status of another machine (2026-10-30)
+
+Three faults, each reproduced live first. Evidence is in
+`docs/evidence/job-bugs-20261030/RESULTS.md`.
+
+**A job for a chat on its own machine has both halves of its monitor.** `WatchProcess`
+recorded the home's half and the in-process delivery looks in the watcher's, so every
+local `workass run` told nobody. `WatchLocal` records the other half and reads the log,
+because a job's first report can carry its end. A self-homed job skips the hosted-row
+settle: its own report already ended its row.
+
+At boot, a monitor an earlier build left with only the home's half is adopted if its job
+has no end yet. If it has one it is retired with no notice: those would arrive days late,
+one per old job, each starting a turn.
+
+**A refused notice is not applied.** The cursor stays on it, nothing after it overtakes it,
+its home is not acknowledged and its log entry stays held. A timer per home offers it again
+at 5 s doubling to 5 minutes, without limit, because a job on this machine has no link and
+no beat to prompt it. Boot does the same for local monitors, and a remote one is covered by
+the sync its link's return causes. The chat's admission is keyed by the event, so a retry
+cannot become a second notice, and a refused notice does not count against the 60 s window.
+A `home_down` that was refused is unlatched and said again on the next beat. A deleted chat
+is still an acknowledgement, not a refusal.
+
+**An update status is about the machine it names.** The asking daemon laid its own jobs
+over the answer, so the Mac reported duklerver as having none. It now keeps what that machine
+said, reads it from `diagnostics.runningJobs` where a headless host of today states it, and a
+machine that said nothing reads `known: false`, never as none.
 
 ## 15. Non-goals and deferred
 
