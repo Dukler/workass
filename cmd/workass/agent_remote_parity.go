@@ -81,7 +81,24 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"schedule.cancel":   remoteAgentLocalOnly,
 	"external.register": remoteAgentLocalOnly,
 	"external.settle":   remoteAgentLocalOnly,
-	"obligation.get":    remoteAgentLocalOnly,
+	// A process child is machine-scoped in EXECUTION and chat-scoped in
+	// OWNERSHIP, which is the combination this table had no class for — and the
+	// reason supervised jobs could not be expressed before the fleet runtime.
+	// The fleet's answer is that these are two different facts: the child's
+	// HOME is the machine with the files and the pids, so list/read/cancel are
+	// machine-scoped and routing already puts them there; and its OWNER is a
+	// global chat id carried on the registration, which is how a job on the
+	// GPU box reports into the chat that asked (§6, §10).
+	//
+	// Registration itself stays local: it is performed by `workass run` on the
+	// machine it supervises, with that machine's pid as its evidence. A
+	// registration forwarded from elsewhere would carry a pid this machine
+	// cannot probe, which is exactly the evidence-less row P4 forbids.
+	"process.register": remoteAgentLocalOnly,
+	"process.list":     remoteAgentMachineScoped,
+	"process.read":     remoteAgentMachineScoped,
+	"process.cancel":   remoteAgentMachineScoped,
+	"obligation.get":   remoteAgentLocalOnly,
 }
 
 // remoteAgentLocalOnlyReasons says, per method, why another machine cannot be
@@ -97,6 +114,7 @@ var remoteAgentLocalOnlyReasons = map[string]string{
 	"schedule.cancel":   "scheduled messages are owned by the calling chat on this machine",
 	"external.register": "external work tracks a process on this machine and must stay in the exact calling chat; register it on the machine that runs the process",
 	"external.settle":   "external work tracks a process on this machine and must stay in the exact calling chat",
+	"process.register":  "a process child is registered by `workass run` on the machine that supervises it, whose pid is the evidence this machine probes; to run a job elsewhere, run `workass run --owner <this chat's global id>` on that machine, and watch it with workass_list_process_children --machine_id",
 	"obligation.get":    "the obligation belongs to the calling chat's running turn on this machine",
 }
 

@@ -35,6 +35,11 @@ type agentControlHandler struct {
 	// changed.
 	fleetHome  *fleetHome
 	fleetWatch *fleetWatcher
+	// fleetMesh is how a home reaches the owner's daemon to offer a monitor it
+	// never asked for, which is the one thing P4 needs that P3 did not: a
+	// process child is registered on the machine that RUNS it, so its owner
+	// made no call it could learn from.
+	fleetMesh fleetMonitorInvoker
 }
 
 type agentControlRequest struct {
@@ -383,6 +388,36 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 				OutputFile: fieldString(params, "output_file"), DoneFile: fieldString(params, "done_file"),
 			},
 		})
+	case "process.register":
+		// `workass run` registering the child it supervises. Not an outbox
+		// mutation: a repeat with the same operation id must be ACCEPTED and
+		// must re-read the spool, which is how the supervisor's closing poke
+		// delivers an outcome immediately. Idempotency comes from the work id
+		// being derived from the operation id (§6), so a retry resolves to the
+		// row that already exists rather than creating a second one.
+		return h.registerProcessChild(ownerKey, tabID, chatID, params)
+	case "process.list":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true, "children": h.manager.ListProcessChildren(),
+			"resource_queues": h.manager.ResourceQueues(), "machine_id": h.selfMachineID,
+		}, nil
+	case "process.read":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
+			return nil, err
+		}
+		tailChars := intField(params, "tail_chars")
+		if tailChars < 0 || tailChars > 65536 {
+			return nil, errors.New("process child tail_chars must be between 0 and 65536")
+		}
+		return h.manager.ReadProcessChild(fieldString(params, "work_id"), tailChars, uint64(intField(params, "after_seq")))
+	case "process.cancel":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
+			return nil, err
+		}
+		return h.manager.CancelProcessChild(fieldString(params, "work_id"), fieldString(params, "reason"))
 	case "obligation.get":
 		obligationTab := firstNonEmptyString(fieldString(params, "tab_id"), tabID)
 		obligationChat := firstNonEmptyString(fieldString(params, "chat_id"), chatID)
@@ -574,4 +609,66 @@ func localRemoteAddr(remote string) bool {
 	}
 	ip := net.ParseIP(strings.TrimSpace(host))
 	return ip != nil && ip.IsLoopback()
+}
+
+// registerProcessChild records one supervised child and gives its owner a
+// monitor on it.
+//
+// The monitor is registered HERE, at registration time, for the same reason a
+// remote subagent's is: a job that finishes in the same second its reply is
+// still travelling has somewhere to report, because the monitor already exists
+// and the log already holds the event. An owner on another machine is offered
+// the monitor over the mesh; an owner on this machine gets a self-homed one,
+// which the home delivers in process — the same projection either way.
+func (h *agentControlHandler) registerProcessChild(ownerKey, tabID, chatID string, params map[string]any) (any, error) {
+	if h == nil || h.manager == nil || h.chats == nil || h.chats.providerChats == nil {
+		return nil, errors.New("process children require the durable chat actor")
+	}
+	targetTab := firstNonEmptyString(fieldString(params, "tab_id"), tabID)
+	targetChat := firstNonEmptyString(fieldString(params, "chat_id"), chatID)
+	if targetTab != tabID || targetChat != chatID {
+		return nil, errors.New("a process child is registered by the supervisor on this machine, in the exact calling chat")
+	}
+	if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child registration"); err != nil {
+		return nil, err
+	}
+	laneID, operationID, turnID, err := h.chats.providerChats.backgroundOriginStamp(tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	var supervisor *int
+	if value, ok := intFieldPresent(params, "pid"); ok {
+		supervisor = &value
+	}
+	owner, err := resolveProcessOwner(
+		fieldString(params, "owner"), h.selfMachineID, chatID, tabID, laneID, operationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.manager.RegisterProcessChild(acp.ProcessChildRegistrationOptions{
+		OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID, TabID: tabID, ChatID: chatID,
+		WorkID: fieldString(params, "work_id"), Label: fieldString(params, "label"),
+		Role: fieldString(params, "role"), Command: fieldString(params, "command"),
+		Owner: fieldString(params, "owner"), Resource: fieldString(params, "resource"),
+		OutputFile: fieldString(params, "output_file"), DoneFile: fieldString(params, "done_file"),
+		Isolation: fieldString(params, "isolation"), ProcessGroup: intField(params, "process_group"),
+		SupervisorPID: supervisor,
+		MaxRuntimeMs:  int64(intField(params, "max_runtime_ms")),
+		StaleAfterMs:  int64(intField(params, "stale_after_ms")),
+		MaxHoldMs:     int64(intField(params, "max_hold_ms")),
+		OriginLaneID:  laneID, OriginOperationID: operationID, OriginTurnID: turnID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	workID := fieldString(result, "workId")
+	if h.fleetHome != nil && workID != "" {
+		if row, ok := h.fleetHome.WatchProcess(
+			context.Background(), h.fleetMesh, owner, workID, fieldString(params, "label"),
+		); ok {
+			result["monitor"] = map[string]any{"ref": row.Ref, "targetId": row.TargetID}
+		}
+	}
+	return result, nil
 }

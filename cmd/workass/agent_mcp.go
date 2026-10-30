@@ -249,6 +249,43 @@ func agentMCPTools() []map[string]any {
 			"tab_id":    str(agenttext.Get("schema.agentMCPTools.guidance.67")),
 			"chat_id":   str(agenttext.Get("schema.agentMCPTools.guidance.68")),
 		}, "work_id", "status"), false, false, true, true),
+		// Process children (docs/specs/fleet-runtime.md §13 P4). Starting one is
+		// `workass run`, a command, not a tool: the daemon never spawns work
+		// (§9), so there is deliberately no tool that would make it. These four
+		// are the record and the control, and each is addressable on any
+		// machine in the fleet by its machine_id — local == remote.
+		tool("workass_register_process_child", agenttext.Get("tools.workass_register_process_child"), mutationObject(map[string]any{
+			"work_id":        str(agenttext.Get("schema.process.work_id_register")),
+			"label":          str(agenttext.Get("schema.process.label")),
+			"role":           enum(agenttext.Get("schema.agentMCPTools.guidance.63"), "work", "service"),
+			"pid":            integer(agenttext.Get("schema.process.supervisor_pid"), 2),
+			"process_group":  integer(agenttext.Get("schema.process.process_group"), 0),
+			"isolation":      str(agenttext.Get("schema.process.isolation")),
+			"command":        str(agenttext.Get("schema.process.command")),
+			"owner":          str(agenttext.Get("schema.process.owner")),
+			"resource":       str(agenttext.Get("schema.process.resource")),
+			"output_file":    str(agenttext.Get("schema.agentMCPTools.guidance.65")),
+			"done_file":      str(agenttext.Get("schema.agentMCPTools.guidance.66")),
+			"max_runtime_ms": integer(agenttext.Get("schema.process.max_runtime_ms"), 0),
+			"stale_after_ms": integer(agenttext.Get("schema.process.stale_after_ms"), 0),
+			"max_hold_ms":    integer(agenttext.Get("schema.process.max_hold_ms"), 0),
+			"tab_id":         str(agenttext.Get("schema.agentMCPTools.guidance.67")),
+			"chat_id":        str(agenttext.Get("schema.agentMCPTools.guidance.68")),
+		}, "work_id", "label", "pid", "output_file"), false, false, true, true),
+		tool("workass_list_process_children", agenttext.Get("tools.workass_list_process_children"), object(map[string]any{
+			"machine_id": str(agenttext.Get("schema.process.machine_id")),
+		}), true, false, true, false),
+		tool("workass_read_process_child", agenttext.Get("tools.workass_read_process_child"), object(map[string]any{
+			"work_id":    str(agenttext.Get("schema.process.work_id")),
+			"tail_chars": map[string]any{"type": "integer", "minimum": 0, "maximum": 65536, "description": agenttext.Get("schema.process.tail_chars")},
+			"after_seq":  integer(agenttext.Get("schema.process.after_seq"), 0),
+			"machine_id": str(agenttext.Get("schema.process.machine_id")),
+		}, "work_id"), true, false, true, false),
+		tool("workass_cancel_process_child", agenttext.Get("tools.workass_cancel_process_child"), mutationObject(map[string]any{
+			"work_id":    str(agenttext.Get("schema.process.work_id")),
+			"reason":     str(agenttext.Get("schema.process.reason")),
+			"machine_id": str(agenttext.Get("schema.process.machine_id")),
+		}, "work_id"), false, true, true, false),
 		tool("workass_list_spawned_work_receipts", agenttext.Get("tools.workass_list_spawned_work_receipts"), object(map[string]any{
 			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.09")),
 			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
@@ -413,6 +450,14 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "external.register"
 	case "workass_settle_external_work":
 		method = "external.settle"
+	case "workass_register_process_child":
+		method = "process.register"
+	case "workass_list_process_children":
+		method = "process.list"
+	case "workass_read_process_child":
+		method = "process.read"
+	case "workass_cancel_process_child":
+		method = "process.cancel"
 	case "workass_list_spawned_work_receipts":
 		method = "spawned_work.receipts"
 	case "workass_list_subagents":

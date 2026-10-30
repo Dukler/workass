@@ -27,8 +27,11 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// or forked) that are not subagents (user order).
 	// 2026-10-21: +1 workass_render_html, the agent publishing a page the chat
 	// renders inline (user-approved mock html-render, t3code's html_render).
-	if len(tools) != 41 {
-		t.Fatalf("tool count = %d, want 41", len(tools))
+	// 2026-10-30: +4 process-child tools (register, list, read, cancel), the
+	// record and control for `workass run` (fleet-runtime §13 P4). Starting one
+	// is a command, not a tool: the daemon never spawns work.
+	if len(tools) != 45 {
+		t.Fatalf("tool count = %d, want 45", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

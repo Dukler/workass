@@ -134,11 +134,17 @@ type Manager struct {
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
 	subagentLifecycle            func(SubagentLifecycleEvent)
 	subagentLifecycleMu          sync.RWMutex
-	harnessTurns                 *harnessTurnStore
-	spawnedWorkMu                sync.Mutex
-	spawnedWorkCommitMu          sync.Mutex
-	spawnedWork                  map[string]*spawnedWorkRecord
-	spawnedCandidates            map[string]spawnedWorkCandidate
+	// processLifecycle is the same contract for process children (P4): one
+	// observer, set after construction, absent on an install with no fleet
+	// logs — in which case a supervised child behaves exactly as pre-P4
+	// external work did.
+	processLifecycle    func(ProcessLifecycleEvent)
+	processLifecycleMu  sync.RWMutex
+	harnessTurns        *harnessTurnStore
+	spawnedWorkMu       sync.Mutex
+	spawnedWorkCommitMu sync.Mutex
+	spawnedWork         map[string]*spawnedWorkRecord
+	spawnedCandidates   map[string]spawnedWorkCandidate
 	// spawnedWorkSettled remembers recently evicted settled items, so a late
 	// event for a finished task (Claude Code sends task_updated, then
 	// task_notification) updates that item instead of minting a blank one.

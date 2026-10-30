@@ -571,3 +571,32 @@ func (r *providerChatRuntime) ReadBackground(tabID, chatID, id string, tailBytes
 	}
 	return r.manager.ReadSpawnedWork(tabID, chatID, id, tailBytes), nil
 }
+
+// backgroundOriginStamp is the immutable (lane, operation, turn) a new
+// background row is bound to, resolved exactly as RunBackgroundAction resolves
+// it for an outbox mutation.
+//
+// A process child needs this WITHOUT the outbox, because its registration must
+// stay repeatable: the supervisor calls it again when the job ends so the
+// outcome is delivered at once instead of one reconcile tick later, and an
+// outbox would answer the second call with the first one's cached receipt
+// rather than ingesting the spool. The idempotency the outbox provides is
+// already there by another route — the work id is derived from the operation
+// id, so a repeat resolves to the row that exists.
+func (r *providerChatRuntime) backgroundOriginStamp(tabID, chatID string) (laneID, operationID, turnID string, err error) {
+	_, state, err := r.exactActor(tabID, chatID)
+	if err != nil {
+		return "", "", "", err
+	}
+	if state.Foreground != nil {
+		return string(state.Foreground.LaneID), string(state.Foreground.OperationID), state.Foreground.Turn.NativeID, nil
+	}
+	for i := len(state.Ledger) - 1; i >= 0; i-- {
+		event := state.Ledger[i]
+		if event.LaneID == "" || event.OperationID == "" {
+			continue
+		}
+		return string(event.LaneID), string(event.OperationID), event.NativeTurnID, nil
+	}
+	return "", "", "", errors.New("new background work requires an actor-owned turn")
+}

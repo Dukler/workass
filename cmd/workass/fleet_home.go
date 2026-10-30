@@ -61,7 +61,13 @@ type fleetHome struct {
 	// it reached, which is how "the peer is not connected" is told from "sent"
 	// with no timeout anywhere.
 	push func(peerID, channel string, payload any) int
-	logf func(string, ...any)
+	// local delivers an event whose watcher is this daemon itself, in process,
+	// and reports the sequence the watcher reached. It is what makes the local
+	// path and the remote path ONE path (§2): a chat reads a job on its own
+	// machine through the same projection it reads one on another machine. It
+	// is nil until the watcher exists, which is the P2 daemon exactly.
+	local func(event fleetlog.Event, head uint64) uint64
+	logf  func(string, ...any)
 
 	mu sync.Mutex
 }
@@ -74,6 +80,15 @@ func newFleetHome(self string, logs *fleetlog.Store, monitors *fleetlog.Monitors
 		push = func(string, string, any) int { return 0 }
 	}
 	return &fleetHome{self: strings.TrimSpace(self), logs: logs, monitors: monitors, push: push, logf: logf}
+}
+
+// SetLocalDelivery installs the in-process delivery for self-homed watchers.
+// A setter because the watcher is built after the home: the home owns the logs
+// the watcher reads, so it cannot be constructed second.
+func (h *fleetHome) SetLocalDelivery(deliver func(fleetlog.Event, uint64) uint64) {
+	if h != nil {
+		h.local = deliver
+	}
 }
 
 func (h *fleetHome) ready() bool {
@@ -128,7 +143,18 @@ func (h *fleetHome) fanOut(event fleetlog.Event) {
 			continue
 		}
 		home := row.WatcherHome()
-		if home == "" || home == h.self {
+		if home == "" {
+			continue
+		}
+		if home == h.self {
+			// A watcher on this machine. Subagents register no self-homed
+			// monitor (their local delivery predates the log), so this reaches
+			// only the subsystems that opted in — process children, today.
+			if h.local != nil {
+				if applied := h.local(event, head); applied > 0 {
+					h.AckLocal(event.Entity, applied)
+				}
+			}
 			continue
 		}
 		if _, already := seen[home]; already {

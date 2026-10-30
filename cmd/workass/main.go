@@ -84,6 +84,13 @@ func main() {
 		}
 		return
 	}
+	// `workass run` is the supervisor (docs/specs/fleet-runtime.md §13 P4). It
+	// is dispatched here, before the daemon's own flags are parsed, because it
+	// is a different program wearing the same binary: it starts one child, and
+	// it must never fall through into starting a second daemon.
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		os.Exit(runProcessChildCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "fleet" {
 		if err := runFleetCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "workass fleet: %v\n", err)
@@ -94,7 +101,7 @@ func main() {
 	// Removed subcommands (including the former MCP stdio server) must not
 	// fall through Go's flag parser and accidentally start a second daemon.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		fmt.Fprintln(os.Stderr, "unknown Workass command; use tools list or fleet --help")
+		fmt.Fprintln(os.Stderr, "unknown Workass command; use tools list, run --help or fleet --help")
 		os.Exit(2)
 	}
 	prod := flag.Bool("prod", prodModeDefault(), "use production daemon defaults where applicable; on Windows this defaults --port 80 and --bind lan")

@@ -250,13 +250,23 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// manager the observer that turns a subagent's life into entity-log events
 	// (fleet-runtime §7). It reads nothing and decides nothing about a chat.
 	"SetSubagentLifecycleObserver": {},
-	"StartProviderDetection":       {},
-	"StartProviderStartup":         {},
-	"StartProviderUpdate":          {},
-	"StateDir":                     {},
-	"Stats":                        {},
-	"ToggleProvider":               {},
-	"UpdateWorkInProgress":         {},
+	// The same wiring setter for process children (fleet-runtime §13 P4).
+	"SetProcessLifecycleObserver": {},
+	// The three process-child reads: a machine's supervised jobs, the visible
+	// resource queue, and one job with a bounded output tail. None of them
+	// touches a chat actor — a process child's authority is the machine that
+	// holds its pids and its files, and the owning chat is fenced before any of
+	// them is called.
+	"ListProcessChildren":    {},
+	"ResourceQueues":         {},
+	"ReadProcessChild":       {},
+	"StartProviderDetection": {},
+	"StartProviderStartup":   {},
+	"StartProviderUpdate":    {},
+	"StateDir":               {},
+	"Stats":                  {},
+	"ToggleProvider":         {},
+	"UpdateWorkInProgress":   {},
 }
 
 type phaseCManagerRule struct {
@@ -326,6 +336,17 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/stateless_mcp.go:ServeHTTP:SubagentParent":                                                          {1, "an authenticated delegated agent resolves its exact parent chat"},
 		"cmd/workass/stateless_mcp.go:ServeHTTP:WithActorOwner":                                                          {1, "a delegated agent's tool call runs for its parent under a short-lived owner"},
 		"cmd/workass/provider_chat_control.go:SaveRuntimeControls:ProviderDefinition":                                    {1, "a runtime-control save must name a provider the registry can start"},
+		// A process child is registered by its own supervisor after the owning
+		// chat is fenced and the owner key authorized, and it is idempotent by a
+		// work id derived from the operation id — so it deliberately does NOT go
+		// through the actor outbox: a repeat must be accepted and must re-read
+		// the spool, which is how the supervisor's closing poke delivers an
+		// outcome at once (fleet-runtime §13 P4, §6).
+		"cmd/workass/agent_control.go:registerProcessChild:RegisterProcessChild": {1, "the supervisor's own registration, fenced and idempotent by the operation id"},
+		// A cancel is a wish written where the supervisor will see it. It
+		// settles nothing: if the supervisor never returns, the row becomes
+		// `lost` through the ordinary verdict, which is the honest answer.
+		"cmd/workass/agent_control.go:call:CancelProcessChild": {1, "a cancel is recorded for the supervisor and settles nothing itself"},
 	}
 }
 
@@ -959,6 +980,10 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		"workass_retry_subagent": {}, "workass_register_external_work": {}, "workass_settle_external_work": {},
 		"workass_cancel_subagent": {}, "workass_decide_subagent_permission": {}, "workass_ask_user_question": {},
 		"workass_create_fork_point": {}, "workass_fork_run": {}, "workass_cancel_fork_child": {}, "workass_retry_fork_child": {},
+		// P4: registering a supervised child creates a durable row, and
+		// cancelling one writes a stop file a supervisor acts on. Listing and
+		// reading are pure reads and carry no operation id.
+		"workass_register_process_child": {}, "workass_cancel_process_child": {},
 	}
 	browserMutations := map[string]struct{}{
 		"workass_browser_open": {}, "workass_browser_navigate": {}, "workass_browser_click": {},

@@ -354,6 +354,69 @@ chat. Live worker execution is not restart-durable: daemon replacement ends
 its managed processes and open waits. Actor state and bounded terminal receipts
 survive, but neither the worker nor a coordinator wait is automatically replayed.
 
+## Long jobs that outlive everything: `workass run`
+
+A subagent is an agent. A **process child** is an ordinary OS process — a
+training run, a build, a long sync — supervised by Workass's own binary and
+owned by a chat. Use it when the work is a command rather than a conversation,
+and especially when it must survive things an in-process child cannot: a daemon
+restart, a Workass self-update, and your own session ending.
+
+```sh
+workass run --label "retrain ranker" --resource gpu0   --max-runtime 6h --stale-after 40m   --inputs /data/shards,/data/labels.jsonl --min-free-disk 50G   --operation-id retrain-ranker-2026-10-30   -- python train.py --epochs 8
+```
+
+Nothing about that call polls, and nothing about it needs a watcher:
+
+- **Preflight refuses in seconds.** Declared inputs must exist and be
+  non-empty, symlink targets must resolve, the command must be on PATH, the
+  output directory must be writable and the disk floor met. A missing input is
+  a refusal before the job queues, not a crash in hour three. A refused run
+  creates no row.
+- **`--resource` is a FIFO queue, visible to anyone.** Waiters report their
+  position; the hold is tied to the supervisor process, so however the holder
+  dies the resource frees. `--max-hold` is reported, never enforced by a kill.
+- **The job runs in its own process group** (a `systemd --user` scope on Linux,
+  a Job object on Windows), so it is not a child of the daemon.
+- **Every transition is written to disk before it is reported**, so a daemon
+  that is restarting or updating itself misses nothing.
+- **`--operation-id` is one key for both sides.** The same id is the same job:
+  a repeat cannot create a second one.
+- **The chat is told only what is actionable**: settled, failed, `timed_out`,
+  `lost`, a declared stall once, and a decision. A queue position and a start
+  are visible by reading, which is when they matter. A job you cancelled never
+  notifies you.
+- **`--owner <global id>`** sends the outcome to a chat on another machine, so a
+  job on the box with the GPU reports into the chat that asked for it.
+
+Read and control it from any machine in the fleet:
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_list_process_children <<'JSON'
+{"machine_id":"m-91be04"}
+JSON
+
+"$WORKASS_TOOLS_COMMAND" tools call workass_read_process_child <<'JSON'
+{"work_id":"xw6f12aa...","tail_chars":4000,"after_seq":3}
+JSON
+```
+
+Reading never notifies anybody and never grows a log: the output is a file and
+you asked for a bounded tail of it. A finished job leaves the live list and its
+outcome lives in `workass_list_spawned_work_receipts`.
+`workass_cancel_process_child` writes the stop the supervisor acts on — a stop
+file, then SIGTERM to the whole group, then a kill after the grace — and the
+stop is applied even if it was issued while the machine was unreachable.
+
+A pid that is gone with no recorded outcome is **`lost`**, which means UNKNOWN,
+not dead: the work may still be running and nobody is left who could say. It is
+never reported as finished, and never as failed.
+
+`workass_register_external_work` is unchanged and still tracks a detached lane
+with no supervisor. It gets no preflight, no resource queue, no notice and no
+`lost` verdict, because nothing is watching it — which is the reason to prefer
+`workass run`.
+
 ## Forkable subsessions
 
 For many short, independent jobs that share one long prefix (a brief plus
