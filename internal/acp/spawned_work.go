@@ -255,6 +255,14 @@ type spawnedWorkRecord struct {
 	LastReportAt time.Time
 	// ReportedSilent keeps the silence notice one-shot.
 	ReportedSilent bool
+	// AwaitingFirstReport is set on a row THIS daemon wrote for a supervisor it
+	// started, and cleared by that supervisor's first report. While it is set,
+	// silence is measured against one beat rather than three, because a
+	// supervisor reports at startup and a minute of nothing is already news.
+	AwaitingFirstReport bool
+	// SupervisorLog is where that supervisor's own stream is being captured, so
+	// a notice about a job nothing has heard from can say where to look.
+	SupervisorLog string
 	// SupervisorMissingSince starts the grace before a vanished supervisor
 	// becomes `lost`. A grace, not an instant: a supervisor between fork and
 	// its own first write is briefly unprobeable on some hosts, and calling
@@ -480,7 +488,18 @@ func (m *Manager) providerForSpawnedWorkChat(tabID, chatID string) string {
 	return m.boundProviderForChatLocked(SessionOptions{TabID: tabID, ChatID: chatID})
 }
 
-func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, requestedChatID, requestedTabID string) (string, string, string, error) {
+// resolveExternalWorkOwner authenticates one registration and names the chat
+// and provider it belongs to.
+//
+// declaredProvider is the chat's DURABLE provider, supplied by the caller that
+// can read it, and it is consulted only when this manager holds no live session
+// binding for the chat. That case is not exotic: a supervised job's host chat
+// is a record holder, not a participant — nobody is running a turn in it — so
+// after a daemon restart `chatProviders` is empty for it and the registration
+// was refused "external work registration is unavailable for this Workass ACP
+// provider". Live, that refused every report four real jobs made. The binding
+// still wins when it exists, and an empty answer from both is still a refusal.
+func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, requestedChatID, requestedTabID, declaredProvider string) (string, string, string, error) {
 	if !m.ValidateAgentOwner(ownerKey, parentChatID, parentTabID) {
 		return "", "", "", errors.New("no running Workass turn owns this external work request")
 	}
@@ -500,6 +519,9 @@ func (m *Manager) resolveExternalWorkOwner(ownerKey, parentChatID, parentTabID, 
 		chatID, tabID = requestedChatID, requestedTabID
 	}
 	providerID := m.providerForSpawnedWorkChat(tabID, chatID)
+	if providerID == "" {
+		providerID = normalizeProviderID(declaredProvider)
+	}
 	if !m.acceptsExternalWorkProvider(providerID) {
 		return "", "", "", errors.New("external work registration is unavailable for this Workass ACP provider")
 	}
@@ -527,7 +549,7 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 		return nil, err
 	}
 	defer m.endWorkAdmission()
-	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID)
+	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +639,7 @@ func (m *Manager) RegisterExternalWork(opts ExternalWorkRegistrationOptions) (ma
 }
 
 func (m *Manager) SettleExternalWork(opts ExternalWorkSettleOptions) (map[string]any, error) {
-	tabID, chatID, _, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID)
+	tabID, chatID, _, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID, "")
 	if err != nil {
 		return nil, err
 	}

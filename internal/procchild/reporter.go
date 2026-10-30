@@ -80,7 +80,14 @@ const reportComplaintInterval = 5 * time.Minute
 // supported, and this is its other half: the caller saying what it heard.
 var daemonTooOldMarkers = []string{
 	"is not a known argument",
+	// The argument validator's own words for a value outside an enum. It is
+	// here because the first live run met exactly this and read it as "the
+	// daemon is unreachable": the report was being ANSWERED, instantly and
+	// identically, and thirty seconds of patient retrying was the wrong
+	// response to a sentence that will never change on its own.
+	"must be one of",
 	"without acknowledging any event",
+	"unknown workass tool",
 	"unknown tool",
 }
 
@@ -356,7 +363,7 @@ func (j *journal) noteFailure(err error) {
 	// be reached says so, keeps running, and keeps trying.
 	if tooOld {
 		fmt.Fprintf(j.diagnostics,
-			"workass run: NOT REPORTING — this machine's Workass daemon is older than the supervised-job reporting contract and refused this report (%s). The work continues and every event is queued in the outbox at %s; update the daemon on this machine and the backlog is delivered then.\n",
+			"workass run: NOT REPORTING — this machine's Workass daemon REFUSED the shape of this report (%s), so it is older than the supervised-job reporting contract or disagrees with this build about its arguments. The work continues and every event is queued in the outbox at %s; nothing retries a refusal, so the backlog is delivered when that daemon is fixed or updated.\n",
 			message, j.outbox.Path())
 		return
 	}
@@ -409,9 +416,20 @@ func (j *journal) settle() ReportingHealth {
 	deadline := started.Add(j.deadline)
 	refused := false
 	for {
-		j.flush()
+		// The queue is read BEFORE the send, not after. The terminal event has
+		// already been recorded and flushed by the caller, so an empty queue
+		// here means this outcome is delivered and there is nothing to say —
+		// and the extra report the old order sent was answered "unauthorized",
+		// because the one-shot credential is consumed by the very registration
+		// that accepted the outcome. A run that reported perfectly then wrote
+		// `reportError: unauthorized` into its own receipt, which is the same
+		// species of untruth as a silence.
 		pending, err := j.outbox.PendingCount(j.childID)
 		if err == nil && pending == 0 {
+			break
+		}
+		j.flush()
+		if pending, err = j.outbox.PendingCount(j.childID); err == nil && pending == 0 {
 			break
 		}
 		if !j.now().Before(deadline) {
@@ -444,7 +462,7 @@ func (j *journal) settle() ReportingHealth {
 		// nobody read.
 		if refused {
 			fmt.Fprintf(j.diagnostics,
-				"workass run: THIS OUTCOME WAS NOT REPORTED — this machine's Workass daemon refused the report (%s), so %d event(s) are queued in the outbox at %s. Nothing will deliver them until that daemon is updated.\n",
+				"workass run: THIS OUTCOME WAS NOT REPORTED — this machine's Workass daemon refused the report's shape (%s), so %d event(s) are queued in the outbox at %s. Nothing will deliver them until that daemon is fixed or updated.\n",
 				health.LastError, health.Pending, j.outbox.Path())
 		} else {
 			fmt.Fprintf(j.diagnostics,

@@ -43,26 +43,23 @@ func supervisorReport(
 	supervisorPID int, events []procchild.Event,
 ) map[string]any {
 	t.Helper()
-	batch := make([]any, 0, len(events))
-	for _, event := range events {
-		entry := map[string]any{
-			"seq": event.Seq, "kind": event.Kind,
-			"at": event.At.UTC().Format(time.RFC3339Nano),
-		}
-		if len(event.Payload) > 0 {
-			entry["payload"] = event.Payload
-		}
-		batch = append(batch, entry)
-	}
-	status, response := harness.request(t, http.MethodPost, map[string]any{
-		"name": "workass_register_process_child",
-		"arguments": map[string]any{
-			"operation_id": "op-" + workID, "work_id": workID, "label": label,
-			"owner": owner, "pid": supervisorPID, "command": "python train.py",
-			"output_file":  harness.manager.StateDir() + "/external-work/" + workID + ".output",
-			"heartbeat_ms": procchild.HeartbeatInterval.Milliseconds(),
-			"events":       batch,
+	// The SUPERVISOR's own payload, built by the supervisor's own constructor
+	// rather than by hand here. Hand-built arguments are why this test passed
+	// while the live run failed: it sent a payload the daemon accepts and the
+	// real `workass run` sent one the argument validator refused whole.
+	arguments := procchild.ReportArguments(procchild.Report{
+		Spec: procchild.Spec{
+			OperationID: "op-" + workID, Label: label, Owner: owner,
+			Command: []string{"python", "train.py"},
 		},
+		ChildID:       workID,
+		OutputFile:    harness.manager.StateDir() + "/external-work/" + workID + ".output",
+		SupervisorPID: supervisorPID,
+		Events:        events,
+		Heartbeat:     procchild.HeartbeatInterval,
+	})
+	status, response := harness.request(t, http.MethodPost, map[string]any{
+		"name": "workass_register_process_child", "arguments": arguments,
 	})
 	if status != http.StatusOK || response["error"] != nil {
 		t.Fatalf("report for %s status=%d response=%#v", workID, status, response)

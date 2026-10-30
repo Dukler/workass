@@ -133,12 +133,48 @@ func (d *daemonReporter) Report(request Report) (Acknowledgement, error) {
 	if d == nil {
 		return Acknowledgement{}, errors.New("this run has no Workass credential")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	defer cancel()
+	response, err := toolcli.Do(ctx, d.config, "", &toolcli.Call{
+		Name: "workass_register_process_child", Arguments: ReportArguments(request),
+	})
+	if err != nil {
+		return Acknowledgement{}, err
+	}
+	if strings.TrimSpace(response.Error) != "" {
+		return Acknowledgement{}, errors.New(response.Error)
+	}
+	fields, _ := response.Result.(map[string]any)
+	ack := Acknowledgement{ChildID: request.ChildID}
+	if value, ok := fields["workId"].(string); ok && strings.TrimSpace(value) != "" {
+		ack.ChildID = value
+	}
+	if value, ok := fields["status"].(string); ok {
+		ack.Status = value
+	}
+	ack.AckThrough = ackThroughOf(fields["ackThrough"])
+	// Whether the ack is sufficient is the journal's call, not this client's:
+	// one authority for "was this delivered", and it is the one that owns the
+	// queue (reporter.go).
+	return ack, nil
+}
+
+// ReportArguments is the exact wire shape of one report.
+//
+// Exported, and that is not incidental. The first live two-machine run failed
+// because every test built this payload BY HAND while the real supervisor
+// built a slightly different one — it stated `role: ""`, which the daemon's
+// own argument validator refuses against the work|service enum, so every
+// report of every job was rejected before it reached the registration while
+// the tests went on passing. One constructor, callable by the daemon's own
+// tests, is what makes "the supervisor's own payload is accepted" something a
+// test can assert at all.
+func ReportArguments(request Report) map[string]any {
 	spec := request.Spec
 	arguments := map[string]any{
 		"operation_id":  strings.TrimSpace(spec.OperationID),
 		"work_id":       request.ChildID,
 		"label":         spec.Label,
-		"role":          strings.TrimSpace(spec.Role),
 		"output_file":   request.OutputFile,
 		"done_file":     request.DoneFile,
 		"pid":           request.SupervisorPID,
@@ -146,6 +182,19 @@ func (d *daemonReporter) Report(request Report) (Acknowledgement, error) {
 		"isolation":     string(request.Group),
 		"command":       strings.Join(spec.Command, " "),
 		"events":        eventArguments(request.Events),
+	}
+	if role := strings.TrimSpace(spec.Role); role != "" {
+		// Stated only when it was declared, like every other optional
+		// declaration here — and this one is the bug that made the whole design
+		// moot in its first live run. `role` is an enum on the tool it calls
+		// (work | service), so `role: ""` is not "no role": it is a value
+		// outside the enum, and the daemon's own argument validator refused the
+		// WHOLE report with "arguments.role must be one of work, service".
+		// Four supervised jobs on another machine therefore ran to completion,
+		// queued every event correctly, and no chat was ever told — because
+		// every report any of them ever made was rejected before it reached the
+		// registration.
+		arguments["role"] = role
 	}
 	if resource := NormalizeResource(spec.Resource); resource != "" {
 		arguments["resource"] = resource
@@ -171,30 +220,7 @@ func (d *daemonReporter) Report(request Report) (Acknowledgement, error) {
 		// the job spent twenty minutes unable to say anything.
 		arguments["report_gap_ms"] = request.ReportGap.Milliseconds()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	response, err := toolcli.Do(ctx, d.config, "", &toolcli.Call{
-		Name: "workass_register_process_child", Arguments: arguments,
-	})
-	if err != nil {
-		return Acknowledgement{}, err
-	}
-	if strings.TrimSpace(response.Error) != "" {
-		return Acknowledgement{}, errors.New(response.Error)
-	}
-	fields, _ := response.Result.(map[string]any)
-	ack := Acknowledgement{ChildID: request.ChildID}
-	if value, ok := fields["workId"].(string); ok && strings.TrimSpace(value) != "" {
-		ack.ChildID = value
-	}
-	if value, ok := fields["status"].(string); ok {
-		ack.Status = value
-	}
-	ack.AckThrough = ackThroughOf(fields["ackThrough"])
-	// Whether the ack is sufficient is the journal's call, not this client's:
-	// one authority for "was this delivered", and it is the one that owns the
-	// queue (reporter.go).
-	return ack, nil
+	return arguments
 }
 
 // ackThroughOf reads the acknowledgement out of the daemon's answer, in

@@ -95,6 +95,28 @@ type ProcessChildRegistrationOptions struct {
 	OriginLaneID      string
 	OriginOperationID string
 	OriginTurnID      string
+
+	// ProviderID is the host chat's DURABLE provider, read by the caller that
+	// can read it. It is the fallback behind this manager's live session
+	// binding, which a record-holder chat with no running turn does not have
+	// (resolveExternalWorkOwner says what that cost).
+	ProviderID string
+	// SupervisorLog is where the supervisor's own stream — its diagnostics and
+	// its closing receipt — is being captured, set only when THIS daemon
+	// started the supervisor and therefore owns that file. It is what a notice
+	// about a silent job can point a reader at.
+	SupervisorLog string
+	// AwaitingFirstReport marks the registration this daemon writes for a
+	// supervisor IT started, before that supervisor has said anything.
+	//
+	// The row has to exist from the start: every way this product notices a
+	// job that cannot report — the silence notice, the `lost` verdict, the
+	// drain of a dead supervisor's outbox — hangs off a row, so a supervisor
+	// whose every report was refused produced no row, no notice and no trace.
+	// It also means the silence is measured against ONE beat rather than
+	// three: a supervisor reports at startup, so a minute of nothing from a
+	// process this daemon launched itself is already news.
+	AwaitingFirstReport bool
 }
 
 // RegisterProcessChild records one supervised child and applies the batch of
@@ -111,7 +133,7 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 		return nil, err
 	}
 	defer m.endWorkAdmission()
-	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID)
+	tabID, chatID, providerID, err := m.resolveExternalWorkOwner(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID, opts.ChatID, opts.TabID, opts.ProviderID)
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +176,21 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	now := time.Now().UTC()
 	supervisor := *opts.SupervisorPID
 	key := spawnedWorkKey(tabID, chatID, workID)
+	if opts.AwaitingFirstReport {
+		// The launch row loses every race it can lose. The daemon starts the
+		// supervisor and then writes the row, so a job that finishes in
+		// milliseconds may already have reported, been settled, and had its
+		// row compacted into a receipt before this call arrives — and creating
+		// a fresh `running` row then would resurrect a finished job, which
+		// would go silent in a minute and `lost` after that. A receipt for
+		// this work id is proof the launch has nothing left to record.
+		if _, settled := m.findSpawnedWorkReceipt(tabID, chatID, workID); settled {
+			return map[string]any{
+				"ok": true, "workId": workID, "taskId": workID, "status": "settled",
+				"created": false, "ackThrough": uint64(0),
+			}, nil
+		}
+	}
 	m.spawnedWorkMu.Lock()
 	rec := m.spawnedWork[key]
 	created := rec == nil
@@ -222,6 +259,19 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	// set for an EMPTY report too: a supervisor with nothing to say still said
 	// it, and that is the whole point of the heartbeat.
 	rec.LastReportAt = now
+	if opts.AwaitingFirstReport {
+		// Not a report at all: this daemon writing down the supervisor it has
+		// just launched. The clock starts here, and nothing is claimed to have
+		// been heard.
+		if created {
+			rec.AwaitingFirstReport = true
+		}
+		if log := strings.TrimSpace(opts.SupervisorLog); log != "" {
+			rec.SupervisorLog = log
+		}
+	} else {
+		rec.AwaitingFirstReport = false
+	}
 	if rec.Item.Reporting == processReportingSilent {
 		rec.Item.Reporting = ""
 		rec.ReportedSilent = false
@@ -600,6 +650,14 @@ func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now ti
 			threshold = declared
 		}
 	}
+	if rec.AwaitingFirstReport {
+		// One beat, not three. A supervisor reports as it starts, so for a
+		// process this daemon launched itself there is nothing to be patient
+		// about: a minute with no first report means the reports are not
+		// arriving, and the live failure this tightening exists for stayed
+		// invisible for the whole of four jobs.
+		threshold = procchild.HeartbeatInterval
+	}
 	silent := now.Sub(rec.LastReportAt)
 	if silent < threshold {
 		return
@@ -609,10 +667,38 @@ func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now ti
 	rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
 	*events = append(*events, m.processLifecycleLocked(rec, ProcessLifecycleEvent{
 		Kind: ProcessLifecycleAttention, AttentionKind: "not_reporting",
-		AttentionText: compactText(fmt.Sprintf(
-			"Not reporting: its supervisor (pid %d) is still running but this machine has heard nothing from it for %s, so its progress and its outcome are unknown until it reports again.",
-			supervisorPIDOf(rec), silent.Round(time.Second)), 400),
+		// Longer than the other two attentions on purpose: this one carries an
+		// absolute path a reader has to be able to open, and a notice whose
+		// action is truncated is a notice that costs more than it gives.
+		AttentionText: compactText(processSilenceText(rec, silent), maxSilenceNoticeText),
 	}))
+}
+
+// maxSilenceNoticeText bounds the silence notice. It is wider than the 400 the
+// stall and attention notices use because this one must still contain a usable
+// absolute path after the sentence that explains it.
+const maxSilenceNoticeText = 900
+
+// processSilenceText says which silence this is.
+//
+// A job that reported and went quiet and a job that has never said anything at
+// all are different news: the first is a supervisor that stopped answering,
+// the second is usually a supervisor that CANNOT answer — and in that case
+// this daemon started it, so it knows where the supervisor's own complaint was
+// written and says so instead of leaving a reader to find it.
+func processSilenceText(rec *spawnedWorkRecord, silent time.Duration) string {
+	if !rec.AwaitingFirstReport {
+		return fmt.Sprintf(
+			"Not reporting: its supervisor (pid %d) is still running but this machine has heard nothing from it for %s, so its progress and its outcome are unknown until it reports again.",
+			supervisorPIDOf(rec), silent.Round(time.Second))
+	}
+	text := fmt.Sprintf(
+		"Not reporting: this machine started its supervisor (pid %d) %s ago and has never heard from it, so this job's progress and its outcome are unknown here. The work may be running perfectly; nothing on this side can say.",
+		supervisorPIDOf(rec), silent.Round(time.Second))
+	if log := strings.TrimSpace(rec.SupervisorLog); log != "" {
+		text += fmt.Sprintf(" The supervisor's own diagnostics and receipt are at %s.", log)
+	}
+	return text
 }
 
 func supervisorPIDOf(rec *spawnedWorkRecord) int {

@@ -335,7 +335,10 @@ func TestADaemonOlderThanThisContractIsNamedAsSuchAndNotWaitedOutForTwoMinutes(t
 		// network for a version skew.
 		t.Fatalf("the complaint must name the version skew, got %q", complaint)
 	}
-	if !strings.Contains(complaint, "until that daemon is updated") {
+	if !strings.Contains(complaint, "until that daemon is fixed or updated") {
+		// Two actions, because there are two causes: a daemon older than the
+		// contract is updated, and one that disagrees with this build about the
+		// arguments is fixed. The live failure was the second kind.
 		t.Fatalf("the complaint must name the action, got %q", complaint)
 	}
 	if strings.Contains(complaint, "of trying") {

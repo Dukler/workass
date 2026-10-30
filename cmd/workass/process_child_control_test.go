@@ -163,8 +163,14 @@ func TestProcessChildRegistrationIsActorOwnedAndMonitoredFromTheInstantItExists(
 	listed := callProcessControl(t, handler, "process.list", map[string]any{
 		"owner_key": ownerKey, "parent_chat_id": chatID, "parent_tab_id": tabID,
 	})
-	children, _ := listed["children"].([]acp.ProcessChildView)
-	if len(children) != 1 || children[0].WorkID != childID || children[0].Resource != "gpu0" {
+	// One list, local rows and the chat's remote ones together, so the shape is
+	// []any rather than []ProcessChildView.
+	children := anySlice(listed["children"])
+	if len(children) != 1 {
+		t.Fatalf("process.list = %#v", listed)
+	}
+	first, _ := children[0].(acp.ProcessChildView)
+	if first.WorkID != childID || first.Resource != "gpu0" {
 		t.Fatalf("process.list = %#v", listed)
 	}
 	if fieldString(listed, "machine_id") != "m-local" {

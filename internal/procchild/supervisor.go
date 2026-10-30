@@ -583,13 +583,25 @@ func writeDoneFile(path string, exitCode int) {
 }
 
 func resolveOutputFile(spec Spec, childID string) (string, error) {
-	if explicit := strings.TrimSpace(spec.OutputFile); explicit != "" {
+	return OutputPath(spec.StateDir, childID, spec.OutputFile)
+}
+
+// OutputPath is where one job's combined output goes: the absolute path its
+// caller stated, or this machine's external-work default for the child id.
+//
+// Exported because the daemon needs the SAME answer. When it starts a
+// supervisor itself (cmd/workass/fleet_process_start.go) it registers the row
+// before the supervisor's first report arrives, and a row naming a different
+// output file than the one being written would be a reader sent to an empty
+// path. One authority for the question, so the two cannot disagree.
+func OutputPath(stateDir, childID, explicit string) (string, error) {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
 		if !filepath.IsAbs(explicit) {
 			return "", errors.New("--output-file must be an absolute path")
 		}
 		return filepath.Clean(explicit), nil
 	}
-	stateDir := strings.TrimSpace(spec.StateDir)
+	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
 		return "", errors.New("this machine has no Workass state directory, so there is nowhere to write the output")
 	}
@@ -605,4 +617,20 @@ func resolveOutputFile(spec Spec, childID string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
+}
+
+// SupervisorLogPath is where a daemon-started supervisor's OWN stream is kept:
+// its diagnostics and its closing JSON receipt, next to the job's output.
+//
+// It exists because of the one failure mode the design had no answer for. A
+// supervisor that cannot report says so on stderr and in its receipt — that is
+// the "never silent" rule — but `process.start` gave the process no stderr at
+// all, so the loudest sentence in the product went to /dev/null and a job
+// nobody was told about looked, from every side, like a job that reported.
+func SupervisorLogPath(outputFile string) string {
+	outputFile = strings.TrimSpace(outputFile)
+	if outputFile == "" {
+		return ""
+	}
+	return filepath.Clean(outputFile) + ".supervisor.log"
 }

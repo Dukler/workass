@@ -348,7 +348,8 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// through the actor outbox: a repeat must be accepted and must re-read
 		// the spool, which is how the supervisor's closing poke delivers an
 		// outcome at once (fleet-runtime §13 P4, §6).
-		"cmd/workass/agent_control.go:registerProcessChild:RegisterProcessChild": {1, "the supervisor's own registration, fenced and idempotent by the operation id"},
+		"cmd/workass/agent_control.go:registerProcessChildWith:RegisterProcessChild":    {1, "the supervisor's own registration, fenced and idempotent by the operation id"},
+		"cmd/workass/fleet_process_start.go:registerStartedProcessChild:WithActorOwner": {1, "the row for a supervisor THIS daemon launched, written in the host chat under a short-lived owner before the first report exists"},
 		// A cancel is a wish written where the supervisor will see it. It
 		// settles nothing: if the supervisor never returns, the row becomes
 		// `lost` through the ordinary verdict, which is the honest answer.
