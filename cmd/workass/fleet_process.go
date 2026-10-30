@@ -398,6 +398,9 @@ func intPointerPayload(value *int) any {
 	return *value
 }
 
+// remoteProcessListTimeout bounds asking one home for its rows.
+const remoteProcessListTimeout = 15 * time.Second
+
 // watchedRemoteProcessChildren lists the supervised jobs one chat owns on other
 // machines, by asking the homes it already holds monitors on.
 //
@@ -424,7 +427,12 @@ func (h *agentControlHandler) watchedRemoteProcessChildren(
 	unreachable := []any{}
 	for _, machine := range machines {
 		wanted := targets[machine]
-		answer, err := h.forwardRemoteAgentCall(ctx, "process.list", machine, params)
+		// Bounded per home. A read that was local before this must not be
+		// held open by one dark machine: the answer names it as unreachable
+		// and the rest of the list arrives.
+		askCtx, cancel := context.WithTimeout(ctx, remoteProcessListTimeout)
+		answer, err := h.forwardRemoteAgentCall(askCtx, "process.list", machine, params)
+		cancel()
 		if err != nil {
 			labels := make([]string, 0, len(wanted))
 			for _, label := range wanted {
