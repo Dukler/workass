@@ -53,17 +53,48 @@ Unit tests passed through all of these:
   rig the Mac always dialled the host.
 - **Real Claude or Codex as the owner's agent:** the owner turn was the mock.
 
-## Known and left as they are
+## Later correction: both items that were listed here
 
-- After an owner restart interrupts the parent turn, the transcript card for a child
-  still running can read "falló", and it is not corrected when the child succeeds. The
-  rail row and the notice are right.
-- Stopping the parent turn does not stop a remote child, as it does a local one. The
-  child runs to its end, its row settles (`case1c-parent-ended`) and, as for any child
-  of a stopped turn, no notice is sent.
+Same rig on 2026-10-30: dev daemon and real renderer on the Mac, scratch daemon on
+duklerver. Real Codex children, owner turn the mock. Host Codex this time was a
+0.165.0 copy inside `/data/workass-scratch`. Output is in `fix-baseline.log` (before)
+and `fix-final.log` (after), commands in `harness/fix/`, labels below are the logs'.
+
+The earlier line "stopping the parent turn does not stop a remote child, as it does
+a local one" was wrong about local. `fix-baseline.log` (`p2`) shows a local child's
+`sleep 45` running on through the parent's Stop and ending `PS-DONE`, exactly like the
+remote one. That is the law, PORT-SPEC §3.4c: a parent turn ending, cancelled included,
+never cancels a running child. So the remote child was not changed to die, and the
+two now match. What differed from the rows was the card, for both of them.
+
+| # | Case | Result | Evidence |
+|---|------|--------|----------|
+| B1 | Before: owner restart, child succeeds | Reproduced. Card `falló`, stored `failed`, after the end and after a reload. Row and notice right | `r2` in `fix-baseline.log`, `baseline-r2-*` |
+| B2 | Before: parent Stop, local and remote | Both run on, no notice, both cards `cancelado` until a reload | `p2`, `baseline-p2-*` |
+| F1 | Owner restart, child succeeds | PASS. Card `en curso` after the restart, `listo` at the end, 40s later, after a reload and after a second restart. Stored `completed`, one notice | `f5`, `fix1-*` |
+| F1b | A new turn is running when it ends | PASS. One card, on the turn that started it; stored `completed` | `f1b`, `fix1b-end` |
+| F1c | Child really fails after the restart | PASS. Card stays `falló`, stored `failed`, one notice with the error | `f6`, `fix1c-end` |
+| F2 | Parent Stop, local and remote side by side | PASS. Both processes still alive after Stop, both cards `en curso`, both `listo` at the end and 40s later with no reload, stored `completed`, no notice for either | `f4`, `fix2-*` |
+| F2b | Parent Stop, then owner restart, then the end | PASS. `listo`, stored `completed`, no notice | `f7`, `fix2b-end` |
+| F3 | Children end before the parent's Stop | PASS. Local and remote alike: one notice each | `f3`, `fix3-end` |
+
+Found only live: the first fix relied on the rail row, and the row leaves the client's
+list a moment after settling (the summary keeps running rows only). The card then fell
+back to `cancelado` with the stored value already right. A settled row now writes its
+end onto the loaded card.
+
+`ps` and `rs` in `fix-baseline.log` are from before the host Codex had its
+`codex-code-mode-host` helper: the commands failed, the model replied anyway, and those
+children prove nothing. `p2` onward had it.
+
+## Still not proven
+
+- A stale card written by an older build is not repaired unless its child ends after
+  this one is running.
+- Owner turn is still the mock, so neither a real Claude or Codex parent was stopped.
 
 ## Re-running
 
 `harness/remote-setup.sh` on duklerver, `harness/run-mac-daemon.sh` on the Mac, then
-`harness/rail-harness.cjs` under the pinned Electron. `case1to2.sh`, `case5.sh` and the
+`harness/rail-harness.cjs` under the pinned Electron; `harness/fix/session.sh SCRIPT` does the last two for one foreground command. `case1to2.sh`, `case5.sh` and the
 commands recorded in `run.log` drive the cases. Paths in the scripts are this Mac's.

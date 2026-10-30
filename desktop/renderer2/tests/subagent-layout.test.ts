@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ToolEvent } from '../src/store/types.ts';
-import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity, reconcileSubagentWork, canStopSpawnedWorkItem } from '../src/subagent-layout.ts';
+import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity, reconcileSubagentWork, canStopSpawnedWorkItem, settleSubagentCards, subagentCardsWithWork } from '../src/subagent-layout.ts';
 
 function tool(partial: Partial<ToolEvent> & Pick<ToolEvent, 'key' | 'title'>): ToolEvent {
   return {
@@ -184,4 +184,34 @@ test('a job on another machine waits as queued and names its machine', async () 
   assert.equal(job.status === 'running' && !!job.queuedAt && !(job as { execStartedAt?: string }).execStartedAt, true);
   assert.equal(canStopSpawnedWorkItem(job as never), true);
   assert.equal(workHostName(job), 'duklerver');
+});
+
+test('a child card reads what its row reads, whatever ended the turn that started it', () => {
+  const card = (status: string) => tool({ key: 'c', id: 'wa-1', title: 'remote child', status, subagentId: 'wa-1', subagentHeader: true });
+  const row = (status: string) => ({ id: 'wa-1', kind: 'subagent', status, startedAt: '2026-10-30T00:00:00Z' }) as never;
+  // A restart closed the card as failed; the child is still running on its host.
+  assert.equal(subagentCardsWithWork([card('failed')], [row('running')])[0].status, 'in_progress');
+  // And it succeeded.
+  assert.equal(subagentCardsWithWork([card('failed')], [row('exited')])[0].status, 'completed');
+  // A Stop closed the card; a child of a stopped turn runs on.
+  assert.equal(subagentCardsWithWork([card('cancelled')], [row('running')])[0].status, 'in_progress');
+  // A real failure stays one, and a card with no row keeps its own word.
+  assert.equal(subagentCardsWithWork([card('failed')], [row('failed')])[0].status, 'failed');
+  assert.equal(subagentCardsWithWork([card('failed')], [])[0].status, 'failed');
+});
+
+test('a child that ended leaves its end on the card, for when its row is gone', () => {
+  const card = tool({ key: 'c', id: 'wa-1', title: 'child', status: 'cancelled', subagentId: 'wa-1', subagentHeader: true });
+  const other = tool({ key: 'o', id: 'other', title: 'a plain call', status: 'failed' });
+  const message = { id: 'm', role: 'assistant', events: [card, other] } as never;
+  const row = (status: string) => ({ id: 'wa-1', kind: 'subagent', status, startedAt: '2026-10-30T00:00:00Z' }) as never;
+  const done = new Set<string>();
+  assert.deepEqual(settleSubagentCards([message], [row('running')], done), []);
+  assert.equal(card.status, 'cancelled');
+  assert.deepEqual(settleSubagentCards([message], [row('exited')], done), [message]);
+  assert.equal(card.status, 'completed');
+  assert.equal(other.status, 'failed');
+  // Already applied: the transcript is not walked again.
+  card.status = 'cancelled';
+  assert.deepEqual(settleSubagentCards([message], [row('exited')], done), []);
 });

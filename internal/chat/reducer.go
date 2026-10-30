@@ -194,6 +194,17 @@ type CancelPendingTurn struct{ OperationID provider.OperationID }
 
 func (CancelPendingTurn) chatCommand() {}
 
+// SettleSubagentCard corrects a subagent's card in the turn that started it, from
+// the child's own recorded end. It needs no provider lane: a child running on
+// another machine can outlive this daemon, and after a restart the turn it hangs
+// off has no attached lane left to carry an event, only its row in the ledger.
+type SettleSubagentCard struct {
+	OperationID provider.OperationID
+	Tool        provider.ToolEvent
+}
+
+func (SettleSubagentCard) chatCommand() {}
+
 type CancelFailed struct {
 	OperationID provider.OperationID
 	Kind        provider.ErrorKind
@@ -629,6 +640,8 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 		effects, err = reduceCancelTurn(&next, command)
 	case CancelPendingTurn:
 		effects, err = reduceCancelPendingTurn(&next, command)
+	case SettleSubagentCard:
+		err = reduceSettleSubagentCard(&next, command)
 	case RecordCancelReceipt:
 		err = reduceRecordCancelReceipt(&next, command)
 	case RecordAgentWaitObservation:
@@ -5059,6 +5072,60 @@ func settledSubagentToolEvent(state State, event provider.Event) bool {
 	}
 	foreground := state.Foreground
 	return foreground == nil || foreground.LaneID != event.Identity.LaneID || foreground.OperationID != event.Identity.OperationID
+}
+
+// SubagentCardStatus is what a child's card in one turn says now. A turn can span
+// several assistant rows, so every row of the operation is looked at; found is
+// false when that turn has no card for the child.
+func SubagentCardStatus(state State, operationID provider.OperationID, toolCallID string) (string, bool) {
+	key := "timeline:tool:" + strings.TrimSpace(toolCallID)
+	if foreground := state.Foreground; foreground != nil && foreground.OperationID == operationID {
+		if index := timelineIndex(foreground.Timeline, key); index >= 0 {
+			return foreground.Timeline[index].Tool.Status, true
+		}
+	}
+	for i := len(state.Ledger) - 1; i >= 0; i-- {
+		row := state.Ledger[i]
+		if row.Role != "assistant" || row.OperationID != operationID {
+			continue
+		}
+		if index := timelineIndex(row.Timeline, key); index >= 0 {
+			return row.Timeline[index].Tool.Status, true
+		}
+	}
+	return "", false
+}
+
+// reduceSettleSubagentCard only ever corrects a card that exists: a turn with no
+// card for this child is left as it is, and a replay changes nothing.
+func reduceSettleSubagentCard(state *State, command SettleSubagentCard) error {
+	operationID := provider.NormalizeOperationID(string(command.OperationID))
+	id := strings.TrimSpace(command.Tool.ToolCallID)
+	if operationID == "" || id == "" {
+		return errors.New("a subagent card needs its turn and its child")
+	}
+	key := "timeline:tool:" + id
+	tool := command.Tool
+	if foreground := state.Foreground; foreground != nil && foreground.OperationID == operationID && timelineIndex(foreground.Timeline, key) >= 0 {
+		// The foreground's own timeline, not a copy: an open turn owns it and this
+		// is the same in-place merge its tool updates get.
+		upsertToolTimeline(foreground, &tool, tool.EndedAtUnixMS)
+		return nil
+	}
+	for i := len(state.Ledger) - 1; i >= 0; i-- {
+		row := state.Ledger[i]
+		if row.Role != "assistant" || row.OperationID != operationID || timelineIndex(row.Timeline, key) < 0 {
+			continue
+		}
+		ledger := append([]LedgerEvent(nil), state.Ledger...)
+		holder := &ForegroundTurn{Timeline: cloneTimeline(row.Timeline), AssistantContent: row.Text}
+		upsertToolTimeline(holder, &tool, tool.EndedAtUnixMS)
+		row.Timeline = holder.Timeline
+		ledger[i] = row
+		state.Ledger = ledger
+		return nil
+	}
+	return nil
 }
 
 // upsertSettledSubagentTool updates the subagent row in the settled turn's

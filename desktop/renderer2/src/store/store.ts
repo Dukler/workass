@@ -66,6 +66,7 @@ import { localId, machineOf, tagId, tagPayload, untagFor } from '../wire/machine
 import { AGENT_CONTROL_CHANNEL, REMOTE_AGENT_CONTROL_METHODS } from '../wire/agentControl';
 import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
+import { settleSubagentCards } from '../subagent-layout';
 
 const APP = 'app';
 const PROC = 'proc';
@@ -7085,10 +7086,15 @@ export class Store {
   // `seq` orders this full list against batched summaries: a live event is the
   // newest thing known (a fresh sequence number); a list reply is as new as
   // the moment its read was issued.
+  private settledSubagentCards = new Set<string>();
   private onSpawnedWorkChanged(s: SpawnedWorkChanged, seq = ++this.spawnedWorkSeq) {
     if (!s || !s.tabId || !s.chatId || !Array.isArray(s.items)) return;
     const key = spawnedWorkChatKey(s.tabId, s.chatId);
     this.state.spawnedWorkByChat[key] = s.items;
+    const owner = this.chat(s.tabId);
+    if (owner?.chatId === s.chatId) {
+      for (const message of settleSubagentCards(owner.messages, s.items, this.settledSubagentCards)) this.bump('msg:' + message.id);
+    }
     this.spawnedWorkDetailSeq.set(key, Math.max(seq, this.spawnedWorkDetailSeq.get(key) ?? 0));
     // `obligation` is additive. An older daemon omits the key entirely, and
     // that reply must not erase a receipt hydrated from the actor. A present

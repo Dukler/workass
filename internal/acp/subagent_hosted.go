@@ -210,6 +210,21 @@ func (m *Manager) RegisterHostedSubagent(tabID, chatID string, row HostedSubagen
 	}
 }
 
+// HostedSubagentOriginOperation is the parent turn a hosted child's row hangs off,
+// which outlives this daemon where the job id does not.
+func (m *Manager) HostedSubagentOriginOperation(tabID, chatID, id string) string {
+	if m == nil {
+		return ""
+	}
+	m.spawnedWorkMu.Lock()
+	defer m.spawnedWorkMu.Unlock()
+	rec := m.spawnedWork[spawnedWorkKey(strings.TrimSpace(tabID), strings.TrimSpace(chatID), strings.TrimSpace(id))]
+	if rec == nil || !hostedWorkItem(rec.Item) {
+		return ""
+	}
+	return strings.TrimSpace(rec.Item.OriginOperationID)
+}
+
 // SettleHostedSubagent settles the asking chat's row from the receipt its
 // monitor delivered. It is the same settle the local path performs, driven by
 // the home's own record rather than by a run in this process.
@@ -224,11 +239,15 @@ func (m *Manager) SettleHostedSubagent(tabID, chatID string, receipt SubagentRec
 	if activity == "" {
 		phase, activity = "done", "Completed"
 	}
-	parentJobID := m.hostedParentJob(strings.TrimSpace(tabID), strings.TrimSpace(chatID), id)
+	// Only the turn that spawned it. After a restart that id is gone and the chat's
+	// running turn is somebody else's: this end would add a card there and leave the
+	// child's own one wrong. The daemon corrects that one from the row's origin.
+	parentJobID := ""
 	running := false
 	m.spawnedWorkMu.Lock()
 	if rec := m.spawnedWork[spawnedWorkKey(strings.TrimSpace(tabID), strings.TrimSpace(chatID), id)]; rec != nil {
 		running = rec.Item.Status == "running"
+		parentJobID = rec.HostedParentJobID
 	}
 	m.spawnedWorkMu.Unlock()
 	if running && parentJobID != "" {

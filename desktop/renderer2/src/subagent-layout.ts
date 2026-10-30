@@ -1,4 +1,4 @@
-import type { Chat, ToolEvent } from './store/types';
+import type { Chat, Msg, ToolEvent } from './store/types';
 import type { SpawnedWorkItem } from './wire/types';
 import { toolPresentation, type ToolPresentation } from './tool-names.ts';
 
@@ -48,11 +48,54 @@ export function subagentWorkId(item: SpawnedWorkItem): string {
 
 // Lifetime and metadata come from the durable record; calls remain attributed
 // by exact tool identity. This projection grants no control over native work.
-export function nodeForSpawnedWork(item: SpawnedWorkItem, node?: SubagentNode): SubagentNode {
-  const id = subagentWorkId(item);
-  const status = item.status === 'running' ? 'in_progress'
+function spawnedWorkToolStatus(item: SpawnedWorkItem): string {
+  return item.status === 'running' ? 'in_progress'
     : item.status === 'failed' || item.status === 'orphaned' ? 'failed'
     : item.status === 'stopped' || item.status === 'cancelled' ? 'cancelled' : 'completed';
+}
+
+// A child's card in the turn that started it reads what its row reads. Ending that
+// turn closes every open tool in it, the child's card too, but a Stop or a daemon
+// restart does not end the child: it stays running and the card must not say
+// "cancelado" or "falló" meanwhile, nor after it succeeds.
+export function subagentCardsWithWork(tools: ToolEvent[], items: readonly SpawnedWorkItem[]): ToolEvent[] {
+  if (!items.length) return tools;
+  const status = new Map(items.filter(isAgentWork).map((item) => [subagentWorkId(item), spawnedWorkToolStatus(item)]));
+  return tools.map((tool) => {
+    const current = status.get(tool.subagentId || tool.id || '');
+    return current && current !== tool.status ? { ...tool, status: current } : tool;
+  });
+}
+
+// When a child ends, its card in the loaded transcript takes that end for good. A
+// row can leave the client's list once it settles (the summary keeps only running
+// ones), and the card would fall back to whatever closed the turn. Returns the
+// messages it changed. `done` holds what was already applied, so a chat that keeps
+// receiving progress does not walk its transcript on every update.
+export function settleSubagentCards(messages: readonly Msg[], items: readonly SpawnedWorkItem[], done: Set<string>): Msg[] {
+  const settled = items.filter((item) => isAgentWork(item) && item.status !== 'running'
+    && !done.has(`${subagentWorkId(item)}:${item.status}`));
+  if (!settled.length) return [];
+  const status = new Map(settled.map((item) => [subagentWorkId(item), spawnedWorkToolStatus(item)]));
+  const changed = new Set<Msg>();
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    for (const event of message.events) {
+      if (event.kind !== 'tool' || !isSubagentHeader(event)) continue;
+      const current = status.get(event.subagentId || event.id || '');
+      if (current && current !== event.status) {
+        event.status = current;
+        changed.add(message);
+      }
+    }
+  }
+  for (const item of settled) done.add(`${subagentWorkId(item)}:${item.status}`);
+  return [...changed];
+}
+
+export function nodeForSpawnedWork(item: SpawnedWorkItem, node?: SubagentNode): SubagentNode {
+  const id = subagentWorkId(item);
+  const status = spawnedWorkToolStatus(item);
   const start = Date.parse(item.startedAt);
   const end = item.finishedAt ? Date.parse(item.finishedAt) : NaN;
   const header: ToolEvent = node?.header ?? {

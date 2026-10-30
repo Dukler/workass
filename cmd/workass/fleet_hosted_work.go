@@ -397,6 +397,7 @@ func (r *providerChatRuntime) settleHostedExit(row fleetlog.Registration, event 
 		return
 	}
 	receipt := subagentReceiptFromPayload(mapFromAnyMain(event.Payload["receipt"]))
+	receipt.OriginOperationID = strings.TrimSpace(row.OriginOperationID)
 	r.settleHostedSubagentRow(tabID, chatID, receipt)
 }
 
