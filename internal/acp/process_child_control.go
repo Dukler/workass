@@ -57,6 +57,20 @@ type ProcessChildView struct {
 	// has not finished acting on it yet. A cancel is a wish, so saying it is
 	// pending is more honest than reporting the job already stopped.
 	StopRequested bool `json:"stop_requested,omitempty"`
+	// Reporting is empty while the supervisor is reporting, and "silent" when
+	// its last report is older than three of its declared heartbeats while its
+	// pid is still alive. It is on the view because the operator's rule is
+	// that a job nothing has heard from must not READ as healthy — a row that
+	// looked fine while the reports were going nowhere is the failure this
+	// field exists to make visible.
+	Reporting string `json:"reporting,omitempty"`
+	// ReportGapMs is the longest stretch the supervisor said it could not
+	// reach this daemon. It outlives the outage, so a row that healed still
+	// shows that it happened.
+	ReportGapMs int64 `json:"report_gap_ms,omitempty"`
+	// HeartbeatMs is the cadence the supervisor declared, so a reader can see
+	// what silence was measured against.
+	HeartbeatMs int64 `json:"heartbeat_ms,omitempty"`
 }
 
 // ListProcessChildren reports every supervised child on this machine, newest
@@ -248,5 +262,6 @@ func processChildView(item SpawnedWorkItem) ProcessChildView {
 		Isolation: item.Isolation, Resource: item.Resource, QueuePosition: item.QueuePosition,
 		Stalled: item.Stalled, MaxRuntimeMs: item.MaxRuntimeMs,
 		StaleAfterMs: item.StaleAfterMs, MaxHoldMs: item.MaxHoldMs,
+		Reporting: item.Reporting, ReportGapMs: item.ReportGapMs, HeartbeatMs: item.HeartbeatMs,
 	}
 }
