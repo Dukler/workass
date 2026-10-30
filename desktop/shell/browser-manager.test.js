@@ -128,6 +128,7 @@ class FakeView {
 }
 
 class FakeBrowserWindow extends EventEmitter {
+  showInactive() { this.shownInactive = true; }
   constructor(options) {
     super();
     this.options = options;
@@ -2212,7 +2213,7 @@ test('a window.open popup of an agent-driven page is a window the person sees an
   // A sign-in popup (a second factor, a captcha, a passkey needs the person).
   const first = open('https://accounts.example/approve');
   assert.ok(first.window instanceof FakeBrowserWindow, 'shown in a window of its own');
-  assert.notEqual(first.window.options.show, false, 'that the person can see');
+  assert.equal(first.window.shownInactive, true, 'that the person can see, without taking their keyboard');
   assert.deepEqual([first.window.options.width, first.window.options.height], [980, 760], 'as on main');
   assert.equal(await first.tab.ready, true);
   assert.deepEqual([first.tab.viewport.width, first.tab.viewport.height], [980, 760], 'the page is the window\'s size');
