@@ -238,10 +238,11 @@ test('will-attach-webview allows only a blank page in the browser profile, witho
   assert.equal(hardenWebviewAttach({}, { partition: 'persist:workass-browser', src: 'https://example.com' }, { partition: 'persist:workass-browser' }).allow, false);
 });
 
-test('the browser host is webview by default on macOS, view on Windows, and either stays selectable', () => {
+test('the browser host is a native view by default on every platform, and the webview host stays selectable', () => {
   const files = new Map();
   const fs = { readFileSync: (file) => { if (!files.has(file)) throw new Error('ENOENT'); return files.get(file); } };
-  assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
+  // A <webview> guest shares the app window's focus: an agent's input there reaches the person's composer.
+  assert.deepEqual(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }), { host: 'view', source: 'default' });
   assert.equal(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }).host, 'view');
   assert.deepEqual(resolveBrowserHost({ env: { WORKASS_BROWSER_HOST: 'webview' }, platform: 'win32', dataRoot: '/d', fs }), { host: 'webview', source: 'env' });
   assert.equal(resolveBrowserHost({ env: {}, platform: 'linux', dataRoot: '/d', fs }).host, 'view');
@@ -252,7 +253,7 @@ test('the browser host is webview by default on macOS, view on Windows, and eith
   files.set('/d/shell-settings.json', JSON.stringify({ browserHost: 'webview' }));
   assert.deepEqual(resolveBrowserHost({ env: {}, platform: 'win32', dataRoot: '/d', fs }), { host: 'webview', source: 'settings' });
   files.set('/d/shell-settings.json', '{not json');
-  assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'webview');
+  assert.equal(resolveBrowserHost({ env: {}, platform: 'darwin', dataRoot: '/d', fs }).host, 'view');
 });
 
 test('a wait that joins a pending wait for the page gets its own full time', async () => {
