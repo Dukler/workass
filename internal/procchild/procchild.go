@@ -43,6 +43,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"workass/internal/durablefs"
 )
 
 // Root is the directory every process child's durable state lives under. It is
@@ -155,6 +157,25 @@ func NormalizeResource(value string) string {
 		return ""
 	}
 	return value
+}
+
+// RemoveDir deletes one child's directory once its outcome is durable
+// elsewhere.
+//
+// What is left in there is small — the stop file, if anybody cancelled — but
+// the directory itself is per job and forever, and a busy week of jobs leaving
+// thousands of empty directories behind is exactly the litter the spool's own
+// removal used to prevent. Called by the daemon, never by a supervisor: the
+// supervisor does not know whether anybody has read what it reported.
+func RemoveDir(stateDir, childID string) error {
+	dir := Dir(stateDir, childID)
+	if dir == "" {
+		return nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return durablefs.SyncDirectory(Root(stateDir))
 }
 
 // EnsureDir creates one child's directory with the owner-only mode every

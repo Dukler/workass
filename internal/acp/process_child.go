@@ -232,6 +232,15 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 
 	m.commitSpawnedWorkChange(tabID, chatID)
 	m.emitProcessChildLifecycle(lifecycle)
+	if item.Status != "running" {
+		// Retired here rather than only on the next reconcile tick, because a
+		// settled row is compacted out of the live registry once its chat actor
+		// has accepted it — so the tick may find nothing to clean up after, and
+		// every finished job would leave its directory behind forever. Only
+		// DELIVERED events go; anything unacknowledged is the only copy of
+		// something nobody has been told.
+		m.forgetProcessChildOutbox(workID)
+	}
 	return map[string]any{
 		"ok": true, "workId": workID, "taskId": workID, "status": item.Status,
 		"outcome": item.Outcome, "outputFile": outputFile, "doneFile": doneFile,
@@ -680,6 +689,10 @@ func (m *Manager) forgetProcessChildOutbox(workID string) {
 	if outbox := m.processOutbox(); outbox != nil {
 		_ = outbox.Forget(workID)
 	}
+	// And the child's own directory, which now holds only its stop file. One
+	// empty directory per job, kept forever, is the litter the spool's removal
+	// used to prevent.
+	_ = procchild.RemoveDir(m.opts.StateDir, workID)
 }
 
 // pruneProcessChildOutbox applies the retention window. It is the whole of
