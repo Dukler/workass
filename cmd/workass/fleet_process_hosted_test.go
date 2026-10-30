@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -550,8 +552,101 @@ func TestAHostedJobsCredentialReportsThatJobAndNothingElse(t *testing.T) {
 	if status != http.StatusOK || response["error"] != nil {
 		t.Fatalf("its closing report: status=%d %#v", status, response)
 	}
-	if status, _ := jobCredentialRequest(t, harness, http.MethodPost, token, "", "", report(nil)); status != http.StatusUnauthorized {
-		t.Fatalf("its credential outlived it: %d", status)
+	// Dead for everything but the answer to its own closing report, whose reply
+	// may have been lost. That answer changes nothing.
+	settled, _ := harness.manager.ProcessChildByID(workID)
+	status, response = jobCredentialRequest(t, harness, http.MethodPost, token, "", "", report([]procchild.Event{
+		{Seq: 2, At: now, Kind: procchild.KindSettled, Payload: map[string]any{"outcome": procchild.OutcomeSettled, "exitCode": 0}},
+		{Seq: 3, At: now, Kind: procchild.KindSettled, Payload: map[string]any{"outcome": procchild.OutcomeFailed, "exitCode": 1, "summary": "rewritten"}},
+	}))
+	if status != http.StatusOK || response["error"] != nil {
+		t.Fatalf("a retry of its closing report: status=%d %#v", status, response)
+	}
+	if answer := mapFromAnyMain(response["result"]); intField(answer, "ackThrough") != 3 || fieldString(answer, "status") != "exited" || answer["replayed"] != true {
+		t.Fatalf("the retry answered %#v", answer)
+	}
+	if after, _ := harness.manager.ProcessChildByID(workID); after.Outcome != settled.Outcome || after.Summary != settled.Summary || after.ExitCode == nil || *after.ExitCode != 0 {
+		t.Fatalf("a closed credential changed the job: %#v", after)
+	}
+	if status, _ := jobCredentialRequest(t, harness, http.MethodGet, token, "", "", nil); status != http.StatusUnauthorized {
+		t.Fatalf("its closed credential read the catalog: %d", status)
+	}
+	if status, _ := jobCredentialRequest(t, harness, http.MethodPost, token, "mcp-chat", "mcp-tab", report(nil)); status != http.StatusUnauthorized {
+		t.Fatalf("its closed credential acted for a chat: %d", status)
+	}
+	if status, _ := jobCredentialRequest(t, harness, http.MethodPost, token, "", "", map[string]any{
+		"name": "workass_list_chats", "arguments": map[string]any{},
+	}); status != http.StatusForbidden {
+		t.Fatalf("its closed credential reached another tool: %d", status)
+	}
+	forged := report(nil)
+	forgedArguments := copyAnyMap(mapFromAnyMain(forged["arguments"]))
+	forgedArguments["work_id"] = "xwotherjob001"
+	forged["arguments"] = forgedArguments
+	if _, response := jobCredentialRequest(t, harness, http.MethodPost, token, "", "", forged); response["error"] == nil {
+		t.Fatalf("its closed credential answered for another job: %#v", response)
+	}
+}
+
+// lossyReporter is the real daemon behind a link that drops the reply to one
+// closing report, after the daemon has applied it.
+type lossyReporter struct {
+	t       *testing.T
+	harness statelessMCPTestHarness
+	token   string
+	lost    atomic.Bool
+}
+
+func (r *lossyReporter) Report(request procchild.Report) (procchild.Acknowledgement, error) {
+	status, response := jobCredentialRequest(r.t, r.harness, http.MethodPost, r.token, "", "", map[string]any{
+		"name": "workass_register_process_child", "arguments": procchild.ReportArguments(request),
+	})
+	if status != http.StatusOK || response["error"] != nil {
+		return procchild.Acknowledgement{}, fmt.Errorf("status %d: %v", status, response["error"])
+	}
+	for _, event := range request.Events {
+		if event.Kind == procchild.KindSettled && r.lost.CompareAndSwap(false, true) {
+			return procchild.Acknowledgement{}, errors.New("connection reset before the reply")
+		}
+	}
+	answer := mapFromAnyMain(response["result"])
+	return procchild.Acknowledgement{
+		ChildID: request.ChildID, Status: fieldString(answer, "status"), AckThrough: uint64(intField(answer, "ackThrough")),
+	}, nil
+}
+
+// The whole supervisor against the real endpoint. Applied and told, so its last
+// line must not say otherwise.
+func TestALostReplyToAClosingReportIsStillAReportedOutcome(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	harness.handler.agentControl.selfMachineID = "m-home"
+	const operation, owner = "hosted-lost-reply", "wa:m-away/chat/some-chat"
+	workID, err := procchild.IDForOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter := &lossyReporter{t: t, harness: harness, token: harness.manager.MintRunToken(workID, owner, operation)}
+	var diagnostics bytes.Buffer
+	result, err := procchild.Run(procchild.Spec{
+		StateDir: harness.manager.StateDir(), OperationID: operation, Label: "lost reply", Owner: owner,
+		Command: []string{"/bin/sh", "-c", "exit 0"}, StopPoll: 5 * time.Millisecond, StalePoll: 5 * time.Millisecond,
+		Diagnostics: &diagnostics, Reporter: reporter,
+		ReportRetry: 5 * time.Millisecond, ReportDeadline: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reporter.lost.Load() {
+		t.Fatal("no reply was lost, so this proves nothing")
+	}
+	if !result.Reporting.Delivered || result.Reporting.Pending != 0 || result.Reporting.LastError != "" {
+		t.Fatalf("reporting = %#v; supervisor said %q", result.Reporting, diagnostics.String())
+	}
+	if strings.Contains(diagnostics.String(), "NOT REPORTED") {
+		t.Fatalf("the owner was told, and the supervisor said %q", diagnostics.String())
+	}
+	if row, ok := harness.manager.ProcessChildByID(workID); !ok || row.Outcome != procchild.OutcomeSettled {
+		t.Fatalf("row = %#v, %v", row, ok)
 	}
 }
 
@@ -601,6 +696,157 @@ func TestAJobStartedBeforeTheChangeKeepsReportingWithTheCredentialItHolds(t *tes
 	if err := harness.handler.agentControl.fenceRunCredential("chat.send", token, "mcp-tab", "mcp-chat",
 		map[string]any{"operation_id": operation}); err == nil {
 		t.Fatal("an older credential gained another method")
+	}
+
+	// Its closing report, and the retry of it after a lost reply.
+	closing := procchild.ReportArguments(procchild.Report{
+		Spec:    procchild.Spec{OperationID: operation, Label: "pre-update job", Owner: owner, Command: []string{"train"}},
+		ChildID: workID, OutputFile: filepath.Join(harness.manager.StateDir(), "external-work", workID+".output"),
+		SupervisorPID: os.Getpid(), Heartbeat: procchild.HeartbeatInterval,
+		Events: []procchild.Event{{Seq: 2, At: time.Now().UTC(), Kind: procchild.KindSettled, Payload: map[string]any{"outcome": procchild.OutcomeSettled, "exitCode": 0}}},
+	})
+	call := map[string]any{"name": "workass_register_process_child", "arguments": closing}
+	if status, response := jobCredentialRequest(t, harness, http.MethodPost, token, "mcp-chat", "mcp-tab", call); status != http.StatusOK || response["error"] != nil {
+		t.Fatalf("its closing report: status=%d %#v", status, response)
+	}
+	if status, response := jobCredentialRequest(t, harness, http.MethodPost, token, "mcp-chat", "mcp-tab", call); status != http.StatusOK ||
+		intField(mapFromAnyMain(response["result"]), "ackThrough") != 2 || mapFromAnyMain(response["result"])["replayed"] != true {
+		t.Fatalf("the retry of its closing report: status=%d %#v", status, response)
+	}
+	if harness.manager.ValidateAgentOwner(token, "mcp-chat", "mcp-tab") {
+		t.Fatal("a closed credential still authenticates as its chat")
+	}
+	if status, _ := jobCredentialRequest(t, harness, http.MethodPost, token, "", "", call); status != http.StatusUnauthorized {
+		t.Fatalf("a closed chat-bound credential answered without its chat: %d", status)
+	}
+}
+
+// A local `workass run` reports on its chat's own credential and its row lives in
+// that chat, so these are the surfaces that read the chat's actor. Driven by the
+// supervisor's own payload through the real endpoint.
+func TestALocalJobsWaitIsNotItsRunInEverySurfaceThatReadsTheChat(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	harness.handler.agentControl.selfMachineID = "m-home"
+	const tabID, chatID, ownerKey, operation = "mcp-tab", "mcp-chat", "mcp-owner", "local-queued-job"
+	workID, err := procchild.IDForOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := func(events ...procchild.Event) {
+		t.Helper()
+		status, response := jobCredentialRequest(t, harness, http.MethodPost, ownerKey, chatID, tabID, map[string]any{
+			"name": "workass_register_process_child", "arguments": procchild.ReportArguments(procchild.Report{
+				Spec:    procchild.Spec{OperationID: operation, Label: "local queued job", Resource: "gpu0", Command: []string{"train"}},
+				ChildID: workID, OutputFile: filepath.Join(harness.manager.StateDir(), "external-work", workID+".output"),
+				SupervisorPID: os.Getpid(), Heartbeat: procchild.HeartbeatInterval, Events: events,
+			}),
+		})
+		if status != http.StatusOK || response["error"] != nil {
+			t.Fatalf("report: status=%d %#v", status, response)
+		}
+		if err := harness.runtime.reconcileAgentBackground(tabID, chatID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed := func() map[string]any {
+		t.Helper()
+		rows, err := harness.runtime.ListSpawnedWorkForOwner(ownerKey, chatID, tabID, chatID, tabID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if fieldString(row, "id") == workID {
+				return row
+			}
+		}
+		t.Fatalf("the job is not listed: %#v", rows)
+		return nil
+	}
+	railRow := func() map[string]any {
+		t.Helper()
+		rows, err := harness.runtime.ListBackground(tabID, chatID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if fieldString(row, "id") == workID {
+				return row
+			}
+		}
+		t.Fatalf("the job has no rail row: %#v", rows)
+		return nil
+	}
+	queuedAt := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Millisecond)
+	report(
+		procchild.Event{Seq: 1, At: queuedAt, Kind: procchild.KindCreated},
+		procchild.Event{Seq: 2, At: queuedAt, Kind: procchild.KindQueued, Payload: map[string]any{"position": 2}},
+	)
+	queued := listed()
+	if fieldString(queued, "status") != "queued" || fieldString(queued, "queuedAt") != queuedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("a waiting job is listed as %#v", queued)
+	}
+	if _, present := queued["startedAt"]; present {
+		t.Fatalf("a waiting job has a start: %#v", queued)
+	}
+	if time.Duration(intField(queued, "queuedMs"))*time.Millisecond < 3*time.Hour {
+		t.Fatalf("queuedMs = %v", queued["queuedMs"])
+	}
+	// The frozen wire: an older renderer reads anything but running as finished.
+	rail := railRow()
+	if fieldString(rail, "status") != "running" || fieldString(rail, "startedAt") == "" || fieldString(rail, "queuedAt") == "" {
+		t.Fatalf("a waiting job's rail row is %#v", rail)
+	}
+	if _, present := rail["execStartedAt"]; present {
+		t.Fatalf("a waiting job's rail row says it started: %#v", rail)
+	}
+
+	startedAt := queuedAt.Add(2 * time.Hour)
+	report(procchild.Event{Seq: 3, At: startedAt, Kind: procchild.KindStarted, Payload: map[string]any{"pid": os.Getpid()}})
+	running := listed()
+	if fieldString(running, "status") != "running" || fieldString(running, "startedAt") != startedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("a started job is listed as %#v", running)
+	}
+	if intField(running, "queuedMs") != int((2 * time.Hour).Milliseconds()) {
+		t.Fatalf("queuedMs = %v, want exactly the wait", running["queuedMs"])
+	}
+	if fieldString(railRow(), "execStartedAt") != startedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("the rail row has no exec start: %#v", railRow())
+	}
+
+	const runMs = 1800000
+	report(procchild.Event{Seq: 4, At: startedAt.Add(30 * time.Minute), Kind: procchild.KindSettled, Payload: map[string]any{
+		"outcome": procchild.OutcomeSettled, "exitCode": 0, "elapsedMs": runMs,
+	}})
+	receipts, err := harness.runtime.ListSpawnedWorkReceipts(ownerKey, chatID, tabID, chatID, tabID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, receipt := range receipts {
+		if receipt.TaskID != workID {
+			continue
+		}
+		found = true
+		if receipt.ElapsedMs != runMs || receipt.RunMs != runMs || receipt.QueuedMs != (2*time.Hour).Milliseconds() {
+			t.Fatalf("receipt times: elapsed=%d run=%d queued=%d", receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs)
+		}
+		if receipt.StartedAt != startedAt.Format(time.RFC3339Nano) || receipt.QueuedAt != queuedAt.Format(time.RFC3339Nano) {
+			t.Fatalf("receipt stamps: started=%q queued=%q", receipt.StartedAt, receipt.QueuedAt)
+		}
+	}
+	if !found {
+		t.Fatalf("no receipt: %#v", receipts)
+	}
+	if got := intField(railRow(), "runMs"); got != runMs {
+		t.Fatalf("the rail's finished row has runMs %d", got)
+	}
+}
+
+// A row with no supervisor encodes exactly as it always has.
+func TestUnsupervisedWorkGainsNoQueueFields(t *testing.T) {
+	event := backgroundEvent(acp.SpawnedWorkItem{ID: "w", TaskID: "w", Kind: "bash", Status: "running", StartedAt: "2026-10-30T10:00:00Z"}, "w")
+	if event.QueuedAt != "" || event.ExecStartedAt != "" || event.RunMs != 0 {
+		t.Fatalf("an unsupervised row got %#v", event)
 	}
 }
 

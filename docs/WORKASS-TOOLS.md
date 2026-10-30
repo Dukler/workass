@@ -454,7 +454,9 @@ JSON
 
 Reading never notifies anybody and never grows a log: the output is a file and
 you asked for a bounded tail of it. A finished job leaves the live list and its
-outcome lives in `workass_list_spawned_work_receipts`.
+outcome lives in `workass_list_spawned_work_receipts`. A job waiting for its
+resource reads `queued`, with no start, on the live lists, and a receipt's run time
+and queue time are separate fields.
 `workass_cancel_process_child` writes the stop the supervisor acts on — a stop
 file, then SIGTERM to the whole group, then a kill after the grace — and the
 stop is applied even if it was issued while the machine was unreachable.

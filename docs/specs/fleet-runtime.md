@@ -817,6 +817,27 @@ still gets both numbers right, since its supervisor always measured from exec.
 its own. A supervisor keeps heartbeating while it waits, so a queued job is not
 `not reporting` either.
 
+The same split holds for a local `workass run` in the surfaces that read a chat's
+actor: `workass_list_spawned_work` and `workass_list_spawned_work_receipts` state
+the same facts in their own camelCase, and read `queued` the same way. The rail's
+wire is frozen and an older renderer reads any status but `running` as finished,
+so `spawned-work:list` keeps `status: "running"` and `startedAt` and adds
+`queuedAt`, `execStartedAt` and `runMs`. The renderer derives the word from those:
+the row says `en cola <wait>` in its elapsed slot with no running pulse, and a
+finished row's duration is its run alone. The sidebar's clock is how long the chat
+has been busy, not a run time, and still counts a wait.
+
+**A retried closing report is a success.** A job's credential used to be deleted
+the moment its job was terminal, so if the reply to the closing report was lost,
+the retry was refused `unauthorized` and the supervisor logged THIS OUTCOME WAS NOT
+REPORTED about a job whose owner had been told. It now closes instead, and answers
+for ten minutes, several times the two a supervisor keeps trying. A closed
+credential resolves to no chat and applies nothing: it can only hear its own job's
+final status, `replayed: true`, with the events it carried acknowledged. A local
+run reporting on the chat's own credential met the other half: its settled row may
+already be compacted, and the retry brought a finished job back and told its owner
+twice. A closing report with no row and a receipt now gets the same answer.
+
 **One operation id is one job, now actually.** A replayed start used to launch a
 second supervisor over the first one's id, output file and stop file. It now
 answers with the job that exists, `replayed: true`, and an id already owned by

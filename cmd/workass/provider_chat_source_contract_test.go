@@ -375,7 +375,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// operation id; consuming ends the grant with the single registration it
 		// authorized (fleet_process_start.go).
 		"cmd/workass/fleet_process_start.go:writeRunCredential:MintRunToken": {1, "one one-shot credential for one supervised job"},
-		"cmd/workass/agent_control.go:call:ConsumeRunToken":                  {1, "the job's credential ends the moment its job is terminal"},
+		"cmd/workass/agent_control.go:call:CloseRunToken":                    {1, "the job's credential ends the moment its job is terminal"},
 		"cmd/workass/agent_control.go:call:TouchRunToken":                    {1, "a reporting job keeps its credential; the ceiling is idleness, not age"},
 	}
 }

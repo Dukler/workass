@@ -178,21 +178,21 @@ func (m *Manager) ProcessChildByID(workID string) (ProcessChildView, bool) {
 	return ProcessChildView{}, false
 }
 
-// processStatusQueued is what a reader is told about a job whose command has not
+// ProcessStatusQueued is what a reader is told about a job whose command has not
 // started: it may be waiting for a resource, or in the moment before exec. It is
 // a word for readers only. The row's own Status stays the closed lifecycle every
 // surface reads, in which anything not "running" has ended.
-const processStatusQueued = "queued"
+const ProcessStatusQueued = "queued"
 
-// processTimes is one job's queue and run time, kept apart.
-type processTimes struct {
+// ProcessTimes is one job's queue and run time, kept apart.
+type ProcessTimes struct {
 	QueuedAt  string
 	StartedAt string
 	QueuedMs  int64
 	RunMs     int64
 }
 
-// processChildTimes separates a job's wait from its run. end is when it ended,
+// ProcessChildTimes separates a job's wait from its run. end is when it ended,
 // and zero while it has not.
 //
 // A row written before these fields existed has only StartedAt, which was when
@@ -200,8 +200,8 @@ type processTimes struct {
 // as having started once it holds a child pid. Such a job's supervisor still
 // reports its run time when it settles, so a job that straddles an update gets
 // the right numbers too.
-func processChildTimes(item SpawnedWorkItem, end time.Time) processTimes {
-	out := processTimes{QueuedAt: firstNonEmpty(strings.TrimSpace(item.QueuedAt), strings.TrimSpace(item.StartedAt))}
+func ProcessChildTimes(item SpawnedWorkItem, end time.Time) ProcessTimes {
+	out := ProcessTimes{QueuedAt: firstNonEmpty(strings.TrimSpace(item.QueuedAt), strings.TrimSpace(item.StartedAt))}
 	queued, _ := time.Parse(time.RFC3339Nano, out.QueuedAt)
 	exec, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(item.ExecStartedAt))
 	switch {

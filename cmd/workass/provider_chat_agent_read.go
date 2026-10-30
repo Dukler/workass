@@ -566,6 +566,7 @@ func actorBackgroundWorkItem(state chat.State, background chat.BackgroundState) 
 		Summary: acp.RedactSensitiveText(event.Summary), LastToolName: acp.RedactSensitiveText(event.LastToolName),
 		ModelLabel: acp.RedactSensitiveText(event.ModelLabel), ResultExcerpt: acp.RedactSensitiveText(event.ResultExcerpt),
 		ParentTaskID: event.ParentTaskID, Forked: event.Forked,
+		QueuedAt: event.QueuedAt, ExecStartedAt: event.ExecStartedAt, RunMs: event.RunMs,
 		OriginLaneID: string(background.Owner.LaneID), OriginOperationID: string(background.Owner.OperationID), OriginTurnID: background.Owner.TurnID,
 	}
 }
@@ -577,10 +578,32 @@ func actorSpawnedWorkRows(state chat.State) []map[string]any {
 		encoded, _ := json.Marshal(projection.item)
 		var row map[string]any
 		if json.Unmarshal(encoded, &row) == nil {
+			applySupervisedWorkTimes(row, projection.item)
 			rows = append(rows, row)
 		}
 	}
 	return rows
+}
+
+// applySupervisedWorkTimes gives a reader a supervised job's wait and run apart,
+// in the words workass_list_process_children uses: status is "queued" and
+// startedAt absent until its command starts.
+func applySupervisedWorkTimes(row map[string]any, item acp.SpawnedWorkItem) {
+	if item.QueuedAt == "" {
+		return
+	}
+	times := acp.ProcessChildTimes(item, parseSpawnedWorkTime(item.FinishedAt))
+	delete(row, "execStartedAt")
+	row["startedAt"] = times.StartedAt
+	if times.StartedAt == "" {
+		delete(row, "startedAt")
+		if item.Status == "running" {
+			row["status"] = acp.ProcessStatusQueued
+		}
+	}
+	if times.QueuedMs > 0 {
+		row["queuedMs"] = times.QueuedMs
+	}
 }
 
 func actorSpawnedWorkReceipts(state chat.State) []acp.SpawnedWorkReceipt {
@@ -597,13 +620,22 @@ func actorSpawnedWorkReceipts(state chat.State) []acp.SpawnedWorkReceipt {
 		if startErr == nil && finishErr == nil && !finished.Before(started) {
 			elapsed = finished.Sub(started).Milliseconds()
 		}
-		receipts = append(receipts, acp.SpawnedWorkReceipt{
+		receipt := acp.SpawnedWorkReceipt{
 			ReceiptID: "spawned-" + item.TaskID, TaskID: item.TaskID, ToolCallID: item.ToolCallID,
 			TabID: item.TabID, ChatID: item.ChatID, Kind: item.Kind, Label: item.Label, Role: item.Role,
 			Status: item.Status, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ElapsedMs: elapsed,
 			OutputFile: item.OutputFile, PID: cloneIntPointer(item.PID), ExitCode: cloneIntPointer(item.ExitCode),
 			Summary: item.Summary,
-		})
+		}
+		if item.QueuedAt != "" {
+			// As spawnedWorkReceiptFromItem reads it. A row settled before these
+			// fields existed has no QueuedAt and keeps its elapsed time, which
+			// includes the queue and is not called a run time.
+			times := acp.ProcessChildTimes(item, finished)
+			receipt.StartedAt, receipt.QueuedAt = times.StartedAt, times.QueuedAt
+			receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs = times.RunMs, times.RunMs, times.QueuedMs
+		}
+		receipts = append(receipts, receipt)
 	}
 	sort.SliceStable(receipts, func(i, j int) bool {
 		if receipts[i].FinishedAt == receipts[j].FinishedAt {

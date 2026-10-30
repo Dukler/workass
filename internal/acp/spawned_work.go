@@ -183,7 +183,7 @@ type SpawnedWorkItem struct {
 	// QueuedAt is when this job was asked for; ExecStartedAt is when its command
 	// actually started, absent until then. StartedAt stays when this row was
 	// first written, which every surface already sorts by. RunMs is the run time
-	// its supervisor measured from exec. processChildTimes reads the three.
+	// its supervisor measured from exec. ProcessChildTimes reads the three.
 	QueuedAt      string `json:"queuedAt,omitempty"`
 	ExecStartedAt string `json:"execStartedAt,omitempty"`
 	RunMs         int64  `json:"runMs,omitempty"`
@@ -2547,7 +2547,7 @@ func (m *Manager) spawnedWorkReceiptFromItem(item SpawnedWorkItem) SpawnedWorkRe
 		Outcome: item.Outcome,
 	}
 	if item.Supervised() {
-		times := processChildTimes(item, finished)
+		times := ProcessChildTimes(item, finished)
 		receipt.StartedAt, receipt.QueuedAt = times.StartedAt, times.QueuedAt
 		receipt.ElapsedMs, receipt.RunMs, receipt.QueuedMs = times.RunMs, times.RunMs, times.QueuedMs
 	}

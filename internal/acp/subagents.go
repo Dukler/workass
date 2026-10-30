@@ -128,8 +128,9 @@ func (m *Manager) ownerBinding(ownerKey, chatID, tabID string) (string, string, 
 		// authenticates as that chat — and ONLY for process.register, which is
 		// enforced at the single entry point that accepts it (agent_control.go).
 		// One bound to its job and owner resolves to nobody: it has no chat to
-		// be, so no chat-authorized path can ever accept it (run_tokens.go).
-		if run, isRun := m.runTokens[ownerKey]; isRun && !run.JobScoped() {
+		// be, so no chat-authorized path can ever accept it (run_tokens.go). Nor
+		// does one whose job has ended.
+		if run, isRun := m.runTokens[ownerKey]; isRun && !run.JobScoped() && !run.Closed() {
 			binding, ok = agentOwnerBinding{ChatID: run.ChatID, TabID: run.TabID}, true
 		}
 	}

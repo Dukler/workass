@@ -49,6 +49,12 @@ const runTokenPrefix = toolcli.RunCredentialPrefix
 // So the clock is "since last used", and a report is a use.
 const runTokenTTL = 24 * time.Hour
 
+// runTokenClosedGrace is how long a credential whose job has ended still answers
+// a retry of its closing report. It is several times the two minutes a finished
+// supervisor keeps trying (procchild.settleReportDeadline), so it outlasts every
+// retry, and it is short because nothing else is owed after that.
+const runTokenClosedGrace = 10 * time.Minute
+
 type runTokenRecord struct {
 	Token       string `json:"token"`
 	WorkID      string `json:"workId,omitempty"`
@@ -58,6 +64,10 @@ type runTokenRecord struct {
 	OperationID string `json:"operationId"`
 	IssuedAt    string `json:"issuedAt"`
 	LastUsedAt  string `json:"lastUsedAt,omitempty"`
+	ClosedAt    string `json:"closedAt,omitempty"`
+	// ClosedStatus and ClosedOutcome are what its closing report ended the job as.
+	ClosedStatus  string `json:"closedStatus,omitempty"`
+	ClosedOutcome string `json:"closedOutcome,omitempty"`
 }
 
 // RunTokenBinding is what one run credential authorizes.
@@ -73,6 +83,21 @@ type RunTokenBinding struct {
 	OperationID string
 	IssuedAt    time.Time
 	LastUsedAt  time.Time
+	// ClosedAt is when its job became terminal. From then on the credential
+	// authorizes nothing but the answer to a retry of its own closing report,
+	// whose reply may have been lost: CloseRunToken.
+	ClosedAt      time.Time
+	ClosedStatus  string
+	ClosedOutcome string
+}
+
+// Closed reports a credential whose job has ended.
+func (b RunTokenBinding) Closed() bool { return !b.ClosedAt.IsZero() }
+
+// closedGraceOver reports a closed credential past the last retry it could owe
+// an answer to.
+func (b RunTokenBinding) closedGraceOver(now time.Time) bool {
+	return b.Closed() && now.Sub(b.ClosedAt) > runTokenClosedGrace
 }
 
 // JobScoped reports a credential bound to a job and its owner rather than to a
@@ -136,6 +161,14 @@ func (m *Manager) loadRunTokens() {
 		if since := binding.idleSince(); !since.IsZero() && now.Sub(since) > runTokenTTL {
 			continue
 		}
+		if closed, err := time.Parse(time.RFC3339, record.ClosedAt); err == nil {
+			binding.ClosedAt = closed.UTC()
+			binding.ClosedStatus = strings.TrimSpace(record.ClosedStatus)
+			binding.ClosedOutcome = strings.TrimSpace(record.ClosedOutcome)
+		}
+		if binding.closedGraceOver(now) {
+			continue
+		}
 		m.runTokens[token] = binding
 	}
 }
@@ -150,7 +183,12 @@ func (m *Manager) persistRunTokensLocked() {
 	// every persist made the idle ceiling mean "24h since this machine last
 	// minted any token", which is not a bound on anything.
 	records := make([]runTokenRecord, 0, len(m.runTokens))
+	now := time.Now().UTC()
 	for token, binding := range m.runTokens {
+		if binding.closedGraceOver(now) {
+			delete(m.runTokens, token)
+			continue
+		}
 		record := runTokenRecord{
 			Token: token, WorkID: binding.WorkID, Owner: binding.Owner,
 			ChatID: binding.ChatID, TabID: binding.TabID,
@@ -159,6 +197,10 @@ func (m *Manager) persistRunTokensLocked() {
 		}
 		if !binding.LastUsedAt.IsZero() {
 			record.LastUsedAt = binding.LastUsedAt.UTC().Format(time.RFC3339)
+		}
+		if binding.Closed() {
+			record.ClosedAt = binding.ClosedAt.UTC().Format(time.RFC3339)
+			record.ClosedStatus, record.ClosedOutcome = binding.ClosedStatus, binding.ClosedOutcome
 		}
 		records = append(records, record)
 	}
@@ -203,7 +245,7 @@ func (m *Manager) MintRunToken(workID, owner, operationID string) string {
 		m.runTokens = map[string]RunTokenBinding{}
 	}
 	for token, binding := range m.runTokens {
-		if binding.OperationID == operationID && binding.WorkID == workID && binding.Owner == owner {
+		if binding.OperationID == operationID && binding.WorkID == workID && binding.Owner == owner && !binding.Closed() {
 			return token
 		}
 	}
@@ -230,24 +272,38 @@ func (m *Manager) RunTokenFor(token string) (RunTokenBinding, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	binding, ok := m.runTokens[token]
-	return binding, ok
+	if !ok || binding.closedGraceOver(time.Now().UTC()) {
+		return RunTokenBinding{}, false
+	}
+	return binding, true
 }
 
-// ConsumeRunToken ends a credential's life. It is called after the single
-// registration it authorized has been accepted, so a token that leaks from a
-// job's own file afterwards authorizes nothing.
-func (m *Manager) ConsumeRunToken(token string) {
+// CloseRunToken ends a credential's authority, once its job is terminal.
+//
+// The record stays for runTokenClosedGrace, because the report that closed it may
+// never have been answered: a supervisor whose reply was lost retries with this
+// same token, and deleting it answered "unauthorized" to a job whose owner had
+// been told, which it then logged as THIS OUTCOME WAS NOT REPORTED. While closed
+// the credential resolves to no chat and applies nothing. It can only be told
+// that its own job has already ended (agent_control.go).
+func (m *Manager) CloseRunToken(token, status, outcome string) bool {
 	token = strings.TrimSpace(token)
 	if m == nil || token == "" {
-		return
+		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.runTokens[token]; !ok {
-		return
+	binding, ok := m.runTokens[token]
+	if !ok {
+		return false
 	}
-	delete(m.runTokens, token)
-	m.persistRunTokensLocked()
+	if !binding.Closed() {
+		binding.ClosedAt = time.Now().UTC()
+		binding.ClosedStatus, binding.ClosedOutcome = strings.TrimSpace(status), strings.TrimSpace(outcome)
+		m.runTokens[token] = binding
+		m.persistRunTokensLocked()
+	}
+	return true
 }
 
 // TouchRunToken records that a supervised job's credential was just used.

@@ -143,3 +143,52 @@ test('an agent row folds its finished work; only running work hangs outside', as
   assert.ok(row.indexOf('label cmd-done') < close, 'finished commands fold with the row');
   assert.ok(row.indexOf('label shell-live') > close, 'running work stays visible outside the fold');
 });
+
+// A supervised job's wait is not its run (fleet-runtime 14e). The wire keeps
+// status 'running' for older renderers; the row reads the additive fields.
+test('a queued job says so and a finished one counts only its run', async (t) => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
+  t.after(async () => { store?.clearToastTimers(); await server.close(); });
+  const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
+    SpawnedWorkCard: React.ComponentType<{ chat: unknown }>;
+    SpawnedWorkLive: React.ComponentType<{ chat: unknown }>;
+  };
+  const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown>; clearToastTimers(): void } };
+  store = storeModule.store;
+  const chat = { id: 'tab-1', chatId: 'chat-1', messages: [] };
+  const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+  const base = { tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'external', updatedAt: at(0) };
+  const hour = 3600_000;
+  const seed = (items: unknown[]) => {
+    storeModule.store.state.hasSpawnedWorkChannels = false;
+    storeModule.store.state.spawnedWorkByChat = { ['tab-1\u0000chat-1']: items };
+  };
+
+  seed([{ ...base, id: 'waiting', taskId: 'waiting', label: 'waiting job', status: 'running', startedAt: at(3 * hour), queuedAt: at(3 * hour) }]);
+  const waiting = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
+  assert.match(waiting, /<span class="bgr-el">en cola 180m/);
+  assert.doesNotMatch(waiting, /r-pulse/);
+
+  seed([{ ...base, id: 'started', taskId: 'started', label: 'started job', status: 'running', startedAt: at(3 * hour), queuedAt: at(3 * hour), execStartedAt: at(hour) }]);
+  const started = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
+  assert.match(started, /<span class="bgr-el">60m/);
+  assert.doesNotMatch(started, /en cola/);
+  assert.match(started, /r-pulse/);
+
+  // An older daemon sends none of the fields and its row is what it always was.
+  seed([{ ...base, id: 'old', taskId: 'old', label: 'old job', status: 'running', startedAt: at(2 * hour) }]);
+  const old = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
+  assert.match(old, /<span class="bgr-el">120m/);
+  assert.match(old, /r-pulse/);
+
+  seed([
+    { ...base, id: 'ran', taskId: 'ran', label: 'ran job', status: 'exited', startedAt: at(5 * hour), finishedAt: at(0), queuedAt: at(5 * hour), execStartedAt: at(hour), runMs: hour },
+    { ...base, id: 'never', taskId: 'never', label: 'never ran', status: 'failed', startedAt: at(5 * hour), finishedAt: at(0), queuedAt: at(5 * hour) },
+  ]);
+  const finished = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkCard, { chat }));
+  assert.match(finished, /ran job<\/span><span class="r-dl">60m/);
+  assert.match(finished, /never ran<\/span>(?!<span class="r-dl">)/);
+  assert.doesNotMatch(finished, /300m/);
+});
