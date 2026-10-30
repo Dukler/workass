@@ -41,6 +41,17 @@ const HeartbeatInterval = time.Minute
 // not an incident.
 const SilenceThreshold = 3 * HeartbeatInterval
 
+// MaxReportBatch is how many events one report carries.
+//
+// It is the daemon's own ceiling (acp.MaxReportedEventsPerCall), and it is
+// stated here because the supervisor is the side that has to respect it: a
+// daemon that has been down for a day leaves a backlog of heartbeats larger
+// than one request may carry, the daemon refuses an oversized batch WHOLE —
+// the events are a sequence, and applying the readable half would advance the
+// cursor past something nobody looked at — and a supervisor that kept sending
+// the whole backlog would be refused forever. So a flush drains in batches.
+const MaxReportBatch = 512
+
 // reportRetryInterval is how often an unreachable daemon is retried. Much
 // faster than the heartbeat, because an unreachable daemon is usually a
 // restart measured in seconds and the job is waiting to be known about.
@@ -226,10 +237,24 @@ func (j *journal) flush() {
 	if j == nil || j.reporter == nil {
 		return
 	}
-	pending, err := j.outbox.Pending(j.childID, 0)
+	// Drains in batches, so a backlog of any size reaches the daemon in order
+	// rather than being refused for its size. It stops on the first failure:
+	// the next flush starts again from the head of the queue.
+	for {
+		more, retryNow := j.flushBatch()
+		if !retryNow || !more {
+			return
+		}
+	}
+}
+
+// flushBatch sends one batch and reports whether more are queued and whether
+// it is worth trying again now.
+func (j *journal) flushBatch() (bool, bool) {
+	pending, err := j.outbox.Pending(j.childID, MaxReportBatch)
 	if err != nil {
 		j.noteFailure(fmt.Errorf("the outbox could not be read: %w", err))
-		return
+		return false, false
 	}
 	j.mu.Lock()
 	gap := time.Duration(0)
@@ -245,7 +270,7 @@ func (j *journal) flush() {
 	ack, err := j.reporter.Report(request)
 	if err != nil {
 		j.noteFailure(err)
-		return
+		return false, false
 	}
 	if len(pending) > 0 && ack.AckThrough == 0 {
 		// A daemon that applied events must say how far it got. One that does
@@ -254,7 +279,7 @@ func (j *journal) flush() {
 		// something nobody has been told. Checked here rather than in the HTTP
 		// client so it holds whatever transport delivered the report.
 		j.noteFailure(errors.New("the daemon accepted the report without acknowledging any event; it is older than the supervised-job reporting contract and must be updated"))
-		return
+		return false, false
 	}
 	j.noteSuccess(ack)
 	if ack.AckThrough > 0 {
@@ -263,8 +288,13 @@ func (j *journal) flush() {
 			// it has it. The cost is one redelivery, which the daemon dedups by
 			// seq, so it is said once and not treated as a failure.
 			fmt.Fprintf(j.diagnostics, "workass run: the daemon acknowledged through %d but the outbox could not record it (%v); it will be re-sent and ignored there\n", ack.AckThrough, err)
+			// Without the mark, the next batch would be this one again.
+			return false, true
 		}
 	}
+	// A full batch means there may be another behind it. An empty one means
+	// this was a heartbeat-only report and there is nothing left to drain.
+	return len(pending) >= MaxReportBatch, true
 }
 
 // beat reports liveness on the declared cadence, and is also the retry: an
