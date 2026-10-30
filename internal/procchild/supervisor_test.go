@@ -591,7 +591,9 @@ func TestWaitingForAResourceIsNeitherAStallNorRunTime(t *testing.T) {
 	}
 	spec, reporter := fastSpec(t, state, "/bin/sh", "-c", "echo ran")
 	spec.Resource = "gpu0"
-	spec.StaleAfter = 10 * time.Millisecond
+	// Well inside the wait, so a stall clock running in the queue would fire, and
+	// wide enough that the command itself cannot trip it on a busy machine.
+	spec.StaleAfter = 250 * time.Millisecond
 	const wait = 700 * time.Millisecond
 	go func() {
 		time.Sleep(wait)
