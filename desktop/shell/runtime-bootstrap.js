@@ -341,7 +341,7 @@ async function ensurePackagedDaemon({
         child.once('error', reject);
       });
     }
-    if (!await wait(runtime.daemonURL, { check, expectedVersion: manifest.version, attempts: 480, timeoutMs: 120000 })) {
+    if (!await wait(runtime.daemonURL, { check, expectedVersion: manifest.version, attempts: 2400, delayMs: 50, timeoutMs: 120000 })) {
       throw new Error('bundled Workass daemon did not become healthy');
     }
   } catch (error) {

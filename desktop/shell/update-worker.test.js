@@ -9,6 +9,7 @@ const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const {
   atomicJSON,
+  cloneMutableState,
   daemonServiceIsDown,
   macDaemonPids,
   defaultOperations,
@@ -901,6 +902,29 @@ test('a macOS daemon that ignores its shutdown is signalled, and a job never is'
   });
   await ops.stopDaemonService();
   assert.deepEqual(signals, [[9123, 'SIGTERM'], [9123, 'SIGKILL']]);
+});
+
+test('the state clone leaves images out, keeps links, and falls back when /bin/cp cannot clone', () => {
+  const tx = transactionFixture();
+  const source = tx.mutableStateTarget;
+  fs.mkdirSync(path.join(source, 'images'), { recursive: true });
+  fs.mkdirSync(path.join(source, 'nested', 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'images', 'abc'), 'bytes');
+  fs.writeFileSync(path.join(source, 'nested', 'deep', 'file'), 'kept');
+  fs.writeFileSync(path.join(source, 'state.db'), 'db');
+  fs.symlinkSync('state.db', path.join(source, 'link'));
+  const check = (destination) => {
+    assert.equal(fs.existsSync(path.join(destination, 'images')), false);
+    assert.equal(fs.readFileSync(path.join(destination, 'nested', 'deep', 'file'), 'utf8'), 'kept');
+    assert.equal(fs.readFileSync(path.join(destination, 'state.db'), 'utf8'), 'db');
+    assert.equal(fs.readlinkSync(path.join(destination, 'link')), 'state.db');
+  };
+  const native = `${source}-native`;
+  cloneMutableState(source, native);
+  check(native);
+  const fallback = `${source}-fallback`;
+  cloneMutableState(source, fallback, { run: () => ({ status: 1 }) });
+  check(fallback);
 });
 
 test('the journal records when each step ended', async () => {
