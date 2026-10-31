@@ -98,8 +98,8 @@ func TestARemoteSubagentRowCarriesTheHostsLiveActivity(t *testing.T) {
 		"outcome": "cancelled", "noticeSuppressed": true,
 		"receipt": subagentReceiptPayload(acp.SubagentReceipt{SubagentID: "wa-subagent-9-1", Status: "cancelled", Label: "remote test"}),
 	}})
-	if ended := railRow(t, harness, "wa-subagent-9-1"); ended == nil || fieldString(ended, "status") == "running" {
-		t.Fatalf("a cancelled remote subagent stayed running: %#v", ended)
+	if ended := railRow(t, harness, "wa-subagent-9-1"); ended != nil {
+		t.Fatalf("a cancelled remote subagent stayed in the rail: %#v", ended)
 	}
 }
 

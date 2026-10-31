@@ -66,7 +66,7 @@ import { localId, machineOf, tagId, tagPayload, untagFor } from '../wire/machine
 import { AGENT_CONTROL_CHANNEL, REMOTE_AGENT_CONTROL_METHODS } from '../wire/agentControl';
 import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
-import { settleSubagentCards } from '../subagent-layout';
+import { isCancelledWork, settleSubagentCards } from '../subagent-layout';
 import { updateChainAfterCheck } from '../update-card';
 
 const APP = 'app';
@@ -7264,7 +7264,10 @@ export class Store {
   }
   spawnedWork(chat: Chat | null = this.active()): SpawnedWorkItem[] {
     if (!chat?.chatId) return [];
-    return this.state.spawnedWorkByChat[spawnedWorkChatKey(chat.id, chat.chatId)] ?? [];
+    // Filtered here as well as on the daemon: a machine on an older build still
+    // lists its cancelled rows, and they must not reach this client's rail.
+    return (this.state.spawnedWorkByChat[spawnedWorkChatKey(chat.id, chat.chatId)] ?? [])
+      .filter((item) => !isCancelledWork(item));
   }
   async readSpawnedWork(chat: Pick<Chat, 'id' | 'chatId'>, id: string, tailBytes = 12000): Promise<SpawnedWorkRead | undefined> {
     if (!chat.chatId || !id || !this.state.hasSpawnedWorkChannels) return undefined;

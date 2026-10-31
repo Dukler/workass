@@ -130,7 +130,8 @@ export function TareasCard() {
   const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
   const doneKidsOf = (n: SubagentNode) => n.work ? <SpawnedWorkDoneKids items={byParent.get(n.work.taskId)} nowMs={nowMs} calls={n.calls} /> : null;
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
-  const doneNodes = nodes.filter((n) => nodeState(n) !== 'running');
+  // A cancelled child leaves the rail; its card stays in the conversation.
+  const doneNodes = nodes.filter((n) => nodeState(n) !== 'running' && nodeState(n) !== 'cancelled');
   const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');
   const doneTools = mainTools.filter((t) => toolState(t.status) !== 'running');
   // The most recent main-thread call: the running one if any, else the last

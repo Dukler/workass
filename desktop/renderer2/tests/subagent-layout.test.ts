@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ToolEvent } from '../src/store/types.ts';
-import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity, reconcileSubagentWork, canStopSpawnedWorkItem, settleSubagentCards, subagentCardsWithWork } from '../src/subagent-layout.ts';
+import { extractSubagents, isSubagentHeader, isSubagentChild, subagentActivity, reconcileSubagentWork, canStopSpawnedWorkItem, settleSubagentCards, subagentCardsWithWork, isCancelledWork } from '../src/subagent-layout.ts';
 
 function tool(partial: Partial<ToolEvent> & Pick<ToolEvent, 'key' | 'title'>): ToolEvent {
   return {
@@ -214,4 +214,12 @@ test('a child that ended leaves its end on the card, for when its row is gone', 
   // Already applied: the transcript is not walked again.
   card.status = 'cancelled';
   assert.deepEqual(settleSubagentCards([message], [row('exited')], done), []);
+});
+
+test('cancelled work is told apart from work that ended any other way', () => {
+  assert.equal(isCancelledWork({ kind: 'external', outcome: 'cancelled' }), true);
+  assert.equal(isCancelledWork({ kind: 'subagent', lastToolName: 'cancelled' }), true);
+  assert.equal(isCancelledWork({ kind: 'subagent', outcome: 'failed', lastToolName: 'failed' }), false);
+  assert.equal(isCancelledWork({ kind: 'external', outcome: 'settled' }), false);
+  assert.equal(isCancelledWork({ kind: 'bash', lastToolName: 'cancelled' }), false);
 });

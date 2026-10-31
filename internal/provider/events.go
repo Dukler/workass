@@ -237,6 +237,9 @@ type BackgroundEvent struct {
 	// row this product has ever published encodes byte for byte as before.
 	HostMachine     string `json:",omitempty"`
 	HostMachineName string `json:",omitempty"`
+	// Outcome is the supervised or tracked work's verdict when it has one. Only
+	// "cancelled" is read here: that row leaves every rail read.
+	Outcome string `json:",omitempty"`
 	// QueuedAt, ExecStartedAt and RunMs keep a supervised job's wait apart from
 	// its run (fleet-runtime §14e). StartedAt stays when its row was first
 	// written. QueuedAt is set on every supervised job and on nothing else;

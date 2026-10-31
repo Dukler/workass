@@ -1292,6 +1292,9 @@ func (m *Manager) settleSubagentSpawnedWork(tabID, chatID string, run SubagentRu
 			rec.Item.ModelLabel = modelLabel
 			rec.Item.ResultExcerpt = excerpt
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
+			if run.Status == "cancelled" {
+				rec.Item.Outcome = procchild.OutcomeCancelled
+			}
 		}
 	}
 	m.spawnedWorkMu.Unlock()
@@ -1740,12 +1743,33 @@ func (m *Manager) commitSpawnedWorkChange(tabID, chatID string) {
 		return
 	}
 	m.touchSpawnedWorkBridgeActivity(tabID, chatID, time.Now())
-	payload := map[string]any{"tabId": tabID, "chatId": chatID, "items": projection.Items}
+	payload := map[string]any{"tabId": tabID, "chatId": chatID, "items": railSpawnedWorkItems(projection.Items)}
 	if projection.Obligation != nil {
 		payload["obligation"] = projection.Obligation
 	}
 	payload["actorRevision"] = projection.ActorRevision
 	m.emit("spawned-work:changed", payload)
+}
+
+// SpawnedWorkCancelled reports work someone cancelled. Such a row leaves the rail
+// the moment it settles, local or hosted; completed and failed rows stay. A
+// tracked subagent cancelled by an earlier build has no outcome but says so in its
+// phase, which is what its cancellation has always recorded.
+func SpawnedWorkCancelled(kind, outcome, lastToolName string) bool {
+	if strings.TrimSpace(outcome) == procchild.OutcomeCancelled {
+		return true
+	}
+	return kind == trackedSubagentSpawnedWorkKind && strings.TrimSpace(lastToolName) == "cancelled"
+}
+
+func railSpawnedWorkItems(items []SpawnedWorkItem) []SpawnedWorkItem {
+	out := make([]SpawnedWorkItem, 0, len(items))
+	for _, item := range items {
+		if !SpawnedWorkCancelled(item.Kind, item.Outcome, item.LastToolName) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 type SpawnedWorkActorProjection struct {
@@ -2097,6 +2121,7 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 		changed = m.settleSpawnedWorkLocked(rec, "exited", nil)
 		if changed {
 			rec.Item.Summary = summary
+			rec.Item.Outcome = procchild.OutcomeCancelled
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
 		}
 		item = rec.Item

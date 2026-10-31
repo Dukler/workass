@@ -396,6 +396,7 @@ func backgroundEvent(item acp.SpawnedWorkItem, workID string) providercontract.B
 		// Where it runs, for a child hosted on another fleet machine. Empty for
 		// every local row, which is what keeps the projection byte-identical.
 		HostMachine: item.HostMachine, HostMachineName: item.HostMachineName,
+		Outcome: item.Outcome,
 	}
 	if item.Supervised() || acp.IsHostedJob(item) {
 		times := acp.ProcessChildTimes(item, parseSpawnedWorkTime(item.FinishedAt))
@@ -448,7 +449,12 @@ func (r *providerChatRuntime) ListBackground(tabID, chatID string) ([]map[string
 		return nil, err
 	}
 	ids := make([]string, 0, len(state.Background))
-	for id := range state.Background {
+	for id, item := range state.Background {
+		// Cancelled work is not worth a row (operator, 2026-10-31). Its receipt
+		// stays readable through the tools.
+		if acp.SpawnedWorkCancelled(item.Event.Kind, item.Event.Outcome, item.Event.LastToolName) {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	sort.SliceStable(ids, func(i, j int) bool {

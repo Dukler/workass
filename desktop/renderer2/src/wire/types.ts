@@ -413,6 +413,7 @@ export interface SpawnedWorkItem {
   pid?: number;
   exitCode?: number;
   summary?: string;
+  outcome?: string;
   lastToolName?: string;
   modelLabel?: string;
   resultExcerpt?: string;

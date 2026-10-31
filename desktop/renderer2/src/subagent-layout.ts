@@ -48,6 +48,12 @@ export function subagentWorkId(item: SpawnedWorkItem): string {
 
 // Lifetime and metadata come from the durable record; calls remain attributed
 // by exact tool identity. This projection grants no control over native work.
+// Someone cancelled it, so the rail drops it (operator, 2026-10-31). A tracked
+// subagent cancelled by an older daemon says so only in its phase.
+export function isCancelledWork(item: Pick<SpawnedWorkItem, 'kind' | 'outcome' | 'lastToolName'>): boolean {
+  return item.outcome === 'cancelled' || (item.kind === 'subagent' && item.lastToolName === 'cancelled');
+}
+
 function spawnedWorkToolStatus(item: SpawnedWorkItem): string {
   return item.status === 'running' ? 'in_progress'
     : item.status === 'failed' || item.status === 'orphaned' ? 'failed'
