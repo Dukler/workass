@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -29,7 +32,7 @@ var updateVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 // both channels instead. The channel names, payloads and authorization text
 // are identical either way: a controller on another machine cannot tell, and
 // does not need to, which half of the fleet answers.
-func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, headless *headlessUpdateService, selfMachineID string, runningJobs func() []headlessupdate.RunningJob) {
+func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRouter, headless *headlessUpdateService, selfMachineID, stateDir string, runningJobs func() []headlessupdate.RunningJob) {
 	if hub == nil {
 		return
 	}
@@ -45,6 +48,13 @@ func registerAgentUpdateWireHandlers(hub *wire.Hub, renderer agentChatRemoteRout
 			return nil, errors.New("Workass updater status requires the local Electron renderer")
 		}
 		result, err := renderer.Call(context.Background(), "update.local.status", copyRemoteAgentRouteParams(params))
+		if errors.Is(err, errNoLocalRenderer) {
+			var jobs []headlessupdate.RunningJob
+			if runningJobs != nil {
+				jobs = runningJobs()
+			}
+			return daemonOnlyUpdateStatus(selfMachineID, stateDir, jobs), nil
+		}
 		if err == nil && runningJobs != nil {
 			result = annotateRunningJobs(result, runningJobs())
 		}
@@ -95,6 +105,68 @@ func validateAgentUpdateApply(params map[string]any, selfMachineID string) error
 		return errors.New("update authorization does not exactly match the machine and versions")
 	}
 	return nil
+}
+
+// daemonOnlyUpdateStatus answers update.status for a packaged machine whose app
+// is closed. The transactional updater lives in the Electron shell, so nothing
+// here can say what is available or start an update, and the answer says exactly
+// that. What the daemon does know is still worth having from another machine: the
+// version it runs, the jobs on it, and how the last update ended. Found live on a
+// Windows laptop running with no window: every status read for it was an error
+// that named a router, while the same read for a Linux peer worked.
+func daemonOnlyUpdateStatus(machineID, stateDir string, jobs []headlessupdate.RunningJob) map[string]any {
+	reason := "no Workass window is open on this machine, so its updater cannot be read and an update cannot start until the app is opened there"
+	diagnostics := map[string]any{
+		"schemaVersion": 1,
+		"state": map[string]any{
+			"phase": "unavailable", "currentVersion": daemonVersion, "supported": false, "error": reason,
+		},
+	}
+	if receipt := lastUpdateReceipt(stateDir); receipt != nil {
+		diagnostics["receipt"] = receipt
+	}
+	return map[string]any{
+		"machineId": machineID, "local": true, "daemonOnly": true, "updaterAvailable": false,
+		"currentVersion": daemonVersion, "reason": reason, "diagnostics": diagnostics,
+		"runningJobs": headlessupdate.DescribeRunningJobs(jobs),
+	}
+}
+
+// lastUpdateReceipt reads the shell's receipt from the data root, field by field,
+// because this answer crosses to another machine. Absent when there is none.
+func lastUpdateReceipt(stateDir string) map[string]any {
+	if strings.TrimSpace(stateDir) == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(stateDir), "updates", "receipt.json"))
+	if err != nil {
+		return nil
+	}
+	var fields map[string]any
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"updateId", "phase", "previousVersion", "targetVersion", "installedVersion", "activated", "rolledBack", "updatedAt"} {
+		if value, ok := fields[key]; ok {
+			out[key] = value
+		}
+	}
+	for _, key := range []string{"error", "rollbackError"} {
+		if value, ok := fields[key].(string); ok && value != "" {
+			out[key] = redactedSessionString(value)
+		}
+	}
+	return out
+}
+
+// updateStatusPeerRefusal names the machine when a peer too old to answer without
+// a window refuses: the router's own words read as a fault on the asking machine.
+func updateStatusPeerRefusal(machineID string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), errNoLocalRenderer.Error()) {
+		return err
+	}
+	return fmt.Errorf("machine %s is connected, but no Workass window is open there and its version cannot report update status without one: open the app there", machineID)
 }
 
 // annotateRunningJobs adds the machine's running jobs to a status the renderer

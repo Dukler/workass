@@ -461,6 +461,7 @@ func main() {
 		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
 	}
 	agentControl.headlessUpdates = headlessUpdates
+	agentControl.stateDir = stateDir
 	// P3: per-entity logs, cursor subscriptions and monitors. P2 let a command
 	// REACH another machine; this is what lets that machine report back — a
 	// subagent spawned from a chat here and hosted there settles INTO THIS CHAT,
@@ -469,7 +470,7 @@ func main() {
 	fleetMonitors := openFleetMonitors(stateDir, identity, hub, fleetMesh, acpManager, providerChats, agentControl, logger)
 	runningJobs := func() []headlessupdate.RunningJob { return runningJobsForUpdate(acpManager.RunningJobSurvival()) }
 	headlessUpdates.SetRunningJobs(runningJobs)
-	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID, runningJobs)
+	registerAgentUpdateWireHandlers(hub, rendererAgentRouter, headlessUpdates, identity.MachineID, stateDir, runningJobs)
 	// The scheduled-message loop lives for the daemon's lifetime and is joined
 	// first on shutdown, so no delivery races the actors' detach below.
 	var scheduledRun sync.WaitGroup

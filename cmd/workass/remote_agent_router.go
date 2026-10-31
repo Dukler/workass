@@ -23,6 +23,11 @@ const (
 	machineTaggedIDPrefix = fleetid.LegacyPrefix
 )
 
+// errNoLocalRenderer is the router's answer when no stamped Electron window is
+// connected to this daemon: the steady state of a packaged machine whose app is
+// closed. It is a fact about this machine, not a failure of the request.
+var errNoLocalRenderer = errors.New("Workass remote-chat MCP router has no local renderer")
+
 type agentChatRemoteRouter interface {
 	Call(context.Context, string, map[string]any) (any, error)
 }
@@ -93,7 +98,7 @@ func (r *rendererAgentRouter) Call(ctx context.Context, method string, params ma
 		"expiresAt": time.Now().Add(wait).UnixMilli(),
 	}
 	if delivered := r.broadcast(remoteAgentRouteRequestChannel, payload); delivered == 0 {
-		return nil, errors.New("Workass remote-chat MCP router has no local renderer")
+		return nil, errNoLocalRenderer
 	}
 	select {
 	case <-routeCtx.Done():

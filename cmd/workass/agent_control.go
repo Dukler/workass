@@ -12,6 +12,7 @@ import (
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
+	"workass/internal/headlessupdate"
 	"workass/internal/procchild"
 	providercontract "workass/internal/provider"
 )
@@ -28,6 +29,9 @@ type agentControlHandler struct {
 	// machine take the ordinary local path, so "machine" is a uniform argument
 	// rather than a switch between two different tools.
 	selfMachineID string
+	// stateDir is where a status answered with no renderer finds the last update
+	// receipt, one level up in the data root.
+	stateDir      string
 	forks         *acp.ForkService
 	validateOwner func(ownerKey, chatID, tabID string) bool
 	// fleetHome owns this machine's entity logs and the monitors it holds for
@@ -567,6 +571,16 @@ func (h *agentControlHandler) answerUpdateLocally(ctx context.Context, method st
 		return nil, errors.New("Workass updater MCP router has no local renderer")
 	}
 	result, err := h.remoteChats.Call(ctx, method, copyRemoteAgentRouteParams(params))
+	if method == "update.status" && errors.Is(err, errNoLocalRenderer) {
+		machineID := fieldString(params, "machine_id")
+		if machineID == strings.TrimSpace(h.selfMachineID) {
+			var jobs []headlessupdate.RunningJob
+			if h.manager != nil {
+				jobs = runningJobsForUpdate(h.manager.RunningJobSurvival())
+			}
+			return daemonOnlyUpdateStatus(machineID, h.stateDir, jobs), nil
+		}
+	}
 	if err == nil && method == "update.status" {
 		result = h.withRunningJobs(fieldString(params, "machine_id"), result)
 	}
@@ -607,6 +621,9 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	// chat, so the pair is deliberately absent from the forwarded params.
 	hostedSpawn := hostedSpawnIsForThisMachine(method, forwarded)
 	result, err := h.remoteChats.Call(ctx, method, forwarded)
+	if method == "update.status" {
+		err = updateStatusPeerRefusal(machineID, err)
+	}
 	if method == "process.start" {
 		err = processStartHostRefusal(machineID, err)
 	}
