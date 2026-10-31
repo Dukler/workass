@@ -64,6 +64,15 @@ func TestRuntimeBackgroundOwnerRequiresExactOrigin(t *testing.T) {
 	if actorSubagentRun(state, backgroundChild).ProviderID != "claude" || actorBackgroundWorkItem(state, backgroundChild).AssistantBrand != "Claude" {
 		t.Fatal("child projection borrowed parent provider")
 	}
+	stopped := backgroundChild
+	stopped.Event.Status, stopped.Event.Summary = "exited", "Cancelled"
+	if got := actorSubagentRun(state, stopped).Status; got != "cancelled" {
+		t.Fatalf("a stopped agent reads as %q", got)
+	}
+	stopped.Event.Summary = "Completed"
+	if got := actorSubagentRun(state, stopped).Status; got != "done" {
+		t.Fatalf("a finished agent reads as %q", got)
+	}
 	child.OriginTurnID = "wrong-turn"
 	if _, ok := exactBackgroundOwner(state, child); ok {
 		t.Fatal("cross-provider exemption bypassed exact turn ownership")
@@ -502,5 +511,19 @@ func TestClaudeAgentResumedBySendMessageCountsAsLiveWork(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the resumed agent is missing from the loaded list: %#v", rows)
+	}
+}
+
+func TestSubagentAttentionNoticeSaysWhoCanAnswer(t *testing.T) {
+	notice := acp.SubagentAttentionNotice{SubagentID: "child", Label: "lane", Title: "Bash", GrantableBy: "human"}
+	body := formatSubagentAttention(notice)
+	for _, want := range []string{"<task-id>child</task-id>", "<status>attention</status>", `Agent "lane"`, "Permission required: Bash", "Only the user"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("%q missing from %s", want, body)
+		}
+	}
+	notice.GrantableBy = "parent"
+	if body := formatSubagentAttention(notice); !strings.Contains(body, "workass_decide_subagent_permission") {
+		t.Fatalf("a parent-grantable wait does not name the tool: %s", body)
 	}
 }

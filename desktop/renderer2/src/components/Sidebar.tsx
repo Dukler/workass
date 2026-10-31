@@ -5,7 +5,7 @@ import { store, useApp, useSpawnedWork } from '../store/store';
 import { call, has } from '../wire/api';
 import { IcSearch, IcAssist, IcChats, IcPlus, IcActivity, IcGear, IcFolder, ModelIcon } from '../icons';
 import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
-import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
+import { nextUpdatePhase, brandForProvider, updateFailureTitle, updateFailureReason, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
 import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
@@ -592,7 +592,10 @@ export function FooterUpdateCards() {
             <div className="updcard upd-fail" key="fail">
               <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
               <span className="ubody">
-                <span className="ut">{cliFor(failedId)}: error{typeof app.updateProgress[failedId]?.exitCode === 'number' ? ` (exit ${app.updateProgress[failedId]!.exitCode})` : ''}</span>
+                <span className="ut">{updateFailureTitle(cliFor(failedId), app.updateProgress[failedId])}</span>
+                {updateFailureReason(app.updateProgress[failedId], app.providersUpdates.find((u) => u.providerId === failedId)) && (
+                  <span className="us us-warn">{updateFailureReason(app.updateProgress[failedId], app.providersUpdates.find((u) => u.providerId === failedId))}</span>
+                )}
                 {provUpdates.some((u) => u.providerId !== failedId) && (
                   <span className="us">Pendientes: {provUpdates.filter((u) => u.providerId !== failedId).map((u) => u.cli).join(' · ')}</span>
                 )}

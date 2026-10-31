@@ -843,6 +843,14 @@ class ClaudeSession {
         toolUseID: options.toolUseID,
       };
     }
+    // Full access means nobody is asked. The SDK still calls here for Claude Code's
+    // own safety checks, which ignore the mode; a card raised for one stopped a
+    // background agent on a click nobody knew was owed (66 minutes, 2026-10-31).
+    if (this.currentMode === 'bypassPermissions') {
+      const why = plainPermissionText(options.decisionReason);
+      process.stderr.write(`[workass] Full access allowed ${toolName}${why ? `: ${why}` : ''}\n`);
+      return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
+    }
     const title = String(options.title || options.displayName || toolName || 'Claude Code action');
     // Why Claude Code is asking. Without it the card read "Quiere ejecutar
     // Bash" even in a chat that allows everything, where the only asks left are

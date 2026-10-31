@@ -84,6 +84,10 @@ test('official Claude SDK host provides session, streaming, steering, and permis
   const fullAccess = await peer.waitFor((message) => message.id === 22);
   assert.equal(fullAccess.error, undefined);
   assert.equal(fullAccess.result.configOptions.find((option) => option.id === 'mode').currentValue, 'bypassPermissions');
+  peer.send({ jsonrpc: '2.0', id: 23, method: 'session/set_config_option', params: {
+    sessionId, configId: 'mode', value: 'default',
+  } });
+  await peer.waitFor((message) => message.id === 23);
 
   peer.send({ jsonrpc: '2.0', id: 20, method: 'session/set_config_option', params: {
     sessionId, configId: 'model', value: 'claude-haiku-fixture',
@@ -608,9 +612,33 @@ test('official Claude SDK host lets a permission outlive the plumbing timeout', 
   assert.equal(promptResult.result.stopReason, 'end_turn', JSON.stringify(promptResult));
 });
 
-// A safety check is the one ask a "Permitir todo" chat still shows. The card
-// needs Claude Code's reason, the tool and the asking subagent, and the model
-// must learn that a person said no, and why it was asked (user 2026-10-24).
+// Claude Code raises its safety checks whatever the mode. In Full access the host
+// answers them, because a card there stops an agent on a click nobody expects.
+test('official Claude SDK host never raises a card in Full access', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test', version: '1' } } });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/set_config_option', params: {
+    sessionId: opened.result.sessionId, configId: 'mode', value: 'bypassPermissions',
+  } });
+  await peer.waitFor((message) => message.id === 4);
+
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId: opened.result.sessionId,
+    prompt: [{ type: 'text', text: 'exercise permission' }],
+  } });
+  const answered = await peer.waitFor((message) => message.id === 3 || message.method === 'session/request_permission');
+  assert.equal(answered.method, undefined, 'a card was raised in Full access');
+  assert.equal(answered.result.stopReason, 'end_turn', JSON.stringify(answered));
+});
+
+// Outside Full access the card needs Claude Code's reason, the tool and the asking
+// subagent, and the model must learn that a person said no, and why it was asked
+// (user 2026-10-24).
 test('official Claude SDK host forwards why Claude Code asks and tells the model who refused', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));

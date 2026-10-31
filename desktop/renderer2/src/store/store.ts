@@ -67,6 +67,7 @@ import { AGENT_CONTROL_CHANNEL, REMOTE_AGENT_CONTROL_METHODS } from '../wire/age
 import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 import { settleSubagentCards } from '../subagent-layout';
+import { updateChainAfterCheck } from '../update-card';
 
 const APP = 'app';
 const PROC = 'proc';
@@ -7315,6 +7316,7 @@ export class Store {
     const disabled = new Set(this.state.providers.filter((provider) => provider.disabledByUser).map((provider) => provider.id));
     this.state.providersUpdates = e.updates.filter((update) => !disabled.has(update.providerId));
     this.state.providersCheckedAt = e.checkedAt;
+    if (!this.chainActive) this.state.updateChain = updateChainAfterCheck(this.state.updateChain, this.state.providersUpdates);
     // Drop a lingering terminal progress entry once its provider disappears from
     // the update list (a successful update makes updateAvailable:false ⇒ the entry
     // is dropped). Running/pending providers stay in the list, so their live
