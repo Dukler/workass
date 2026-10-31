@@ -22,6 +22,20 @@ let sdkPromise;
 
 const transientOAuthRefreshError = 'Failed to authenticate: OAuth session expired and could not be refreshed';
 
+// Neither side of this host bounds how long a prompt may run — correctly, a
+// real turn can think silently for minutes. But NOTHING bounds how long one
+// may wait for its FIRST sign of life either, and a provider stuck before it
+// ever authenticates (an expired credential whose refresh call hangs instead
+// of failing cleanly, a wedged subprocess) produces exactly zero SDK traffic:
+// no system/init, no partial text, not even a heartbeat-eligible turn start.
+// That silence is what stranded a hosted subagent at "Running delegated task"
+// for minutes until an operator cancelled it (live bug, dukler-laptop
+// 2026-10-31) even though a direct `claude -p` on the same machine printed a
+// clean failure in seconds. ANY message at all disarms this watchdog — it
+// exists only for total silence, never to race a provider that is working.
+const claudeFirstSignalTimeoutMs = Number(process.env.WORKASS_CLAUDE_FIRST_SIGNAL_TIMEOUT_MS) > 0
+  ? Number(process.env.WORKASS_CLAUDE_FIRST_SIGNAL_TIMEOUT_MS) : 60000;
+
 // Claude Code's own words for "nothing to say". It writes them as a synthetic
 // reply after a rate-limit stop or an interrupted turn, and the model copies
 // them when a background task wakes it up with nothing to add. Claude Code
@@ -948,6 +962,7 @@ class ClaudeSession {
       };
     });
     const active = this.activePrompt;
+    this.armNoSignalWatchdog(active);
     try {
       // Reserve the turn before the first await. JSON-RPC requests are handled
       // concurrently so a steer can arrive in the same event-loop window as
@@ -1099,9 +1114,31 @@ class ClaudeSession {
     ledger.clear();
   }
 
+  // Armed whenever a fresh subprocess attempt is awaiting its first SDK
+  // message; disarmed by that first message (handleMessage) or by settling.
+  // Never armed twice for the same attempt — a steer or the OAuth retry calls
+  // this again, which disarmTheDueTimer below makes safe to do unconditionally.
+  armNoSignalWatchdog(active) {
+    this.disarmNoSignalWatchdog(active);
+    active.noSignalTimer = setTimeout(() => {
+      if (this.activePrompt !== active) return;
+      this.settlePrompt(null, new Error(
+        `Claude Code produced no response at all within ${claudeFirstSignalTimeoutMs}ms of this prompt `
+        + '(the provider process may be stuck authenticating or otherwise wedged before it ever answered)',
+      ));
+    }, claudeFirstSignalTimeoutMs);
+    active.noSignalTimer.unref?.();
+  }
+
+  disarmNoSignalWatchdog(active) {
+    if (active?.noSignalTimer) clearTimeout(active.noSignalTimer);
+    if (active) active.noSignalTimer = null;
+  }
+
   settlePrompt(result, error) {
     const active = this.activePrompt;
     if (!active) return;
+    this.disarmNoSignalWatchdog(active);
     this.activePrompt = null;
     this.forgetPromptCommands(active);
     this.failOpenToolCalls('La herramienta murió con la consulta al proveedor antes de terminar.');
@@ -1232,6 +1269,11 @@ class ClaudeSession {
     this.partialThoughtSeen = false;
     this.retireQuery(query, true);
     process.stderr.write('Claude OAuth refresh retry: reopening the provider query once\n');
+    // The retry spawns a fresh subprocess attempt, which deserves its own
+    // silence budget: the first attempt's watchdog already did its job (it
+    // disarmed itself on the result that got us here, or it would have
+    // settled the prompt already and this function would never have run).
+    this.armNoSignalWatchdog(active);
     try {
       await this.ensureQuery();
       if (this.activePrompt !== active || this.closed) return;
@@ -1267,6 +1309,7 @@ class ClaudeSession {
     this.partialThoughtSeen = false;
     this.retireQuery(query, true);
     process.stderr.write('Claude steer landed before any answer: reopening the query to ask it again\n');
+    this.armNoSignalWatchdog(active);
     try {
       await this.ensureQuery();
       if (this.activePrompt !== active || this.closed) return;
@@ -1313,6 +1356,15 @@ class ClaudeSession {
     if (!message || typeof message !== 'object') return;
     // Any SDK traffic proves the provider stream is alive again.
     this.retryState = null;
+    // EXCEPT system/init: the real CLI (and the mock) emits it the instant the
+    // subprocess starts, before the pushed prompt is even taken off the input
+    // queue — it proves the process launched, not that THIS prompt is going
+    // anywhere. A credential whose refresh call hangs produces init and then
+    // nothing else, forever; disarming on init here would have made the
+    // watchdog permanently inert against exactly the hang it exists to catch.
+    if (!(message.type === 'system' && message.subtype === 'init')) {
+      this.disarmNoSignalWatchdog(this.activePrompt);
+    }
     const announced = typeof message.session_id === 'string' ? message.session_id.trim() : '';
     if (announced && announced !== this.providerSessionId) {
 	  const previousProviderSessionId = this.providerSessionId;
