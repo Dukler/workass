@@ -1,0 +1,1 @@
+(async(text)=>{const w=ms=>new Promise(r=>setTimeout(r,ms));const a=document.querySelector('.comp textarea');a.focus();Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(a,text);a.dispatchEvent(new Event('input',{bubbles:true}));await w(400);const b=[...document.querySelectorAll('.comp button')].pop();b.click();return b.className})
