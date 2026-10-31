@@ -1274,7 +1274,9 @@ function updateDiagnosticRecord(value, fields) {
     }
     if (typeof item === 'string') out[field] = redactUpdateDiagnosticText(item, 4096);
     else if (typeof item === 'number' || typeof item === 'boolean') out[field] = item;
-    else if (field === 'interruptedWork' || field === 'blockers') {
+    else if (field === 'timings') {
+      out[field] = updateDiagnosticRecord(item, Object.keys(item).slice(0, 40));
+    } else if (field === 'interruptedWork' || field === 'blockers') {
       out[field] = updateDiagnosticRecord(item, [
         'reason', 'foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions', 'daemonUnavailable',
       ]);
@@ -1925,7 +1927,7 @@ class UpdateManager {
         'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
         'createdAt', 'updatedAt', 'terminal', 'shellStopped', 'daemonStopped', 'incomingVerified',
         'mutableStateSnapshotted', 'activated', 'healthVerified', 'rollbackStarted', 'rolledBack',
-        'mutableStateRestored', 'error', 'rollbackError',
+        'mutableStateRestored', 'error', 'rollbackError', 'timings',
       ]),
       progressReceipt: updateDiagnosticRecord(progressReceipt, [
         'schemaVersion', 'updateId', 'phase', 'displayedPhase', 'windowVisible', 'updatedAt', 'error',

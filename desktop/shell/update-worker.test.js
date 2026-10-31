@@ -10,6 +10,7 @@ const test = require('node:test');
 const {
   atomicJSON,
   daemonServiceIsDown,
+  macDaemonPids,
   defaultOperations,
   launchUntilHealthy,
   mirrorWindowsDirectory,
@@ -585,7 +586,7 @@ test('daemon exit requires exact OS process or service evidence, never a silent 
   assert.equal(daemonServiceIsDown(mac, {
     run: (bin, args) => {
       assert.equal(bin, '/bin/ps');
-      assert.deepEqual(args, ['-axo', 'pid=,comm=']);
+      assert.deepEqual(args, ['-axww', '-o', 'pid=,args=']);
       return { status: 0, stdout: '  1 /sbin/launchd\n' };
     },
   }), true);
@@ -593,8 +594,19 @@ test('daemon exit requires exact OS process or service evidence, never a silent 
     run: () => ({ status: 0, stdout: `  1 /sbin/launchd\n9123 ${executable}\n` }),
   }), false);
   assert.equal(daemonServiceIsDown(mac, {
+    run: () => ({ status: 0, stdout: `9123 ${executable} --prod --headless --port 8788\n` }),
+  }), false);
+  assert.equal(daemonServiceIsDown(mac, {
     run: () => ({ status: 0, stdout: `9123 ${executable}-other\n` }),
   }), true);
+  // 2026-10-31: one running job made every update roll back after waiting for a
+  // "daemon" that was never going to stop. Jobs survive an update on purpose.
+  assert.equal(daemonServiceIsDown(mac, {
+    run: () => ({ status: 0, stdout: `15203 ${executable} run --label Mirror -- /bin/sh -c x\n8123 ${executable} tools call y\n` }),
+  }), true);
+  assert.deepEqual(macDaemonPids(mac, {
+    run: () => ({ status: 0, stdout: `15203 ${executable} run --label x\n9123 ${executable} --prod --headless\n` }),
+  }), [9123]);
   for (const result of [{ status: 1 }, { status: 0, stdout: '' }, { status: 0, stdout: 'malformed' }, { status: 0, error: new Error('failed') }]) {
     assert.equal(daemonServiceIsDown(mac, { run: () => result }), false);
   }
@@ -841,6 +853,64 @@ test('a completed mutable-state snapshot is reconciled when its checkpoint was l
   assert.equal(receipt.phase, 'healthy');
   assert.equal(snapshotReconciliations, 1);
   assert.equal(fs.readFileSync(path.join(tx.mutableStateBackupTarget, 'state', 'provider-lanes.json'), 'utf8'), '{"v":1}\n');
+});
+
+test('images stay out of the snapshot and a rollback gets every one of them back', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(path.join(tx.mutableStateTarget, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'images', 'abc'), 'bytes');
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'state.db'), 'before');
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker, daemonServiceIsDown: () => true });
+  await disk.snapshotMutableState();
+  assert.equal(fs.existsSync(path.join(tx.mutableStateBackupTarget, 'state', 'images')), false);
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateBackupTarget, 'state', 'state.db'), 'utf8'), 'before');
+  // The new release changes the database and adds an image, then fails.
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'state.db'), 'after');
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'images', 'def'), 'new');
+  await disk.restoreMutableState();
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateTarget, 'state.db'), 'utf8'), 'before');
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateTarget, 'images', 'abc'), 'utf8'), 'bytes');
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateTarget, 'images', 'def'), 'utf8'), 'new');
+  assert.equal(fs.existsSync(path.join(tx.failedMutableStateTarget, 'images')), false, 'nothing a cleanup could delete');
+});
+
+test('a worker that crashed between the renames of a restore still returns the images', async () => {
+  const tx = transactionFixture();
+  fs.mkdirSync(path.join(tx.mutableStateTarget, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(tx.mutableStateTarget, 'images', 'abc'), 'bytes');
+  const disk = defaultOperations(tx, { verifyMacTree: verifyReleaseMarker, daemonServiceIsDown: () => true });
+  await disk.snapshotMutableState();
+  // The state is set aside and the snapshot back in place, images not yet moved.
+  fs.renameSync(tx.mutableStateTarget, tx.failedMutableStateTarget);
+  fs.renameSync(path.join(tx.mutableStateBackupTarget, 'state'), tx.mutableStateTarget);
+  await disk.restoreMutableState();
+  assert.equal(fs.readFileSync(path.join(tx.mutableStateTarget, 'images', 'abc'), 'utf8'), 'bytes');
+});
+
+test('a macOS daemon that ignores its shutdown is signalled, and a job never is', async () => {
+  const tx = transactionFixture();
+  const signals = [];
+  let alive = true;
+  const ops = defaultOperations(tx, {
+    verifyMacTree: verifyReleaseMarker,
+    requestDaemonShutdown: async () => {},
+    daemonServiceIsDown: () => !alive,
+    macDaemonPids: () => (alive ? [9123] : []),
+    signalProcess: (pid, name) => { signals.push([pid, name]); if (name === 'SIGKILL') alive = false; },
+    waitUntil: async (check) => check(),
+  });
+  await ops.stopDaemonService();
+  assert.deepEqual(signals, [[9123, 'SIGTERM'], [9123, 'SIGKILL']]);
+});
+
+test('the journal records when each step ended', async () => {
+  const tx = transactionFixture();
+  const receipt = await runTransaction(tx, operations());
+  assert.equal(receipt.phase, 'healthy');
+  const journal = JSON.parse(fs.readFileSync(tx.journalPath, 'utf8'));
+  for (const step of ['shell_stopped', 'daemon_stopped', 'state_snapshotted', 'activated', 'health_verified', 'healthy']) {
+    assert.ok(journal.timings[step], step);
+  }
 });
 
 test('the mutable-state snapshot is never copied while the daemon can write', async () => {

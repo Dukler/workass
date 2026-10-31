@@ -32,6 +32,10 @@ const RECEIPT_SCHEMA_VERSION = 2;
 const JOURNAL_SCHEMA_VERSION = 1;
 const LEASE_SCHEMA_VERSION = 1;
 const WINDOWS_BACKUP_RECEIPT = 'installed-before-activation.complete.json';
+// Content-addressed and never rewritten, so a rollback gets the same files back
+// by moving them instead of paying for a copy: state/images alone was 93,000 of
+// 95,000 files, and 60 of the 78 seconds of an update. Top level of the state.
+const STATE_NOT_SNAPSHOTTED = Object.freeze(['images']);
 const PROGRESS_HEARTBEAT_RECOVERY_ATTEMPTS = 20;
 const PROGRESS_HEARTBEAT_RECOVERY_DELAY_MS = 250;
 const PROGRESS_REPLACEMENT_ATTEMPTS = 4;
@@ -357,6 +361,31 @@ Write-Output 'WORKASS_QUIESCENT=1'
   return Number(match[1]);
 }
 
+// The daemon's own processes, or null when the OS cannot say. The same binary
+// also runs jobs (`workass run`, which outlive an update on purpose) and the
+// tool CLI; the daemon alone starts with flags only (main.go refuses any other
+// first argument). Telling them apart by executable alone made a single running
+// job look like a daemon that would never stop, so every update rolled back.
+function macDaemonPids(transaction, { run = spawnSync } = {}) {
+  if (!path.isAbsolute(String(transaction.installTarget || ''))) return null;
+  const executable = path.join(transaction.installTarget, 'Contents', 'Resources', 'runtime', 'workass');
+  const result = run('/bin/ps', ['-axww', '-o', 'pid=,args='], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0) return null;
+  const rows = String(result.stdout || '').split('\n').filter((row) => row.trim());
+  if (!rows.length) return null;
+  const pids = [];
+  for (const row of rows) {
+    const match = row.match(/^\s*(\d+)\s+(.+?)\s*$/);
+    if (!match) return null;
+    const args = match[2];
+    if (args !== executable && !args.startsWith(`${executable} -`)) continue;
+    pids.push(Number(match[1]));
+  }
+  return pids;
+}
+
 function daemonServiceIsDown(transaction, { run = spawnSync } = {}) {
   if (transaction.platform === 'win32') {
     const executable = path.join(transaction.installTarget, 'workass-daemon.exe');
@@ -406,17 +435,8 @@ exit 3
   }
   if (transaction.platform === 'darwin') {
     if (!path.isAbsolute(String(transaction.installTarget || ''))) return false;
-    const executable = path.join(transaction.installTarget, 'Contents', 'Resources', 'runtime', 'workass');
-    const result = run('/bin/ps', ['-axo', 'pid=,comm='], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (result.error || result.status !== 0) return false;
-    const rows = String(result.stdout || '').split('\n').filter(row => row.trim());
-    if (!rows.length) return false;
-    return rows.every(row => {
-      const match = row.match(/^\s*(\d+)\s+(.+?)\s*$/);
-      return match && match[2] !== executable;
-    });
+    const pids = macDaemonPids(transaction, { run });
+    return pids !== null && pids.length === 0;
   }
   return false;
 }
@@ -930,6 +950,21 @@ function defaultOperations(transaction, dependencies = {}) {
       stopWindowsProcesses(path.join(transaction.installTarget, 'workass-daemon.exe'));
     }
   };
+  // A daemon that ignores its shutdown (a hung drain) must not cost the person
+  // the update, or leave them with no app at all: SQLite survives a kill, and
+  // only the daemon's own processes are signalled, never a job's.
+  const stopMacDaemonAfterGrace = async () => {
+    const daemonPids = dependencies.macDaemonPids || macDaemonPids;
+    const signal = dependencies.signalProcess || ((pid, name) => process.kill(pid, name));
+    for (const [name, attempts] of [[null, 32], ['SIGTERM', 16], ['SIGKILL', 8]]) {
+      if (name) {
+        for (const pid of daemonPids(transaction) || []) {
+          try { signal(pid, name); } catch { /* it exited on its own */ }
+        }
+      }
+      if (await waitForCondition(() => exactDaemonDown(transaction), { attempts, delayMs: 250 })) return;
+    }
+  };
   return {
     progressVisible: async () => {
       let receipt = null;
@@ -947,6 +982,7 @@ function defaultOperations(transaction, dependencies = {}) {
       // itself never reached the Windows daemon: the worker owns the already
       // quiescent transaction and must not wait forever on a no-op service stop.
       await shutdownDaemon(transaction.daemonHealthURL);
+      if (transaction.platform === 'darwin') await stopMacDaemonAfterGrace();
       if (transaction.platform === 'win32') {
         // The 202 response schedules ordinary daemon cleanup, which can spend
         // several seconds detaching providers. Give that path a bounded grace
@@ -1027,6 +1063,8 @@ function defaultOperations(transaction, dependencies = {}) {
             preserveTimestamps: true,
             verbatimSymlinks: true,
             mode: fs.constants.COPYFILE_FICLONE,
+            filter: (source) => !(path.dirname(source) === transaction.mutableStateTarget &&
+              STATE_NOT_SNAPSHOTTED.includes(path.basename(source))),
           },
         );
         if (!await proveQuiescent() || databaseStamp() !== stampBefore) {
@@ -1173,6 +1211,7 @@ function defaultOperations(transaction, dependencies = {}) {
       // files remain locked while the daemon is alive, and prevents an old app
       // from accidentally reconnecting to the failed new daemon on either OS.
       await shutdownDaemon(transaction.daemonHealthURL);
+      if (transaction.platform === 'darwin') await stopMacDaemonAfterGrace();
       if (transaction.platform === 'win32') {
         await stopWindowsDaemonAfterGrace();
       }
@@ -1218,6 +1257,18 @@ function defaultOperations(transaction, dependencies = {}) {
       }
       const snapshotState = path.join(transaction.mutableStateBackupTarget, 'state');
       const snapshotStateExists = fs.statSync(snapshotState, { throwIfNoEntry: false })?.isDirectory() === true;
+      // Everything left out of the snapshot lives only in the state being set
+      // aside. Moved back before anything can delete that state, and safe to
+      // repeat after a crash at any point of this restore.
+      const returnUnsnapshotted = () => {
+        for (const name of STATE_NOT_SNAPSHOTTED) {
+          const setAside = path.join(transaction.failedMutableStateTarget, name);
+          const restored = path.join(transaction.mutableStateTarget, name);
+          if (fs.existsSync(setAside) && fs.existsSync(transaction.mutableStateTarget) && !fs.existsSync(restored)) {
+            fs.renameSync(setAside, restored);
+          }
+        }
+      };
       if (snapshotReceipt.existed && !snapshotStateExists &&
           !(fs.existsSync(transaction.failedMutableStateTarget) && fs.existsSync(transaction.mutableStateTarget))) {
         throw new Error('mutable state rollback snapshot is incomplete');
@@ -1227,6 +1278,7 @@ function defaultOperations(transaction, dependencies = {}) {
       }
       if (snapshotReceipt.existed && !snapshotStateExists &&
           fs.existsSync(transaction.failedMutableStateTarget) && fs.existsSync(transaction.mutableStateTarget)) {
+        returnUnsnapshotted();
         return;
       }
       if (!snapshotReceipt.existed && fs.existsSync(transaction.failedMutableStateTarget) &&
@@ -1242,6 +1294,7 @@ function defaultOperations(transaction, dependencies = {}) {
         }
         throw err;
       }
+      returnUnsnapshotted();
     },
     cleanup: async () => {
       const progressRunning = [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]
@@ -1312,8 +1365,10 @@ async function runTransaction(rawTransaction, operations) {
     return false;
   };
 
+  // When each step ended, in the journal: how long an update took, and where,
+  // is then a read of its receipt rather than an argument.
   const save = (phase, patch = {}) => {
-    journal = checkpoint(transaction, journal, phase, patch);
+    journal = checkpoint(transaction, journal, phase, { ...patch, timings: { ...journal?.timings, [phase]: new Date().toISOString() } });
     return journal;
   };
   const finish = (phase, extra = {}) => {
@@ -1743,6 +1798,7 @@ module.exports = {
   bootstrapWindowsZip,
   checkpoint,
   daemonServiceIsDown,
+  macDaemonPids,
   defaultOperations,
   launchUntilHealthy,
   main,
