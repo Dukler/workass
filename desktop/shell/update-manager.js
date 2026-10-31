@@ -778,6 +778,14 @@ function verifyWindowsRelease(_currentRoot, incomingRoot, targetVersion, arch = 
 
 function stageRelease(source, incomingTarget, platform = process.platform) {
   if (platform === 'darwin') {
+    // The extracted tree is never used again, so a rename is enough where the
+    // transaction and the app share a volume (they normally do).
+    try {
+      fs.renameSync(source, incomingTarget);
+      return;
+    } catch (err) {
+      if (err?.code !== 'EXDEV') throw err;
+    }
     const copy = spawnSync('/usr/bin/ditto', [source, incomingTarget], { stdio: ['ignore', 'pipe', 'pipe'] });
     if (copy.error || copy.status !== 0) throw new Error('could not stage the signed app beside the installed app');
     return;
@@ -1274,7 +1282,7 @@ function updateDiagnosticRecord(value, fields) {
     }
     if (typeof item === 'string') out[field] = redactUpdateDiagnosticText(item, 4096);
     else if (typeof item === 'number' || typeof item === 'boolean') out[field] = item;
-    else if (field === 'timings') {
+    else if (field === 'timings' || field === 'healthGates') {
       out[field] = updateDiagnosticRecord(item, Object.keys(item).slice(0, 40));
     } else if (field === 'interruptedWork' || field === 'blockers') {
       out[field] = updateDiagnosticRecord(item, [
@@ -1927,7 +1935,7 @@ class UpdateManager {
         'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
         'createdAt', 'updatedAt', 'terminal', 'shellStopped', 'daemonStopped', 'incomingVerified',
         'mutableStateSnapshotted', 'activated', 'healthVerified', 'rollbackStarted', 'rolledBack',
-        'mutableStateRestored', 'error', 'rollbackError', 'timings',
+        'mutableStateRestored', 'error', 'rollbackError', 'timings', 'healthGates',
       ]),
       progressReceipt: updateDiagnosticRecord(progressReceipt, [
         'schemaVersion', 'updateId', 'phase', 'displayedPhase', 'windowVisible', 'updatedAt', 'error',
