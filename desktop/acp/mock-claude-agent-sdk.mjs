@@ -184,6 +184,14 @@ class FixtureQuery {
         forkTranscriptDepths.set(this.sessionId, (forkTranscriptDepths.get(this.sessionId) || 0) + 1);
       }
       const pushedText = message.message?.content?.find?.((block) => block.type === 'text')?.text || '';
+      // A wedged subprocess (WORKASS_CLAUDE_FIXTURE_SILENT_HANG=1): the prompt
+      // is consumed and NOTHING is ever emitted back, not even a lifecycle
+      // frame, exactly as an auth refresh call that hangs instead of failing
+      // would look from this host's side. Only the no-signal watchdog can end
+      // a turn like this; it must never see a disarming message.
+      if (process.env.WORKASS_CLAUDE_FIXTURE_SILENT_HANG === '1') {
+        await new Promise(() => {});
+      }
       this.commandLifecycle(message.uuid, 'queued');
       if (this.lifecycle && this.openTurn && message.priority !== 'now' && message.priority !== 'later') {
         // Claude Code 2.1.x: folded into the running turn at its next boundary.
