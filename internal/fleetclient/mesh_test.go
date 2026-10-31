@@ -389,6 +389,32 @@ func TestAKeyFromAnotherFleetIsRefused(t *testing.T) {
 	}
 }
 
+// A dialler can hold a key this peer has never heard of, ahead of the right one.
+// The refused key used to leave the next key checking a proof from the spent
+// challenge, and that verdict refuses the address for good (seen live).
+func TestAKeyThePeerDoesNotKnowDoesNotBurnTheOneItDoes(t *testing.T) {
+	secret := newTestSecret(t)
+	home := newPeerDaemon(t, "m-home", secret)
+	stateDir := t.TempDir()
+	keys, err := fleet.Open(stateDir)
+	if err != nil {
+		t.Fatalf("fleet store: %v", err)
+	}
+	if _, err := keys.Join(newTestSecret(t), fleet.LocalOwner, "stale"); err != nil {
+		t.Fatalf("join the stale fleet: %v", err)
+	}
+	mesh, store := newDialerIn(t, stateDir, "m-away", secret)
+	if err := mesh.AddRoute(home.machineID, "home", KindLAN, home.address, SourceManual); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if _, err := mesh.Invoke(context.Background(), home.machineID, "test:echo"); err != nil {
+		t.Fatalf("the right key could not link: %v", err)
+	}
+	if peer, _ := store.Peer(home.machineID); !peer.Linked() {
+		t.Fatalf("no credential after the link: %#v", peer)
+	}
+}
+
 // Revoking one link cuts exactly one peer. The other link keeps working, the
 // fleet key is untouched, and the cut peer stays cut rather than re-enrolling
 // itself on the next heartbeat under the very key that was left in place.

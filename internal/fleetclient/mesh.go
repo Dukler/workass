@@ -713,6 +713,11 @@ func (m *Mesh) enroll(ctx context.Context, peer Peer, route Route, card machineb
 				}
 				if refreshed := textOf(mapOf(retry)["serverNonce"]); refreshed != "" {
 					serverNonce = refreshed
+					// The proofs are bound to the nonce. Keeping the first
+					// challenge's made the next key's check fail, and that verdict
+					// refuses the address for good: a daemon holding one key the
+					// peer does not know could never link to it (seen live).
+					proofs = mapOf(mapOf(retry)["certProofs"])
 				}
 				if next, nonceErr := fleet.NewNonce(); nonceErr == nil {
 					clientNonce = next
