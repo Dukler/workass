@@ -2554,6 +2554,26 @@ func (m *Manager) loadSpawnedWorkSnapshots() {
 			rec.Item.LastToolName = "orphaned"
 			rec.Item.UpdatedAt = rec.Item.FinishedAt
 			orphanedPairs[[2]string{rec.Item.TabID, rec.Item.ChatID}] = struct{}{}
+			if rec.Item.Kind == trackedSubagentSpawnedWorkKind {
+				// The row update above is silent: it is a renderer projection, not
+				// a wake. A subagent's owner is told it finished only through a
+				// durable SubagentReceipt, and no receipt was ever written for a
+				// run the restart killed mid-flight. Writing one here, pending
+				// delivery, is what SetChatEnvObserver's startup replay turns into
+				// the owner's one <task-notification> once the actor runtime is
+				// installed.
+				_ = m.writeSubagentReceipt(rec.Item.TabID, rec.Item.ChatID, SubagentReceipt{
+					ReceiptID: rec.Item.ID, SubagentID: rec.Item.ID, Label: rec.Item.Label,
+					Status: "failed", ProviderID: rec.Item.ProviderID, ModelLabel: rec.Item.ModelLabel,
+					StartedAt: rec.Item.StartedAt, FinishedAt: rec.Item.FinishedAt,
+					Error:             summary,
+					ParentTabID:       rec.Item.TabID,
+					ParentChatID:      rec.Item.ChatID,
+					OriginLaneID:      rec.Item.OriginLaneID,
+					OriginOperationID: rec.Item.OriginOperationID,
+					DeliveryPending:   true,
+				})
+			}
 		}
 	}
 	for pair := range orphanedPairs {
