@@ -12,7 +12,6 @@ import (
 	"workass/internal/acp"
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
-	"workass/internal/headlessupdate"
 	"workass/internal/procchild"
 	providercontract "workass/internal/provider"
 )
@@ -574,11 +573,7 @@ func (h *agentControlHandler) answerUpdateLocally(ctx context.Context, method st
 	if method == "update.status" && errors.Is(err, errNoLocalRenderer) {
 		machineID := fieldString(params, "machine_id")
 		if machineID == strings.TrimSpace(h.selfMachineID) {
-			var jobs []headlessupdate.RunningJob
-			if h.manager != nil {
-				jobs = runningJobsForUpdate(h.manager.RunningJobSurvival())
-			}
-			return daemonOnlyUpdateStatus(machineID, h.stateDir, jobs), nil
+			return h.withRunningJobs(machineID, daemonOnlyUpdateStatus(machineID, h.stateDir, nil)), nil
 		}
 	}
 	if err == nil && method == "update.status" {
