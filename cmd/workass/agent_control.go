@@ -176,33 +176,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
 		}
-		// The updater is the one family that is addressed by machine_id all the
-		// way down, so the self-addressing strip above has to be undone before
-		// either half answers. Without this a packaged install refused its OWN
-		// machine — `workass_get_update_status` with the exact machine_id
-		// `workass_list_update_targets` had just printed came back "update
-		// status requires an exact machine_id", while every remote machine
-		// worked, because only the self case ever lost the field.
-		if request.Method != "update.targets" && strings.TrimSpace(fieldString(params, "machine_id")) == "" {
-			params = copyAnyMap(params)
-			params["machine_id"] = h.selfMachineID
-		}
-		// A headless daemon answers for itself; a packaged install asks its
-		// stamped renderer, which owns the transactional UpdateManager.
-		if h.headlessUpdates.available() {
-			if request.Method == "update.targets" {
-				return h.headlessUpdates.Targets(r.Context())
-			}
-			return h.headlessUpdates.headlessUpdateCall(r.Context(), request.Method, params)
-		}
-		if h.remoteChats == nil {
-			return nil, errors.New("Workass updater MCP router has no local renderer")
-		}
-		result, err := h.remoteChats.Call(r.Context(), request.Method, copyRemoteAgentRouteParams(params))
-		if err == nil && request.Method == "update.status" {
-			result = h.withRunningJobs(fieldString(params, "machine_id"), result)
-		}
-		return result, err
+		return h.answerUpdateLocally(r.Context(), request.Method, params)
 	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.subsession", "chat.rename", "chat.settle", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err
@@ -559,6 +533,44 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	default:
 		return nil, errors.New("unknown agent control method")
 	}
+}
+
+// answerUpdateLocally answers update.targets/update.status/update.apply for
+// THIS exact machine: a headless daemon answers for itself, and a packaged
+// install asks its own stamped renderer, which owns the transactional
+// UpdateManager. Shared by the locally-authorized caller (the switch above)
+// and a fleet peer whose update.status reached here over agent:control
+// (callAsControllerFor) — both answer this machine's update state the same
+// way, which is the whole point of carrying update.status over the mesh.
+func (h *agentControlHandler) answerUpdateLocally(ctx context.Context, method string, params map[string]any) (any, error) {
+	// The updater is the one family that is addressed by machine_id all the
+	// way down, so the self-addressing strip done earlier in call() (and the
+	// machine_id deleted by callAsControllerFor before a forwarded call ever
+	// reaches here) has to be undone before either half answers. Without this
+	// a packaged install refused its OWN machine — `workass_get_update_status`
+	// with the exact machine_id `workass_list_update_targets` had just printed
+	// came back "update status requires an exact machine_id", while every
+	// remote machine worked, because only the self case ever lost the field.
+	if method != "update.targets" && strings.TrimSpace(fieldString(params, "machine_id")) == "" {
+		params = copyAnyMap(params)
+		params["machine_id"] = h.selfMachineID
+	}
+	// A headless daemon answers for itself; a packaged install asks its
+	// stamped renderer, which owns the transactional UpdateManager.
+	if h.headlessUpdates.available() {
+		if method == "update.targets" {
+			return h.headlessUpdates.Targets(ctx)
+		}
+		return h.headlessUpdates.headlessUpdateCall(ctx, method, params)
+	}
+	if h.remoteChats == nil {
+		return nil, errors.New("Workass updater MCP router has no local renderer")
+	}
+	result, err := h.remoteChats.Call(ctx, method, copyRemoteAgentRouteParams(params))
+	if err == nil && method == "update.status" {
+		result = h.withRunningJobs(fieldString(params, "machine_id"), result)
+	}
+	return result, err
 }
 
 // forwardRemoteAgentCall hands one addressed call to the home that owns it —

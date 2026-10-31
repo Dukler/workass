@@ -51,12 +51,13 @@ func (r *fleetMeshRouter) Call(ctx context.Context, method string, params map[st
 	if r == nil {
 		return nil, errors.New("Workass remote-chat MCP router is unavailable")
 	}
-	// The mesh carries the agent-control surface and only that. `update.*` keeps
-	// its own older machine_id contract, answered by the renderer's
-	// transactional updater or by the headless service — never by a peer's
-	// agent:control, which would refuse it. Routing it here would break updating
-	// another machine from a packaged install, so it goes straight to the relay
-	// that has always owned it.
+	// The mesh carries the agent-control surface and only that. update.targets
+	// and update.apply keep their own older machine_id contract, answered by
+	// the renderer's transactional updater or by the headless service — never
+	// by a peer's agent:control, which would refuse them. Routing them here
+	// would break updating another machine from a packaged install, so they go
+	// straight to the relay that has always owned them. update.status is
+	// carried (2026-10-31): see remoteAgentMethodKinds for why.
 	if _, carried := remoteAgentMethodKinds[method]; !carried {
 		if r.relay == nil {
 			return nil, errors.New("Workass has no local renderer to answer " + method + " for another machine")
@@ -67,6 +68,19 @@ func (r *fleetMeshRouter) Call(ctx context.Context, method string, params map[st
 	if machineID == "" || machineID == r.self {
 		// A call with no addressee is the fleet-wide read: today that is
 		// chat.list, whose answer is the union of every machine's catalog.
+		//
+		// update.status reaches this branch only through its OWN self-addressed
+		// renderer-relay path (answerUpdateLocally's fallback when this machine
+		// has no headless updater) — never through forwardRemoteAgentCall, which
+		// only ever names a genuinely other machine. It is not a fleet-wide read
+		// and must not become one: this machine's own update status is not the
+		// union of every peer's.
+		if strings.HasPrefix(method, "update.") {
+			if r.relay == nil {
+				return nil, errors.New("Workass has no local renderer to answer " + method + " for another machine")
+			}
+			return r.relay.Call(ctx, method, params)
+		}
 		return r.callEveryPeer(ctx, method, params)
 	}
 	if r.mesh != nil {
