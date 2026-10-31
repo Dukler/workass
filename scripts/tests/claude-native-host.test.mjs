@@ -613,8 +613,11 @@ test('official Claude SDK host lets a permission outlive the plumbing timeout', 
 });
 
 // Claude Code raises its safety checks whatever the mode. In Full access the host
-// answers them, because a card there stops an agent on a click nobody expects.
-test('official Claude SDK host never raises a card in Full access', async (t) => {
+// never raises a card for one — it refuses the tool call back to the agent with
+// the reason, so a risky command does not run and the agent can rewrite it
+// (auto-approving one let a dangerous rm through untouched; a card raised for one
+// stopped a background agent on a click nobody knew was owed, 66 min, 2026-10-31).
+test('official Claude SDK host refuses a Claude Code safety check in Full access', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));
 
@@ -629,11 +632,16 @@ test('official Claude SDK host never raises a card in Full access', async (t) =>
 
   peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
     sessionId: opened.result.sessionId,
-    prompt: [{ type: 'text', text: 'exercise permission' }],
+    prompt: [{ type: 'text', text: 'exercise safety check' }],
   } });
-  const answered = await peer.waitFor((message) => message.id === 3 || message.method === 'session/request_permission');
-  assert.equal(answered.method, undefined, 'a card was raised in Full access');
-  assert.equal(answered.result.stopReason, 'end_turn', JSON.stringify(answered));
+  const answered = await peer.waitFor((message) => message.method === 'session/request_permission'
+    || (message.method === 'session/update' && String(message.params.update.content?.text || '').startsWith('safety outcome:')));
+  assert.equal(answered.method, 'session/update', 'a card was raised in Full access for a safety check');
+  assert.equal(answered.params.update.content.text,
+    "safety outcome: deny Claude Code's own safety check refused this in Full access, so it did not run: "
+    + 'Dangerous rm operation on possibly-empty variable path: $V/*.png in `rm -f $V/*.png`');
+  const promptResult = await peer.waitFor((message) => message.id === 3);
+  assert.equal(promptResult.result.stopReason, 'end_turn', JSON.stringify(promptResult));
 });
 
 // Outside Full access the card needs Claude Code's reason, the tool and the asking

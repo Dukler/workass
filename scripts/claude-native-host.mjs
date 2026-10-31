@@ -843,13 +843,22 @@ class ClaudeSession {
         toolUseID: options.toolUseID,
       };
     }
-    // Full access means nobody is asked. The SDK still calls here for Claude Code's
-    // own safety checks, which ignore the mode; a card raised for one stopped a
-    // background agent on a click nobody knew was owed (66 minutes, 2026-10-31).
+    // Full access means nobody is asked. The SDK still calls here only for Claude
+    // Code's own safety checks, which ignore the mode — there is no other reason
+    // this callback fires in bypassPermissions. Auto-approving one let a dangerous
+    // rm through untouched; a card raised for one stopped a background agent on a
+    // click nobody knew was owed (66 minutes, 2026-10-31). Refuse it back to the
+    // agent instead: no card, no hang, and it can read why and rewrite the command.
     if (this.currentMode === 'bypassPermissions') {
       const why = plainPermissionText(options.decisionReason);
-      process.stderr.write(`[workass] Full access allowed ${toolName}${why ? `: ${why}` : ''}\n`);
-      return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
+      process.stderr.write(`[workass] Full access refused a Claude Code safety check for ${toolName}${why ? `: ${why}` : ''}\n`);
+      return {
+        behavior: 'deny',
+        message: why
+          ? `Claude Code's own safety check refused this in Full access, so it did not run: ${why}`
+          : "Claude Code's own safety check refused this in Full access, so it did not run.",
+        toolUseID: options.toolUseID,
+      };
     }
     const title = String(options.title || options.displayName || toolName || 'Claude Code action');
     // Why Claude Code is asking. Without it the card read "Quiere ejecutar
