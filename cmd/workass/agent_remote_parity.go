@@ -34,8 +34,18 @@ const (
 )
 
 // remoteAgentMethodKinds is the single authority for Agent API remote reach.
-// update.* is deliberately absent: it owns an older machine_id contract with
-// its own local/remote split and must keep answering exactly as it does today.
+// update.apply and update.targets are deliberately absent: an apply's current-
+// human authorization is written for the renderer/headless contract that owns
+// it today, and targets enumerates every machine the ASKING daemon can reach,
+// which has no single remote home to carry it to. update.status is carried
+// (added 2026-10-31, bug report dukler-laptop/duklerver): a remote machine_id
+// used to go straight to the asking daemon's own renderer relay, which fails
+// with "no local renderer" whenever nobody has that daemon's Electron open —
+// exactly the steady state for a headless fleet peer with no human watching
+// it. Carrying it reaches the TARGET's own daemon over the mesh, which then
+// answers for itself exactly as a self-addressed call already does (its own
+// headless updater when it has one, its own renderer relay otherwise) — the
+// same local/remote split, just reachable without a renderer anywhere.
 var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"chat.read":               remoteAgentChatScoped,
 	"chat.diagnostics":        remoteAgentChatScoped,
@@ -73,6 +83,7 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	// list has to be answerable over a link too, or workass_list_chats would be
 	// the one tool that still needed the app open (§6, §10).
 	"chat.list":         remoteAgentMachineScoped,
+	"update.status":     remoteAgentMachineScoped,
 	"agent.question":    remoteAgentLocalOnly,
 	"html.render":       remoteAgentLocalOnly,
 	"artifact.host":     remoteAgentLocalOnly,

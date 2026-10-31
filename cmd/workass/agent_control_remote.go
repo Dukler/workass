@@ -124,6 +124,11 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 			// merged list here would double-count a shared peer and, between two
 			// daemons that each know the other, never terminate.
 			return h.chats.list()
+		case "update.status":
+			// machine_id was already deleted above: a forwarded call carries only
+			// this machine's own ids. answerUpdateLocally re-adds it as this
+			// machine's self id, exactly as a local self-addressed call does.
+			return h.answerUpdateLocally(ctx, method, params)
 		case "process.start":
 			// The one command this daemon starts a process for, and the whole of
 			// why that is still §9-safe is in fleet_process_start.go.
