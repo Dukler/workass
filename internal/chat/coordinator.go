@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"workass/internal/provider"
 )
@@ -65,6 +67,23 @@ type Coordinator struct {
 	// redactReason makes a provider's failure text safe to show in the
 	// transcript. Without it a failed admission names only the error class.
 	redactReason func(string) string
+	// stopping is set first thing in Close. From then on nothing new crosses the
+	// provider boundary and a failure caused by the teardown settles nothing:
+	// this actor's durable state is what the restarted daemon carries on from.
+	stopping atomic.Bool
+	// turnStartsHeld reports an update handoff in progress: queued input waits
+	// instead of being refused and recorded as a failed turn.
+	turnStartsHeld func() bool
+}
+
+// SetTurnStartHold installs the check that holds queued turns during a handoff.
+func (c *Coordinator) SetTurnStartHold(held func() bool) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.turnStartsHeld = held
+	c.mu.Unlock()
 }
 
 // BeginReplyAdmission fences the generic durable-effect claim boundary while
@@ -214,7 +233,17 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 		c.claimMu.Unlock()
 		return false, nil
 	}
-	effect, ok, err := c.engine.ClaimNext()
+	if c.stopping.Load() {
+		c.claimMu.Unlock()
+		return false, nil
+	}
+	c.mu.Lock()
+	held := c.turnStartsHeld
+	c.mu.Unlock()
+	startsHeld := held != nil && held()
+	effect, ok, err := c.engine.ClaimNextExcept(func(entry OutboxEntry) bool {
+		return startsHeld && entry.Kind == EffectStartTurn
+	})
 	c.claimMu.Unlock()
 	if err != nil || !ok {
 		return ok, err
@@ -318,6 +347,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 	case StartTurnEffect:
 		lane, err := c.lane(effect.LaneID)
 		if err != nil {
+			if c.stopping.Load() {
+				return true, c.engine.Apply(TurnStartDeferred{OperationID: effect.Input.OperationID})
+			}
 			return true, err
 		}
 		initialContext, delta := effect.Seed.Messages, []provider.ContextMessage(nil)
@@ -355,6 +387,9 @@ func (c *Coordinator) ExecuteNext(ctx context.Context) (bool, error) {
 					})
 				}
 				return true, applyErr
+			}
+			if c.stopping.Load() || provider.ErrorIs(err, provider.ErrorTurnStartDeferred) {
+				return true, c.engine.Apply(TurnStartDeferred{OperationID: effect.Input.OperationID})
 			}
 			applyErr := c.engine.Apply(TurnAdmissionFailed{OperationID: effect.Input.OperationID, Kind: providerErrorKind(err), Reason: c.failureReason(err)})
 			if applyErr == nil {
@@ -727,6 +762,8 @@ func (c *Coordinator) Close(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
+	c.stopping.Store(true)
+	c.waitForEffectInFlight(ctx)
 	c.mu.Lock()
 	lanes := make([]provider.Lane, 0, len(c.lanes))
 	for _, lane := range c.lanes {
@@ -757,6 +794,30 @@ func (c *Coordinator) Close(ctx context.Context) error {
 	c.mu.Unlock()
 	return errors.Join(errs...)
 }
+
+// waitForEffectInFlight lets an effect claimed before Close finish against a
+// live lane, so it settles on its own terms instead of on the teardown. The cap
+// is what keeps one stuck chat from spending every other chat's shutdown budget.
+func (c *Coordinator) waitForEffectInFlight(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		c.drainMu.Lock()
+		c.drainMu.Unlock() //nolint:staticcheck // the lock is the wait
+		close(done)
+	}()
+	timer := time.NewTimer(effectInFlightCloseWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+const effectInFlightCloseWait = 2 * time.Second
+
+// StopReasonDaemonStopping marks a turn this daemon's own shutdown ended.
+const StopReasonDaemonStopping = "daemon-stopping"
 
 func (c *Coordinator) definition(id provider.ID) (provider.Definition, error) {
 	definition, ok := c.registry.Resolve(id)
@@ -874,6 +935,13 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 			acknowledgeProviderEvent(lane, event.Identity.Sequence, errors.New("provider event belongs to a stale attachment"))
 			return
 		}
+		if c.stopping.Load() && event.Kind == provider.EventTurnTerminal && event.Terminal != nil && strings.EqualFold(strings.TrimSpace(event.Terminal.Status), "failed") {
+			// This is Close ending the turn, not the turn's own outcome.
+			terminal := *event.Terminal
+			terminal.Interrupted = true
+			terminal.StopReason = StopReasonDaemonStopping
+			event.Terminal = &terminal
+		}
 		if err := c.engine.Apply(ProviderEventReceived{ConnectionGeneration: generation, Event: event}); err != nil {
 			acknowledgeProviderEvent(lane, event.Identity.Sequence, err)
 			// The authoritative state rejected malformed, duplicate, or stale
@@ -909,6 +977,11 @@ func acknowledgeProviderEvent(lane provider.Lane, sequence uint64, err error) {
 }
 
 func (c *Coordinator) applyLaneFailure(laneID provider.LaneID, err error) error {
+	if c.stopping.Load() {
+		// The attachment failed because this daemon is closing it. Recovery opens
+		// the lane again for whatever input is still waiting on it.
+		return nil
+	}
 	before := c.engine.Snapshot()
 	operationID := provider.OperationID("")
 	if before.Foreground != nil && before.Foreground.LaneID == laneID && before.Foreground.Status == ForegroundDispatching {

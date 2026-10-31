@@ -9,7 +9,10 @@ import (
 type ErrorKind string
 
 const (
-	ErrorTransientTransport     ErrorKind = "transient_transport"
+	ErrorTransientTransport ErrorKind = "transient_transport"
+	// ErrorTurnStartDeferred means nothing reached the provider and the reason
+	// is this daemon's own handoff, not the turn. It never reaches durable state.
+	ErrorTurnStartDeferred      ErrorKind = "turn_start_deferred"
 	ErrorAuthenticationRequired ErrorKind = "authentication_required"
 	ErrorProviderUnavailable    ErrorKind = "provider_unavailable"
 	ErrorNativeThreadMissing    ErrorKind = "native_thread_missing"

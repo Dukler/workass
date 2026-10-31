@@ -184,9 +184,10 @@ type Manager struct {
 	// never waits for foreground or asynchronous work to become terminal. Once
 	// BeginUpdateDrain succeeds, no new work can enter while the shell shuts this
 	// daemon down and swaps the complete release.
-	updateGateMu     sync.Mutex
-	updateDraining   bool
-	updateAdmissions int
+	updateGateMu         sync.Mutex
+	updateDraining       bool
+	updateAdmissions     int
+	updateDrainCancelled func()
 	// Serializes the short turn-boundary claim for one exact logical chat.
 	// Workspace rebinds hold this lock while invalidating/recreating the session;
 	// job:start holds it until the running job is registered. Different chats do

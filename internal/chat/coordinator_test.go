@@ -127,12 +127,20 @@ type coordinatorDelivery struct {
 	steerStarted  chan<- struct{}
 	steerRelease  <-chan struct{}
 	cancelStarted chan<- struct{}
+	startErr      error
+	startHook     func()
 }
 
 func (d coordinatorDelivery) Capabilities() provider.DeliveryCapabilities {
 	return provider.DeliveryCapabilities{StableInputIdentity: true, ConsumptionReceipt: true}
 }
 func (d coordinatorDelivery) StartTurn(_ context.Context, input provider.TurnInput) (provider.TurnAdmission, error) {
+	if d.startHook != nil {
+		d.startHook()
+	}
+	if d.startErr != nil {
+		return provider.TurnAdmission{}, d.startErr
+	}
 	if d.startStarted != nil {
 		d.startStarted <- struct{}{}
 	}

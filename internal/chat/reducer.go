@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -261,6 +262,16 @@ type TurnAdmissionFailed struct {
 }
 
 func (TurnAdmissionFailed) chatCommand() {}
+
+// TurnStartDeferred hands a claimed start back: the prompt never reached the
+// provider because this daemon is handing off, so the turn has neither failed
+// nor been delivered. It stays the foreground owner, Pending, and the same
+// operation crosses the provider boundary once, here or after the restart.
+type TurnStartDeferred struct {
+	OperationID provider.OperationID
+}
+
+func (TurnStartDeferred) chatCommand() {}
 
 type InputConsumed struct {
 	OperationID provider.OperationID
@@ -674,6 +685,8 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 		effects, err = reduceTurnAdmitted(&next, command)
 	case TurnAdmissionFailed:
 		effects, err = reduceTurnAdmissionFailed(&next, command)
+	case TurnStartDeferred:
+		reduceTurnStartDeferred(&next, command)
 	case InputConsumed:
 		err = reduceInputConsumed(&next, command)
 	case TurnCompleted:
@@ -3022,6 +3035,67 @@ func reduceTurnAdmissionFailed(state *State, command TurnAdmissionFailed) ([]Eff
 	return driveQueued(state)
 }
 
+func reduceTurnStartDeferred(state *State, command TurnStartDeferred) {
+	foreground := state.Foreground
+	if foreground == nil || foreground.OperationID != command.OperationID || foreground.Status != ForegroundDispatching {
+		return
+	}
+	if outboxHas(state, startTurnEffectID(command.OperationID), OutboxDispatched) {
+		updateOutbox(state, startTurnEffectID(command.OperationID), OutboxPending, "")
+	}
+}
+
+// noticeRedeliveryLimit bounds how many times one notice is sent again after
+// its turn was interrupted: a notice that itself takes the provider down must
+// not become a loop. Restarts close together are the reason it is more than one.
+const noticeRedeliveryLimit = 3
+
+const noticeRedeliverySuffix = "-redelivery-"
+
+// requeueInterruptedNotice runs just before an interrupted foreground is made
+// terminal. A notice is the one input nobody will send again: the job or agent
+// it reports has ended and its operation id is spent, so without this the owner
+// never answers it. A person's own turn is not repeated; they can see it failed.
+// A turn someone stopped is finished.
+func requeueInterruptedNotice(state *State) {
+	foreground := state.Foreground
+	if foreground == nil || strings.TrimSpace(foreground.Input.Presentation.NoticeKind) == "" ||
+		strings.TrimSpace(foreground.Input.Presentation.Origin) != "agent" ||
+		state.PendingCancel != nil {
+		return
+	}
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectCancelTurn && entry.Turn.NativeID != "" && entry.Turn.NativeID == foreground.Turn.NativeID {
+			return
+		}
+	}
+	base, attempt := string(foreground.OperationID), 0
+	if index := strings.LastIndex(base, noticeRedeliverySuffix); index >= 0 {
+		if parsed, err := strconv.Atoi(base[index+len(noticeRedeliverySuffix):]); err == nil {
+			base, attempt = base[:index], parsed
+		}
+	}
+	if attempt >= noticeRedeliveryLimit {
+		return
+	}
+	suffix := noticeRedeliverySuffix + strconv.Itoa(attempt+1)
+	operationID := provider.OperationID(base + suffix)
+	if _, exists := state.Operations[operationID]; exists {
+		return
+	}
+	input := foreground.Input
+	input.OperationID = operationID
+	input.InitialSeedFrom, input.InitialSeedThrough, input.InitialSeedDigest = 0, 0, ""
+	input.DeltaFrom, input.DeltaThrough, input.DeltaDigest = 0, 0, ""
+	input.Presentation.UserMessageID = strings.TrimSuffix(input.Presentation.UserMessageID, noticeRedeliverySuffix+strconv.Itoa(attempt)) + suffix
+	input.Presentation.AssistantMessageID = strings.TrimSuffix(input.Presentation.AssistantMessageID, noticeRedeliverySuffix+strconv.Itoa(attempt)) + suffix
+	input.Presentation.QueueID = string(operationID)
+	input.Presentation.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	state.Operations[operationID] = struct{}{}
+	state.Queue = append([]QueueEntry{input}, state.Queue...)
+	state.Presentation.AgentQueueRevision++
+}
+
 func markLateConsumedSteer(state *State, operationID provider.OperationID) {
 	for index := len(state.Ledger) - 1; index >= 0; index-- {
 		row := &state.Ledger[index]
@@ -3205,6 +3279,9 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 		status = "completed"
 	}
 	terminal.Status = status
+	if status == "failed" && terminal.StopReason == StopReasonDaemonStopping {
+		requeueInterruptedNotice(state)
+	}
 	for _, operationID := range terminal.ConsumedSteerIDs {
 		if err := consumeTerminalSteerReceipt(state, operationID); err != nil {
 			return nil, err
@@ -4399,6 +4476,7 @@ func reduceHostLost(state *State, command HostLost) ([]Effect, error) {
 			}
 		}
 		updateOutbox(state, startTurnEffectID(state.Foreground.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
+		requeueInterruptedNotice(state)
 		if err := terminalizeInterruptedForeground(
 			state,
 			provider.ErrorTransientTransport,
@@ -5864,6 +5942,7 @@ func retireRestartedForeground(state *State) (bool, error) {
 	}
 	lane.LastError = provider.ErrorTransientTransport
 	state.Lanes[foreground.LaneID] = lane
+	requeueInterruptedNotice(state)
 	if err := terminalizeInterruptedForeground(
 		state,
 		provider.ErrorTransientTransport,

@@ -73,6 +73,25 @@ func (m *Manager) BeginUpdateDrain() AppUpdateReadiness {
 func (m *Manager) CancelUpdateDrain() {
 	m.updateGateMu.Lock()
 	m.updateDraining = false
+	resume := m.updateDrainCancelled
+	m.updateGateMu.Unlock()
+	if resume != nil {
+		resume()
+	}
+}
+
+// UpdateDraining reports the handoff window between prepare and process exit.
+func (m *Manager) UpdateDraining() bool {
+	m.updateGateMu.Lock()
+	defer m.updateGateMu.Unlock()
+	return m.updateDraining
+}
+
+// SetUpdateDrainCancelled names what must run again when an update is called
+// off: the chats whose queued turns were held for it.
+func (m *Manager) SetUpdateDrainCancelled(resume func()) {
+	m.updateGateMu.Lock()
+	m.updateDrainCancelled = resume
 	m.updateGateMu.Unlock()
 }
 

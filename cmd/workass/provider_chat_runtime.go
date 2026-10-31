@@ -149,6 +149,7 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 	// the frozen chat:env event is published. The observer is installed before
 	// any resumed lane can execute a provider effect.
 	manager.SetChatEnvObserver(runtime.observeChatEnv, runtime.deliverSubagentCompletion)
+	manager.SetUpdateDrainCancelled(runtime.wakeOpenActors)
 	manager.SetSubagentAttentionObserver(runtime.deliverSubagentAttention)
 	manager.SetChatEnvRestorer(runtime.restoreActorChatEnvReference)
 	if runtime.bootErr == nil {
@@ -533,6 +534,7 @@ func (r *providerChatRuntime) configureCoordinator(coordinator *chat.Coordinator
 	if err := coordinator.SetBackgroundExecutor(r.executeBackgroundAction); err != nil {
 		return err
 	}
+	coordinator.SetTurnStartHold(r.manager.UpdateDraining)
 	if err := coordinator.SetLifecycleObserver(r.publishLifecycleReceipt); err != nil {
 		return err
 	}
@@ -621,6 +623,20 @@ func (r *providerChatRuntime) ResumeActors() error {
 		actor.coordinator.Wake()
 	}
 	return nil
+}
+
+// wakeOpenActors runs after an update is called off: turns held for its handoff
+// are already durable, and only need telling that they may go.
+func (r *providerChatRuntime) wakeOpenActors() {
+	r.mu.Lock()
+	actors := make([]*providerChatActor, 0, len(r.actors))
+	for _, actor := range r.actors {
+		actors = append(actors, actor)
+	}
+	r.mu.Unlock()
+	for _, actor := range actors {
+		actor.coordinator.Wake()
+	}
 }
 
 func (r *providerChatRuntime) restoreActorEnvironment(actor *providerChatActor) error {

@@ -1242,6 +1242,9 @@ func (d managerLaneDelivery) StartTurn(ctx context.Context, input providercontra
 			return nil
 		},
 	})
+	if errors.Is(err, ErrUpdateDraining) {
+		return providercontract.TurnAdmission{}, &providercontract.Error{Kind: providercontract.ErrorTurnStartDeferred, Operation: operationID, Message: "the turn waits for the update handoff", Cause: err}
+	}
 	if err != nil {
 		return providercontract.TurnAdmission{}, classifyLaneRuntimeError("start turn", err)
 	}

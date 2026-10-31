@@ -273,6 +273,12 @@ func (e *Engine) saveReduced(next State) error {
 // external effect. Callers must execute only claimed effects, never the effects
 // initially reported by Apply.
 func (e *Engine) ClaimNext() (Effect, bool, error) {
+	return e.ClaimNextExcept(nil)
+}
+
+// ClaimNextExcept is ClaimNext passing over the entries skip names. A skipped
+// entry stays Pending, so it keeps its place and is claimed when skip lets go.
+func (e *Engine) ClaimNextExcept(skip func(OutboxEntry) bool) (Effect, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.retired {
@@ -280,6 +286,9 @@ func (e *Engine) ClaimNext() (Effect, bool, error) {
 	}
 	for _, entry := range e.state.Outbox {
 		if entry.Status != OutboxPending || !outboxEntryExecutable(e.state, entry) {
+			continue
+		}
+		if skip != nil && skip(entry) {
 			continue
 		}
 		next, effects, err := reduce(e.state, ClaimEffect{EffectID: entry.ID}, e.validated)

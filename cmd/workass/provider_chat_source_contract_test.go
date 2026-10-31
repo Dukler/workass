@@ -246,6 +246,7 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"SetChatEnvObserver":             {},
 	"SetSubagentAttentionObserver":   {},
 	"SetChatEnvRestorer":             {},
+	"SetUpdateDrainCancelled":        {},
 	"InstallSpawnedWorkObserver":     {},
 	// One wiring setter, like SetChatEnvObserver beside it: the daemon hands the
 	// manager the observer that turns a subagent's life into entity-log events
