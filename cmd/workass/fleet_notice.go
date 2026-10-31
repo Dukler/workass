@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"workass/internal/acp"
 	"workass/internal/chat"
 	"workass/internal/fleetlog"
 	providercontract "workass/internal/provider"
@@ -185,6 +186,32 @@ func formatFleetAttention(notice fleetMonitorNotice) string {
 	if text := strings.TrimSpace(notice.AttentionText); text != "" {
 		fmt.Fprintf(&b, "<result>%s</result>\n", text)
 	}
+	b.WriteString("</task-notification>")
+	return redactedSessionString(b.String())
+}
+
+// deliverSubagentAttention admits a local child's wait on a permission through the
+// same actor fences as every other notice. The operation id names this wait, so one
+// wait is one notice however often delivery is attempted.
+func (r *providerChatRuntime) deliverSubagentAttention(tabID, chatID string, attention acp.SubagentAttentionNotice) error {
+	return r.admitFleetNotice(tabID, chatID, fleetMonitorNotice{
+		TargetID: attention.SubagentID, Label: attention.Label,
+		LaneID: attention.OriginLaneID, OriginOperationID: attention.OriginOperationID,
+	}, fleetNoticeOperationID("subagent-attention", tabID, chatID, fmt.Sprintf("%s\x00%d", attention.SubagentID, attention.Sequence)),
+		"attention", formatSubagentAttention(attention))
+}
+
+// formatSubagentAttention states the wait and who can end it, and nothing else.
+func formatSubagentAttention(attention acp.SubagentAttentionNotice) string {
+	who := "Only the user can grant it."
+	if attention.GrantableBy == "parent" {
+		who = "workass_decide_subagent_permission can answer it."
+	}
+	var b strings.Builder
+	b.WriteString("<task-notification>\n")
+	fmt.Fprintf(&b, "<task-id>%s</task-id>\n<status>attention</status>\n", attention.SubagentID)
+	fmt.Fprintf(&b, "<summary>Agent %q is waiting on a permission and does nothing until it is answered</summary>\n", attention.Label)
+	fmt.Fprintf(&b, "<result>Permission required: %s. %s</result>\n", attention.Title, who)
 	b.WriteString("</task-notification>")
 	return redactedSessionString(b.String())
 }

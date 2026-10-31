@@ -423,6 +423,11 @@ func actorSubagentRun(state chat.State, item chat.BackgroundState) acp.SubagentR
 	switch status {
 	case "exited":
 		status = "done"
+		// A spawned-work row has one "exited" for both outcomes; a stopped agent
+		// that read as done looks like one that ended silently with no result.
+		if event.Summary == "Cancelled" {
+			status = "cancelled"
+		}
 	case "orphaned":
 		status = "failed"
 	}

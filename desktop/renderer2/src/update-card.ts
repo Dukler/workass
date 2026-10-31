@@ -1,4 +1,4 @@
-import type { CatalogGroup, ProviderRecord } from './wire/types.ts';
+import type { CatalogGroup, ProviderRecord, ProviderUpdate, ProviderUpdateProgress } from './wire/types.ts';
 
 // Footer update-card lifecycle. The card used to vanish the instant the daemon
 // re-emitted `providers:updates` with nothing left to update, so a successful
@@ -53,4 +53,23 @@ export function nextUpdatePhase(prev: UpdatePhase, s: UpdateSignals): UpdatePhas
   if (prev === 'done' || prev === 'exiting') return prev;
   // Nothing in flight and nothing sealed: show the resting card iff work remains.
   return s.pending > 0 ? 'resting' : 'hidden';
+}
+
+// The failure card's title and reason. A zero exit is a real outcome here: the
+// updater ran and reported success, but the version did not move, so the status
+// says nothing and the reason says everything.
+export function updateFailureTitle(cli: string, progress: ProviderUpdateProgress | undefined): string {
+  const code = progress?.exitCode;
+  return `${cli}: error${typeof code === 'number' && code !== 0 ? ` (exit ${code})` : ''}`;
+}
+
+export function updateFailureReason(progress: ProviderUpdateProgress | undefined, update: ProviderUpdate | undefined): string {
+  return progress?.error || update?.lastError || '';
+}
+
+// The failed step stays on the card only while there is still something to retry.
+// A CLI that reached the version by itself leaves nothing for Reintentar to run.
+export function updateChainAfterCheck<T extends { failedId: string | null }>(chain: T | undefined, updates: readonly ProviderUpdate[]): T | undefined {
+  if (!chain?.failedId) return chain;
+  return updates.some((update) => update.providerId === chain.failedId && update.updateAvailable) ? chain : undefined;
 }

@@ -347,7 +347,7 @@ var providerRegistrations = map[string]providerRegistration{
 			subagentEnvironment: map[string]string{"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
 			context:             staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},
-		Update: providerUpdateRegistration{Source: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest", Command: ProviderUpdateCommand{Command: "claude", Args: []string{"update"}}, Hint: "claude update"},
+		Update: providerUpdateRegistration{Source: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest", AssetSource: claudeNativeReleaseSource, Command: ProviderUpdateCommand{Command: "claude", Args: []string{"update"}}, Hint: "claude update", ResolveLatest: resolveClaudeLatestVersion},
 	},
 	"codex": {
 		ID: "codex", Name: "Codex", DefaultCommand: "codex", Badge: "native",

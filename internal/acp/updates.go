@@ -783,8 +783,9 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 		if version, recheckError := m.detectInstalledCLIVersionAfterProviderUpdate(providerID); version != nil {
 			catalogRefreshed = m.setProviderCLIVersion(providerID, version)
 			if comparison, comparable := compareLenientSemver(version.Version, run.target); comparable && comparison > 0 {
+				// The updater really did exit 0; only the verification failed, and
+				// the reason is the error text, not an exit status.
 				status = "failed"
-				exitCode = -1
 				lastError = fmt.Sprintf("la actualización terminó sin instalar %s (sigue en %s; esperada %s)", providerID, version.Version, run.target)
 				run.appendOutput("system", lastError)
 			}
@@ -800,6 +801,15 @@ func (m *Manager) finishProviderUpdateRun(providerID string, run *providerUpdate
 	}
 	run.finish(status, exitCode, lastError)
 	tail := run.tailString()
+	if m.opts.Logf != nil {
+		m.opts.Logf("provider update finished", map[string]any{
+			"provider": providerID,
+			"status":   status,
+			"exitCode": exitCode,
+			"target":   run.target,
+			"error":    redactSensitiveText(lastError),
+		})
+	}
 
 	m.updateMu.Lock()
 	if m.providerUpdateRuns[providerID] == run {
@@ -1281,6 +1291,14 @@ func (m *Manager) decorateProviderUpdateFailure(update *ProviderUpdate) {
 	failure, ok := m.providerUpdateFailures[update.ProviderID]
 	recheckError := m.providerUpdateRechecks[update.ProviderID]
 	m.updateMu.Unlock()
+	// The CLI reached the failed target by other means (Claude Code updates itself),
+	// so there is nothing left to retry and no failure left to show.
+	if cmp, comparable := compareLenientSemver(update.Installed, update.Latest); ok && comparable && cmp <= 0 {
+		m.updateMu.Lock()
+		delete(m.providerUpdateFailures, update.ProviderID)
+		m.updateMu.Unlock()
+		ok = false
+	}
 	if ok && (failure.Target == "" || failure.Target == update.Latest) {
 		update.UpdateAvailable = true
 		update.LastError = failure.LastError

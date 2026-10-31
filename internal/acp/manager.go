@@ -137,6 +137,7 @@ type Manager struct {
 	receiptMu                    sync.Mutex
 	subagentCompletionObserverMu sync.RWMutex
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
+	subagentAttentionObserver    func(tabID, chatID string, notice SubagentAttentionNotice) error
 	subagentLifecycle            func(SubagentLifecycleEvent)
 	subagentLifecycleMu          sync.RWMutex
 	// processLifecycle is the same contract for process children (P4): one

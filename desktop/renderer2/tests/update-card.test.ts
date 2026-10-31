@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nextUpdatePhase, brandForProvider, DONE_HOLD_MS, EXIT_MS } from '../src/update-card.ts';
+import { nextUpdatePhase, brandForProvider, updateFailureTitle, updateFailureReason, updateChainAfterCheck, DONE_HOLD_MS, EXIT_MS } from '../src/update-card.ts';
 
 test('provider ids resolve to the same brand marks the daemon uses', () => {
   const providers = [
@@ -48,4 +48,26 @@ test('resting appears only while updates remain, else hidden', () => {
 test('timing constants keep the seal hold and slide-out distinct and short', () => {
   assert.equal(DONE_HOLD_MS, 500);
   assert.ok(EXIT_MS > 0 && EXIT_MS < DONE_HOLD_MS);
+});
+
+test('a failed update says why, and an exit status only when one means something', () => {
+  const noChange = { providerId: 'claude', status: 'failed', startedAt: '', tail: '', exitCode: 0, error: 'la actualización terminó sin instalar claude' };
+  assert.equal(updateFailureTitle('claude', noChange), 'claude: error');
+  assert.equal(updateFailureReason(noChange, undefined), 'la actualización terminó sin instalar claude');
+  const killed = { ...noChange, exitCode: -1, error: 'signal: killed' };
+  assert.equal(updateFailureTitle('claude', killed), 'claude: error (exit -1)');
+  assert.equal(updateFailureTitle('claude', undefined), 'claude: error');
+  const update = { providerId: 'claude', cli: 'claude', installed: '1', latest: '2', updateAvailable: true, lastError: 'desde el daemon' };
+  assert.equal(updateFailureReason(undefined, update), 'desde el daemon');
+});
+
+test('a failed step leaves the card once the provider no longer offers an update', () => {
+  const chain = { ids: ['claude'], index: 1, failedId: 'claude' };
+  const offer = { providerId: 'claude', cli: 'claude', installed: '1', latest: '2', updateAvailable: true };
+  assert.equal(updateChainAfterCheck(chain, [offer]), chain);
+  assert.equal(updateChainAfterCheck(chain, [{ ...offer, updateAvailable: false }]), undefined);
+  assert.equal(updateChainAfterCheck(chain, []), undefined);
+  const walking = { ids: ['claude'], index: 1, failedId: null };
+  assert.equal(updateChainAfterCheck(walking, []), walking);
+  assert.equal(updateChainAfterCheck(undefined, [offer]), undefined);
 });

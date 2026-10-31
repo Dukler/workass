@@ -149,6 +149,7 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 	// the frozen chat:env event is published. The observer is installed before
 	// any resumed lane can execute a provider effect.
 	manager.SetChatEnvObserver(runtime.observeChatEnv, runtime.deliverSubagentCompletion)
+	manager.SetSubagentAttentionObserver(runtime.deliverSubagentAttention)
 	manager.SetChatEnvRestorer(runtime.restoreActorChatEnvReference)
 	if runtime.bootErr == nil {
 		// Install semantic ingress before any resumed lane or manager recovery can

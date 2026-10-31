@@ -732,6 +732,32 @@ func (m *Manager) updateSubagentActivityForJob(job *Job, phase, activity string)
 	m.updateSubagentActivity(job.SubagentID, phase, activity)
 }
 
+// subagentAttentionNoticeGrace keeps a permission that is answered at once, such
+// as a subagent's question handed straight back to its parent, from notifying.
+var subagentAttentionNoticeGrace = 2 * time.Second
+
+// SubagentAttentionNotice is one local child's wait on a permission, addressed to
+// the chat that owns it.
+type SubagentAttentionNotice struct {
+	SubagentID        string
+	Label             string
+	Sequence          int64
+	Title             string
+	GrantableBy       string
+	OriginLaneID      string
+	OriginOperationID string
+}
+
+// SetSubagentAttentionObserver installs the actor ingress for attention notices.
+func (m *Manager) SetSubagentAttentionObserver(observer func(tabID, chatID string, notice SubagentAttentionNotice) error) {
+	if m == nil {
+		return
+	}
+	m.subagentCompletionObserverMu.Lock()
+	m.subagentAttentionObserver = observer
+	m.subagentCompletionObserverMu.Unlock()
+}
+
 func (m *Manager) notifySubagentPermissionForJob(job *Job, title string) {
 	if job == nil || job.SubagentID == "" {
 		return
@@ -804,6 +830,42 @@ func (m *Manager) notifySubagentPermissionForJob(job *Job, title string) {
 			ParentChatID: chatID, ParentTabID: tabID,
 			OriginMachine: originMachine, OriginChatID: originChatID, OriginTabID: originTabID,
 			OriginLaneID: originLaneID, OriginOperationID: originOperationID,
+		})
+		// A child on another machine reaches its owner through the monitor stream
+		// above. A local one has no watcher, so without this its owner learned of
+		// the wait only by reading, however long the wait lasted.
+		if strings.TrimSpace(originMachine) == "" {
+			notice := SubagentAttentionNotice{
+				SubagentID: job.SubagentID, Label: label, Sequence: attention.Sequence,
+				Title: title, GrantableBy: grantableBy,
+				OriginLaneID: originLaneID, OriginOperationID: originOperationID,
+			}
+			time.AfterFunc(subagentAttentionNoticeGrace, func() { m.deliverSubagentAttention(tabID, chatID, notice) })
+		}
+	}
+}
+
+// deliverSubagentAttention tells the owner once, if the wait outlived the grace
+// and no live wait call of its own already returned it.
+func (m *Manager) deliverSubagentAttention(tabID, chatID string, notice SubagentAttentionNotice) {
+	m.mu.Lock()
+	run := m.subagents[notice.SubagentID]
+	waiting := run != nil && run.Status == "running" && !m.resetting && run.Attention != nil &&
+		run.Attention.Active && run.Attention.Sequence == notice.Sequence &&
+		run.attentionDeliveredSequence < notice.Sequence
+	m.mu.Unlock()
+	if !waiting {
+		return
+	}
+	m.subagentCompletionObserverMu.RLock()
+	observer := m.subagentAttentionObserver
+	m.subagentCompletionObserverMu.RUnlock()
+	if observer == nil {
+		return
+	}
+	if err := observer(tabID, chatID, notice); err != nil && m.opts.Logf != nil {
+		m.opts.Logf("subagent attention notice not delivered", map[string]any{
+			"subagent": notice.SubagentID, "error": redactSensitiveText(err.Error()),
 		})
 	}
 }

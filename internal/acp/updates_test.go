@@ -244,6 +244,10 @@ func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.224"})
 	}))
 	t.Cleanup(registry.Close)
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("2.1.224\n"))
+	}))
+	t.Cleanup(releases.Close)
 	deadRoot := filepath.Join(t.TempDir(), "removed-app-runtime")
 	if err := os.MkdirAll(deadRoot, 0o755); err != nil {
 		t.Fatal(err)
@@ -256,13 +260,14 @@ func TestClaudeUpdateReresolvesTransientShimAndAtomicInstallSwap(t *testing.T) {
 		Providers: []ProviderConfig{{
 			ID: "claude", Name: "Claude Code", Command: "claude", ResolvedCommand: staleShim, Enabled: true,
 		}},
-		DefaultProviderID:        "claude",
-		ProviderConfigFile:       providerFile,
-		Broadcast:                events.Broadcast,
-		RSSSampleInterval:        time.Hour,
-		ProviderUpdateSources:    map[string]string{"claude": registry.URL + "/latest"},
-		ProviderUpdateTimeout:    time.Second,
-		ProviderUpdateRunTimeout: 2 * time.Second,
+		DefaultProviderID:          "claude",
+		ProviderConfigFile:         providerFile,
+		Broadcast:                  events.Broadcast,
+		RSSSampleInterval:          time.Hour,
+		ProviderUpdateSources:      map[string]string{"claude": registry.URL + "/latest"},
+		ProviderUpdateAssetSources: map[string]string{"claude": releases.URL},
+		ProviderUpdateTimeout:      time.Second,
+		ProviderUpdateRunTimeout:   2 * time.Second,
 	})
 	t.Cleanup(func() { manager.Reset() })
 	if err := os.RemoveAll(deadRoot); err != nil {
@@ -820,6 +825,168 @@ func TestProviderUpdateFailureDoesNotLeakToDifferentTarget(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateFailureClearsOnceTheCLIReachesTheTarget(t *testing.T) {
+	t.Parallel()
+	manager := &Manager{
+		providerUpdateFailures: map[string]providerUpdateFailure{
+			"claude": {LastError: "sin instalar", ExitCode: 0, Target: "2.1.316"},
+		},
+		providerUpdateRechecks: map[string]string{},
+	}
+	update := ProviderUpdate{ProviderID: "claude", Installed: "2.1.316", Latest: "2.1.316"}
+	manager.decorateProviderUpdateFailure(&update)
+	if update.UpdateAvailable || update.LastError != "" || update.ExitCode != nil {
+		t.Fatalf("a self-updated CLI still offered a failed update: %#v", update)
+	}
+	if _, kept := manager.providerUpdateFailures["claude"]; kept {
+		t.Fatal("the stale failure survived")
+	}
+}
+
+func TestClaudeNativeInstallRecognizedFromTheExecutable(t *testing.T) {
+	t.Parallel()
+	prefix := t.TempDir()
+	version := filepath.Join(prefix, "share", "claude", "versions", "2.1.314")
+	if err := os.MkdirAll(filepath.Dir(version), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureExecutable(t, version, "exit 0\n")
+	launcher := filepath.Join(prefix, "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(version, launcher); err != nil {
+		t.Fatal(err)
+	}
+	if !claudeNativeInstallForCLI(launcher) {
+		t.Fatal("symlinked native launcher not recognized")
+	}
+
+	copied := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(copied, "share", "claude", "versions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copy := filepath.Join(copied, "bin", "claude.exe")
+	if err := os.MkdirAll(filepath.Dir(copy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureExecutable(t, copy, "exit 0\n")
+	if !claudeNativeInstallForCLI(copy) {
+		t.Fatal("copied launcher beside a versions directory not recognized")
+	}
+
+	npm := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(npm, "share", "claude", "versions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(npm, "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+	if err := os.MkdirAll(filepath.Dir(cli), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	npmLauncher := filepath.Join(npm, "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(npmLauncher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cli, npmLauncher); err != nil {
+		t.Fatal(err)
+	}
+	if claudeNativeInstallForCLI(npmLauncher) {
+		t.Fatal("npm install under a prefix with leftover versions read as native")
+	}
+	if claudeNativeInstallForCLI(filepath.Join(npm, "bin", "missing")) {
+		t.Fatal("a missing executable read as native")
+	}
+}
+
+func TestClaudeNativeInstallChecksItsOwnReleaseChannel(t *testing.T) {
+	prefix := t.TempDir()
+	version := filepath.Join(prefix, "share", "claude", "versions", "2.1.314")
+	if err := os.MkdirAll(filepath.Dir(version), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureExecutable(t, version, "exit 0\n")
+	launcher := filepath.Join(prefix, "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(version, launcher); err != nil {
+		t.Fatal(err)
+	}
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_, _ = w.Write([]byte("2.1.314\n"))
+		case "/stable":
+			_, _ = w.Write([]byte("2.1.308\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(releases.Close)
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "2.1.316"})
+	}))
+	t.Cleanup(registry.Close)
+	config := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", config)
+	manager := &Manager{opts: Options{ProviderUpdateTimeout: 2 * time.Second}}
+	candidate := providerUpdateCandidate{
+		spec:        providerUpdateSpec{ProviderID: "claude", CLI: "claude", Source: registry.URL + "/latest", AssetSource: releases.URL},
+		installed:   "2.1.314",
+		resolvedCLI: launcher,
+	}
+	if latest, err := manager.latestCLIVersion(context.Background(), candidate); err != nil || latest != "2.1.314" {
+		t.Fatalf("native latest = %q, %v; npm leading its channel must not offer an update", latest, err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "settings.json"), []byte(`{"autoUpdatesChannel":"stable"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := manager.latestCLIVersion(context.Background(), candidate); err != nil || latest != "2.1.308" {
+		t.Fatalf("stable channel latest = %q, %v", latest, err)
+	}
+	if cmp, _ := compareLenientSemver(candidate.installed, "2.1.308"); cmp >= 0 {
+		t.Fatal("a stable pointer behind the install must not read as an update: claude update would downgrade")
+	}
+	candidate.resolvedCLI = filepath.Join(prefix, "elsewhere")
+	if latest, err := manager.latestCLIVersion(context.Background(), candidate); err != nil || latest != "2.1.316" {
+		t.Fatalf("non-native latest = %q, %v", latest, err)
+	}
+}
+
+func TestSubagentAttentionNoticeOnlyForAWaitStillOpen(t *testing.T) {
+	t.Parallel()
+	var got []SubagentAttentionNotice
+	manager := &Manager{subagents: map[string]*SubagentRun{}}
+	manager.SetSubagentAttentionObserver(func(_, _ string, notice SubagentAttentionNotice) error {
+		got = append(got, notice)
+		return nil
+	})
+	run := &SubagentRun{Status: "running", Attention: &SubagentAttention{Kind: "permission", Sequence: 2, Active: true}}
+	manager.subagents["child"] = run
+	notice := SubagentAttentionNotice{SubagentID: "child", Sequence: 2}
+
+	run.Attention.Active = false
+	manager.deliverSubagentAttention("tab", "chat", notice)
+	run.Attention.Active = true
+	manager.deliverSubagentAttention("tab", "chat", SubagentAttentionNotice{SubagentID: "child", Sequence: 1})
+	run.attentionDeliveredSequence = 2
+	manager.deliverSubagentAttention("tab", "chat", notice)
+	run.attentionDeliveredSequence = 1
+	run.Status = "done"
+	manager.deliverSubagentAttention("tab", "chat", notice)
+	run.Status = "running"
+	if len(got) != 0 {
+		t.Fatalf("a closed wait notified its owner: %#v", got)
+	}
+	manager.deliverSubagentAttention("tab", "chat", notice)
+	if len(got) != 1 || got[0].SubagentID != "child" {
+		t.Fatalf("an open wait did not notify its owner once: %#v", got)
+	}
+}
+
 func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing.T) {
 	t.Parallel()
 	manager, events, _ := newProviderUpdateTestManager(t, "0.58.1", "0.58.2", "")
@@ -833,7 +1000,7 @@ func TestProviderUpdateZeroExitWithoutVersionAdvanceFailsVerification(t *testing
 	progress := waitProviderUpdateProgress(t, events, "qwen", func(progress ProviderUpdateProgress) bool {
 		return progress.Status == "failed"
 	}, 2*time.Second)
-	if progress.ExitCode == nil || *progress.ExitCode != -1 || !strings.Contains(progress.Error, "sin instalar qwen") {
+	if progress.ExitCode == nil || *progress.ExitCode != 0 || !strings.Contains(progress.Error, "sin instalar qwen") {
 		t.Fatalf("no-change progress = %#v", progress)
 	}
 	update := waitProviderUpdate(t, events, "qwen", func(update ProviderUpdate) bool {
