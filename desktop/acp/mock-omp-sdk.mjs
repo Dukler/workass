@@ -21,7 +21,7 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
   const listeners=new Set(), overrides=new Map();
   const emit=e=>listeners.forEach(fn=>fn(e));
   const models=[{provider:'fixture',id:'same',name:'Fixture Same',reasoning:true},{provider:'other',id:'same',name:'Other Same',reasoning:true}];
-  let release, ui;
+  let release, ui, aborted=false, runActive=false;
   const session={
     isStreaming:false,
     sessionManager:manager, modelRegistry:{getAvailable:()=>models}, model:models[0],thinkingLevel:'off',
@@ -31,6 +31,8 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
     async prompt(text, options) {
       if(text==='FAIL') throw Error('native startup failure');
       if(this.isStreaming) throw Error('fixture duplicate prompt');
+      // The real SDK has no run until agent_start, and abort() before it does nothing.
+      if(process.env.WORKASS_OMP_FIXTURE_LATE_RUN){await new Promise(resolve=>setTimeout(resolve,5));aborted=false;runActive=true;emit({type:'agent_start'});await new Promise(resolve=>setImmediate(resolve))}
       this.isStreaming=true;
       const message={role:'user',content:text};
       emit({type:'message_start',message});
@@ -44,13 +46,13 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
       if(text==='WAIT' || text.includes('[fixture:wait]')) await new Promise(resolve=>{release=resolve});
       if(text==='COMPACT') { emit({type:'auto_compaction_start'}); emit({type:'auto_compaction_end',result:{summary:'fixture native summary'}}); }
       const answer= text==='STATE' ? JSON.stringify({approval:overrides.get('tools.approvalMode'),plan:this.plan,images:options.images}) : 'Fixture answer';
-      emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:answer}});
+      if(!(process.env.WORKASS_OMP_FIXTURE_LATE_RUN&&aborted))emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:answer}});
       const assistant={role:'assistant',stopReason:text==='ERROR'?'error':'stop',errorMessage:text==='ERROR'?'fixture model failed':undefined};
       manager.entries.push({type:'message',message:assistant});
       await manager.ensureOnDisk();
       emit({type:'message_end',message:assistant});
       emit({type:'agent_end',messages:[assistant]});
-      this.isStreaming=false;
+      this.isStreaming=false;runActive=false;
     },
     async steer(text, images) {
       if(!this.isStreaming) throw Error('fixture idle steer');
@@ -64,7 +66,7 @@ export async function createAgentSession({sessionManager:manager,appendSystemPro
       // accidental second prompt instead of the one native steer call.
     },
     async followUp(){throw Error('fixture follow-up must never receive a steer')},
-    async abort(){release?.()}, async dispose(){await manager.flush()},
+    async abort(){if(process.env.WORKASS_OMP_FIXTURE_LATE_RUN&&!runActive)return;aborted=true;release?.()}, async dispose(){await manager.flush()},
   };
   fs.writeFileSync(path.join(root,'prompt.txt'),'NATIVE DEFAULT\n'+(appendSystemPrompt||''));
   return {session,setToolUIContext(value){ui=value}};

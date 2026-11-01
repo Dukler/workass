@@ -208,6 +208,11 @@ export class PiSession {
     }
   }
   event(event) {
+    // Pi's abort only reaches a run that exists. Between prompt() and agent_start
+    // (input handlers, auth, compaction, before_agent_start) it is a no-op and the
+    // run then starts anyway, so a Stop in that gap is repeated at the first moment
+    // it can land, before the model is asked.
+    if (event.type === 'agent_start' && this.turnAbort?.signal.aborted && this.running) void this.native.abort().catch(diagnostic);
     if (event.type === 'message_end') {
       if (event.message?.role === 'user' && !this.inputMessage) this.inputMessage = event.message;
       else if (event.message?.role === 'user') {
@@ -277,6 +282,10 @@ export class PiSession {
       this.commitSteers();
       if (this.lastAssistant?.stopReason === 'error') throw new Error(safe(this.lastAssistant.errorMessage || 'Pi model request failed'));
       return {stopReason:this.turnAbort.signal.aborted || this.lastAssistant?.stopReason === 'aborted' ? 'cancelled':'end_turn'};
+    } catch (error) {
+      // An abort that lands as the run starts surfaces as a throw: it was a Stop.
+      if (this.turnAbort.signal.aborted) return {stopReason:'cancelled'};
+      throw error;
     } finally { this.turnAbort.abort(); this.running = false; this.turnId = null; this.pendingInput = null; this.pendingSteers = []; }
   }
   async steer(params) {

@@ -141,3 +141,10 @@ test('native model/effort controls, extension tools/guards, compaction, usage an
   assert.ok(h.out.some(x=>x.params?.update?.used===42&&x.params?.update?.size===4096));
   await assert.rejects(h.call('session/prompt',{sessionId,prompt:'ERROR'}),/model failed/);
 });
+test('a Stop before Pi has a run is repeated when the run starts, before the model answers',async t=>{
+  const dir=await setup(t),h=run(t,dir,{WORKASS_PI_FIXTURE_LATE_RUN:'1'});
+  await h.call('initialize');const {sessionId}=await h.call('session/new',{cwd:dir,mcpServers:[]});
+  h.p.stdin.write(JSON.stringify({jsonrpc:'2.0',id:900,method:'session/prompt',params:{sessionId,prompt:'stop me'}})+'\n'+JSON.stringify({jsonrpc:'2.0',method:'session/cancel',params:{sessionId}})+'\n');
+  assert.equal((await h.wait(x=>x.id===900)).result?.stopReason,'cancelled');
+  assert.ok(!h.out.some(x=>x.params?.update?.sessionUpdate==='agent_message_chunk'),'the model answered a stopped turn');
+});

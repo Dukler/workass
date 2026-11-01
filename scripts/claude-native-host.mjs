@@ -494,6 +494,7 @@ class ClaudeSession {
     // message stream, so the turn's result cannot be what closes it here.
     this.turnPromptId = '';
     this.startedTurns = false;
+    this.queryOpening = null;
     this.queryNeedsRestart = false;
     // Turn pulse: elapsed/tokens/phase while a turn is live, plus provider
     // retry state classified from Claude Code's stderr. A max-effort turn can
@@ -1767,8 +1768,22 @@ class ClaudeSession {
     }
   }
 
+  // A prompt stopped before its query opened leaves that open running, and the
+  // next prompt must wait for it: a second query on one session id is refused.
   async ensureQuery() {
-    if (this.query && !this.queryNeedsRestart) return;
+    for (;;) {
+      if (this.queryOpening) {
+        await this.queryOpening;
+      } else if (this.query && !this.queryNeedsRestart) {
+        return;
+      } else {
+        this.queryOpening = this.openQueryForTurn().finally(() => { this.queryOpening = null; });
+        await this.queryOpening;
+      }
+    }
+  }
+
+  async openQueryForTurn() {
     const resumeExisting = this.conversation.resumeExisting();
     try {
       await this.openQuery(resumeExisting);
@@ -1805,7 +1820,17 @@ class ClaudeSession {
       }
       return;
     }
-    if (!this.query || !this.activePrompt) return;
+    if (!this.activePrompt) return;
+    // The prompt is reserved before its query is ready, and every earlier Stop
+    // retires the query, so a Stop written right behind a prompt finds no query
+    // or a harness that does not hold this input. There is nothing to interrupt
+    // and the turn must not start: settling here is what enqueuePrompt checks
+    // before it pushes. The query is left to finish opening, idle, for the next
+    // prompt (retiring one that never saw input is the first-turn id wedge).
+    if (!this.query || !this.activePrompt.inputSubmitted) {
+      this.settlePrompt({ stop_reason: 'cancelled', subtype: 'error_during_execution', is_error: false, errors: ['interrupted by user'] }, null);
+      return;
+    }
     const query = this.query;
     // Stop belongs to the prompt that was running when it was asked. If that
     // prompt ends on its own while the interrupt is in flight, the next queued

@@ -145,6 +145,9 @@ export class OmpSession {
     await runner.emit({type:'session_start'});
   }
   event(event) {
+    // Abort only reaches a run that exists; a Stop between prompt() and agent_start
+    // is a no-op and the run then starts anyway. Repeat it when it can land.
+    if (event.type === 'agent_start' && this.running && this.turnAbort?.signal.aborted) void this.native.abort({reason:'interrupted'}).catch(e=>diagnostic('OMP cancel failed',e));
     const type = String(event?.type || '');
     if (type === 'message_end' && event.message?.role === 'user' && this.pendingInput) {
       const accepted = this.pendingInput;
@@ -197,6 +200,10 @@ export class OmpSession {
       if (this.receipt) await this.receipt;
       if (this.turnError) throw this.turnError;
       return {stopReason:this.lastStopReason};
+    } catch (error) {
+      // An abort that lands as the run starts surfaces as a throw: it was a Stop.
+      if (this.turnAbort?.signal.aborted) return {stopReason:'cancelled'};
+      throw error;
     } finally { this.turnAbort?.abort(); this.running = false; this.turnId = null; this.pendingInput = null; }
   }
   async steer(value) {

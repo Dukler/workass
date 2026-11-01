@@ -62,7 +62,13 @@ type session struct {
 	promptMu sync.Mutex
 	cancel   context.CancelFunc
 	running  bool
+	// Counts Stops, in stdin order. A prompt records it when read and starts only
+	// if no Stop came after: requests run on goroutines, so a cancel read right
+	// behind a prompt usually gets here before the prompt has a context to cancel.
+	stops uint64
 }
+
+type promptAdmissionKey struct{}
 
 func New(opts Options) (*Server, error) {
 	stdout := opts.Stdout
@@ -149,10 +155,28 @@ func (s *Server) acceptLine(ctx context.Context, line []byte) {
 	params := append(json.RawMessage(nil), fields["params"]...)
 	if hasID {
 		id := append(json.RawMessage(nil), rawID...)
-		go s.handleRequest(ctx, id, method, params)
+		requestCtx := ctx
+		if method == "session/prompt" {
+			requestCtx = s.admitPrompt(ctx, params)
+		}
+		go s.handleRequest(requestCtx, id, method, params)
 		return
 	}
 	s.handleNotification(method, params)
+}
+
+func (s *Server) admitPrompt(ctx context.Context, rawParams json.RawMessage) context.Context {
+	params, err := decodeParams(rawParams)
+	if err != nil {
+		return ctx
+	}
+	sess := s.getSession(asString(params["sessionId"]))
+	if sess == nil {
+		return ctx
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return context.WithValue(ctx, promptAdmissionKey{}, sess.stops)
 }
 
 func idOrNull(id json.RawMessage) json.RawMessage {
@@ -363,6 +387,7 @@ func (s *Server) cancel(params map[string]any, strict bool) (map[string]any, *rp
 		return map[string]any{}, nil
 	}
 	sess.mu.Lock()
+	sess.stops++
 	cancel := sess.cancel
 	sess.mu.Unlock()
 	if cancel != nil {
@@ -395,6 +420,11 @@ func (s *Server) prompt(ctx context.Context, params map[string]any) (map[string]
 	messages := append(history, userMsg)
 	promptCtx, cancel := context.WithCancel(ctx)
 	sess.mu.Lock()
+	if admitted, ok := ctx.Value(promptAdmissionKey{}).(uint64); ok && admitted != sess.stops {
+		sess.mu.Unlock()
+		cancel()
+		return map[string]any{"stopReason": "cancelled"}, nil
+	}
 	sess.cancel = cancel
 	sess.running = true
 	sess.mu.Unlock()

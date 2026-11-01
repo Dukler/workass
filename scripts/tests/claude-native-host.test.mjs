@@ -417,6 +417,55 @@ test('official Claude SDK host cancellation settles even when the provider inter
   assert.equal(followUp.result.stopReason, 'end_turn');
 });
 
+// The daemon writes session/cancel right behind session/prompt when Stop came
+// while the turn was being prepared. After any earlier Stop the query is retired,
+// so this prompt has no query yet: the Stop was dropped and the turn ran.
+test('official Claude SDK host: a Stop written behind the prompt keeps the turn from starting', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  const stopped = async (id) => {
+    const from = peer.messages.length;
+    const prompt = JSON.stringify({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'must not run' }] } });
+    peer.child.stdin.write(`${prompt}\n${JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })}\n`);
+    const reply = await peer.waitFor((message) => message.id === id);
+    assert.equal(reply.result?.stopReason, 'cancelled', JSON.stringify(reply));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(peer.messages.slice(from).filter((m) => m.params?.update?.sessionUpdate === 'agent_message_chunk').length, 0);
+  };
+  // A live idle query, then a retired one, then the same again.
+  for (const id of [3, 4, 5]) await stopped(id);
+  peer.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'after the Stops' }] } });
+  assert.equal((await peer.waitFor((message) => message.id === 6)).result.stopReason, 'end_turn');
+  // One input reached the provider: no second query was opened on the id.
+  assert.equal(peer.messages.filter((m) => m.params?.update?.sessionUpdate === 'agent_message_chunk').length, 1);
+});
+
+test('official Claude SDK host: stopped before the query opens, the next prompt shares that open', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_EXCLUSIVE_SESSION: '1', WORKASS_CLAUDE_FIXTURE_CLOSE_DELAY_MS: '40' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  const line = (value) => `${JSON.stringify({ jsonrpc: '2.0', ...value })}\n`;
+  const prompt = (id, text) => line({ id, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text }] } });
+  const stop = line({ method: 'session/cancel', params: { sessionId } });
+  // Retire the query with a real Stop, whose close is slow.
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'keep running' }] } });
+  await peer.waitFor((message) => message.method === 'session/update' && message.params.update.sessionUpdate === 'agent_thought_chunk');
+  peer.child.stdin.write(stop);
+  await peer.waitFor((message) => message.id === 3);
+  // Stopped while the reopen waits for that close, then asked again at once.
+  peer.child.stdin.write(prompt(4, 'must not run') + stop + prompt(5, 'run this'));
+  assert.equal((await peer.waitFor((message) => message.id === 4)).result?.stopReason, 'cancelled');
+  const followUp = await peer.waitFor((message) => message.id === 5);
+  assert.equal(followUp.result?.stopReason, 'end_turn', JSON.stringify(followUp));
+});
+
 test('official Claude SDK host waits for the prior SDK query to release its session id before reopening', async (t) => {
   const peer = startHost({
     WORKASS_CLAUDE_FIXTURE_EXCLUSIVE_SESSION: '1',

@@ -631,6 +631,12 @@ async function runPrompt(id, params) {
 	// session/prompt response is deliberately withheld. Workass must not invent
 	// a second terminal-status protocol; tests end it through explicit cancel.
 	session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+	// A cancel read while this turn was still streaming found nothing parked to
+	// answer; parking now would drop it, which no harness does.
+	if (session.cancelled) {
+		respond(id, { stopReason: 'cancelled' });
+		return;
+	}
 	if (text.includes('[mock:active-without-terminal]')) {
 		session.turnStatus = 'active';
 		session.pendingPromptId = id;

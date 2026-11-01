@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,46 @@ func TestAgentCancelAbortsInFlightHTTP(t *testing.T) {
 	case <-fake.cancelDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake OpenAI server did not observe request cancellation")
+	}
+	proc.AssertStdoutPurity(t)
+}
+
+// A Stop read right behind its prompt must keep the model from being asked. The
+// two lines are one write, so nothing but the agent's own order decides it.
+func TestAgentStopWrittenBehindThePromptNeverAsksTheModel(t *testing.T) {
+	fake := newFakeOpenAI(t)
+	defer fake.Close()
+	proc := startAgent(t, fake.URL()+"/v1", "fake-model")
+	defer proc.Close(t)
+
+	proc.Send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{}})
+	_ = proc.WaitFor(t, responseID("1"), 2*time.Second)
+	proc.Send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": map[string]any{}})
+	sessionID := stringField(asMap(proc.WaitFor(t, responseID("2"), 2*time.Second)["result"])["sessionId"])
+	for round := 0; round < 20; round++ {
+		id := 100 + round
+		prompt, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "session/prompt",
+			"params": map[string]any{"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": "stop me"}}}})
+		stop, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "session/cancel", "params": map[string]any{"sessionId": sessionID}})
+		if _, err := proc.stdin.Write(append(append(append(prompt, '\n'), stop...), '\n')); err != nil {
+			t.Fatal(err)
+		}
+		result := asMap(proc.WaitFor(t, responseID(strconv.Itoa(id)), 2*time.Second)["result"])
+		if result["stopReason"] != "cancelled" {
+			t.Fatalf("round %d: stopped prompt ended %#v", round, result)
+		}
+	}
+	fake.mu.Lock()
+	asked := len(fake.requests)
+	fake.mu.Unlock()
+	if asked != 0 {
+		t.Fatalf("the model was asked %d times after a Stop", asked)
+	}
+	// A Stop belongs to the prompts before it: the next one runs.
+	proc.Send(t, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": "run me"}}}})
+	if result := asMap(proc.WaitFor(t, responseID("3"), 2*time.Second)["result"]); result["stopReason"] != "end_turn" {
+		t.Fatalf("prompt after the Stop ended %#v", result)
 	}
 	proc.AssertStdoutPurity(t)
 }

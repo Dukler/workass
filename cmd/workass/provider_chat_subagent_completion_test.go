@@ -414,8 +414,16 @@ func TestARemoteChildOfAStoppedTurnEndsLikeALocalOne(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	state := await("the parent's admission", func(s chat.State) bool {
-		return s.Foreground != nil && s.Foreground.OperationID == parentOperation && s.Foreground.Turn.NativeID != ""
+	// A child is started by a turn the provider is already running, never in the
+	// instant after admission: the actor shows the native id before the manager
+	// shows a running job, and a row registered in that gap has no turn to put a
+	// card on, as with any row registered while no turn runs.
+	state := await("the provider running the parent", func(s chat.State) bool {
+		if s.Foreground == nil || s.Foreground.OperationID != parentOperation || s.Foreground.Turn.NativeID == "" || s.Foreground.AssistantContent == "" {
+			return false
+		}
+		_, running := manager.RunningJobForChat(tabID, chatID)
+		return running
 	})
 	register := func(id string) {
 		manager.RegisterHostedSubagent(tabID, chatID, acp.HostedSubagentRow{

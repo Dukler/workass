@@ -31,7 +31,7 @@ export async function createAgentSession({sessionManager:manager}) {
   const emit=e=>listeners.forEach(fn=>fn(e));
   const end=message=>{emit({type:'message_end',message});manager.appendMessage(message)};
   const models=[{provider:'fixture',id:'same',name:'Fixture Same'},{provider:'other',id:'same',name:'Other Same'}];
-  let release,ui,aborted=false;
+  let release,ui,aborted=false,runActive=false;
   const steers=[];
   const session={
     isStreaming:false,model:models[0],thinkingLevel:'off',modelRuntime:{getAvailable:async()=>process.env.WORKASS_PI_FIXTURE_NO_MODELS ? [] : models},
@@ -45,7 +45,10 @@ export async function createAgentSession({sessionManager:manager}) {
       if (this.isStreaming) throw Error('duplicate native prompt');
       if (options.expandPromptTemplates!==false) throw Error('imported context dispatched a native command');
       if (text==='FAIL') throw Error('native startup failure');
-      this.isStreaming=true;aborted=false;
+      // The real SDK awaits input handlers, auth and compaction before its run
+      // exists, and abort() before that does nothing (WORKASS_PI_FIXTURE_LATE_RUN).
+      if(process.env.WORKASS_PI_FIXTURE_LATE_RUN){await new Promise(resolve=>setTimeout(resolve,5));aborted=false;runActive=true;emit({type:'agent_start'});await new Promise(resolve=>setImmediate(resolve))}
+      this.isStreaming=true;if(!process.env.WORKASS_PI_FIXTURE_LATE_RUN)aborted=false;
       fs.writeFileSync(path.join(root,`${manager.id}.started`),text);
       try {
         end({role:'user',content:text,images:options.images});
@@ -70,10 +73,10 @@ export async function createAgentSession({sessionManager:manager}) {
         }
         if(text==='COMPACT') {emit({type:'compaction_start'});emit({type:'compaction_end',result:{summary:'fixture summary'}})}
         const answer=text==='STATE'?JSON.stringify({model:this.model,effort:this.thinkingLevel,images:options.images}):'Fixture answer';
-        emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:answer}});
+        if(!(process.env.WORKASS_PI_FIXTURE_LATE_RUN&&aborted))emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:answer}});
         end({role:'assistant',stopReason:aborted?'aborted':text==='ERROR'?'error':'stop',errorMessage:text==='ERROR'?'fixture model failed':undefined});
         emit({type:'turn_end'});
-      } finally {this.isStreaming=false;release=undefined;emit({type:'agent_settled'})}
+      } finally {this.isStreaming=false;runActive=false;release=undefined;emit({type:'agent_settled'})}
     },
     async steer(text,images) {
       if(!this.isStreaming)throw Error('idle steer');
@@ -83,7 +86,7 @@ export async function createAgentSession({sessionManager:manager}) {
       if (text === '[fixture:consume]') release?.();
     },
     async followUp(){throw Error('a steer must not call followUp')},
-    async abort(){aborted=true;release?.()},async waitForIdle(){},dispose(){},
+    async abort(){if(process.env.WORKASS_PI_FIXTURE_LATE_RUN&&!runActive)return;aborted=true;release?.()},async waitForIdle(){},dispose(){},
   };
   return {session,extensionsResult:{errors:[]}};
 }
