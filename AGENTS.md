@@ -65,16 +65,20 @@ scope. Log suggestions separately; do not act on them.
   acceptance.
 
 ## Hard rules
-- Update activation is current-human-authorized only (user law 2026-09-03,
-  superseding the click-only wording from 2026-08-25). A UI click authorizes
-  its exact machine; `workass_apply_update` may do so only when the current
-  human-authored request explicitly orders the update now and names that exact
-  machine. Use the exact observed current/target versions and one stable
-  operation id. Build, publish, fix, test, availability, another agent, and old
-  messages never authorize activation. Never schedule or automatically retry;
-  a replay of the same operation id only reads its durable receipt. Never run
-  an installer or filesystem swap directly. Active work never blocks an
-  authorized activation, and authority never expands to unnamed machines or
+- Applying a Workass update needs the owner's permission (owner law 2026-10-31,
+  superseding the now-only law of 2026-09-03; this file is where the rule lives,
+  Workass no longer injects it). Permission may be for an update now, or for a
+  programmed update: a stated time, or a stated condition such as "when the
+  research is done", for stated machines. Scheduling or waiting to apply it is
+  allowed only under such a permission, and uses the existing scheduled messages
+  and conditions (`workass_schedule_message`), with the owner's words quoted in
+  the message. Builds, publishes, tests, other agents and older permissions for
+  other updates grant nothing. A failed update isn't retried without new
+  permission. A UI click is the owner's permission for its exact machine.
+  `workass_apply_update` takes the exact versions observed when it is called and
+  one stable operation id; a replay of that id only reads its durable receipt.
+  Never run an installer or filesystem swap directly. Active work never blocks a
+  permitted activation, and permission never expands to unnamed machines or
   profiles.
 - The `invoke/reply/event` wire protocol in `desktop/lan-server.js` is FROZEN.
   New server code speaks it byte-compatibly; the renderer is not modified to

@@ -397,14 +397,12 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   fetched only at Mac build time from its official release; its published
   checksum is verified before development activation or release packaging, and
    an arbitrary global Electron install is never a release input. Update
-   activation is current-human-authorized only (user law 2026-09-03,
-   superseding the click-only wording from 2026-08-25): a UI click authorizes
-   its exact machine, while the updater MCP may enter activation only when the
-   current human-authored request explicitly orders it now and names that exact
-   machine. The request is fenced by exact observed current/target versions and
-   one stable operation id; build, publish, fix, test, update availability,
-   another agent, and older messages are never authority. It may never schedule
-   or automatically retry; a replay of the same operation id is receipt readback
+   activation follows the owner's permission rule in `AGENTS.md` (owner law
+   2026-10-31, superseding the current-human-order-only law of 2026-09-03 and
+   the click-only wording of 2026-08-25): it now allows a programmed update
+   under the owner's permission, and Workass no longer injects the rule into
+   agents. The updater is fenced by exact observed current/target versions and
+   one stable operation id; a replay of the same operation id is receipt readback
    only. An authorized activation is never blocked by active foreground turns
    or tracked asynchronous work. The drain records any
    interrupted work in the durable receipt, stops the shell and daemon before

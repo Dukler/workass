@@ -3,34 +3,36 @@ package acp
 import (
 	"strings"
 	"testing"
+
+	"workass/internal/agenttext"
 )
 
-func TestUpdaterMCPAuthorityRuleIsAdjacentToEveryConfiguredTurn(t *testing.T) {
+// The update permission rule lives in AGENTS.md (owner law 2026-10-31). Nothing
+// Workass injects may state it: not the per-turn block, the environment brief,
+// the native bootstrap or the tool description, which only points at the file.
+func TestUpdatePermissionRuleIsNotInjected(t *testing.T) {
 	manager := NewManager(Options{WorkassToolsOrigin: "https://localhost:8788"})
 	t.Cleanup(func() { manager.Reset() })
-	for _, request := range []string{"inspect the failed update", "continue"} {
-		prompt := manager.buildUserRequestBlock(request, true)
-		ruleAt := strings.LastIndex(prompt, "Updater tools:")
-		requestAt := strings.LastIndex(prompt, "User request:\n"+request)
-		if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {
-			t.Fatalf("per-turn updater rule missing or misplaced: %q", prompt)
-		}
-		for _, want := range []string{
-			"workass_get_update_status", "read-only", "bounded, redacted update-failure evidence",
-			"workass_apply_update", "CURRENT human-authored user request", "exact machine",
-			"never infer authorization", "Never schedule or automatically retry", "same operation_id",
+	injected := map[string]string{
+		"turn":      manager.buildUserRequestBlock("inspect the failed update", true),
+		"agentTurn": manager.buildUserRequestBlock("a scheduled message", false),
+		"brief":     manager.buildEnvironmentBrief(false),
+		"bootstrap": agenttext.Get("native.bootstrap"),
+		"tool":      agenttext.Get("tools.workass_apply_update"),
+	}
+	for name, text := range injected {
+		for _, removed := range []string{
+			"Updater tools:", "human request ordering", "human-authored request explicitly",
+			"human-authored user request explicitly", "orders an update", "orders installation",
+			"never infer authori", "Never infer authori", "Never schedule", "never schedule", "automatically retry",
+			"never authorize",
 		} {
-			if !strings.Contains(prompt[ruleAt:requestAt], want) {
-				t.Fatalf("per-turn updater rule missing %q: %q", want, prompt[ruleAt:requestAt])
+			if strings.Contains(text, removed) {
+				t.Errorf("%s still carries the update rule (%q): %q", name, removed, text)
 			}
 		}
 	}
-}
-
-func TestUpdaterMCPIsNotAdvertisedWithoutConfiguredServer(t *testing.T) {
-	manager := NewManager(Options{})
-	t.Cleanup(func() { manager.Reset() })
-	if prompt := manager.buildUserRequestBlock("update", true); strings.Contains(prompt, "workass_apply_update") {
-		t.Fatalf("unconfigured updater MCP was advertised: %q", prompt)
+	if !strings.Contains(injected["tool"], "AGENTS.md") {
+		t.Errorf("tool description does not say where the rule lives: %q", injected["tool"])
 	}
 }

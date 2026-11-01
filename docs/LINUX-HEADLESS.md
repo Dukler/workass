@@ -150,10 +150,10 @@ From the Mac, with buildbox mounted and paired:
 //        "operation_id": "<caller-stable id>" }
 ```
 
-`workass_apply_update` is authorized by a current human request that names that
-exact machine and orders the update now. Nothing else authorizes it: not a
-build, not a publish, not availability, not an older message, not another
-agent. Replaying the same `operation_id` reads its durable receipt back and
+When `workass_apply_update` may be called is the owner's permission rule in
+`AGENTS.md` (owner law 2026-10-31, superseding the current-human-order-only law
+of 2026-09-03): an update now, or a programmed update at a stated time or
+condition for stated machines. Replaying the same `operation_id` reads its durable receipt back and
 cannot start a second activation.
 
 ## Diagnosing

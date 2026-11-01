@@ -1909,36 +1909,32 @@ var perTurnLanguageRule = agenttext.Get("rules.language")
 
 var perTurnBrowserRule = agenttext.Get("rules.browser")
 
-var perTurnUpdateRule = agenttext.Get("rules.update")
-
 func (m *Manager) buildUserRequestBlock(userText string, humanAuthored bool) string {
 	browserRule := ""
-	updateRule := ""
 	if m != nil && strings.HasPrefix(strings.TrimSpace(m.opts.WorkassToolsOrigin), "https://") {
 		browserRule = perTurnBrowserRule
-		updateRule = perTurnUpdateRule
 	}
-	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule, updateRule)
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule)
 }
 
 func buildUserRequestBlock(userText string, humanAuthored bool) string {
-	return buildUserRequestBlockWithToolRules(userText, humanAuthored, "", "")
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, "")
 }
 
 func buildUserRequestBlockWithBrowserRule(userText string, humanAuthored bool, browserRule string) string {
-	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule, "")
+	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule)
 }
 
-func buildUserRequestBlockWithToolRules(userText string, humanAuthored bool, browserRule, updateRule string) string {
+func buildUserRequestBlockWithToolRules(userText string, humanAuthored bool, browserRule string) string {
 	// Keep generated tool-card evidence separate from the current user request.
 	if humanAuthored {
 		if card, request, ok := splitWorkassToolCardPrefix(userText); ok {
-			return perTurnLanguageRule + browserRule + updateRule +
+			return perTurnLanguageRule + browserRule +
 				agenttext.Get("request.toolcard.prefix") + card +
 				agenttext.Get("request.toolcard.suffix") + request
 		}
 	}
-	return perTurnLanguageRule + browserRule + updateRule + agenttext.Get("request.prefix") + userText
+	return perTurnLanguageRule + browserRule + agenttext.Get("request.prefix") + userText
 }
 
 // splitWorkassToolCardPrefix recognizes only the concrete serialized card
@@ -2035,7 +2031,6 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 	agentLine := ""
 	if strings.TrimSpace(m.opts.WorkassToolsOrigin) != "" {
 		agentLine = agenttext.Get("environment.controls") +
-			perTurnUpdateRule +
 			agenttext.Get("environment.artifacts")
 	}
 	return agenttext.Get("environment.context") +

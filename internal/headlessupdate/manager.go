@@ -165,7 +165,7 @@ type AuthorizationReceipt struct {
 	AcceptedAt     string `json:"acceptedAt"`
 }
 
-// ApplyRequest is the authorized activation a human ordered now for this exact
+// ApplyRequest is the authorized activation the owner permitted for this exact
 // machine. The fields and the authorization sentence match the Electron path
 // exactly so one agent contract covers every platform.
 type ApplyRequest struct {
@@ -489,8 +489,8 @@ func receiptValue(receipt *Receipt) any {
 }
 
 // Apply activates the exact authorized target. It is the only method here that
-// changes the machine, and it only ever runs from a human order relayed for
-// this exact machine id, version pair and operation_id.
+// changes the machine, and it only ever runs from an owner-permitted request
+// relayed for this exact machine id, version pair and operation_id.
 func (m *Manager) Apply(ctx context.Context, request ApplyRequest) (map[string]any, error) {
 	operationID := strings.TrimSpace(request.OperationID)
 	machineID := strings.TrimSpace(request.MachineID)
