@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 	"workass/internal/agenttext"
 
 	"workass/internal/acp"
@@ -80,18 +81,29 @@ func agentMCPTools() []map[string]any {
 			},
 		}
 	}
+	// callingChatPair is a pair the caller may leave out to mean its own chat. Half
+	// a pair is still refused, by the schema, before anything runs.
+	callingChatPair := func(schema map[string]any) map[string]any {
+		properties, _ := schema["properties"].(map[string]any)
+		properties["tab_id"] = str(agenttext.Get("schema.agentMCPTools.guidance.02"))
+		properties["chat_id"] = str(agenttext.Get("schema.agentMCPTools.guidance.03"))
+		schema["dependentRequired"] = map[string]any{"tab_id": []string{"chat_id"}, "chat_id": []string{"tab_id"}}
+		return schema
+	}
 	return []map[string]any{
-		tool("workass_get_chat_diagnostics", agenttext.Get("tools.workass_get_chat_diagnostics"), object(map[string]any{
-			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.02")),
-			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.03")),
-			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": agenttext.Get("schema.agentMCPTools.01")},
-		}, "tab_id", "chat_id"), true, false, true, false),
-		tool("workass_list_chats", agenttext.Get("tools.workass_list_chats"), object(map[string]any{}), true, false, true, false),
+		tool("workass_get_chat_diagnostics", agenttext.Get("tools.workass_get_chat_diagnostics"), callingChatPair(object(map[string]any{
+			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": agenttext.Get("schema.agentMCPTools.01")},
+		})), true, false, true, false),
+		tool("workass_list_chats", agenttext.Get("tools.workass_list_chats"), object(map[string]any{
+			"include_settled": boolean(agenttext.Get("schema.listChats.include_settled")),
+			"query":           str(agenttext.Get("schema.listChats.query")),
+			"limit":           map[string]any{"type": "integer", "minimum": 1, "maximum": listChatsMaxLimit, "description": agenttext.Get("schema.listChats.limit")},
+		}), true, false, true, false),
 		tool("workass_discover_machines", agenttext.Get("tools.workass_discover_machines"), object(map[string]any{}), true, false, true, true),
 		tool("workass_list_update_targets", agenttext.Get("tools.workass_list_update_targets"), object(map[string]any{}), true, false, true, false),
 		tool("workass_get_update_status", agenttext.Get("tools.workass_get_update_status"), object(map[string]any{
-			"machine_id": str(agenttext.Get("schema.agentMCPTools.guidance.04")),
-		}, "machine_id"), true, false, true, false),
+			"machine_id": str(agenttext.Get("schema.update.status_machine_id")),
+		}), true, false, true, false),
 		tool("workass_apply_update", agenttext.Get("tools.workass_apply_update"), mutationObject(map[string]any{
 			"machine_id":               str(agenttext.Get("schema.agentMCPTools.guidance.04")),
 			"expected_current_version": str(agenttext.Get("schema.agentMCPTools.guidance.06")),
@@ -99,12 +111,10 @@ func agentMCPTools() []map[string]any {
 			"authorizing_message_id":   str(agenttext.Get("schema.agentMCPTools.guidance.authorizing_message_id")),
 			"authorization":            str(agenttext.Get("schema.agentMCPTools.guidance.08")),
 		}, "machine_id", "expected_current_version", "expected_target_version", "authorizing_message_id"), false, true, true, true),
-		tool("workass_read_chat", agenttext.Get("tools.workass_read_chat"), object(map[string]any{
-			"tab_id":         str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id":        str(agenttext.Get("schema.agentMCPTools.guidance.10")),
+		tool("workass_read_chat", agenttext.Get("tools.workass_read_chat"), callingChatPair(object(map[string]any{
 			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "description": agenttext.Get("schema.agentMCPTools.02")},
 			"include_events": boolean(agenttext.Get("schema.agentMCPTools.guidance.11")),
-		}, "tab_id", "chat_id"), true, false, true, false),
+		})), true, false, true, false),
 		tool("workass_create_chat", agenttext.Get("tools.workass_create_chat"), mutationObject(map[string]any{
 			"title":             str(agenttext.Get("schema.agentMCPTools.guidance.12")),
 			"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.13")),
@@ -129,22 +139,20 @@ func agentMCPTools() []map[string]any {
 			"tab_id":            str(agenttext.Get("schema.remote.owner_tab_id")),
 			"chat_id":           str(agenttext.Get("schema.remote.owner_chat_id")),
 		}, "title"), false, false, false, false),
-		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), mutationObject(map[string]any{
-			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
-		}, "tab_id", "chat_id", "title"), false, false, false, false),
+		tool("workass_rename_chat", agenttext.Get("tools.workass_rename_chat"), callingChatPair(mutationObject(map[string]any{
+			"title": str(agenttext.Get("schema.agentMCPTools.guidance.22")),
+		}, "title")), false, false, false, false),
 		tool("workass_settle_chat", agenttext.Get("tools.workass_settle_chat"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")), "settled": boolean(agenttext.Get("schema.settleChat.settled")),
 		}, "tab_id", "chat_id", "settled"), false, false, false, false),
-		tool("workass_configure_chat", agenttext.Get("tools.workass_configure_chat"), mutationObject(map[string]any{
-			"tab_id":            str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id":           str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+		tool("workass_configure_chat", agenttext.Get("tools.workass_configure_chat"), callingChatPair(mutationObject(map[string]any{
 			"cwd":               str(agenttext.Get("schema.agentMCPTools.guidance.25")),
 			"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.26")),
 			"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.27")),
 			"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.28")),
 			"mode_id":           str(agenttext.Get("schema.agentMCPTools.guidance.29")),
 			"permission_intent": enum(agenttext.Get("schema.agentMCPTools.guidance.30"), "read", "edit", "full"),
-		}, "tab_id", "chat_id"), false, false, false, false),
+		})), false, false, false, false),
 		tool("workass_focus_chat", agenttext.Get("tools.workass_focus_chat"), mutationObject(map[string]any{
 			"tab_id": str(agenttext.Get("schema.agentMCPTools.guidance.09")), "chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
 		}, "tab_id", "chat_id"), false, false, true, false),
@@ -214,15 +222,18 @@ func agentMCPTools() []map[string]any {
 			},
 		}, false, true, false, true),
 		tool("workass_list_subagents", agenttext.Get("tools.workass_list_subagents"), object(ownerPair(map[string]any{})), true, false, true, false),
-		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), mutationObject(ownerPair(map[string]any{
-			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
-			"timeout_ms":  subagentWaitTimeoutSchema(),
-		}), "subagent_id"), false, false, false, false),
-		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), mutationObject(ownerPair(map[string]any{
-			"subagent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8},
-			"return_when":  enum(agenttext.Get("schema.agentMCPTools.guidance.55"), "first", "all"),
+		tool("workass_wait_subagent", agenttext.Get("tools.workass_wait_subagent"), object(ownerPair(map[string]any{
+			"subagent_id":  str(agenttext.Get("schema.agentMCPTools.guidance.54")),
 			"timeout_ms":   subagentWaitTimeoutSchema(),
-		}), "subagent_ids"), false, false, false, false),
+			"operation_id": str(agenttext.Get("schema.wait.operation_id")),
+		}), "subagent_id"), false, false, false, false),
+		tool("workass_wait_subagents", agenttext.Get("tools.workass_wait_subagents"), object(ownerPair(map[string]any{
+			"subagent_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8, "description": agenttext.Get("schema.wait.subagent_ids")},
+			"operation_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 8, "description": agenttext.Get("schema.wait.operation_ids")},
+			"return_when":   enum(agenttext.Get("schema.agentMCPTools.guidance.55"), "first", "all"),
+			"timeout_ms":    subagentWaitTimeoutSchema(),
+			"operation_id":  str(agenttext.Get("schema.wait.operation_id")),
+		})), false, false, false, false),
 		tool("workass_message_subagent", agenttext.Get("tools.workass_message_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.56")),
 			"message":     str(agenttext.Get("schema.agentMCPTools.guidance.57")),
@@ -234,11 +245,9 @@ func agentMCPTools() []map[string]any {
 		tool("workass_list_subagent_receipts", agenttext.Get("tools.workass_list_subagent_receipts"), object(ownerPair(map[string]any{
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
 		})), true, false, true, false),
-		tool("workass_list_spawned_work", agenttext.Get("tools.workass_list_spawned_work"), object(map[string]any{
-			"tab_id":     str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id":    str(agenttext.Get("schema.agentMCPTools.guidance.21")),
+		tool("workass_list_spawned_work", agenttext.Get("tools.workass_list_spawned_work"), callingChatPair(object(map[string]any{
 			"tail_chars": map[string]any{"type": "integer", "minimum": 0, "maximum": 12000, "description": agenttext.Get("schema.agentMCPTools.06")},
-		}, "tab_id", "chat_id"), true, false, true, false),
+		})), true, false, true, false),
 		tool("workass_register_external_work", agenttext.Get("tools.workass_register_external_work"), mutationObject(map[string]any{
 			"label":       str(agenttext.Get("schema.agentMCPTools.guidance.62")),
 			"role":        enum(agenttext.Get("schema.agentMCPTools.guidance.63"), "work", "service"),
@@ -334,26 +343,19 @@ func agentMCPTools() []map[string]any {
 			"reason":     str(agenttext.Get("schema.process.reason")),
 			"machine_id": str(agenttext.Get("schema.process.machine_id")),
 		}, "work_id"), false, true, true, false),
-		tool("workass_list_spawned_work_receipts", agenttext.Get("tools.workass_list_spawned_work_receipts"), object(map[string]any{
-			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
-			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
-		}, "tab_id", "chat_id"), true, false, true, false),
+		tool("workass_list_spawned_work_receipts", agenttext.Get("tools.workass_list_spawned_work_receipts"), callingChatPair(object(map[string]any{
+			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
+		})), true, false, true, false),
 		tool("workass_cancel_subagent", agenttext.Get("tools.workass_cancel_subagent"), mutationObject(ownerPair(map[string]any{
 			"subagent_id": str(agenttext.Get("schema.agentMCPTools.guidance.54")),
 		}), "subagent_id"), false, true, false, false),
-		tool("workass_create_fork_point", agenttext.Get("tools.workass_create_fork_point"), mutationObject(map[string]any{
-			"tab_id":   str(agenttext.Get("schema.fork.target_tab")),
-			"chat_id":  str(agenttext.Get("schema.fork.target_chat")),
+		tool("workass_create_fork_point", agenttext.Get("tools.workass_create_fork_point"), callingChatPair(mutationObject(map[string]any{
 			"name":     map[string]any{"type": "string", "minLength": 1, "maxLength": 80, "description": agenttext.Get("schema.fork.name")},
 			"mode_id":  str(agenttext.Get("schema.fork.mode_id")),
 			"effort":   str(agenttext.Get("schema.fork.effort")),
 			"add_dirs": map[string]any{"type": "array", "maxItems": 8, "items": map[string]any{"type": "string", "minLength": 1}, "description": agenttext.Get("schema.fork.add_dirs")},
-		}, "tab_id", "chat_id", "name"), false, false, true, true),
-		tool("workass_list_forks", agenttext.Get("tools.workass_list_forks"), object(map[string]any{
-			"tab_id":  str(agenttext.Get("schema.agentMCPTools.guidance.09")),
-			"chat_id": str(agenttext.Get("schema.agentMCPTools.guidance.21")),
-		}, "tab_id", "chat_id"), true, false, true, false),
+		}, "name")), false, false, true, true),
+		tool("workass_list_forks", agenttext.Get("tools.workass_list_forks"), callingChatPair(object(map[string]any{})), true, false, true, false),
 		tool("workass_fork_run", agenttext.Get("tools.workass_fork_run"), mutationObject(map[string]any{
 			"fork_point_id": str(agenttext.Get("schema.fork.fork_point_id")),
 			"children": map[string]any{
@@ -428,11 +430,16 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 	if _, exists := params["operationId"]; exists {
 		return agentMCPErrorResult("Workass tools use operation_id; operationId is not accepted"), nil
 	}
+	if agentToolDefaultsToCallingChat[call.Name] && fieldString(params, "tab_id") == "" && fieldString(params, "chat_id") == "" {
+		params["tab_id"], params["chat_id"] = options.TabID, options.ChatID
+	}
+	listOptions := chatListOptions{}
 	switch call.Name {
 	case "workass_get_chat_diagnostics":
 		method = "chat.diagnostics"
 	case "workass_list_chats":
 		method = "chat.list"
+		listOptions = takeChatListOptions(params)
 	case "workass_discover_machines":
 		method = "machines.discover"
 	case "workass_list_update_targets":
@@ -441,6 +448,9 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "update.status"
 	case "workass_apply_update":
 		method = "update.apply"
+		if err := checkUpdateApplyArguments(params); err != nil {
+			return agentMCPErrorResult(err.Error()), nil
+		}
 	case "workass_read_chat":
 		method = "chat.read"
 	case "workass_create_chat":
@@ -482,8 +492,14 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		}
 	case "workass_wait_subagents":
 		method = "agent.wait_many"
-		params["ids"] = params["subagent_ids"]
+		if ids, given := params["subagent_ids"]; given {
+			params["ids"] = ids
+		}
 		delete(params, "subagent_ids")
+		if operationID == "" && params["ids"] != nil && params["operation_ids"] == nil {
+			operationID = derivedAgentWaitOperationID(agentWaitObservationDigest("many", fieldString(params, "tab_id"), fieldString(params, "chat_id"),
+				stringSliceField(params["ids"]), fieldString(params, "return_when"), time.Duration(intField(params, "timeout_ms"))*time.Millisecond))
+		}
 	case "workass_message_subagent":
 		method = "agent.message"
 		params["id"] = params["subagent_id"]
@@ -518,6 +534,10 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "agent.wait"
 		params["id"] = params["subagent_id"]
 		delete(params, "subagent_id")
+		if operationID == "" {
+			operationID = derivedAgentWaitOperationID(agentWaitObservationDigest("single", fieldString(params, "tab_id"), fieldString(params, "chat_id"),
+				[]string{fieldString(params, "id")}, "single", time.Duration(intField(params, "timeout_ms"))*time.Millisecond))
+		}
 	case "workass_cancel_subagent":
 		method = "agent.cancel"
 		params["id"] = params["subagent_id"]
@@ -551,7 +571,10 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 	}
 	result, err := control.call(request, agentControlRequest{Method: method, Params: params})
 	if err != nil {
-		return agentMCPErrorResult(err.Error()), nil
+		return agentMCPErrorResult(plainAgentToolError(call.Name, params, control.selfMachineID, err)), nil
+	}
+	if call.Name == "workass_list_chats" {
+		result = projectToolChatList(result, listOptions, options)
 	}
 	encoded, _ := json.Marshal(redactValue(result))
 	return map[string]any{"content": []any{map[string]any{"type": "text", "text": string(encoded)}}}, nil

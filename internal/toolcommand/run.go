@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,22 @@ import (
 	"workass/internal/acp"
 	"workass/internal/toolcli"
 )
+
+// readContext reads this process's private context, saying what actually
+// happened to it without ever repeating its path.
+func readContext(contextFile string) (toolcli.Config, error) {
+	if strings.TrimSpace(contextFile) == "" {
+		return toolcli.Config{}, errors.New("WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine")
+	}
+	config, err := toolcli.ReadConfig(contextFile)
+	if err != nil {
+		if errors.Is(err, toolcli.ErrContextMissing) {
+			return toolcli.Config{}, fmt.Errorf("%w; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message", err)
+		}
+		return toolcli.Config{}, fmt.Errorf("%w; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history", err)
+	}
+	return config, nil
+}
 
 // Run executes one direct Workass CLI command. It performs exactly one
 // authenticated request; uncertain mutations must be read back by the caller
@@ -28,7 +45,7 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	flags.SetOutput(diagnostics)
 	contextFile := flags.String("context", os.Getenv("WORKASS_TOOL_CONTEXT"), "private context file supplied by the current Workass turn")
 	flags.Usage = func() {
-		fmt.Fprintln(diagnostics, "workass tools --context FILE list [NAME]\nworkass tools --context FILE call NAME [--input FILE]\nCall arguments are one JSON object read from stdin, or --input FILE. Mutations require operation_id; retry only with the same id and arguments.")
+		fmt.Fprintln(diagnostics, Usage)
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -43,48 +60,86 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	}
 	var call *toolcli.Call
 	name := ""
+	query := url.Values{}
 	switch args[0] {
 	case "guide":
-		if len(args) != 1 {
-			return errors.New("guide accepts no arguments")
-		}
 		guide, err := os.ReadFile(os.Getenv("WORKASS_TOOLS_GUIDE"))
 		if err != nil {
 			return errors.New("Workass guide is unavailable in this process")
 		}
+		if len(args) > 1 {
+			// The guide is what was asked for, whatever else was typed after it.
+			fmt.Fprintln(diagnostics, "guide takes no arguments; tools list NAME shows one tool's schema")
+		}
 		_, err = output.Write(guide)
 		return err
 	case "list":
-		if len(args) > 2 {
-			return errors.New("list accepts at most one exact tool name")
+		for _, argument := range args[1:] {
+			switch {
+			case argument == "--full" || argument == "-full":
+				query.Set("full", "1")
+			case strings.HasPrefix(argument, "-"):
+				return errors.New("list accepts one exact tool name or --full")
+			case name != "":
+				return errors.New("list accepts at most one exact tool name")
+			default:
+				name = argument
+			}
 		}
-		if len(args) == 2 {
-			name = args[1]
+		if name != "" {
+			query = url.Values{"name": {name}}
 		}
 	case "call":
 		if len(args) < 2 {
 			return errors.New("call requires an exact tool name")
 		}
 		name = args[1]
-		callFlags := flag.NewFlagSet("call", flag.ContinueOnError)
-		callFlags.SetOutput(diagnostics)
-		inputFile := callFlags.String("input", "", "JSON arguments file; stdin by default")
-		if err := callFlags.Parse(args[2:]); err != nil {
-			return err
+		if strings.HasPrefix(name, "-") {
+			return errors.New("call takes the exact tool name first: tools call NAME --key value")
 		}
-		if callFlags.NArg() != 0 {
-			return errors.New("unexpected call argument")
+		parsed, syntaxErr := parseCallFlags(args[2:])
+		if syntaxErr != nil {
+			return explainCallSyntax(ctx, *contextFile, name, syntaxErr)
 		}
-		if *inputFile != "" {
-			f, err := os.Open(*inputFile)
-			if err != nil {
-				return errors.New("cannot open tool arguments file")
+		if parsed.help {
+			fmt.Fprintln(diagnostics, Usage)
+			return nil
+		}
+		if len(parsed.pairs) > 0 {
+			arguments := make(map[string]any, len(parsed.pairs))
+			for key, value := range parsed.pairs {
+				arguments[key] = value
 			}
-			defer f.Close()
-			input = f
+			call = &toolcli.Call{Name: name, Arguments: arguments, FromFlags: true}
+			break
 		}
-		raw, err := io.ReadAll(io.LimitReader(input, 4*1024*1024+1))
-		if err != nil || len(raw) > 4*1024*1024 {
+		var raw []byte
+		if parsed.inline != "" {
+			raw = []byte(parsed.inline)
+		} else {
+			if parsed.input != "" {
+				f, err := os.Open(parsed.input)
+				switch {
+				case err == nil:
+					defer f.Close()
+					input = f
+				case looksLikeInlineJSON(parsed.input):
+					raw = []byte(parsed.input)
+				case parsed.input == "-":
+					// stdin, as most tools spell it.
+				default:
+					return errors.New("cannot open tool arguments file; --input takes a file path or one inline JSON object, and stdin works too")
+				}
+			}
+			if raw == nil {
+				read, err := io.ReadAll(io.LimitReader(input, 4*1024*1024+1))
+				if err != nil {
+					return errors.New("tool arguments are unreadable or exceed 4 MiB")
+				}
+				raw = read
+			}
+		}
+		if len(raw) > 4*1024*1024 {
 			return errors.New("tool arguments are unreadable or exceed 4 MiB")
 		}
 		// Windows PowerShell commonly writes a UTF-8 BOM with JSON files.
@@ -100,19 +155,13 @@ func Run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		}
 		call = &toolcli.Call{Name: name, Arguments: arguments}
 	default:
-		return errors.New("unknown tools command: use list or call")
+		return errors.New("unknown tools command: use guide, list or call")
 	}
-	if strings.TrimSpace(*contextFile) == "" {
-		return errors.New("WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine")
-	}
-	config, err := toolcli.ReadConfig(*contextFile)
+	config, err := readContext(*contextFile)
 	if err != nil {
-		if errors.Is(err, toolcli.ErrContextMissing) {
-			return fmt.Errorf("%w; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message", err)
-		}
-		return fmt.Errorf("%w; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history", err)
+		return err
 	}
-	response, err := toolcli.Do(ctx, config, name, call)
+	response, err := toolcli.DoQuery(ctx, config, query, call)
 	if err != nil {
 		return err
 	}

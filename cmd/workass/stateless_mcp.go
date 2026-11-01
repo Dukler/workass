@@ -100,18 +100,27 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		catalog = agentToolsForChild()
 	}
 	if r.Method == http.MethodGet {
-		name := r.URL.Query().Get("name")
+		query := r.URL.Query()
+		name := query.Get("name")
 		if name != "" {
 			for _, t := range catalog {
 				if t["name"] == name {
+					if query.Get("usage") == "1" {
+						writeToolJSON(w, 200, toolcli.Response{Result: map[string]any{"usage": toolUsageForThisMachine(t)}})
+						return
+					}
 					writeToolJSON(w, 200, toolcli.Response{Result: t})
 					return
 				}
 			}
-			fail(404, "unknown Workass tool")
+			fail(404, "unknown Workass tool "+name+"; tools list shows every tool")
 			return
 		}
-		writeToolJSON(w, 200, toolcli.Response{Result: map[string]any{"tools": catalog}})
+		if query.Get("full") == "1" {
+			writeToolJSON(w, 200, toolcli.Response{Result: map[string]any{"tools": catalog}})
+			return
+		}
+		writeToolJSON(w, 200, toolcli.Response{Result: toolListing(catalog)})
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -144,13 +153,19 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if tool == nil {
-		fail(404, "unknown Workass tool")
+		fail(404, "unknown Workass tool "+call.Name+"; tools list shows every tool")
 		return
 	}
+	// Flag values are the text the caller typed. The schema gives them their type
+	// here, in one place, so neither client has to know a tool's arguments.
+	if r.URL.Query().Get("flags") == "1" {
+		call.Arguments = coerceFlagArguments(tool, call.Arguments)
+	}
 	if err := validateToolArguments(tool, call.Arguments); err != nil {
-		result := agentMCPErrorResult(err.Error())
+		message := err.Error() + ". " + toolUsageForThisMachine(tool)
+		result := agentMCPErrorResult(message)
 		if strings.HasPrefix(call.Name, "workass_browser_") {
-			result = browserMCPErrorResult(err.Error())
+			result = browserMCPErrorResult(message)
 		}
 		writeToolJSON(w, 200, toolResponse(result))
 		return
@@ -286,9 +301,20 @@ func agentToolsForChild() []map[string]any {
 	return filtered
 }
 
+// agentWaitOperationOptional names the mutations whose operation id may be left
+// out. A wait changes nothing but a durable note that it was asked for, and the
+// actor derives a stable id for that note from the wait itself
+// (derivedAgentWaitOperationID). An id a caller does pass keeps its whole contract.
+var agentWaitOperationOptional = map[string]bool{"workass_wait_subagent": true, "workass_wait_subagents": true}
+
 func requiredToolOperationID(kind toolKind, call browserMCPCallParams) (providercontract.OperationID, error) {
 	if !workassToolMutates(kind, call.Name) {
 		return "", nil
+	}
+	if kind == agentToolKind && agentWaitOperationOptional[call.Name] {
+		if _, present := call.Arguments["operation_id"]; !present {
+			return "", nil
+		}
 	}
 	if call.Arguments == nil {
 		return "", errors.New("mutating Workass tool requires a caller-stable operation_id")

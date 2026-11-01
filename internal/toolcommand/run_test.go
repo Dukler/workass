@@ -34,6 +34,14 @@ func fixtureContextFile(t *testing.T, status int, responseError string) string {
 
 func fixtureContextFileResponse(t *testing.T, status int, response toolcli.Response) string {
 	t.Helper()
+	return fixtureContextFileHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(response)
+	})
+}
+
+func fixtureContextFileHandler(t *testing.T, handler http.HandlerFunc) string {
+	t.Helper()
 	root := t.TempDir()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -53,10 +61,7 @@ func fixtureContextFileResponse(t *testing.T, status int, response toolcli.Respo
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(response)
-	}))
+	server := httptest.NewUnstartedServer(handler)
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	server.StartTLS()
 	t.Cleanup(server.Close)

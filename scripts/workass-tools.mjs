@@ -16,7 +16,9 @@ export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 10_000;
 const ENDPOINT_RE = /^https:\/\/tools\.localhost:([0-9]{1,5})\/workass\/tools$/;
 const SECRET_TEXT_RE = /(bearer\s+)[A-Za-z0-9._~+/=-]+|((?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi;
-const USAGE = 'workass tools --context FILE list [NAME]\nworkass tools --context FILE call NAME [--input FILE]\nCall arguments are one JSON object read from stdin, or --input FILE. Mutations require operation_id; retry only with the same id and arguments.';
+// internal/toolcommand keeps the same string; a Go test holds them equal.
+const USAGE = "workass tools guide\nworkass tools list [NAME | --full]\nworkass tools call NAME [--input FILE]\nlist shows each tool in one line, list NAME its schema, list --full every schema.\nCall arguments are one JSON object on stdin, or --input FILE, or inline JSON. Simple values also work as --key value. Mutations require operation_id; retry only with the same id and arguments.";
+const FLAG_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export class ToolError extends Error {}
 
@@ -48,6 +50,64 @@ function parseFlags(args, known) {
     }
   }
   return { values, rest: args.slice(index) };
+}
+
+// A token after a flag is the next flag unless it is a negative number, which
+// is a value: timeout_ms takes -1.
+function looksLikeFlag(token) {
+  return token.startsWith('--') || /^-[A-Za-z]/.test(token);
+}
+
+function looksLikeInlineJSON(value) {
+  return /^[ \t\r\n]*\{/.test(value);
+}
+
+// Mirrors internal/toolcommand.parseCallFlags, held to it by
+// tests/fixtures/tools-call-flags.json. --input reads as it always did; any other
+// flag is one argument for the daemon to type against the tool's schema.
+export function parseCallFlags(tokens) {
+  const parsed = { input: '', inline: '', pairs: {}, help: false };
+  const positional = [];
+  let hasInput = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--') { positional.push(...tokens.slice(index + 1)); break; }
+    if (!token.startsWith('-') || token === '-') { positional.push(token); continue; }
+    const body = token.replace(/^--?/, '');
+    const equals = body.indexOf('=');
+    const name = equals >= 0 ? body.slice(0, equals) : body;
+    let value = equals >= 0 ? body.slice(equals + 1) : '';
+    if (name === 'h' || name === 'help') { parsed.help = true; return parsed; }
+    if (!FLAG_NAME_RE.test(name)) throw new ToolError('that is not a valid flag');
+    const key = name.replaceAll('-', '_');
+    if (key === 'context') throw new ToolError('--context is not needed: the process environment already names the context');
+    if (key === 'input') {
+      if (equals < 0) {
+        if (index + 1 >= tokens.length) throw new ToolError('--input needs an argument');
+        index += 1;
+        value = tokens[index];
+      }
+      parsed.input = value;
+      hasInput = true;
+      continue;
+    }
+    if (equals < 0) {
+      value = 'true';
+      if (index + 1 < tokens.length && !looksLikeFlag(tokens[index + 1])) { index += 1; value = tokens[index]; }
+    }
+    if (Object.hasOwn(parsed.pairs, key)) throw new ToolError(`--${key} was passed more than once`);
+    parsed.pairs[key] = value;
+  }
+  if (positional.length > 1 || (positional.length === 1 && !looksLikeInlineJSON(positional[0]))) throw new ToolError('unexpected call argument');
+  if (positional.length === 1) parsed.inline = positional[0];
+  if ([hasInput, parsed.inline !== '', Object.keys(parsed.pairs).length > 0].filter(Boolean).length > 1) {
+    throw new ToolError('use one of --input, inline JSON or --key value, not both');
+  }
+  return parsed;
+}
+
+function callSyntaxHelp(name) {
+  return `pass arguments as one JSON object: on stdin, with --input FILE, or inline as tools call ${name} --input '{"key":"value"}'; tools list ${name} shows its arguments`;
 }
 
 function readBounded(fd, limit) {
@@ -102,7 +162,7 @@ export function readConfig(path) {
   return { endpoint: field('endpoint'), caFile: field('ca_file'), credential: field('credential'), chatID: field('chat_id'), tabID: field('tab_id') };
 }
 
-export function doRequest(config, name, call, { signal, requestImpl = httpsRequest } = {}) {
+export function doRequest(config, name, call, { signal, requestImpl = httpsRequest, query = {} } = {}) {
   const match = ENDPOINT_RE.exec(config.endpoint);
   const port = match ? Number(match[1]) : 0;
   if (!match || port < 1 || port > 65535) return Promise.reject(new ToolError('invalid Workass tool endpoint'));
@@ -123,8 +183,17 @@ export function doRequest(config, name, call, { signal, requestImpl = httpsReque
       argumentsJSON,
       Buffer.from('}', 'utf8'),
     ]);
+    // Flag values are the text the caller typed; the daemon holds the schema and
+    // gives each its type. A daemon that predates this reads an ordinary call.
+    if (call.fromFlags) requestPath += '?flags=1';
   }
-  else if (name) requestPath += `?${new URLSearchParams({ name }).toString()}`;
+  else {
+    // Sorted like Go's url.Values.Encode, so both clients send the same request.
+    const parameters = new URLSearchParams({ ...(name ? { name } : {}), ...query });
+    parameters.sort();
+    const encoded = parameters.toString();
+    if (encoded) requestPath += `?${encoded}`;
+  }
   const headers = {
     Host: `tools.localhost:${port}`,
     Authorization: `Bearer ${config.credential}`,
@@ -201,6 +270,49 @@ export function materializeImages(result, images, contextFile) {
   return { images: saved, result };
 }
 
+// Mirrors internal/toolcommand/run.go: state what actually happened to this
+// process's context, without ever echoing the private context file path.
+function readContext(contextFile) {
+  if (!contextFile || !String(contextFile).trim()) throw new ToolError('WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine');
+  try { return readConfig(contextFile); }
+  catch (err) {
+    if (err.message === 'Workass context file does not exist') {
+      throw new ToolError('Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message');
+    }
+    throw new ToolError(`${err.message}; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history`);
+  }
+}
+
+// A command line that could not be read: the error carries a working example for
+// that tool, which only the daemon can write. This is the one request this run
+// makes, and nothing about the call has been sent.
+async function explainCallSyntax(contextFile, name, mistake, options) {
+  let help = callSyntaxHelp(name);
+  try {
+    const response = await doRequest(readContext(contextFile), name, null, { ...options, query: { usage: '1' } });
+    if (!response.error && typeof response.result?.usage === 'string' && response.result.usage) help = response.result.usage;
+  } catch { /* the plain explanation stands */ }
+  return new ToolError(redactSensitiveText(`${mistake.message}. ${help}`));
+}
+
+function readCallBytes(callFlags, readStdin) {
+  if (callFlags.inline) return Buffer.from(callFlags.inline, 'utf8');
+  if (callFlags.input) {
+    let fd;
+    try { fd = openSync(callFlags.input, 'r'); }
+    catch {
+      if (looksLikeInlineJSON(callFlags.input)) return Buffer.from(callFlags.input, 'utf8');
+      if (callFlags.input !== '-') throw new ToolError('cannot open tool arguments file; --input takes a file path or one inline JSON object, and stdin works too');
+    }
+    if (fd !== undefined) {
+      try { return readBounded(fd, MAX_ARGUMENT_BYTES); }
+      catch { throw new ToolError('tool arguments are unreadable or exceed 4 MiB'); }
+      finally { closeSync(fd); }
+    }
+  }
+  try { return readStdin(); } catch { throw new ToolError('tool arguments are unreadable or exceed 4 MiB'); }
+}
+
 export async function run(args, { env = process.env, stdout = process.stdout, stderr = process.stderr, readStdin = () => readBounded(0, MAX_ARGUMENT_BYTES), signal, requestImpl } = {}) {
   const parsed = parseFlags(args, ['context']);
   if (parsed.help) { stderr.write(`${USAGE}\n`); return; }
@@ -209,50 +321,47 @@ export async function run(args, { env = process.env, stdout = process.stdout, st
   if (rest.length === 0) { stderr.write(`${USAGE}\n`); throw new ToolError('a tools command is required'); }
   let name = '';
   let call = null;
+  const query = {};
   switch (rest[0]) {
     case 'guide': {
-      if (rest.length !== 1) throw new ToolError('guide accepts no arguments');
       let guide;
       try { guide = readFileSync(String(env.WORKASS_TOOLS_GUIDE || '')); } catch { throw new ToolError('Workass guide is unavailable in this process'); }
+      // The guide is what was asked for, whatever else was typed after it.
+      if (rest.length > 1) stderr.write("guide takes no arguments; tools list NAME shows one tool's schema\n");
       stdout.write(guide); return;
     }
     case 'list':
-      if (rest.length > 2) throw new ToolError('list accepts at most one exact tool name');
-      if (rest.length === 2) name = rest[1];
+      for (const argument of rest.slice(1)) {
+        if (argument === '--full' || argument === '-full') query.full = '1';
+        else if (argument.startsWith('-')) throw new ToolError('list accepts one exact tool name or --full');
+        else if (name) throw new ToolError('list accepts at most one exact tool name');
+        else name = argument;
+      }
+      if (name) delete query.full;
       break;
     case 'call': {
       if (rest.length < 2) throw new ToolError('call requires an exact tool name');
       name = rest[1];
-      const callFlags = parseFlags(rest.slice(2), ['input']);
-      if (callFlags.help) { stderr.write('Usage of call:\n  -input string\n    \tJSON arguments file; stdin by default\n'); return; }
-      if (callFlags.rest.length !== 0) throw new ToolError('unexpected call argument');
-      let raw;
-      if (callFlags.values.input) {
-        let fd;
-        try { fd = openSync(callFlags.values.input, 'r'); } catch { throw new ToolError('cannot open tool arguments file'); }
-        try { raw = readBounded(fd, MAX_ARGUMENT_BYTES); }
-        catch { throw new ToolError('tool arguments are unreadable or exceed 4 MiB'); }
-        finally { closeSync(fd); }
-      } else {
-        try { raw = readStdin(); } catch { throw new ToolError('tool arguments are unreadable or exceed 4 MiB'); }
+      if (name.startsWith('-')) throw new ToolError('call takes the exact tool name first: tools call NAME --key value');
+      let callFlags;
+      try { callFlags = parseCallFlags(rest.slice(2)); }
+      catch (err) {
+        if (!(err instanceof ToolError)) throw err;
+        throw await explainCallSyntax(contextFile, name, err, { signal, requestImpl });
       }
+      if (callFlags.help) { stderr.write(`${USAGE}\n`); return; }
+      if (Object.keys(callFlags.pairs).length > 0) {
+        call = { name, arguments: callFlags.pairs, fromFlags: true };
+        break;
+      }
+      const raw = readCallBytes(callFlags, readStdin);
       call = { name, arguments: parseArguments(raw), rawArguments: rawArgumentObject(raw) };
       break;
     }
-    default: throw new ToolError('unknown tools command: use list or call');
+    default: throw new ToolError('unknown tools command: use guide, list or call');
   }
-  if (!contextFile || !String(contextFile).trim()) throw new ToolError('WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine');
-  let config;
-  try { config = readConfig(contextFile); }
-  catch (err) {
-    // Mirrors internal/toolcommand/run.go: state what actually happened to this
-    // process's context, without ever echoing the private context file path.
-    if (err.message === 'Workass context file does not exist') {
-      throw new ToolError('Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message');
-    }
-    throw new ToolError(`${err.message}; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history`);
-  }
-  const response = await doRequest(config, name, call, { signal, requestImpl });
+  const config = readContext(contextFile);
+  const response = await doRequest(config, name, call, { signal, requestImpl, query });
   if (response.error) {
     if (response.status === 401) {
       // A 401 means either the chat was deleted or this context's credential

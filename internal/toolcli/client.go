@@ -44,6 +44,12 @@ type Config struct {
 type Call struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+	// FromFlags marks arguments that came from --key value pairs on the command
+	// line. Every value is then the text the caller typed, and the daemon, which
+	// holds the schema, gives it its type. It travels as a query parameter, so a
+	// daemon that predates it reads an ordinary call and refuses a wrong type by
+	// name.
+	FromFlags bool `json:"-"`
 }
 
 type Image struct {
@@ -99,6 +105,17 @@ func ReadConfig(path string) (Config, error) {
 // Do issues exactly one request, with no retry or discovery handshake. In
 // particular an uncertain mutation must be read back with its same operation id.
 func Do(ctx context.Context, config Config, name string, call *Call) (Response, error) {
+	query := url.Values{}
+	if call == nil && name != "" {
+		query.Set("name", name)
+	}
+	return DoQuery(ctx, config, query, call)
+}
+
+// DoQuery is Do with the catalog question spelled out, under the same rule:
+// exactly one request. A query the daemon does not know is ignored by a daemon
+// that predates it, so each question degrades to the plain catalog read.
+func DoQuery(ctx context.Context, config Config, query url.Values, call *Call) (Response, error) {
 	u, err := url.Parse(config.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Hostname() != "tools.localhost" || u.Port() == "" || u.Path != "/workass/tools" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return Response{}, errors.New("invalid Workass tool endpoint")
@@ -139,10 +156,12 @@ func Do(ctx context.Context, config Config, name string, call *Call) (Response, 
 			return Response{}, errors.New("invalid Workass tool arguments")
 		}
 		body = bytes.NewReader(encoded)
-	} else if name != "" {
-		q := u.Query()
-		q.Set("name", name)
-		u.RawQuery = q.Encode()
+		if call.FromFlags {
+			query = url.Values{"flags": {"1"}}
+		}
+	}
+	if query != nil {
+		u.RawQuery = query.Encode()
 	}
 	request, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {

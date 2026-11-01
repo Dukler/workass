@@ -326,10 +326,6 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
 		return h.chats.providerChats.WaitSubagent(r.Context(), ownerKey, tabID, chatID, operationID, id, timeout)
 	case "agent.wait_many":
-		ids := stringSliceField(params["ids"])
-		if len(ids) == 0 {
-			return nil, errors.New("at least one subagent id is required")
-		}
 		timeoutMS := intField(params, "timeout_ms")
 		if timeoutMS != -1 && timeoutMS != 0 && (timeoutMS < 1000 || timeoutMS > 3600000) {
 			return nil, errors.New("subagent wait timeout_ms must be -1 (event-only), 0 (default), or between 1000 and 3600000")
@@ -338,7 +334,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, errors.New("agent wait requires the durable chat actor")
 		}
 		operationID := providercontract.NormalizeOperationID(fieldString(params, "operation_id"))
-		return h.chats.providerChats.WaitSubagents(r.Context(), ownerKey, tabID, chatID, operationID, ids, fieldString(params, "return_when"), time.Duration(timeoutMS)*time.Millisecond)
+		return h.chats.providerChats.WaitSelectedSubagents(r.Context(), ownerKey, tabID, chatID, operationID, stringSliceField(params["ids"]), stringSliceField(params["operation_ids"]), fieldString(params, "return_when"), time.Duration(timeoutMS)*time.Millisecond)
 	case "agent.message":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err

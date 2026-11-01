@@ -38,6 +38,7 @@ options remain outstanding.
 "$WORKASS_TOOLS_COMMAND" tools guide
 "$WORKASS_TOOLS_COMMAND" tools list
 "$WORKASS_TOOLS_COMMAND" tools list workass_read_chat
+"$WORKASS_TOOLS_COMMAND" tools list --full
 "$WORKASS_TOOLS_COMMAND" tools call workass_read_chat --input arguments.json
 ```
 
@@ -49,9 +50,21 @@ The last command reads a JSON object such as:
 
 Without `--input`, `call` reads one JSON object from stdin. Use `{}` for no
 arguments. Files are UTF-8; UTF-8 BOMs from Windows PowerShell are accepted.
+`--input` takes a file path; a value that is not a file and starts with `{` is
+that JSON itself, so `--input '{}'` works, and `--input -` is stdin. A file of
+that name always wins, so an existing `--input` reads as it did. On PowerShell,
+which strips the quotes of a JSON argument, pipe it instead.
+Simple values also work as `--limit 10 --fork --title "Some title"`, in place of
+the JSON and never beside it. The daemon gives each its type from the tool's
+schema, so a title of `2026` stays text; a flag with no value is `true`; an array
+or object is written as JSON. A flag the tool does not have is refused with an
+example for that tool that passes its schema. Flags never read stdin.
 On PowerShell invoke the executable with `& $env:WORKASS_TOOLS_COMMAND tools`.
-`list` returns the full catalog and JSON argument schemas. `list NAME` returns
-one schema. Successful results are JSON on stdout; errors are redacted JSON on
+`list` returns each tool's name and one sentence, and leaves out internal tools
+such as `workass_register_process_child`, the verb `workass run` reports through,
+which stays callable. `list NAME` returns one schema. `list --full` returns every
+schema, internal tools included. `tools guide` prints the guide, whatever follows
+it. Successful results are JSON on stdout; errors are redacted JSON on
 stderr with a nonzero exit status. Screenshots return local image paths for the
 provider's native image reader. Copy an image into the chat workspace before
 using ordinary image Markdown to deliver it to the user.
@@ -68,8 +81,9 @@ a prompt. Its path stays stable for that process; its exact owner binding is
 refreshed before use, and a missing context file is recreated. A new attachment
 gets a new process path. Context is removed on session close/reset. Old
 authority is rejected after detachment even if a caller retained the file.
-An explicit `--context` remains available for controlled CLI callers; an
-invalid explicit path fails instead of silently switching to another owner.
+An explicit `--context` remains available for controlled CLI callers, though the
+usage text no longer offers it to agents; an invalid explicit path fails instead
+of silently switching to another owner.
 Context errors never echo the private context file path. When
 `WORKASS_TOOL_CONTEXT` is unset the process was not launched by a Workass chat
 engine. A missing context file means the chat that launched the process was
@@ -304,10 +318,28 @@ Arguments are validated against the tool's input schema before any handler
 runs: unknown arguments, wrong types, out-of-range numbers and values outside an
 enum are rejected with an error naming the argument.
 
+Tools that read or adjust one chat take the calling chat when `tab_id` and
+`chat_id` are both left out: `workass_read_chat`, `workass_get_chat_diagnostics`,
+`workass_list_forks`, `workass_create_fork_point`, `workass_list_spawned_work`,
+`workass_list_spawned_work_receipts`, `workass_rename_chat` and
+`workass_configure_chat`. Exact ids still mean that exact chat, and one id without
+the other is refused. Deleting, cancelling, sending, settling and focusing always
+name their chat. `workass_get_update_status` with no `machine_id` is this machine.
+
+`workass_list_chats` answers with the chats that are not settled, with empty
+fields left out and the caller's row marked `self:true`. Its top-level
+`self: {tab_id, chat_id}` is there even when that row is filtered out. Settled
+chats it left out are counted in `settledOmitted` with a `note`; `include_settled`
+lists them, `query` searches title and cwd, `limit` cuts the list and says how
+many in `omittedByLimit`. All of this is on the tool alone: the `chat.list` method
+a peer or the renderer reads still answers with every row, unchanged. A row
+relayed by another machine's window carries no settled state and is listed.
+
 Calls reuse the existing action handlers, remote routing, redaction, ownership,
 and durable operation receipts. Mutations require a caller-stable
-`operation_id`. An uncertain response is not permission to issue a fresh
-mutation: reuse the same id and exact arguments for receipt readback. Updating
+`operation_id`, except a wait, where it is optional. An uncertain response is not
+permission to issue a fresh mutation: reuse the same id and exact arguments for
+receipt readback. Updating
 an application still requires the current human's explicit instruction naming
 the exact machine and the observed versions. Publication does not authorize
 activation.
@@ -354,6 +386,17 @@ progress does not return control to the coordinator. `workass_wait_subagents`
 supports the same option with `subagent_ids` and `return_when:"first"|"all"`.
 Omission or zero retains the ten-minute default; 1000..3600000 sets a bounded
 deadline. Caller cancellation or connection/daemon loss can interrupt any wait.
+
+`operation_id` is optional on both waits. A wait changes nothing but a durable note
+that it was asked for, so without one the id is derived from the wait itself: the
+same wait reads the same note, and it still reads its answer live. An id a caller
+does pass keeps its contract, and reusing it for a different wait is refused.
+`workass_wait_subagents` also takes `operation_ids`, the ids the subagents were
+spawned with, resolved through their spawn receipts, alone or beside `subagent_ids`.
+With neither, it waits for this turn's subagents: those the foreground turn started
+and any still running, for all of them unless `return_when` says `first`, which then
+means the next one to finish. A child hosted on another machine cannot be waited on
+from here and arrives as a notice, so it is named in `notWaitedFor`.
 
 The worker reports a genuine blocker or a decision requiring a changed approach
 by finishing with that report; the same pending wait returns it. Permission
@@ -533,7 +576,8 @@ Every Workass tool reaches exactly one machine, and the ids say which. A chat
 mounted from another fleet machine is returned by `workass_list_chats` with a
 machine-tagged `tabId`/`chatId` pair (`M~<machineId>~<localId>`) and its
 `machineId`. Pass that pair back and the tool runs on the machine that owns the
-chat; pass an untagged pair and it runs here, byte-identically to before.
+chat; pass an untagged pair and it runs here, byte-identically to before. Leaving
+the pair out is the calling chat, on this machine.
 
 `cmd/workass/agent_remote_parity.go` is the single authority for this. Each
 control method is classified once:
