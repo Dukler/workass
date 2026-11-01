@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -242,5 +244,61 @@ func TestArtifactTransferResponseHeadersPreserveMetadataOnly(t *testing.T) {
 	got := safeHeaders(headers)
 	if got["Etag"] != `"fixture"` || got["Referrer-Policy"] != "no-referrer" || got["Set-Cookie"] != "" {
 		t.Fatalf("unexpected response metadata: %#v", got)
+	}
+}
+
+// A sandboxed response gives Chromium's player page an opaque origin, and that
+// page requests its video in CORS mode: the request fails and the player stays
+// empty. Everything else hosted keeps the sandbox.
+func TestHostedMediaIsPlayableAndEverythingElseStaysSandboxed(t *testing.T) {
+	state, workspace := t.TempDir(), t.TempDir()
+	body := "0123456789"
+	for _, name := range []string{"clip.mp4", "clip.webm", "tone.mp3", "tone.wav", "tone.ogg", "page.html", "image.svg", "report.pdf", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg, err := New(state, "http://127.0.0.1:8788", "m-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosted, err := reg.Register(RegisterOptions{BaseDir: workspace, SourcePath: ".", Entry: "page.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfers := NewArtifactTransferManager(reg)
+	for name, want := range map[string]string{"clip.mp4": "video/mp4", "clip.webm": "video/webm", "tone.mp3": "audio/mpeg", "tone.wav": "audio/wav", "tone.ogg": "audio/ogg"} {
+		// The same response both ways: a browser on the daemon, and the transfer
+		// a machine-tagged link reaches a remote owner through.
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, hosted.URLPath+name, nil)
+		request.Header.Set("Range", "bytes=2-5")
+		reg.ServeHTTP(recorder, request)
+		opened, err := transfers.Open(context.Background(), hosted.URLPath+name, http.MethodGet, map[string]string{"Range": "bytes=2-5"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = transfers.Close(opened.TransferID) })
+		for route, got := range map[string]map[string]string{
+			"http": {"Content-Type": recorder.Header().Get("Content-Type"), "Content-Security-Policy": recorder.Header().Get("Content-Security-Policy"), "Content-Range": recorder.Header().Get("Content-Range"), "Accept-Ranges": recorder.Header().Get("Accept-Ranges"), "X-Content-Type-Options": recorder.Header().Get("X-Content-Type-Options")},
+			"transfer": opened.Headers,
+		} {
+			if got["Content-Type"] != want || got["Content-Range"] != "bytes 2-5/10" || got["Accept-Ranges"] != "bytes" || got["X-Content-Type-Options"] != "nosniff" {
+				t.Fatalf("%s %s headers = %#v", route, name, got)
+			}
+			if got["Content-Security-Policy"] != "default-src 'none'; media-src 'self'; frame-ancestors 'self'" {
+				t.Fatalf("%s %s policy = %q", route, name, got["Content-Security-Policy"])
+			}
+		}
+		if recorder.Code != http.StatusPartialContent || opened.Status != http.StatusPartialContent || recorder.Body.String() != "2345" {
+			t.Fatalf("%s status http=%d transfer=%d body=%q", name, recorder.Code, opened.Status, recorder.Body.String())
+		}
+	}
+	for _, name := range []string{"page.html", "image.svg", "report.pdf", "notes.txt"} {
+		recorder := httptest.NewRecorder()
+		reg.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, hosted.URLPath+name, nil))
+		if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox allow-scripts") {
+			t.Fatalf("%s policy = %q", name, got)
+		}
 	}
 }

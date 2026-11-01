@@ -1,0 +1,1015 @@
+{
+  "label": "remote",
+  "source": "/Users/dev/Workspace/myproject/tmp/test-set-look1-20261101/worst-clip-accepted.mp4",
+  "controller": true,
+  "controller_after_chat": true,
+  "owner_machine": {
+    "selfId": "m-903c4bb5eb1ae139d99480f871c22491",
+    "ownerLink": "@m-57b4e241881ab3c94a3904946bb9179f"
+  },
+  "direct_lan_http_status": 403,
+  "controller_after_reload": true,
+  "machine_added": {
+    "ok": true
+  },
+  "renderer_machine_keys": [],
+  "controller_after_add": true,
+  "hosted": {
+    "id": "worst-clip-accepted-3817b4b019b5",
+    "urlPath": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+    "markdown": "[Open worst-clip-accepted](/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/)",
+    "raw": "{\"contentType\":\"video/mp4\",\"createdAt\":\"2026-11-01T16:45:18.287136Z\",\"entry\":\"worst-clip-accepted.mp4\",\"id\":\"worst-clip-accepted-3817b4b019b5\",\"kind\":\"file\",\"label\":\"worst-clip-accepted\",\"markdown\":\"[Open worst-clip-accepted](/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/)\",\"updatedAt\":\"2026-11-01T16:45:18.287136Z\",\"urlPath\":\"/workass/artifacts/@m-57b4e241"
+  },
+  "chat_selected": true,
+  "link": {
+    "text": "ver video",
+    "href": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/"
+  },
+  "after_click": {
+    "toasts": [],
+    "pane": true,
+    "parked": [],
+    "hasKey": true
+  },
+  "guest": {
+    "id": 4,
+    "type": "window",
+    "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+    "audioMuted": true,
+    "audible": false
+  },
+  "panel_frame": {
+    "w": 285,
+    "h": 838
+  },
+  "muted": {
+    "all": [
+      {
+        "id": 5,
+        "audioMuted": true
+      },
+      {
+        "id": 4,
+        "audioMuted": true
+      },
+      {
+        "id": 3,
+        "audioMuted": true
+      },
+      {
+        "id": 2,
+        "audioMuted": true
+      },
+      {
+        "id": 1,
+        "audioMuted": true
+      }
+    ]
+  },
+  "alerts_after_open": {
+    "toasts": [],
+    "paneError": null
+  },
+  "timeline": [
+    {
+      "ms": 2,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": true,
+      "focus": false,
+      "t": 0.6,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 404,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 807,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.4,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1210,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.8,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1612,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.21,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2015,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.61,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2417,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.01,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2820,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.41,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3223,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.82,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3626,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.22,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4029,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.62,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4431,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.03,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4833,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.43,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5234,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.83,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5637,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.23,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6040,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.63,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6442,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.04,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6844,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.44,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7246,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.84,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7649,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.24,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8052,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.65,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8454,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.05,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8857,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.45,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9260,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.85,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9662,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.26,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10065,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.66,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10467,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.06,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10870,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.46,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11273,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.87,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11675,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 12.27,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    }
+  ],
+  "alerts_after_12s": {
+    "toasts": [],
+    "paneError": null
+  },
+  "browser": {
+    "states": [
+      {
+        "at": 1793551514035,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551514078,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551514080,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551514083,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551514087,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551518309,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551521638,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528818,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551528854,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551528856,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551528858,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551528860,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528861,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528871,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528875,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528883,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528883,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528884,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551528885,
+        "url": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 320,
+          "height": 941,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          320,
+          941
+        ],
+        "gen": 2
+      }
+    ],
+    "calls": [
+      {
+        "at": 1793551528770,
+        "channel": "workass-browser:command",
+        "args": "[{\"chatId\":\"tab-mvy29in7-1\",\"command\":\"navigate\",\"value\":\"http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/\"}]",
+        "doneAt": 1793551528883
+      },
+      {
+        "at": 1793551528782,
+        "channel": "workass-browser:activate",
+        "args": "[{\"chatId\":\"tab-mvy29in7-1\",\"conversationId\":\"conv-mvy29in7-2\",\"bounds\":{\"x\":1102,\"y\":48,\"width\":285,\"height\":838},\"viewport\":{\"width\":320,\"height\":941}}]",
+        "doneAt": 1793551528884
+      }
+    ]
+  },
+  "video_after_6s": {
+    "video": true,
+    "src": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 17.6,
+    "currentTime": 12.673516,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        17.6
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "viewport": {
+    "href": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+    "origin": "http://127.0.0.1:30676",
+    "w": 320,
+    "h": 941,
+    "dpr": 1,
+    "html": "<html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body><video controls=\"\" autoplay=\"\" name=\"media\" crossorigin=\"anonymous\"><source src=\"http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/\" type=\"video/mp4\"></video></body></html>",
+    "csp": "video/mp4"
+  },
+  "play": "playing",
+  "playback": {
+    "t1": 14.177101,
+    "t2": 17.179388,
+    "advanced": true,
+    "paused": false,
+    "readyState": 4,
+    "error": null
+  },
+  "page_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "page_nonblack_share": 0.03976499210057481,
+  "window_capture": "/Users/dev/Workspace/workass/docs/evidence/hosted-video-20261101/remote/window.png",
+  "seek": {
+    "seeked": true,
+    "currentTime": 14.000226,
+    "readyState": 4
+  },
+  "after_seek": {
+    "video": true,
+    "src": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 17.666667,
+    "currentTime": 15.501409,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        17.666667
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "paused_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "muted_at_end": [
+    {
+      "id": 5,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 4,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 3,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 2,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 1,
+      "audioMuted": true,
+      "audible": false
+    }
+  ],
+  "net": [
+    {
+      "at": 1793551528864,
+      "phase": "send",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "capability": true,
+      "frameUrl": "about:blank",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551528874,
+      "phase": "error",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": false,
+      "status": 200,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "length": "9980053",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "at": 1793551528876,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "range": "bytes=0-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551528885,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 0-9980052/9980053",
+      "length": "9980053",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551528888,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "range": "bytes=9961472-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551528890,
+      "phase": "done",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 9961472-9980052/9980053",
+      "length": "18581",
+      "error": "net::OK"
+    },
+    {
+      "at": 1793551528892,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "range": "bytes=131072-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551529295,
+      "phase": "done",
+      "type": "media",
+      "url": "/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "frameUrl": "http://127.0.0.1:30676/workass/artifacts/@m-57b4e241881ab3c94a3904946bb9179f/worst-clip-accepted-3817b4b019b5/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 131072-9980052/9980053",
+      "length": "9848981",
+      "error": "net::OK"
+    }
+  ],
+  "guest_console": [
+    {
+      "wc": 3,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 2,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 5,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 4,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    }
+  ]
+}

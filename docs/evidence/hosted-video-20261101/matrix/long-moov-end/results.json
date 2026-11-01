@@ -1,0 +1,1168 @@
+{
+  "label": "stress",
+  "source": "/Users/dev/Workspace/workass/.dev/vrig/media/long-moov-end.mp4",
+  "controller": true,
+  "controller_after_chat": true,
+  "hosted": {
+    "id": "long-moov-end-1be47004c53b",
+    "urlPath": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "markdown": "[Open long-moov-end](/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/)",
+    "raw": "{\"contentType\":\"video/mp4\",\"createdAt\":\"2026-11-01T16:47:38.861803Z\",\"entry\":\"long-moov-end.mp4\",\"id\":\"long-moov-end-1be47004c53b\",\"kind\":\"file\",\"label\":\"long-moov-end\",\"markdown\":\"[Open long-moov-end](/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/)\",\"updatedAt\":\"2026-11-01T16:47:38.861803Z\",\"urlPath\":\"/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-"
+  },
+  "chat_selected": true,
+  "link": {
+    "text": "ver video",
+    "href": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/"
+  },
+  "after_click": {
+    "toasts": [],
+    "pane": true,
+    "parked": [],
+    "hasKey": false
+  },
+  "guest": {
+    "id": 4,
+    "type": "window",
+    "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "audioMuted": true,
+    "audible": false
+  },
+  "panel_frame": {
+    "w": 285,
+    "h": 838
+  },
+  "muted": {
+    "all": [
+      {
+        "id": 5,
+        "audioMuted": true
+      },
+      {
+        "id": 4,
+        "audioMuted": true
+      },
+      {
+        "id": 3,
+        "audioMuted": true
+      },
+      {
+        "id": 2,
+        "audioMuted": true
+      },
+      {
+        "id": 1,
+        "audioMuted": true
+      }
+    ]
+  },
+  "alerts_after_open": {
+    "toasts": [],
+    "paneError": null
+  },
+  "timeline": [
+    {
+      "ms": 2,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": true,
+      "focus": false,
+      "t": 0.58,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 404,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 0.99,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 806,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.39,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1209,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.79,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1611,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.19,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2014,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.6,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2417,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2820,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.4,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3222,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.81,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3625,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.21,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4028,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.61,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4431,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.01,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4834,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.42,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5237,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.82,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5639,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.22,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6041,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.62,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6444,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.03,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6847,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.43,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7249,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.83,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7651,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.23,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8053,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.64,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8456,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.04,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8858,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.44,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9261,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.84,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9664,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.25,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10066,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.65,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10469,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.05,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10872,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.46,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11275,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.86,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11678,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 12.26,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    }
+  ],
+  "alerts_after_12s": {
+    "toasts": [],
+    "paneError": null
+  },
+  "browser": {
+    "states": [
+      {
+        "at": 1793551654842,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551654886,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551654889,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551654892,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551654895,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660578,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551660613,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551660616,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551660618,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793551660620,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660621,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660634,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660638,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660647,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660647,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660648,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793551660648,
+        "url": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 320,
+          "height": 941,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          320,
+          941
+        ],
+        "gen": 2
+      }
+    ],
+    "calls": [
+      {
+        "at": 1793551660527,
+        "channel": "workass-browser:command",
+        "args": "[{\"chatId\":\"tab-mvy2cjag-1\",\"command\":\"navigate\",\"value\":\"http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/\"}]",
+        "doneAt": 1793551660647
+      },
+      {
+        "at": 1793551660540,
+        "channel": "workass-browser:activate",
+        "args": "[{\"chatId\":\"tab-mvy2cjag-1\",\"conversationId\":\"conv-mvy2cjag-2\",\"bounds\":{\"x\":1102,\"y\":48,\"width\":285,\"height\":838},\"viewport\":{\"width\":320,\"height\":941}}]",
+        "doneAt": 1793551660648
+      }
+    ]
+  },
+  "video_after_6s": {
+    "video": true,
+    "src": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 213.4,
+    "currentTime": 12.664655,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        30.072
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "viewport": {
+    "href": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "origin": "http://127.0.0.1:29596",
+    "w": 320,
+    "h": 941,
+    "dpr": 1,
+    "html": "<html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body><video controls=\"\" autoplay=\"\" name=\"media\" crossorigin=\"anonymous\"><source src=\"http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/\" type=\"video/mp4\"></video></body></html>",
+    "csp": "video/mp4"
+  },
+  "play": "playing",
+  "playback": {
+    "t1": 14.167792,
+    "t2": 17.170418,
+    "advanced": true,
+    "paused": false,
+    "readyState": 4,
+    "error": null
+  },
+  "page_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "page_nonblack_share": 0.03976499210057481,
+  "window_capture": "/Users/dev/Workspace/workass/docs/evidence/hosted-video-20261101/matrix/long-moov-end/window.png",
+  "seek": {
+    "seeked": true,
+    "currentTime": 14.000229,
+    "readyState": 4
+  },
+  "after_seek": {
+    "video": true,
+    "src": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 213.4,
+    "currentTime": 15.502713,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        33.809
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "stress_seek_far": {
+    "seeked": true,
+    "target": 190,
+    "ms": 167,
+    "currentTime": 190.000904,
+    "readyState": 4
+  },
+  "stress_seek_back": {
+    "seeked": true,
+    "target": 30,
+    "ms": 43,
+    "currentTime": 30.000183,
+    "readyState": 4
+  },
+  "stress_seek_mid": {
+    "seeked": true,
+    "target": 120,
+    "ms": 167,
+    "currentTime": 120.000186,
+    "readyState": 4
+  },
+  "stress_after_40s_pause": {
+    "video": true,
+    "src": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 213.4,
+    "currentTime": 120.000999,
+    "paused": true,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        33.809
+      ],
+      [
+        112.733333,
+        141.312
+      ],
+      [
+        183.933333,
+        192.99
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "stress_resume": {
+    "t1": 121.503415,
+    "t2": 125.496985,
+    "advanced": true,
+    "readyState": 4,
+    "error": null
+  },
+  "stress_seek_after_pause": {
+    "seeked": true,
+    "target": 60,
+    "ms": 52,
+    "currentTime": 60.000201,
+    "readyState": 4
+  },
+  "stress_final": {
+    "t": 63.002575,
+    "paused": false,
+    "readyState": 4,
+    "error": null
+  },
+  "paused_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "muted_at_end": [
+    {
+      "id": 5,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 4,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 3,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 2,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 1,
+      "audioMuted": true,
+      "audible": false
+    }
+  ],
+  "net": [
+    {
+      "at": 1793551660624,
+      "phase": "send",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "capability": true,
+      "frameUrl": "about:blank",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551660638,
+      "phase": "error",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": false,
+      "status": 200,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "length": "119751243",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "at": 1793551660639,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=0-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551660649,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 0-119751242/119751243",
+      "length": "119751243",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551660650,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=119701504-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551660654,
+      "phase": "done",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 119701504-119751242/119751243",
+      "length": "49739",
+      "error": "net::OK"
+    },
+    {
+      "at": 1793551660656,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=98304-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551678271,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 98304-119751242/119751243",
+      "length": "119652939",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551678272,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=4620288-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551678468,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 4620288-119751242/119751243",
+      "length": "115130955",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551679976,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=104366080-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551680181,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 104366080-119751242/119751243",
+      "length": "15385163",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551680181,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=18644992-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551680188,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 18644992-119751242/119751243",
+      "length": "101106251",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793551680188,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=64454656-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793551722038,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 64454656-119751242/119751243",
+      "length": "55296587",
+      "error": "net::ERR_CONTENT_LENGTH_MISMATCH"
+    },
+    {
+      "at": 1793551725865,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "range": "bytes=34537472-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:29596/workass/artifacts/@m-9456c7e18c5b5f267556897251573c98/long-moov-end-1be47004c53b/",
+      "hasFrame": true,
+      "wc": 4
+    }
+  ],
+  "guest_console": [
+    {
+      "wc": 3,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 2,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 5,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 4,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    }
+  ]
+}

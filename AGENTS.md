@@ -65,6 +65,9 @@ scope. Log suggestions separately; do not act on them.
   acceptance.
 
 ## Hard rules
+- Video and audio tests run muted (owner, 2026-11-01). Mute every player, app and
+  test page during playback tests so nothing plays on the owner's speakers. Use
+  sound only when the test is about audio output itself.
 - Applying a Workass update needs the owner's permission (owner law 2026-10-31,
   superseding the now-only law of 2026-09-03; this file is where the rule lives,
   Workass no longer injects it). Permission may be for an update now, or for a

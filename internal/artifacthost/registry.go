@@ -121,6 +121,11 @@ var artifactMIMEByExtension = map[string]string{
 	".ndjson":   "application/x-ndjson; charset=utf-8",
 	".geojson":  "application/geo+json; charset=utf-8",
 	".pdf":      "application/pdf",
+	".mp4":      "video/mp4",
+	".webm":     "video/webm",
+	".mp3":      "audio/mpeg",
+	".wav":      "audio/wav",
+	".ogg":      "audio/ogg",
 	".docx":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".xlsx":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	".pptx":     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -678,7 +683,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer file.Close()
-	w.Header().Set("Content-Type", artifactContentType(cleanRel))
+	contentType := artifactContentType(cleanRel)
+	w.Header().Set("Content-Type", contentType)
+	if isPlayableMedia(contentType) {
+		w.Header().Set("Content-Security-Policy", hostedMediaCSP)
+	}
 	if disposition := mime.FormatMediaType("inline", map[string]string{"filename": filepath.Base(cleanRel)}); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
@@ -745,6 +754,12 @@ func artifactContentType(path string) string {
 		return strings.TrimSpace(strings.Split(contentType, ";")[0]) + "; charset=utf-8"
 	}
 	return contentType
+}
+
+// isPlayableMedia is what a browser opens as its own player page: it parses no
+// markup, and nosniff stops a file named .mp4 from being read as anything else.
+func isPlayableMedia(contentType string) bool {
+	return strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/")
 }
 
 func isTextualArtifact(extension string) bool {
@@ -1226,6 +1241,12 @@ func safeID(id string) string {
 	}
 	return id
 }
+
+// hostedMediaCSP replaces the sandbox on media files. Chromium's player page
+// loads its video in CORS mode, so a sandbox's opaque origin fails that request
+// and leaves an empty 300x150 player. The page has no scripts or subresources to
+// contain: this policy allows it nothing but its own media.
+const hostedMediaCSP = "default-src 'none'; media-src 'self'; frame-ancestors 'self'"
 
 func setHostedHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")

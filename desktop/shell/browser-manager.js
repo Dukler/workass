@@ -3,6 +3,11 @@
 const crypto = require('node:crypto');
 const DEFAULT_PARTITION = 'persist:workass-browser';
 const DEFAULT_URL = 'about:blank';
+// Chromium's own player page shows a media file at its natural size. A hosted
+// one fills the pane, whatever its resolution; the page keeps the aspect ratio.
+const HOSTED_MEDIA_FIT = 'video:-webkit-full-page-media{width:100%;height:100%}';
+// The two routes the view server hands to the artifact bridge.
+const HOSTED_ARTIFACT_PATH = /^\/workass\/(?:artifacts\/@|connected-artifacts\/)/;
 const {
   DEFAULT_VIEWPORT, MAX_CAPTURE_PIXELS, MAX_PNG_BYTES, assertCaptureBounds, captureRasterStep, pngDimensions, presentationFor, validateViewport,
 } = require('./browser-viewport');
@@ -26,6 +31,17 @@ const MAX_BROWSER_SNAPSHOT_BYTES = 64 * 1024;
 const SNAPSHOT_FRAME_LIMIT = 100;
 const SNAPSHOT_EDITOR_LIMIT = 50;
 const AX_NODE_LIMIT = 500;
+
+// Electron rejects loadURL with ERR_FAILED when loading stops with no load
+// event. A media file does exactly that: its committed player page takes over
+// the response. A page that really failed reports through did-fail-load as well.
+function isLoadWithoutLoadEvent(error) {
+  return !!error && error.code === 'ERR_FAILED';
+}
+
+function isHostedArtifactPage(url) {
+  try { return HOSTED_ARTIFACT_PATH.test(new URL(url).pathname); } catch { return false; }
+}
 
 function finiteMetric(value) {
   const number = Number(value);
@@ -613,7 +629,11 @@ class BrowserManager {
     on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
       if (!inPlace && isMainFrame !== false) { entry.mainDocumentReady = false; entry.mainCommitPending = true; }
     });
-    on('dom-ready', () => { entry.mainDocumentReady = true; entry.mainCommitPending = false; });
+    on('dom-ready', () => {
+      entry.mainDocumentReady = true;
+      entry.mainCommitPending = false;
+      if (isHostedArtifactPage(wc.getURL())) void Promise.resolve().then(() => wc.insertCSS(HOSTED_MEDIA_FIT)).catch(() => {});
+    });
     on('did-start-loading', () => { entry.loading = true; entry.error = null; touchActivity(entry); this.publish(entry); });
     on('focus', () => {
       if (!entry.crashLeftAppFocused) return;
@@ -2490,7 +2510,10 @@ class BrowserManager {
     let load;
     try {
       load = Promise.resolve(wc.loadURL(target));
-      load.then(() => settle.resolve('loaded'), (error) => settle.reject(error));
+      load.then(() => settle.resolve('loaded'), (error) => {
+        if (committed && isLoadWithoutLoadEvent(error)) settle.resolve('loaded');
+        else settle.reject(error);
+      });
       const result = await outcome;
       if (result !== 'loaded') {
         this.lifecycle(entry, 'user-navigation-load-pending', { committed });
@@ -2769,11 +2792,15 @@ class BrowserManager {
       entry.url = target;
       this.artifactNavigations.set(entry.view.webContents, target);
       void entry.view.webContents.loadURL(target).catch((err) => {
+        if (isLoadWithoutLoadEvent(err)) return; // a real failure is did-fail-load's to report
         entry.loading = false;
         entry.error = String(err && err.message || err);
         this.publish(entry);
       });
     }
+    // The pane's viewport is deferred when it arrives during a load. A load that
+    // stopped while this activation ran has already passed its retry.
+    this.retryDeferredViewport(entry);
     return this.publish(entry);
   }
 

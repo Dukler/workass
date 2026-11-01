@@ -1681,6 +1681,52 @@ test('a target paused at start is resumed on every setup outcome', async () => {
   manager.destroy();
 });
 
+test('a hosted video that committed is an open page: no false failure, and it fills the pane', async () => {
+  const { manager, tab, entry, wc } = await ownedFrameSetupFixture('chat-hosted-video');
+  manager.navigationLoadGraceMs = 30;
+  manager.navigationCommitTimeoutMs = 120;
+  const inserted = [];
+  wc.insertCSS = async (css) => { inserted.push(css); };
+  const stopsWithoutLoadEvent = (commit) => (url) => {
+    wc.emit('did-start-navigation', {}, url, false, true);
+    if (commit) { wc.url = url; wc.emit('did-navigate', {}, url); wc.emit('dom-ready'); }
+    return Promise.reject(Object.assign(new Error(`ERR_FAILED (-2) loading '${url}'`), { code: 'ERR_FAILED', errno: -2, url }));
+  };
+  const video = 'http://127.0.0.1:8799/workass/artifacts/@m-owner/clip-1/';
+  wc.loadURL = stopsWithoutLoadEvent(true);
+  const result = await manager.browserControl('browser.navigate', { tabId: tab.id, url: video });
+  assert.equal(result.url, video);
+  assert.equal(entry.error, null);
+  assert.deepEqual(inserted, ['video:-webkit-full-page-media{width:100%;height:100%}']);
+
+  // Only a committed page may read this way, and only a hosted one is restyled.
+  wc.loadURL = stopsWithoutLoadEvent(false);
+  await assert.rejects(manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/refused' }), /ERR_FAILED/);
+  wc.loadURL = stopsWithoutLoadEvent(true);
+  await manager.browserControl('browser.navigate', { tabId: tab.id, url: 'https://fixture.invalid/clip.mp4' });
+  assert.equal(inserted.length, 1);
+  manager.destroy();
+});
+
+test('a pane viewport deferred after the load stopped still reaches the page', async () => {
+  const { manager, entry, wc } = await ownedFrameSetupFixture('chat-deferred-viewport');
+  const realEmulation = manager.applyAndReadDeviceEmulation.bind(manager);
+  // The pane's activation arrives during a load, whose stop has passed before it defers.
+  let refusals = 1;
+  manager.applyAndReadDeviceEmulation = async (target, viewport, scale) => {
+    if (viewport.width === 320 && refusals > 0) { refusals -= 1; wc.emit('did-stop-loading'); throw new Error('page is between documents'); }
+    return realEmulation(target, viewport, scale);
+  };
+  const bounds = { x: 0, y: 0, width: 285, height: 838 };
+  await manager.activate({ chatId: entry.chatId, bounds, viewport: { width: 320, height: 941 } });
+  await manager.presentationChain;
+  assert.equal(refusals, 0);
+  assert.equal(entry.deferredViewport, null);
+  assert.equal(entry.viewport.width, 320);
+  assert.equal(entry.viewport.height, 941);
+  manager.destroy();
+});
+
 test('navigation returns once the document is ready when a subframe never finishes loading', async () => {
   const { manager, tab, entry, wc, events } = await ownedFrameSetupFixture('chat-frame-load');
   manager.navigationLoadGraceMs = 30;

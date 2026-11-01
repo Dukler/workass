@@ -1,0 +1,152 @@
+{
+  "file": "/Users/dev/Workspace/workass/.dev/vrig/c/clip.mp4",
+  "size": 9980053,
+  "range, no csp": {
+    "audioMuted": true,
+    "first": {
+      "origin": "http://127.0.0.1:57844",
+      "crossorigin": "anonymous",
+      "readyState": 4,
+      "networkState": 1,
+      "w": 1912,
+      "h": 720,
+      "duration": 17.6,
+      "t": 2.410942,
+      "paused": false,
+      "rect": [
+        1280,
+        482
+      ]
+    },
+    "later": {
+      "t": 4.412562,
+      "readyState": 4
+    },
+    "plays": true,
+    "ranges": [
+      "full",
+      "bytes=0-",
+      "bytes=9961472-",
+      "bytes=3145728-"
+    ],
+    "errors": []
+  },
+  "range, hosted csp (the sandbox)": {
+    "audioMuted": true,
+    "first": {
+      "origin": "null",
+      "crossorigin": "anonymous",
+      "readyState": 0,
+      "networkState": 3,
+      "w": 0,
+      "h": 0,
+      "duration": null,
+      "t": 0,
+      "paused": true,
+      "rect": [
+        300,
+        150
+      ]
+    },
+    "later": {
+      "t": 0,
+      "readyState": 0
+    },
+    "plays": false,
+    "ranges": [
+      "full",
+      "bytes=0-"
+    ],
+    "errors": [
+      "Access to video at 'http://127.0.0.1:57856/clip' from origin 'null' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource."
+    ]
+  },
+  "range, hosted csp without sandbox": {
+    "audioMuted": true,
+    "first": {
+      "origin": "http://127.0.0.1:57860",
+      "crossorigin": "anonymous",
+      "readyState": 4,
+      "networkState": 1,
+      "w": 1912,
+      "h": 720,
+      "duration": 17.6,
+      "t": 2.474329,
+      "paused": false,
+      "rect": [
+        1280,
+        482
+      ]
+    },
+    "later": {
+      "t": 4.476057,
+      "readyState": 4
+    },
+    "plays": true,
+    "ranges": [
+      "full",
+      "bytes=0-",
+      "bytes=9961472-",
+      "bytes=3407872-"
+    ],
+    "errors": []
+  },
+  "range, media-only csp": {
+    "audioMuted": true,
+    "first": {
+      "origin": "http://127.0.0.1:57871",
+      "crossorigin": "anonymous",
+      "readyState": 4,
+      "networkState": 1,
+      "w": 1912,
+      "h": 720,
+      "duration": 17.6,
+      "t": 2.477691,
+      "paused": false,
+      "rect": [
+        1280,
+        482
+      ]
+    },
+    "later": {
+      "t": 4.478909,
+      "readyState": 4
+    },
+    "plays": true,
+    "ranges": [
+      "full",
+      "bytes=0-",
+      "bytes=9961472-",
+      "bytes=3407872-"
+    ],
+    "errors": []
+  },
+  "no range, no csp": {
+    "audioMuted": true,
+    "first": {
+      "origin": "http://127.0.0.1:57879",
+      "crossorigin": "anonymous",
+      "readyState": 4,
+      "networkState": 1,
+      "w": 1912,
+      "h": 720,
+      "duration": 17.6,
+      "t": 2.470225,
+      "paused": false,
+      "rect": [
+        1280,
+        482
+      ]
+    },
+    "later": {
+      "t": 4.471885,
+      "readyState": 4
+    },
+    "plays": true,
+    "ranges": [
+      "full",
+      "bytes=0-"
+    ],
+    "errors": []
+  }
+}
