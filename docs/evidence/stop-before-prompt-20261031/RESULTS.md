@@ -74,3 +74,9 @@ stands in for the model. How often a real chat hits it: the rig forces the read,
 rates. The first `scripts/gate.sh` failed once on `TestNodeProbeAgainstGoRun` (5 s initialize behind
 `go run`, in the package just changed, so probably a cold compile under load, not proven); the rerun
 with a warm cache passed.
+
+The gate inside the first `ship.sh` failed on another test bug:
+`TestClaudeAgentRunningAtDaemonKillIsOrphanedOnRestart` copied a live state dir with `os.CopyFS` and the
+daemon renamed `.turn-diagnostics.pending` away mid-walk. Under the same churn, `os.CopyFS` gives that
+exact error 5/200; the copy that tolerates it passes 200/200. Nothing was published by that attempt.
+

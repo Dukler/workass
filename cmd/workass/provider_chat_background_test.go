@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,7 +344,7 @@ func TestClaudeAgentRunningAtDaemonKillIsOrphanedOnRestart(t *testing.T) {
 	// The daemon is killed here: what is on disk at this instant is all the
 	// next daemon gets. Copy it rather than shutting down cleanly.
 	secondDir := t.TempDir()
-	if err := os.CopyFS(secondDir, os.DirFS(firstDir)); err != nil {
+	if err := copyLiveStateDir(secondDir, firstDir); err != nil {
 		t.Fatal(err)
 	}
 	second := newManager(secondDir)
@@ -354,6 +356,68 @@ func TestClaudeAgentRunningAtDaemonKillIsOrphanedOnRestart(t *testing.T) {
 	}
 	if got := state.Background["a-stranded"].Event.Status; got != "orphaned" {
 		t.Fatalf("an agent whose Claude process died with the daemon reads %q after restart", got)
+	}
+}
+
+// copyLiveStateDir copies a state dir a running daemon is still writing, as a kill
+// would leave it. A temp file the daemon renamed away during the walk is not an
+// error: it was not there at that instant. os.CopyFS fails on it.
+func copyLiveStateDir(dst, src string) error {
+	return filepath.WalkDir(src, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, raw, 0o600)
+	})
+}
+
+func TestCopyOfALiveStateDirSurvivesAFileThatVanishes(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "state.db"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			name := filepath.Join(src, ".turn-diagnostics.pending")
+			_ = os.WriteFile(name, []byte("x"), 0o600)
+			_ = os.Rename(name, filepath.Join(src, "turn-diagnostics.json"))
+		}
+	}()
+	defer func() { close(done); <-stopped }()
+	for round := 0; round < 200; round++ {
+		dst := t.TempDir()
+		if err := copyLiveStateDir(dst, src); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		if raw, err := os.ReadFile(filepath.Join(dst, "state.db")); err != nil || string(raw) != "kept" {
+			t.Fatalf("round %d: state.db = %q, %v", round, raw, err)
+		}
 	}
 }
 
