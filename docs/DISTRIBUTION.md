@@ -129,10 +129,9 @@ The updater:
 The UI exposes this through the same compact sidebar update card used for
 provider updates; it does not add a separate Settings section. Workass never
 enters or schedules an update on its own. A user click updates immediately
-regardless of running work. An agent may apply one only with the owner's
-permission, which `workass_apply_update` proves by naming the owner's own message
-(see "Agent activation" below); no click is needed, so a programmed update stays
-hands-off.
+regardless of running work. When an agent may call `workass_apply_update` is the
+owner's rule in `AGENTS.md`; the tool takes the exact machine, the expected
+versions and a stable operation id.
 
 ### Release manifest signature
 
@@ -193,37 +192,6 @@ can, so anything still running a build that pins it trusts it until updated.
 4. Point the lane at the new key and publish. Machines on step 3's build accept it;
    a machine still older than that refuses it and needs step 3's release first.
 5. Remove the old key from both lists in a later release.
-
-### Agent activation
-
-`workass_apply_update` has no click, because the owner wants to be able to say "after
-you are done with this update" and walk away. It has one human step instead: an
-agent passes `authorizing_message_id`, the id of a message in the calling chat
-(`workass_read_chat` lists them, with `origin`). The daemon that holds the chat
-checks, from its own durable record:
-
-- the message is in this exact chat, and was not copied in by a fork;
-- its origin is `human`. Origin is stamped by the daemon when the turn is admitted,
-  and agent sends, relayed agent sends, scheduled text and notices are stamped
-  otherwise. A row with no recorded origin is refused and the agent is told to ask
-  for a new message;
-- its text mentions an update, in English or Spanish; and
-- it is at most 8 days old: the scheduler's 7-day limit plus one day, so the longest
-  programmed update still works.
-
-One message authorizes one activation per machine and target version, recorded
-durably in `update-authorizations.json` under the state directory before the updater
-is asked. Replaying the same `operation_id` reads its receipt; any other operation
-for that message, machine and version is refused. A programmed update carries the
-owner's message id through `workass_schedule_message` and names it on delivery.
-Applying to another machine is checked here, on the side that holds the chat. That
-machine's own `app:update-apply` channel stays the authenticated controller surface
-it always was, and the UI's click path needs no id. A delegated subagent has no
-update tool.
-
-This proves the owner wrote a message about updating. It cannot prove which update
-they meant, so an agent is still bound by the rule in `AGENTS.md`, including which
-machines were named.
 
 ### macOS local update channel
 

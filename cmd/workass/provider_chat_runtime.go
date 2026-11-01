@@ -2049,37 +2049,9 @@ func (r *providerChatRuntime) AdmitStart(ctx context.Context, arg map[string]any
 	return &providerChatStartAdmission{Receipt: receipt, dispatch: release}, nil
 }
 
-// agentRelayUserMessagePrefix is how a controller's renderer names a message it is
-// relaying for an agent on another machine (agentRemoteChatSend in store.ts). Those
-// arrive over the same job:start a person's message does.
-const agentRelayUserMessagePrefix = "agent-user-"
-
-// wireTurnOrigin corrects the one thing job:start and live steer cannot say for
-// themselves: a controller sends a person's words through them, and also text that
-// is not a person's. Origin decides what a message may authorize, and it is stamped
-// here on the daemon from facts the daemon can see, never from a field a caller
-// could set. Everything else keeps the origin it was admitted with.
-func wireTurnOrigin(state chat.State, userMessageID, queueID, origin string) string {
-	if strings.ToLower(strings.TrimSpace(origin)) != "human" {
-		return origin
-	}
-	if strings.HasPrefix(strings.TrimSpace(userMessageID), agentRelayUserMessagePrefix) {
-		return "agent"
-	}
-	if queueID = strings.TrimSpace(queueID); queueID != "" {
-		for _, entry := range state.StagedQueue {
-			if entry.ID == queueID && strings.EqualFold(strings.TrimSpace(entry.Source), "agent") {
-				return "agent"
-			}
-		}
-	}
-	return origin
-}
-
 func (r *providerChatRuntime) admitStartReceipt(ctx context.Context, arg map[string]any, fields map[string]string, origin string, actor *providerChatActor) (map[string]any, error) {
 	actor.mu.Lock()
 	defer actor.mu.Unlock()
-	origin = wireTurnOrigin(actor.engine.ReadSnapshot(), fields["userMessageId"], fieldString(arg, "queueId"), origin)
 	if result, handled, err := r.existingTurnReceiptLocked(actor, arg, fields, origin); handled {
 		return result, err
 	}
@@ -2955,7 +2927,7 @@ func (r *providerChatRuntime) Steer(ctx context.Context, arg map[string]any) (ma
 	}
 	presentation := providercontract.TurnPresentation{
 		UserMessageID: string(operationID), AssistantMessageID: continuationID,
-		PromptText: prompt, Origin: wireTurnOrigin(state, string(operationID), queueID, "human"), StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		PromptText: prompt, Origin: "human", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	// Revalidate immediately before the actor command. A terminal winner rejects
 	// live-steer intent before ownership; it is never converted into FIFO.

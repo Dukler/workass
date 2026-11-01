@@ -32,12 +32,9 @@ type agentControlHandler struct {
 	machineDiscovery *machineDiscovery
 	// stateDir is where a status answered with no renderer finds the last update
 	// receipt, one level up in the data root.
-	stateDir string
-	// updatePermissionNow replaces the clock of the owner-permission age check in
-	// a test.
-	updatePermissionNow func() time.Time
-	forks               *acp.ForkService
-	validateOwner       func(ownerKey, chatID, tabID string) bool
+	stateDir      string
+	forks         *acp.ForkService
+	validateOwner func(ownerKey, chatID, tabID string) bool
 	// fleetHome owns this machine's entity logs and the monitors it holds for
 	// other machines' watchers; fleetWatch owns the monitors this machine holds
 	// on other machines' entities. Both are nil on an install with no fleet
@@ -193,7 +190,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return nil, err
 		}
 		if request.Method == "update.apply" {
-			return h.applyAuthorizedUpdate(r.Context(), tabID, chatID, params)
+			params = withUpdateApplySentence(params, h.selfMachineID)
 		}
 		return h.answerUpdateLocally(r.Context(), request.Method, params)
 	case "chat.list", "chat.read", "chat.diagnostics", "chat.create", "chat.subsession", "chat.rename", "chat.settle", "chat.configure", "chat.focus", "chat.delete", "chat.send", "chat.cancel":
@@ -202,9 +199,6 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 		if request.Method == "chat.list" {
 			local, err := h.chats.list()
-			if err == nil {
-				markCallingChat(local, tabID, chatID)
-			}
 			if err != nil || h.remoteChats == nil {
 				return local, err
 			}

@@ -47,7 +47,7 @@ func TestSelfAddressedUpdateKeepsItsMachineID(t *testing.T) {
 		"name": "workass_apply_update",
 		"arguments": map[string]any{
 			"machine_id": "m-self", "expected_current_version": "0.1.237", "expected_target_version": "0.1.238",
-			"authorizing_message_id": statelessMCPOwnerMessageID, "operation_id": "update-self-0.1.238",
+			"operation_id": "update-self-0.1.238",
 		},
 	})
 	if status != http.StatusOK || response["error"] != nil || remote.method != "update.apply" {

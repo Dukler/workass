@@ -3675,7 +3675,6 @@ func appendUnconsumedSteerAtTerminal(state *State, pending *PendingSteer) error 
 		OperationID: pending.OperationID, QueueID: strings.TrimSpace(pending.Presentation.QueueID),
 		NativeTurnID: pending.Turn.NativeID, TerminalState: "unconsumed",
 		SteerState: steerState, TurnRootID: state.Foreground.RootAssistantMessageID,
-		Origin: pending.Presentation.Origin,
 	}
 	state.Ledger = append(state.Ledger, event)
 	// No consumption receipt means this exact input remains ambiguity-fenced and
@@ -4718,7 +4717,6 @@ func applyNotice(event *LedgerEvent, presentation provider.TurnPresentation) {
 	event.NoticeKind = presentation.NoticeKind
 	event.NoticeTitle = presentation.NoticeTitle
 	event.NoticeStatus = presentation.NoticeStatus
-	event.Origin = presentation.Origin
 }
 
 func appendForegroundUser(state *State) (LedgerEvent, error) {
@@ -4828,7 +4826,6 @@ func appendConsumedSteer(state *State, pending *PendingSteer) (LedgerEvent, erro
 		OperationID: pending.OperationID, QueueID: strings.TrimSpace(pending.Presentation.QueueID),
 		NativeTurnID: pending.Turn.NativeID, TerminalState: "consumed",
 		SteerState: "applied", TurnRootID: state.Foreground.RootAssistantMessageID,
-		Origin: pending.Presentation.Origin,
 	}
 	state.Ledger = append(state.Ledger, event)
 	if err := markLedgerNativeSeen(state, event, pending.OperationID); err != nil {

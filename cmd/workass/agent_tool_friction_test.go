@@ -247,11 +247,16 @@ func TestToolFrictionChildListingIsShortToo(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("empty child listing")
 	}
+	applyListed := false
 	for _, raw := range rows {
 		name := fieldString(mapFromAnyMain(raw), "name")
 		if name == "workass_register_process_child" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
 			t.Fatalf("%s is not for a child's listing", name)
 		}
+		applyListed = applyListed || name == "workass_apply_update"
+	}
+	if !applyListed {
+		t.Fatal("a delegated agent lost workass_apply_update")
 	}
 }
 
@@ -602,7 +607,7 @@ func TestToolFrictionUpdateErrorsSayWhatIsWrong(t *testing.T) {
 
 	apply := map[string]any{
 		"operation_id": "friction-apply", "machine_id": "m-here", "expected_current_version": "0.1.1",
-		"expected_target_version": "0.1.2", "authorization": "update m-here from 0.1.1 to 0.1.2",
+		"expected_target_version": "0.1.2",
 	}
 	for name, arguments := range map[string]map[string]any{
 		"workass_apply_update":        apply,
@@ -630,11 +635,6 @@ func TestToolFrictionUpdateErrorsSayWhatIsWrong(t *testing.T) {
 	}
 
 	bad := copyAnyMap(apply)
-	bad["authorization"] = "please update"
-	if _, failure := frictionCall(t, h, "workass_apply_update", bad); !strings.Contains(failure, "update m-here from 0.1.1 to 0.1.2") || !strings.Contains(failure, "AGENTS.md") {
-		t.Fatalf("a wrong authorization does not state the exact text and the rule: %q", failure)
-	}
-	bad = copyAnyMap(apply)
 	bad["expected_target_version"] = "latest"
 	if _, failure := frictionCall(t, h, "workass_apply_update", bad); !strings.Contains(failure, "workass_get_update_status") {
 		t.Fatalf("a wrong version does not say where to read it: %q", failure)

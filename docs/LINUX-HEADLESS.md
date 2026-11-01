@@ -10,8 +10,7 @@ than an app, and the activation mechanics live in the daemon (Go,
 What is deliberately *not* different: the wire and MCP contract. The same
 `update.targets` / `update.status` / `update.apply` methods, the same
 `app:update-status` / `app:update-apply` channels, the same
-`update <machineId> from <a> to <b>` sentence on those channels, the same
-owner's-message check on the agent tool, and the same
+`update <machineId> from <a> to <b>` sentence on those channels, and the same
 `operation_id` replay receipts. A controller on another machine cannot tell
 which half of the fleet answered, and does not need to.
 
@@ -154,16 +153,13 @@ From a client, with the server mounted and paired:
 //        state: { supported, currentVersion, availableVersion, phase }, receipt } }
 // workass_apply_update         { "machine_id": "<id>",
 //        "expected_current_version": "<current>", "expected_target_version": "<target>",
-//        "authorizing_message_id": "<the owner's message in the calling chat>",
 //        "operation_id": "<caller-stable id>" }
 ```
 
 When `workass_apply_update` may be called is the owner's permission rule in
 `AGENTS.md` (owner law 2026-10-31, superseding the current-human-order-only law
 of 2026-09-03): an update now, or a programmed update at a stated time or
-condition for stated machines. `authorizing_message_id` is how that permission is
-proved, with no click, on the daemon that holds the calling chat; see "Agent
-activation" in `docs/DISTRIBUTION.md`. Replaying the same `operation_id` reads its
+condition for stated machines. Replaying the same `operation_id` reads its
 durable receipt back and cannot start a second activation.
 
 ## Diagnosing

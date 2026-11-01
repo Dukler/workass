@@ -285,15 +285,13 @@ func workassToolMutates(kind toolKind, name string) bool {
 // tool, acting for its parent chat. Like Claude Code subagents it cannot
 // delegate further (no subagent orchestration), and questions and pages go to
 // the parent that owns the conversation with the user: a page renders only
-// from the chat's own reply, so a delegated agent reports instead. Applying an
-// update is the same: the owner's permission was given to the chat they talk to,
-// and a delegated agent runs on text it was handed.
+// from the chat's own reply, so a delegated agent reports instead.
 func agentToolsForChild() []map[string]any {
 	tools := agentMCPTools()
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == "workass_ask_user_question" || name == "workass_render_html" || name == "workass_apply_update" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
+		if name == "workass_ask_user_question" || name == "workass_render_html" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
 			continue
 		}
 		filtered = append(filtered, tool)

@@ -8,16 +8,17 @@ import (
 	"time"
 )
 
-// Levels are what a mode allows without a human, across every provider's own
-// words for it. An unknown mode has no level, and that is never read as a high one.
+// Levels across every provider's own words for a mode. A mode that asks before
+// acting ranks with edit. An unknown mode has no level, and that is never read as
+// a high one.
 func TestPermissionLevelsRankEveryProvidersVocabulary(t *testing.T) {
 	for _, row := range []struct{ provider, mode, level string }{
-		{"claude", "plan", "read"}, {"claude", "default", "read"}, {"claude", "acceptEdits", "edit"}, {"claude", "bypassPermissions", "full"},
+		{"claude", "plan", "read"}, {"claude", "default", "edit"}, {"claude", "acceptEdits", "edit"}, {"claude", "bypassPermissions", "full"},
 		{"codex", "read-only", "read"}, {"codex", "agent", "edit"}, {"codex", "agent-full-access", "full"},
-		{"mock", "ask", "read"}, {"mock", "bypass", "full"},
-		{"devin", "ask", "read"}, {"devin", "guardian", "edit"}, {"devin", "dontAsk", "full"},
-		{"qwen", "plan", "read"}, {"qwen", "default", "read"}, {"qwen", "auto-edit", "edit"}, {"qwen", "yolo", "full"},
-		{"omp", "plan", "read"}, {"omp", "default", "read"}, {"omp", "always-ask", "read"}, {"omp", "write", "edit"}, {"omp", "yolo", "full"},
+		{"mock", "ask", "edit"}, {"mock", "bypass", "full"},
+		{"devin", "ask", "edit"}, {"devin", "guardian", "edit"}, {"devin", "dontAsk", "full"},
+		{"qwen", "plan", "read"}, {"qwen", "default", "edit"}, {"qwen", "auto-edit", "edit"}, {"qwen", "yolo", "full"},
+		{"omp", "plan", "read"}, {"omp", "default", "edit"}, {"omp", "always-ask", "edit"}, {"omp", "write", "edit"}, {"omp", "yolo", "full"},
 		{"pi", "native", "full"},
 		{"mock", "made-up", ""}, {"claude", "", ""},
 	} {

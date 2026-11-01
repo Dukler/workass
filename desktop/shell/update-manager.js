@@ -1958,8 +1958,7 @@ class UpdateManager {
     if (!machineId) throw new Error('authorized update requires an exact machine_id');
     if (!parseVersion(currentVersion) || !parseVersion(targetVersion)) throw new Error('authorized update requires exact X.Y.Z current and target versions');
     // A fence against a confused caller, not permission: every word of it is
-    // public. The owner's permission is proved on the daemon that holds the
-    // calling chat, before this is ever reached (update_authorization.go).
+    // public, and the daemon fills it in for an agent's call.
     const expectedAuthorization = `update ${machineId} from ${currentVersion} to ${targetVersion}`;
     if (String(request.authorization ?? '') !== expectedAuthorization) {
       throw new Error('authorized update text does not exactly match the machine and versions');

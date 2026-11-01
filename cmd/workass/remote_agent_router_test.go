@@ -170,7 +170,7 @@ func TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner(t
 		"name": "workass_apply_update",
 		"arguments": map[string]any{
 			"machine_id": "m-work", "expected_current_version": "1.2.3", "expected_target_version": "1.2.4",
-			"authorizing_message_id": statelessMCPOwnerMessageID, "operation_id": "update-work-1.2.4",
+			"operation_id": "update-work-1.2.4",
 		},
 	})
 	if status != http.StatusOK || response["error"] != nil || remote.method != "update.apply" {
@@ -178,5 +178,19 @@ func TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner(t
 	}
 	if fieldString(remote.params, "operation_id") != "update-work-1.2.4" || remote.params["owner_key"] != nil {
 		t.Fatalf("authorized update route params=%#v", remote.params)
+	}
+	// The updater's contract still gets its sentence, whatever the agent wrote or left out.
+	if got := fieldString(remote.params, "authorization"); got != "update m-work from 1.2.3 to 1.2.4" {
+		t.Fatalf("updater sentence = %q", got)
+	}
+	status, response = harness.request(t, http.MethodPost, map[string]any{
+		"name": "workass_apply_update",
+		"arguments": map[string]any{
+			"machine_id": "m-work", "expected_current_version": "1.2.3", "expected_target_version": "1.2.4",
+			"authorization": "please update", "operation_id": "update-work-1.2.4-any-text",
+		},
+	})
+	if status != http.StatusOK || response["error"] != nil || fieldString(remote.params, "authorization") != "update m-work from 1.2.3 to 1.2.4" {
+		t.Fatalf("free authorization text HTTP=%d response=%#v params=%#v", status, response, remote.params)
 	}
 }

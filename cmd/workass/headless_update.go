@@ -178,10 +178,9 @@ func (s *headlessUpdateService) Status(ctx context.Context, params map[string]an
 	return out, nil
 }
 
-// Apply answers update.apply. Only a request for this exact machine, version pair
-// and operation_id reaches here: from an agent in a chat here, after the owner's
-// message was checked (update_authorization.go), or from a controller over the
-// authenticated wire. The daemon never schedules, retries or infers an activation.
+// Apply answers update.apply. Only a human order relayed for this exact
+// machine, version pair and operation_id reaches here; the daemon never
+// schedules, retries or infers an activation.
 func (s *headlessUpdateService) Apply(ctx context.Context, params map[string]any) (any, error) {
 	if !s.available() {
 		return nil, errors.New("this Workass daemon has no updater")

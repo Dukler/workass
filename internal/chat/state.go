@@ -72,11 +72,6 @@ type LedgerEvent struct {
 	NoticeKind   string `json:",omitempty"`
 	NoticeTitle  string `json:",omitempty"`
 	NoticeStatus string `json:",omitempty"`
-	// Origin is who wrote this user row: provider.TurnPresentation.Origin, stamped
-	// by the daemon when the turn was admitted, never read from a provider or a
-	// caller's words. Empty on a row from before it was recorded, which is not the
-	// same as human: see UserMessageRecord.
-	Origin string `json:",omitempty"`
 	// WorkassNotice marks an assistant row whose text Workass wrote (an
 	// admission failure, an interruption explanation, a failure fallback),
 	// not the provider. UI and maintenance notices are never context events

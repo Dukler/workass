@@ -139,18 +139,12 @@ func compactChatRow(row map[string]any, caller agentMCPOptions) map[string]any {
 }
 
 // checkUpdateApplyArguments refuses an apply that could never pass, in words that
-// say what would. The authorization is exact text about this one update: stating
-// it does not grant anything, which is why the owner's rule is named beside it.
+// say what would.
 func checkUpdateApplyArguments(params map[string]any) error {
-	machineID := strings.TrimSpace(fieldString(params, "machine_id"))
 	current := strings.TrimSpace(fieldString(params, "expected_current_version"))
 	target := strings.TrimSpace(fieldString(params, "expected_target_version"))
 	if !updateVersionPattern.MatchString(current) || !updateVersionPattern.MatchString(target) {
 		return errors.New("expected_current_version and expected_target_version must be exact X.Y.Z versions; read currentVersion and targetVersion from workass_get_update_status for this machine")
-	}
-	expected := fmt.Sprintf("update %s from %s to %s", machineID, current, target)
-	if fieldString(params, "authorization") != expected {
-		return fmt.Errorf("authorization must be exactly %q. That text only names the update; applying one needs the owner's permission, under Hard rules in AGENTS.md", expected)
 	}
 	return nil
 }

@@ -87,6 +87,17 @@ func validateAgentUpdateTarget(params map[string]any, selfMachineID string) erro
 	return nil
 }
 
+// withUpdateApplySentence fills in the sentence the updater's wire contract carries,
+// which every installed renderer and peer still reads. It is built from the request's
+// own fields, so an agent never has to write it and what it wrote does not matter.
+func withUpdateApplySentence(params map[string]any, selfMachineID string) map[string]any {
+	machineID := firstNonEmptyString(strings.TrimSpace(fieldString(params, "machine_id")), strings.TrimSpace(selfMachineID))
+	forwarded := copyAnyMap(params)
+	forwarded["authorization"] = fmt.Sprintf("update %s from %s to %s", machineID,
+		strings.TrimSpace(fieldString(params, "expected_current_version")), strings.TrimSpace(fieldString(params, "expected_target_version")))
+	return forwarded
+}
+
 func validateAgentUpdateApply(params map[string]any, selfMachineID string) error {
 	if err := validateAgentUpdateTarget(params, selfMachineID); err != nil {
 		return err

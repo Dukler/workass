@@ -52,18 +52,19 @@ func (qwenProviderPermissionPolicy) Intent(modeID string) string {
 	return genericProviderPermissionPolicy{}.Intent(modeID)
 }
 
-// permissionLevelAliases ranks the modes no provider policy claims as an intent.
-// They are real modes that the read/edit/full mapping has no use for, because
-// nothing ever selects them BY intent: a mode that asks before everything sits
-// with `default`, and `guardian` with the other modes that act on their own within
-// bounds. Keys are lower case.
+// permissionLevelAliases ranks modes by the owner's word rather than by the
+// read/edit/full mapping, which selects a mode BY intent and is a different question.
+// A mode that asks before acting sits with edit, because a person is in front of
+// whatever it does: a default-mode chat creating, configuring, sending to or spawning
+// an editing child must not cost a card. `guardian` acts on its own within bounds.
+// Keys are lower case.
 var permissionLevelAliases = map[string]string{
-	"ask": "read", "always-ask": "read", "default": "read",
+	"ask": "edit", "always-ask": "edit", "default": "edit",
 	"guardian": "edit",
 }
 
-// PermissionLevel ranks one mode by what it allows without a human, in the
-// read/edit/full vocabulary every provider already maps to. A mode nothing knows
+// PermissionLevel ranks one mode in the read/edit/full vocabulary every provider
+// already maps to; the aliases above go first. A mode nothing knows
 // returns empty, which means unknown and never high: PermissionLevelRank keeps
 // it apart from every real level, and callers decide what unknown costs them.
 func PermissionLevel(providerID, modeID string) string {
@@ -71,10 +72,10 @@ func PermissionLevel(providerID, modeID string) string {
 	if modeID == "" {
 		return ""
 	}
-	if level := permissionIntentForMode(providerID, modeID); level != "" {
+	if level := permissionLevelAliases[strings.ToLower(modeID)]; level != "" {
 		return level
 	}
-	return permissionLevelAliases[strings.ToLower(modeID)]
+	return permissionIntentForMode(providerID, modeID)
 }
 
 // PermissionLevelRank orders levels: read 1, edit 2, full 3, anything else 0.

@@ -19,7 +19,7 @@ import (
 // The chat tools let an agent change permissions, which is the feature: a parent
 // has no other way to change a child's. These tests hold the law around it. A
 // caller moves things up to its own level with no prompt, and past it only with
-// the human's yes. The mock provider's modes are `ask` (read) and `bypass` (full).
+// the human's yes. The mock provider's modes are `ask` (edit) and `bypass` (full).
 
 type ceilingCall struct {
 	status   int
@@ -147,6 +147,42 @@ func ceilingChatMode(t *testing.T, h statelessMCPTestHarness, chatID string) str
 		t.Fatalf("chat %s does not exist", chatID)
 	}
 	return state.Presentation.CurrentModeID
+}
+
+// Normal use costs no card: a mode that asks before acting ranks with edit, so only
+// reaching Full access from below asks, and a read-only or plan chat raising itself.
+func TestOnlyFullAccessOrALowChatRaisingItselfAsks(t *testing.T) {
+	caller := func(provider, mode string) permissionCaller {
+		return permissionCaller{providerID: provider, modeID: mode, level: acp.PermissionLevel(provider, mode)}
+	}
+	for _, test := range []struct {
+		name           string
+		from           permissionCaller
+		provider, mode string
+		current        string
+		raises         bool
+	}{
+		{"default to an editing child", caller("claude", "default"), "claude", "acceptEdits", "", false},
+		{"default to default", caller("claude", "default"), "claude", "default", "", false},
+		{"ask to an editing child", caller("codex", "ask"), "codex", "agent", "", false},
+		{"always-ask to write", caller("omp", "always-ask"), "omp", "write", "", false},
+		{"default configuring an editing chat", caller("claude", "default"), "claude", "acceptEdits", "plan", false},
+		{"default to bypass", caller("claude", "default"), "claude", "bypassPermissions", "", true},
+		{"ask to full", caller("codex", "ask"), "codex", "agent-full-access", "", true},
+		{"edit to bypass", caller("claude", "acceptEdits"), "claude", "bypassPermissions", "", true},
+		{"plan raising itself to edit", caller("claude", "plan"), "claude", "acceptEdits", "plan", true},
+		{"plan raising itself to default", caller("claude", "plan"), "claude", "default", "plan", true},
+		{"read-only raising itself to edit", caller("codex", "read-only"), "codex", "agent", "read-only", true},
+		{"full to anything", caller("claude", "bypassPermissions"), "claude", "plan", "bypassPermissions", false},
+	} {
+		change := permissionChange{providerID: test.provider, modeID: test.mode}
+		if test.current != "" {
+			change.reconfigures, change.currentProviderID, change.currentModeID = true, test.provider, test.current
+		}
+		if got := permissionChangeRaises(test.from, change); got != test.raises {
+			t.Errorf("%s: raises = %v, want %v", test.name, got, test.raises)
+		}
+	}
 }
 
 // An agent on `ask` could create a `bypass` chat with nothing in the way.
@@ -403,7 +439,7 @@ func TestForwardedCommandsAnswerToTheStatedLimit(t *testing.T) {
 	}
 
 	// Inside the limit nothing changes, and a command stating no mode starts at it.
-	if _, err := forward("chat.send", "read", map[string]any{"operation_id": "fwd-send-peer", "tab_id": "peer-tab", "chat_id": "peer-chat", "message": "go", "delivery": "queue"}); err != nil {
+	if _, err := forward("chat.send", "edit", map[string]any{"operation_id": "fwd-send-peer", "tab_id": "peer-tab", "chat_id": "peer-chat", "message": "go", "delivery": "queue"}); err != nil {
 		t.Fatalf("a same-level forwarded send = %v", err)
 	}
 	if _, err := forward("chat.configure", "read", map[string]any{"operation_id": "fwd-lower", "tab_id": "wide-tab", "chat_id": "wide-chat", "mode_id": "ask"}); err != nil {
@@ -461,7 +497,7 @@ func TestAForwardedCommandStatesTheCallersRealLevel(t *testing.T) {
 	if call.errorText() != "" {
 		t.Fatalf("forward = %#v", call.response)
 	}
-	if got := fieldString(remote.params, fleetLimitParam); got != fleetLimitRead {
+	if got := fieldString(remote.params, fleetLimitParam); got != fleetLimitEdit {
 		t.Fatalf("an ask chat stated limit %q", got)
 	}
 
