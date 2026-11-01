@@ -36,6 +36,8 @@ case "$output_root" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe local
 case "$candidate_root" in ''|/*) ;; *) echo "--candidate-root must be absolute" >&2; exit 2 ;; esac
 case "$release_input" in ''|/*) ;; *) echo "--release-input must be absolute" >&2; exit 2 ;; esac
 
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" check-key
+
 commit=$(git -C "$repo_root" rev-parse HEAD)
 if [ -n "$release_input" ]; then
   # shellcheck disable=SC1091
@@ -103,6 +105,7 @@ const release = {
 };
 fs.writeFileSync(file, `${JSON.stringify(release, null, 2)}\n`, { mode: 0o600 });
 NODE
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" sign --manifest "$feed_incoming"
 
 # Publish the archive first and the manifest last. A concurrent app check sees
 # either the previous complete release or this complete release, never a feed

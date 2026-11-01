@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { verifyManifestFile } from './manifest-signature.mjs';
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -156,6 +157,16 @@ function verify(args) {
     'frontier-hosts/linux-amd64/omp-native-host.mjs',
     'frontier-hosts/linux-amd64/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
   ]) requireFile(path.join(linuxBundle, ...relative.split('/')));
+
+  // Last, over the exact files the clients will read: a candidate a client would
+  // refuse is not a candidate, however well everything above matched.
+  for (const feedFile of [macFeedFile, windowsFeedFile, linuxFeedFile]) {
+    try {
+      verifyManifestFile(feedFile);
+    } catch (error) {
+      fail(`release candidate signature check failed: ${error.message}`);
+    }
+  }
 
   const inputManifest = artifact(path.join(args.input, 'manifest.json'));
   return {

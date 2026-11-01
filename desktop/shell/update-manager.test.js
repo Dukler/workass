@@ -1,12 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { PassThrough, Readable } = require('node:stream');
 const test = require('node:test');
+const { canonicalReleaseManifest } = require('./release-manifest-signature');
 const {
   UpdateManager,
   atomicJSON,
@@ -221,7 +223,28 @@ function fakeSystemNetwork(routes, requests = [], visited = []) {
   };
 }
 
+// Generated per run: no test ever reads the real signing key, and this key reaches
+// a manager only through its injected dependencies.
+const testReleaseKey = crypto.generateKeyPairSync('ed25519');
+const testReleasePublicKey = testReleaseKey.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+
+function signRelease(release, privateKey = testReleaseKey.privateKey) {
+  const { signature: _previous, ...unsigned } = release;
+  return {
+    ...unsigned,
+    signature: {
+      algorithm: 'ed25519',
+      keyId: 'test',
+      value: crypto.sign(null, Buffer.from(canonicalReleaseManifest(unsigned)), privateKey).toString('base64'),
+    },
+  };
+}
+
 function manifest(overrides = {}) {
+  return signRelease(unsignedManifest(overrides));
+}
+
+function unsignedManifest(overrides = {}) {
   return {
     schemaVersion: 1,
     product: 'Workass',
@@ -286,6 +309,7 @@ function managerFixture({
     isPackaged: true,
     quit: () => { quit = true; },
     deps: {
+      releaseManifestPublicKeys: [testReleasePublicKey],
       ...(networkRequest ? { networkRequest } : {}),
       postLocalUpdate: async (_url, action) => {
         calls.push(action);
@@ -521,16 +545,16 @@ test('Windows ignores incomplete, wrong-size, wrong-checksum and symlink ZIP cac
 test('Windows cache is bound to artifact bytes, not version or URL', async (t) => {
   const fixture = windowsDownloadFixture(t);
   assert.equal((await fixture.manager.download()).phase, 'ready');
-  fixture.offer(fixture.manager, { ...fixture.release, artifacts: { update: {
+  fixture.offer(fixture.manager, signRelease({ ...fixture.release, artifacts: { update: {
     ...fixture.release.artifacts.update, url: 'https://releases.example.test/new-mirror.zip',
-  } } });
+  } } }));
   assert.equal((await fixture.manager.download()).phase, 'ready');
   assert.equal(fixture.downloads(), 1);
   const other = Buffer.from('different artifact with the same version');
   const sha256 = require('node:crypto').createHash('sha256').update(other).digest('hex');
-  fixture.offer(fixture.manager, { ...fixture.release, artifacts: { update: {
+  fixture.offer(fixture.manager, signRelease({ ...fixture.release, artifacts: { update: {
     ...fixture.release.artifacts.update, sha256, size: other.length,
-  } } });
+  } } }));
   let replaced = false;
   fixture.manager.deps.downloadArtifact = async (_source, destination) => { replaced = true; fs.writeFileSync(destination, other); };
   assert.equal((await fixture.manager.download()).phase, 'ready');
@@ -2502,6 +2526,107 @@ test('a missing platform asset means current while a feed failure cannot imperso
   assert.equal(state.phase, 'check_failed');
   assert.match(state.error, /TLS failed/);
   assert.equal(state.receipt, null);
+});
+
+test('no release is offered or staged unless its manifest verifies, on every OS and on the local feed', async (t) => {
+  const windowsRelease = (overrides = {}) => unsignedManifest({
+    platform: 'windows', arch: 'amd64', portable: true, designatedRequirement: undefined, ...overrides,
+  });
+  const attacker = crypto.generateKeyPairSync('ed25519');
+  const forms = {
+    missing: (release) => release,
+    'signed by a key this build does not trust': (release) => signRelease(release, attacker.privateKey),
+    'changed after signing': (release) => ({
+      ...signRelease(release),
+      artifacts: { update: { ...release.artifacts.update, url: 'https://attacker.example/release.zip' } },
+    }),
+    'version raised after signing': (release) => ({ ...signRelease(release), version: '9.9.9' }),
+    'checksum changed after signing': (release) => ({
+      ...signRelease(release),
+      artifacts: { update: { ...release.artifacts.update, sha256: 'b'.repeat(64) } },
+    }),
+    'size changed after signing': (release) => ({
+      ...signRelease(release),
+      artifacts: { update: { ...release.artifacts.update, size: 2048 } },
+    }),
+    'carrying the signature of another platform': (release) => ({
+      ...release, signature: signRelease({ ...release, platform: 'linux' }).signature,
+    }),
+    'malformed signature': (release) => ({ ...release, signature: { algorithm: 'ed25519', value: 'AAAA' } }),
+    'another algorithm': (release) => ({ ...signRelease(release), signature: { ...signRelease(release).signature, algorithm: 'rsa' } }),
+  };
+  for (const [platform, build] of [['darwin', unsignedManifest], ['win32', windowsRelease]]) {
+    for (const [name, form] of Object.entries(forms)) {
+      await t.test(`${platform}: ${name}`, async () => {
+        const { manager } = managerFixture({ platform, primeReady: false });
+        let staged = false;
+        manager.deps.downloadArtifact = async () => { staged = true; };
+        manager.deps.fetchManifest = async () => form(build());
+        const state = await manager.check();
+        assert.equal(state.phase, 'check_failed', name);
+        assert.match(state.error, /refused/);
+        assert.equal(state.targetVersion, null);
+        await assert.rejects(() => manager.download());
+        assert.equal(staged, false);
+        assert.equal(fs.existsSync(path.join(manager.updateRoot, 'transactions')), false);
+      });
+    }
+  }
+
+  await t.test('the Mac local feed reads the same manifests through the same check', async () => {
+    const { manager } = managerFixture({ primeReady: false });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'unsigned-workass-feed-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    manager.feedURL = path.join(root, 'workass-darwin-arm64-release.json');
+    fs.writeFileSync(manager.feedURL, JSON.stringify(unsignedManifest()));
+    const unsigned = await manager.check();
+    assert.equal(unsigned.phase, 'check_failed');
+    assert.match(unsigned.error, /no signature/);
+    fs.writeFileSync(manager.feedURL, JSON.stringify(manifest()));
+    assert.equal((await manager.check()).phase, 'available');
+  });
+
+  await t.test('a manager built without test keys trusts only the pinned ones', async () => {
+    const { manager } = managerFixture({ primeReady: false });
+    delete manager.deps.releaseManifestPublicKeys;
+    manager.deps.fetchManifest = async () => manifest();
+    const state = await manager.check();
+    assert.equal(state.phase, 'check_failed');
+    assert.match(state.error, /not signed by a key this build trusts/);
+  });
+
+  await t.test('a verified offer changed afterward is refused before anything is staged', async () => {
+    const { manager } = managerFixture({ primeReady: false });
+    manager.deps.fetchManifest = async () => manifest();
+    assert.equal((await manager.check()).phase, 'available');
+    let staged = false;
+    manager.deps.downloadArtifact = async () => { staged = true; };
+    manager.manifest = { ...manager.manifest, artifacts: { update: { ...manager.manifest.artifacts.update, sha256: 'b'.repeat(64) } } };
+    await assert.rejects(() => manager.download(), /refused/);
+    assert.equal(staged, false);
+    assert.equal(fs.existsSync(path.join(manager.updateRoot, 'transactions')), false);
+  });
+
+  await t.test('an old signed release cannot be replayed over a newer install', async () => {
+    const { manager } = managerFixture({ currentVersion: '1.3.0', primeReady: false });
+    manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+    const state = await manager.check();
+    assert.equal(state.phase, 'current');
+    assert.equal(state.targetVersion, null);
+    await assert.rejects(() => manager.download());
+    await assert.rejects(async () => manager.startAuthorizedApply({
+      operation_id: 'update-replay-1.2.0', machine_id: 'machine-work',
+      expected_current_version: '1.3.0', expected_target_version: '1.2.0',
+      authorization: 'update machine-work from 1.3.0 to 1.2.0',
+    }));
+  });
+
+  await t.test('a client from before this signature reads a signed manifest unchanged', () => {
+    const signed = manifest();
+    assert.equal(validateReleaseManifest(signed, { platform: 'darwin', arch: 'arm64' }), signed);
+    assert.equal(signed.artifacts.update.size, 1024);
+    assert.equal(signed.version, '1.2.0');
+  });
 });
 
 test('an empty local feed means current while malformed local metadata stays visible', async () => {

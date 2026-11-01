@@ -74,6 +74,9 @@ type Options struct {
 	RequestRestart func()
 	// RunningJobs reads this machine's running jobs when the status is asked for.
 	RunningJobs func() []RunningJob
+	// ReleaseManifestKeys replaces the keys pinned in this binary. Tests only: no
+	// flag or environment variable reaches it.
+	ReleaseManifestKeys []string
 }
 
 // RunningJob is one job or subagent an update would be applied over.
@@ -130,6 +133,7 @@ type resolvedOptions struct {
 	log            func(format string, args ...any)
 	requestRestart func()
 	runningJobs    func() []RunningJob
+	releaseKeys    []string
 }
 
 // Receipt is the durable record of one activation. It survives the restart it
@@ -249,6 +253,7 @@ func resolveOptions(options Options) resolvedOptions {
 	}
 	resolved.requestRestart = options.RequestRestart
 	resolved.runningJobs = options.RunningJobs
+	resolved.releaseKeys = options.ReleaseManifestKeys
 	return resolved
 }
 
@@ -357,6 +362,12 @@ func (m *Manager) Check(ctx context.Context, force bool) (*Manifest, error) {
 	}
 	manifest, err := ValidateManifest(raw, m.options.goos, m.options.goarch)
 	if err != nil {
+		m.recordCheckError(err)
+		return nil, err
+	}
+	// The check that is independent of GitHub. Apply always comes through here
+	// with force set, so nothing is believed, downloaded or staged without it.
+	if err := VerifyManifestSignature(manifest, m.options.releaseKeys); err != nil {
 		m.recordCheckError(err)
 		return nil, err
 	}

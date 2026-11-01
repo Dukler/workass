@@ -1,0 +1,87 @@
+{
+  "comment": "Made once with a throwaway key whose private half was discarded. Go and the Electron updater both verify these, so neither canonical form can drift alone.",
+  "publicKey": "zY1mtKGWUAKXo3i3uk+kZ1xkKzr9vZ/XxoixfyNwyEY=",
+  "cases": [
+    {
+      "name": "darwin",
+      "canonical": "workass-release-manifest-v1\nschemaVersion=1:1\nproduct=7:Workass\nversion=5:1.2.0\nbuild=8:20261101\nplatform=6:darwin\narch=5:arm64\nportable=5:false\nheadless=5:false\ndesignatedRequirement=53:identifier \"com.workass.app\" and anchor apple generic\nnotes=25:Línea uno\nline two = 3:x\nartifact.name=30:Workass-1.2.0-darwin-arm64.zip\nartifact.url=30:Workass-1.2.0-darwin-arm64.zip\nartifact.sha256=64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nartifact.size=6:123456\n",
+      "manifest": {
+        "schemaVersion": 1,
+        "product": "Workass",
+        "bundleId": "com.workass.app",
+        "version": "1.2.0",
+        "build": 20261101,
+        "platform": "darwin",
+        "arch": "arm64",
+        "publishedAt": "2026-11-01T00:00:00Z",
+        "designatedRequirement": "identifier \"com.workass.app\" and anchor apple generic",
+        "notes": "Línea uno\nline two = 3:x",
+        "artifacts": {
+          "update": {
+            "name": "Workass-1.2.0-darwin-arm64.zip",
+            "url": "Workass-1.2.0-darwin-arm64.zip",
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "size": 123456
+          }
+        },
+        "signature": {
+          "algorithm": "ed25519",
+          "keyId": "vector",
+          "value": "DSmMHungWm76L8DMIlrxtNpO0glazFhPFDm0l3DiWoeHQWVn6G2wEjfplLWIzVRmrwP5PRlPdmPzN3Z95NdtDQ=="
+        }
+      }
+    },
+    {
+      "name": "windows",
+      "canonical": "workass-release-manifest-v1\nschemaVersion=1:1\nproduct=7:Workass\nversion=5:1.2.0\nbuild=0:\nplatform=7:windows\narch=5:amd64\nportable=4:true\nheadless=5:false\ndesignatedRequirement=0:\nnotes=0:\nartifact.name=31:Workass-1.2.0-windows-amd64.zip\nartifact.url=90:https://github.com/Dukler/workass/releases/download/v1.2.0/Workass-1.2.0-windows-amd64.zip\nartifact.sha256=64:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nartifact.size=9:987654321\n",
+      "manifest": {
+        "schemaVersion": 1,
+        "product": "Workass",
+        "version": "1.2.0",
+        "platform": "windows",
+        "arch": "amd64",
+        "portable": true,
+        "authenticode": false,
+        "artifacts": {
+          "update": {
+            "name": "Workass-1.2.0-windows-amd64.zip",
+            "url": "https://github.com/Dukler/workass/releases/download/v1.2.0/Workass-1.2.0-windows-amd64.zip",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "size": 987654321
+          }
+        },
+        "signature": {
+          "algorithm": "ed25519",
+          "keyId": "vector",
+          "value": "fFCZp1k5ONcrdw7bjjn8j5KGuRqnvSM97qEKjjJyffD8QcUtYAAoWD/J5p1xIZwt9LKI30/+O/W0cXSqTwojCA=="
+        }
+      }
+    },
+    {
+      "name": "linux",
+      "canonical": "workass-release-manifest-v1\nschemaVersion=1:1\nproduct=7:Workass\nversion=5:1.2.0\nbuild=0:\nplatform=5:linux\narch=5:amd64\nportable=5:false\nheadless=4:true\ndesignatedRequirement=0:\nnotes=0:\nartifact.name=32:Workass-1.2.0-linux-amd64.tar.gz\nartifact.url=91:https://github.com/Dukler/workass/releases/download/v1.2.0/Workass-1.2.0-linux-amd64.tar.gz\nartifact.sha256=64:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nartifact.size=4:4242\n",
+      "manifest": {
+        "schemaVersion": 1,
+        "product": "Workass",
+        "version": "1.2.0",
+        "platform": "linux",
+        "arch": "amd64",
+        "headless": true,
+        "service": "systemd-user",
+        "artifacts": {
+          "update": {
+            "name": "Workass-1.2.0-linux-amd64.tar.gz",
+            "url": "https://github.com/Dukler/workass/releases/download/v1.2.0/Workass-1.2.0-linux-amd64.tar.gz",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "size": 4242
+          }
+        },
+        "signature": {
+          "algorithm": "ed25519",
+          "keyId": "vector",
+          "value": "lpmSx+ELY/kflS9M1w6KLcnEAv5yW5eC7IskDIPsPCwqzIQNG9ayKSigjwPwvitU1TH7TyxBSgFXQgnm8bezAA=="
+        }
+      }
+    }
+  ]
+}

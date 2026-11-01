@@ -101,6 +101,12 @@ func (h *agentControlHandler) scheduledMessageCall(method string, params map[str
 		if err != nil {
 			return nil, err
 		}
+		if req.AuthorizingMessageID != "" {
+			now := scheduler.Now()
+			if err := h.checkScheduledUpdatePermission(tabID, chatID, req.AuthorizingMessageID, now, req.Due(now)); err != nil {
+				return nil, err
+			}
+		}
 		entry, err := scheduler.Schedule(tabID, chatID, req)
 		if err != nil {
 			return nil, err
@@ -149,6 +155,9 @@ func scheduledMessageView(e scheduledmessage.Entry) map[string]any {
 	}
 	if e.Error != "" {
 		view["error"] = e.Error
+	}
+	if e.AuthorizingMessageID != "" {
+		view["authorizingMessageId"] = e.AuthorizingMessageID
 	}
 	return view
 }

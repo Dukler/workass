@@ -9,7 +9,7 @@
 // mechanics live here, in Go, beside the binary being replaced. The wire and
 // MCP contract is unchanged in shape on purpose: the same
 // update.targets/update.status/update.apply methods, the same
-// `update <machineId> from <a> to <b>` authorization text, and the same
+// `update <machineId> from <a> to <b>` sentence, and the same
 // operation_id replay receipts.
 package headlessupdate
 
@@ -103,6 +103,15 @@ type Manifest struct {
 	Artifacts     struct {
 		Update Artifact `json:"update"`
 	} `json:"artifacts"`
+
+	// Read only because the signature covers them: one canonical form across
+	// every platform's manifest.
+	Build                 *int64 `json:"build,omitempty"`
+	Portable              bool   `json:"portable,omitempty"`
+	DesignatedRequirement string `json:"designatedRequirement,omitempty"`
+	Notes                 string `json:"notes,omitempty"`
+
+	Signature *ManifestSignature `json:"signature,omitempty"`
 }
 
 // FeedName is the per-platform manifest file name. It matches

@@ -70,6 +70,8 @@ type Entry struct {
 	Late     bool   `json:"late,omitempty"`
 	Attempts int    `json:"attempts,omitempty"`
 	Error    string `json:"error,omitempty"` // redacted, short
+	// AuthorizingMessageID is the owner's message behind a programmed update.
+	AuthorizingMessageID string `json:"authorizingMessageId,omitempty"`
 }
 
 // Sender delivers text to the entry's own chat.
@@ -283,6 +285,9 @@ func (e Entry) clone() Entry {
 	return e
 }
 
+// Now is this scheduler's clock.
+func (s *Scheduler) Now() time.Time { return s.now() }
+
 // Schedule records a scheduled message for the chat. The same operation id
 // with the same request returns the existing one unchanged.
 func (s *Scheduler) Schedule(tabID, chatID string, req Request) (Entry, error) {
@@ -320,6 +325,8 @@ func (s *Scheduler) Schedule(tabID, chatID string, req Request) (Entry, error) {
 		Condition:   req.Condition,
 		CreatedAt:   now,
 		Status:      StatusPending,
+
+		AuthorizingMessageID: req.AuthorizingMessageID,
 	}
 	if req.Field == "after_seconds" {
 		entry.Condition.At = now.Add(req.After).UTC()
@@ -559,7 +566,11 @@ func Text(e Entry) string {
 	if e.Late {
 		text += "\n(This was due at " + e.Condition.At.Format(time.RFC3339) + "; Workass was not running then, so it is delivered late.)"
 	}
-	return text + "\n\n" + e.Message
+	text += "\n\n" + e.Message
+	if e.AuthorizingMessageID != "" {
+		text += "\n\n[authorizing_message_id for workass_apply_update: " + e.AuthorizingMessageID + "]"
+	}
+	return text
 }
 
 var secretPattern = regexp.MustCompile(`(?i)\b(api[_-]?key|token|secret|password|credential|bearer)\b(["']?\s*[:=]?\s*)\S+`)

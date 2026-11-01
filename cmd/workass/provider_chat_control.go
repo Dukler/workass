@@ -587,6 +587,13 @@ func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeE
 	eventCount := 0
 	for _, raw := range messages {
 		message := mapFromAnyMain(cloneJSON(raw))
+		// Who wrote an input, for an agent looking for the owner's message that
+		// allows an update. Only this agent-facing read carries it.
+		if fieldString(message, "role") == "user" {
+			if record, found := state.UserMessageRecord(fieldString(message, "id")); found && record.Origin != "" {
+				message["origin"] = record.Origin
+			}
+		}
 		events := anySlice(message["events"])
 		if includeEvents {
 			eventCount += len(events)

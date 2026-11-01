@@ -10,7 +10,8 @@ than an app, and the activation mechanics live in the daemon (Go,
 What is deliberately *not* different: the wire and MCP contract. The same
 `update.targets` / `update.status` / `update.apply` methods, the same
 `app:update-status` / `app:update-apply` channels, the same
-`update <machineId> from <a> to <b>` authorization sentence, and the same
+`update <machineId> from <a> to <b>` sentence on those channels, the same
+owner's-message check on the agent tool, and the same
 `operation_id` replay receipts. A controller on another machine cannot tell
 which half of the fleet answered, and does not need to.
 
@@ -39,6 +40,11 @@ The archive layout **is** the install layout: every entry sits directly in the
 install root (`~/workass/runtime` in the examples below). That is what lets the
 daemon's own updater rename the new tree into place without a translation
 table.
+
+The feed carries an offline ed25519 signature that the daemon verifies against keys
+pinned in its binary before it reads anything else about the release. `SHA256SUMS`
+above is for a person's first install and proves nothing about who published it; see
+"Release manifest signature" in `docs/DISTRIBUTION.md`.
 
 `headless: true` in the feed is to Linux what `portable: true` is to Windows:
 it states the artifact's shape, so a daemon never accepts an app bundle and an
@@ -95,7 +101,9 @@ One `workass_apply_update` for this exact machine runs:
 1. **Discover.** A background loop (hourly) reads the feed. `update.status` is
    a pure read of that cached state: the read tools promise they never check
    for an update, and the promise is kept literally.
-2. **Download and verify.** Exact size and SHA-256 from the manifest.
+2. **Download and verify.** The manifest's signature against the keys pinned in this
+   binary, a version newer than the one installed, then exact size and SHA-256 from
+   the manifest. A release that fails any of these is refused with nothing staged.
 3. **Extract.** Absolute paths, `..`, symlinks, hard links and device nodes are
    rejected rather than sanitized.
 4. **Preflight.** `<staged>/workass version` must print the version the
@@ -146,15 +154,17 @@ From a client, with the server mounted and paired:
 //        state: { supported, currentVersion, availableVersion, phase }, receipt } }
 // workass_apply_update         { "machine_id": "<id>",
 //        "expected_current_version": "<current>", "expected_target_version": "<target>",
-//        "authorization": "update <id> from <current> to <target>",
+//        "authorizing_message_id": "<the owner's message in the calling chat>",
 //        "operation_id": "<caller-stable id>" }
 ```
 
 When `workass_apply_update` may be called is the owner's permission rule in
 `AGENTS.md` (owner law 2026-10-31, superseding the current-human-order-only law
 of 2026-09-03): an update now, or a programmed update at a stated time or
-condition for stated machines. Replaying the same `operation_id` reads its durable receipt back and
-cannot start a second activation.
+condition for stated machines. `authorizing_message_id` is how that permission is
+proved, with no click, on the daemon that holds the calling chat; see "Agent
+activation" in `docs/DISTRIBUTION.md`. Replaying the same `operation_id` reads its
+durable receipt back and cannot start a second activation.
 
 ## Diagnosing
 

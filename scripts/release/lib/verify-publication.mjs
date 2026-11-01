@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { verifyManifestFile } from './manifest-signature.mjs';
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -125,6 +126,20 @@ function expectedReceipt(args) {
   const checksumFields = fs.readFileSync(path.join(args.macosOutput, 'SHA256SUMS'), 'utf8').trim().split(/\s+/);
   if (checksumFields.length !== 2 || checksumFields[0] !== publishedArchive.sha256 || checksumFields[1] !== archiveName) {
     fail('published macOS checksum does not bind the published archive');
+  }
+
+  // The published manifests are byte-identical to these (bound above and read
+  // back by the publisher), so this is the check every client will make.
+  for (const feedFile of [
+    publishedFeedFile,
+    path.join(args.root, 'windows', args.version, 'workass-windows-amd64-release.json'),
+    path.join(args.root, 'linux', args.version, 'workass-linux-amd64-release.json'),
+  ]) {
+    try {
+      verifyManifestFile(feedFile);
+    } catch (error) {
+      fail(`published release signature check failed: ${error.message}`);
+    }
   }
 
   return {

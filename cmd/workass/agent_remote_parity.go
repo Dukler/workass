@@ -34,9 +34,9 @@ const (
 )
 
 // remoteAgentMethodKinds is the single authority for Agent API remote reach.
-// update.apply and update.targets are deliberately absent: an apply's current-
-// human authorization is written for the renderer/headless contract that owns
-// it today, and targets enumerates every machine the ASKING daemon can reach,
+// update.apply and update.targets are deliberately absent: an apply's owner
+// permission is a message in the calling chat, so it can only be checked on the
+// machine holding that chat, and targets enumerates every machine the ASKING daemon can reach,
 // which has no single remote home to carry it to. update.status is carried
 // (added 2026-10-31, bug report work-laptop/buildbox): a remote machine_id
 // used to go straight to the asking daemon's own renderer relay, which fails

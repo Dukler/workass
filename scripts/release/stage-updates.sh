@@ -61,6 +61,14 @@ case "$candidate" in ''|/*) ;; *) echo "--candidate must be absolute" >&2; exit 
 case "$macos_output" in /*) ;; *) echo "--macos-output must be absolute" >&2; exit 2 ;; esac
 case "$candidate" in /|"$repo_root"|"$repo_root"/) echo "refusing unsafe candidate root: $candidate" >&2; exit 2 ;; esac
 
+# A key a test named can never publish, and a key that is missing or unpinned
+# fails here rather than after the whole build.
+if [ "$publish" -eq 1 ] && [ -n "${WORKASS_RELEASE_MANIFEST_TEST_PUBLIC_KEY:-}" ]; then
+  echo "refusing to publish with WORKASS_RELEASE_MANIFEST_TEST_PUBLIC_KEY set" >&2
+  exit 2
+fi
+node "$script_dir/lib/manifest-signature.mjs" check-key
+
 workass_release_require_source "$repo_root"
 commit=$WORKASS_RELEASE_COMMIT
 if [ -z "$build_number" ]; then build_number=$(workass_release_build_number "$repo_root" "$commit"); fi
