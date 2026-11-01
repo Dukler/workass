@@ -175,8 +175,16 @@ Approval flow:
 any current access status and never accepts or validates PINs.
 
 Localhost dev ergonomics: when `--trust-localhost=true`, localhost WebSocket clients without a
-valid token are auto-approved and receive a token without host approval. Tests can force the real
-approval path on loopback with `--trust-localhost=false`.
+valid token are auto-approved and receive a token without host approval, if they send no `Origin`
+or an `Origin` exactly equal (scheme, host and port) to this daemon's own origin or to the view
+server's own origin. The view server rewrites `Host` when it proxies a WebSocket, so it verifies the
+page's `Origin` itself and names it in `X-Workass-View-Origin`. A page on any other loopback port
+waits for approval like a LAN device. Tests can force the real approval path on loopback with
+`--trust-localhost=false`.
+
+The daemon's local-only HTTP routes (`/workass/recovery/shutdown`, `/workass/update/*`,
+`/workass/fleet-qr.svg`) also require a loopback `Host`, and refuse a foreign `Origin` or
+cross-site fetch metadata. Local callers that send neither header are unaffected.
 
 Exactly one approved device owns the controller lease. The normal desktop pairing flow is: add the
 other machine by address, approve its `lan:access-request` from the other Workass window, and let

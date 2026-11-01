@@ -653,7 +653,7 @@ func localRecoveryShutdownHandler(requestShutdown context.CancelFunc) http.Handl
 			return
 		}
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil || !net.ParseIP(host).IsLoopback() {
+		if err != nil || !net.ParseIP(host).IsLoopback() || !wire.LocalControlRequestAllowed(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -712,7 +712,7 @@ func localUpdateRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !net.ParseIP(host).IsLoopback() {
+	if err != nil || !net.ParseIP(host).IsLoopback() || !wire.LocalControlRequestAllowed(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return "", false
 	}

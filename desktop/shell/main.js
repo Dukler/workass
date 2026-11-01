@@ -8,7 +8,7 @@ const { createViewServer } = require('./view-server');
 const { createConnectedArtifactBridge, shouldInjectArtifactHeader } = require('./connected-artifacts');
 const { BrowserManager, DEFAULT_PARTITION: BROWSER_PARTITION } = require('./browser-manager');
 const { BrowserControlServer } = require('./browser-control-server');
-const { hardenWebviewAttach, resolveBrowserHost } = require('./browser-webview-policy');
+const { hardenWebviewAttach, openExternalIfSafe, resolveBrowserHost } = require('./browser-webview-policy');
 const { resolveRuntimeProfile } = require('./runtime-profile');
 const { applyMacDockIcon, refreshWindowsShortcutIconsAsync, resolveWindowFrameOptions, resolveWindowIconPath } = require('./app-icon');
 const { ensurePackagedDaemon, ensurePortableDaemon, restartDaemonAndRecover, restartPackagedDaemonAndRecover } = require('./runtime-bootstrap');
@@ -486,7 +486,7 @@ function createWindow(url, browserReporter, isController) {
     }
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternalIfSafe(shell, url);
     return { action: 'deny' };
   });
   // Dev screenshot: hand the view server a capture fn bound to THIS window so

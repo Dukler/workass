@@ -186,7 +186,8 @@ is entirely the client's own policy, so the failure is yours to avoid and yours
 to test.
 
 Localhost is auto-approved server-side when `--trust-localhost` is on (the
-default); a LAN client never is.
+default) and the client sends no `Origin`; a LAN client never is. A browser page
+on another loopback port waits for approval too.
 
 ## 5 · Error taxonomy
 

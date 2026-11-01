@@ -8,6 +8,7 @@ import (
 
 	"workass/internal/fleet"
 	"workass/internal/fleetqr"
+	"workass/internal/wire"
 )
 
 // fleetQRPath serves the join code as an SVG so a sheet can show one with an
@@ -21,7 +22,8 @@ const fleetQRPath = "/workass/fleet-qr.svg"
 // fleet key is allowed on the machine that holds it and nowhere else, and an
 // image of the key is the key. Serving it to the LAN would hand the fleet to
 // anyone who could reach the port — which is every device this design exists to
-// keep OUT until it has enrolled.
+// keep OUT until it has enrolled. The source address is not enough either: a
+// rebinding page arrives from loopback too, so the Host and Origin must agree.
 func newFleetQRHandler(keys *fleet.Store, port int, bind string, logf func(format string, args ...any)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -35,6 +37,10 @@ func newFleetQRHandler(keys *fleet.Store, port int, bind string, logf func(forma
 		}
 		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || !ip.IsLoopback() {
 			http.Error(w, "a fleet key is only readable on the machine that holds it", http.StatusForbidden)
+			return
+		}
+		if !wire.LocalControlRequestAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		// A QR is a promise that the encoded endpoint is reachable from another
