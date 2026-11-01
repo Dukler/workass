@@ -166,6 +166,12 @@ func updateStatusPeerRefusal(machineID string, err error) error {
 	if err == nil || !strings.Contains(err.Error(), errNoLocalRenderer.Error()) {
 		return err
 	}
+	// Raised here, the words are about this machine: nothing was connected, and the
+	// relay that would have carried the question has no window to run in. Only the
+	// same words arriving over a link are that machine speaking.
+	if errors.Is(err, errNoLocalRenderer) {
+		return fmt.Errorf("this machine has no direct link to %s and no Workass window open to reach it through: open the Workass app here, or check that machine with workass_list_update_targets, and try again", machineID)
+	}
 	return fmt.Errorf("machine %s is connected, but no Workass window is open there and its version cannot report update status without one: open the app there", machineID)
 }
 

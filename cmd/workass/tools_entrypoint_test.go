@@ -46,7 +46,7 @@ func TestDaemonToolsEntrypointDispatchesBeforeStartup(t *testing.T) {
 				}
 			} else {
 				var response toolcli.Response
-				if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || stdout.Len() != 0 || json.Unmarshal(stderr.Bytes(), &response) != nil || response.Error != "unknown tools command: use list or call" {
+				if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || stdout.Len() != 0 || json.Unmarshal(stderr.Bytes(), &response) != nil || response.Error != "unknown tools command: use guide, list or call" {
 					t.Fatalf("invalid command: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 				}
 			}

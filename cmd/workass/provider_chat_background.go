@@ -112,7 +112,7 @@ func (r *providerChatRuntime) RunBackgroundAction(ctx context.Context, tabID, ch
 	if target := action.TargetWorkID(); target != "" {
 		item, ok := state.Background[target]
 		if !ok {
-			return nil, fmt.Errorf("background work %q is not actor-owned", target)
+			return nil, fmt.Errorf("%q is not a subagent or tracked work of this chat: workass_list_subagents and workass_list_spawned_work list their ids", target)
 		}
 		action.Owner = item.Owner
 	} else {

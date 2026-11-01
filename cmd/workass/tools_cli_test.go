@@ -81,12 +81,19 @@ func TestToolsCLICatalogCallAndMutationReceiptsWithoutMCP(t *testing.T) {
 		}
 		return value, err
 	}
-	catalog, err := run([]string{"list"}, "")
+	catalog, err := run([]string{"list", "--full"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(catalog["tools"].([]any)) != len(agentMCPTools())+len(browserMCPTools()) {
 		t.Fatal("CLI did not expose the full catalog")
+	}
+	listing, err := run([]string{"list"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listing["tools"].([]any)) != len(catalog["tools"].([]any))-len(internalWorkassTools) {
+		t.Fatal("the listing left out more than the internal tools")
 	}
 	for _, name := range []string{"workass_get_chat_diagnostics", "workass_read_chat", "workass_browser_snapshot", "workass_apply_update", "workass_host_artifact", "workass_register_external_work"} {
 		schema, err := run([]string{"list", name}, "")

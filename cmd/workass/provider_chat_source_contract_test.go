@@ -491,7 +491,7 @@ func TestPhaseCAgentWaitBindsOperationIDBeforeTransientManager(t *testing.T) {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && (selector.Sel.Name == "WaitSubagent" || selector.Sel.Name == "WaitSubagents") {
+		if ok && (selector.Sel.Name == "WaitSubagent" || selector.Sel.Name == "WaitSelectedSubagents") {
 			waitCalls = append(waitCalls, call)
 		}
 		return true
@@ -1067,7 +1067,9 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 				if _, ok := properties["operation_id"]; !ok {
 					t.Errorf("%s mutation %s has no operation_id schema property", kind, name)
 				}
-				if _, ok := required["operation_id"]; !ok {
+				// A wait records only that it was asked for, and derives a stable id
+				// for that record when its caller names none.
+				if _, ok := required["operation_id"]; !ok && !(kind == agentToolKind && agentWaitOperationOptional[name]) {
 					t.Errorf("%s mutation %s does not require operation_id", kind, name)
 				}
 			} else if _, ok := properties["operation_id"]; ok {

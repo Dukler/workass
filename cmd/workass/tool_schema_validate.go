@@ -73,6 +73,27 @@ func validateSchemaValue(rawSchema, value any, path string) error {
 				}
 			}
 		}
+		// JSON Schema's dependentRequired: tab_id and chat_id are one address, so
+		// each needs the other even where the pair as a whole may be left out.
+		if dependent, ok := schema["dependentRequired"].(map[string]any); ok {
+			names := make([]string, 0, len(dependent))
+			for name := range dependent {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if _, present := object[name]; !present {
+					continue
+				}
+				needed, _ := dependent[name].([]any)
+				for _, raw := range needed {
+					other, _ := raw.(string)
+					if _, present := object[other]; !present {
+						return fmt.Errorf("%s.%s is required with %s: pass both, or neither for the calling chat", path, other, name)
+					}
+				}
+			}
+		}
 		keys := make([]string, 0, len(object))
 		for key := range object {
 			keys = append(keys, key)

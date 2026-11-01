@@ -1870,11 +1870,11 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 	run := m.subagents[id]
 	if !m.addressSubagentLocked(run, parent, chatID, tabID) {
 		m.mu.Unlock()
-		return nil, errors.New("subagent not found for this owner")
+		return nil, errors.New("subagent not found for this owner: workass_list_subagents lists this chat's subagents, and workass_list_subagent_receipts its finished ones")
 	}
 	if run.Status != "running" || !run.acceptingMessages {
 		m.mu.Unlock()
-		return nil, errors.New("subagent is no longer accepting messages; retry it to continue")
+		return nil, errors.New("subagent has finished and no longer takes messages: read its result with workass_wait_subagent, or call workass_retry_subagent with this message to continue its work")
 	}
 	run.followupSeq++
 	followup := subagentFollowup{ID: run.followupSeq, Text: message}

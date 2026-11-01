@@ -81,6 +81,124 @@ func agentWaitObservationDigest(kind, tabID, chatID string, ids []string, return
 	return fmt.Sprintf("%x", digest[:])
 }
 
+// derivedAgentWaitOperationID is the id of a wait whose caller named none. It is a
+// function of the wait's own immutable identity, so asking the same thing again
+// reads the same durable observation, and it can never collide with a different
+// wait. The observation still happens: a wait only records that it was asked for,
+// and what it answers is read live each time.
+func derivedAgentWaitOperationID(digest string) providercontract.OperationID {
+	return providercontract.OperationID("wait-" + digest[:32])
+}
+
+// agentWaitTargets resolves what a wait was given into subagent ids. Ids and spawn
+// operation ids may be mixed. With neither, the wait is for this turn's subagents:
+// those the foreground turn started, and any still running from before it, which a
+// settled chat's turn can still be waiting on. It defaults to all of them, because
+// returning on the first when an earlier one finished long ago would wake at once.
+//
+// A child hosted on another machine is not waited on from here: its row is watched
+// through a monitor and its outcome arrives as a notice. It is named in the answer.
+func agentWaitTargets(state chat.State, ids, spawnOperationIDs []string, returnWhen string) ([]string, string, []string, error) {
+	selected := append([]string(nil), ids...)
+	for _, operationID := range spawnOperationIDs {
+		id, ok := subagentForSpawnOperation(state, operationID)
+		if !ok {
+			return nil, "", nil, fmt.Errorf("operation id %q did not start a subagent in this chat: workass_list_subagents lists their ids", operationID)
+		}
+		selected = append(selected, id)
+	}
+	selected = uniqueAgentIDs(selected)
+	if len(selected) > 0 {
+		return selected, returnWhen, nil, nil
+	}
+	if strings.TrimSpace(returnWhen) == "" {
+		returnWhen = "all"
+	}
+	turnOperation := providercontract.OperationID("")
+	if state.Foreground != nil {
+		turnOperation = state.Foreground.OperationID
+	}
+	var running, hosted []string
+	for _, item := range state.Background {
+		if !isActorSubagent(item.Event) {
+			continue
+		}
+		id := firstNonEmptyString(item.Event.WorkID, item.Event.TaskID)
+		isRunning := strings.TrimSpace(item.Event.Status) == "running"
+		switch {
+		case isRunning && strings.TrimSpace(item.Event.HostMachine) != "":
+			hosted = append(hosted, id)
+		case isRunning:
+			running = append(running, id)
+		case turnOperation != "" && item.Owner.OperationID == turnOperation:
+			selected = append(selected, id)
+		}
+	}
+	sort.Strings(running)
+	sort.Strings(selected)
+	sort.Strings(hosted)
+	if strings.EqualFold(strings.TrimSpace(returnWhen), "first") && len(running) > 0 {
+		// Waiting for the next one to finish: one already finished is not news.
+		selected = nil
+	}
+	selected = append(selected, running...)
+	if len(selected) == 0 {
+		if len(hosted) > 0 {
+			return nil, "", hosted, fmt.Errorf("no subagents to wait for here: %s run on other machines and report to this chat when they finish; workass_list_subagents shows them", strings.Join(hosted, ", "))
+		}
+		return nil, "", nil, errors.New("no subagents to wait for: this turn started none and none are running; workass_list_subagent_receipts has earlier results")
+	}
+	return selected, returnWhen, hosted, nil
+}
+
+// subagentForSpawnOperation finds the subagent one spawn or retry operation made.
+// An agent that kept the id it spawned with has this one fact to go on, and the
+// actor's receipt of that spawn says which child it was.
+func subagentForSpawnOperation(state chat.State, raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	operationID := providercontract.NormalizeOperationID(raw)
+	for _, entry := range state.Outbox {
+		if entry.Kind != chat.EffectBackground || entry.OperationID != operationID || entry.Background == nil || entry.Status != chat.OutboxCompleted {
+			continue
+		}
+		if entry.Background.Kind != chat.BackgroundSpawnAgent && entry.Background.Kind != chat.BackgroundRetryAgent {
+			continue
+		}
+		var receipt struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(entry.Result, &receipt) == nil && strings.TrimSpace(receipt.ID) != "" {
+			return strings.TrimSpace(receipt.ID), true
+		}
+	}
+	// A subagent id handed to the alias is still the subagent it names.
+	if item, ok := actorBackgroundByID(state, raw); ok && isActorSubagent(item.Event) {
+		return raw, true
+	}
+	return "", false
+}
+
+// WaitSelectedSubagents is workass_wait_subagents as agents actually call it:
+// by subagent ids, by the operation ids that spawned them, or by nothing at all.
+func (r *providerChatRuntime) WaitSelectedSubagents(ctx context.Context, ownerKey, tabID, chatID string, operationID providercontract.OperationID, ids, spawnOperationIDs []string, returnWhen string, timeout time.Duration) (map[string]any, error) {
+	_, state, err := r.agentWaitFence(ownerKey, tabID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	selected, resolvedWhen, hosted, err := agentWaitTargets(state, ids, spawnOperationIDs, returnWhen)
+	if err != nil {
+		return nil, err
+	}
+	result, err := r.WaitSubagents(ctx, ownerKey, tabID, chatID, operationID, selected, resolvedWhen, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if len(hosted) > 0 {
+		result["notWaitedFor"] = hosted
+	}
+	return result, nil
+}
+
 // recordAgentWaitObservation is the actor-owned command boundary for the
 // transient Manager wait. Target proof, exact-pair fencing, and operation
 // idempotency all happen while the actor is serialized. A retry with the same
@@ -160,6 +278,9 @@ func (r *providerChatRuntime) WaitSubagent(ctx context.Context, ownerKey, tabID,
 	}
 	operationID = providercontract.NormalizeOperationID(string(operationID))
 	digest := agentWaitObservationDigest("single", tabID, chatID, []string{id}, "single", timeout)
+	if operationID == "" {
+		operationID = derivedAgentWaitOperationID(digest)
+	}
 	state, err := r.recordAgentWaitObservation(actor, tabID, chatID, operationID, digest, []string{id})
 	if err != nil {
 		return acp.SubagentRun{}, err
@@ -201,6 +322,9 @@ func (r *providerChatRuntime) WaitSubagents(ctx context.Context, ownerKey, tabID
 	}
 	operationID = providercontract.NormalizeOperationID(string(operationID))
 	digest := agentWaitObservationDigest("many", tabID, chatID, cleanIDs, returnWhen, timeout)
+	if operationID == "" {
+		operationID = derivedAgentWaitOperationID(digest)
+	}
 	state, err := r.recordAgentWaitObservation(actor, tabID, chatID, operationID, digest, cleanIDs)
 	if err != nil {
 		return nil, err
