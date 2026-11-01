@@ -152,11 +152,27 @@ func formatSubagentCompletion(receipt acp.SubagentReceipt) string {
 	fmt.Fprintf(&b, "<task-id>%s</task-id>\n<status>%s</status>\n<summary>Agent %q %s</summary>\n", receipt.ReceiptID, status, receipt.Label, verb)
 	if receipt.Status == "failed" {
 		fmt.Fprintf(&b, "<error>%s</error>\n", receipt.Error)
+		// Its own report is still worth reading beside the loss: it says what it
+		// was doing. A failure with nothing lost keeps the shape it always had.
+		if len(receipt.BackgroundStopped) > 0 && receipt.Result != "" {
+			fmt.Fprintf(&b, "<result>%s</result>\n", receipt.Result)
+		}
 	} else {
 		fmt.Fprintf(&b, "<result>%s</result>\n", receipt.Result)
 	}
+	if stopped := subagentBackgroundStoppedNotice(receipt); stopped != "" {
+		fmt.Fprintf(&b, "<background-stopped>%s</background-stopped>\n", stopped)
+	}
 	b.WriteString("</task-notification>")
 	return redactedSessionString(b.String())
+}
+
+func subagentBackgroundStoppedNotice(receipt acp.SubagentReceipt) string {
+	labels := make([]string, 0, len(receipt.BackgroundStopped))
+	for _, work := range receipt.BackgroundStopped {
+		labels = append(labels, fmt.Sprintf("%q", work.Label))
+	}
+	return strings.Join(labels, ", ")
 }
 
 // formatSubagentCompletionLegacy is the text earlier builds sent. Only kept so

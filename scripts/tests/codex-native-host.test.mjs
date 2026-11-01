@@ -732,6 +732,61 @@ test('native Codex children use stable subagent cards without completing or cons
   assert.equal((await peer.waitFor((message) => message.id === 5)).result.stopReason, 'end_turn');
 });
 
+test('a command outliving its turn is reported before the reply and again when it ends', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:background-command] start it and stop' }],
+  } });
+  const isWork = (message) => message.params?.update?.sessionUpdate === '_workass_codex_spawned_work';
+  await peer.waitFor((message) => message.id === 3);
+  const atReply = peer.messages.filter(isWork);
+  assert.equal(atReply.length, 1, 'the daemon must know before the reply that decides whether to close');
+  assert.deepEqual(atReply[0].params.update.event, {
+    type: 'started', taskId: 'codex-exec-background-command', toolCallId: 'background-command', description: 'sh sweep.sh', status: 'running',
+  });
+  const ended = await peer.waitFor((message) => isWork(message) && message.params.update.event.type === 'progress');
+  assert.equal(ended.params.update.event.status, 'completed');
+  assert.match(ended.params.update.event.summary, /sweep output/);
+  assert.doesNotMatch(ended.params.update.event.summary, /hunter2/);
+});
+
+test('a command left open by a stopped turn is not reported as outliving the next one', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:open-command-then-interrupted]' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  peer.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:foreground-command]' }],
+  } });
+  await peer.waitFor((message) => message.id === 4);
+  assert.equal(peer.messages.some((message) => message.params?.update?.sessionUpdate === '_workass_codex_spawned_work'), false);
+});
+
+test('a command that ends inside its turn is not background work', async (t) => {
+  const peer = startHost();
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((message) => message.id === 2)).result.sessionId;
+  peer.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:foreground-command]' }],
+  } });
+  await peer.waitFor((message) => message.id === 3);
+  assert.equal(peer.messages.some((message) => message.params?.update?.sessionUpdate === '_workass_codex_spawned_work'), false);
+});
+
 test('native child discovery requires parent provenance and preserves permission and failure routing', async (t) => {
   const peer = startHost();
   t.after(() => peer.child.kill('SIGKILL'));

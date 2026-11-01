@@ -89,6 +89,8 @@ func (strategy claudeProviderSpawnedWorkStrategy) decodeTask(raw map[string]any)
 	return task, task.TaskID != ""
 }
 
+func (claudeProviderSpawnedWorkStrategy) ChildSessionOnly(providerSpawnedWorkTask) bool { return false }
+
 func (claudeProviderSpawnedWorkStrategy) ValidateOutputPath(taskID, raw string) (string, bool) {
 	taskID = normalizeSpawnedWorkTaskID(taskID)
 	if taskID == "" || strings.ContainsAny(taskID, `/\\`) {

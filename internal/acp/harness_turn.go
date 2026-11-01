@@ -176,6 +176,18 @@ func (s *harnessTurnStore) markStarted(sessionID, promptID string) bool {
 	return true
 }
 
+// active reports a harness-born turn running in this session now.
+func (s *harnessTurnStore) active(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, running := s.started[sessionID]
+	return running
+}
+
 // staleEnd reports an end naming a native turn that already ended and is not
 // the turn running now.
 func (s *harnessTurnStore) staleEnd(sessionID, promptID string) bool {
@@ -353,6 +365,12 @@ func (m *Manager) observeHarnessTurn(bridge *Bridge, tabID, chatID, sessionID st
 // is ended by the matching phase:"ended" update (gate amendment D1).
 func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, promptID string) {
 	if bridge == nil || strings.TrimSpace(chatID) == "" || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	// A tracked subagent's job stays bound for its whole life, so this turn is
+	// already its own: its output belongs to that job and its end to that run.
+	// Waiting for the job to release the session would only hold up the reader.
+	if job := bridge.jobForSession(sessionID); job != nil && job.SubagentID != "" {
 		return
 	}
 	// The host reports a turn as provider-started only when no human prompt is

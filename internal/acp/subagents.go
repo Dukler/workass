@@ -222,22 +222,25 @@ type SubagentRun struct {
 	// boundary for list/wait/cancel until a run is adopted by its owning chat.
 	// RootJobID is the visible Workass turn used only for Turnos event routing
 	// and explicit teardown.
-	ParentJobID                string `json:"parentJobId"`
-	RootJobID                  string `json:"rootJobId"`
-	Adopted                    bool   `json:"adopted,omitempty"`
-	AdoptedAt                  string `json:"adoptedAt,omitempty"`
-	ParentSessionID            string `json:"parentSessionId,omitempty"`
-	RootSessionID              string `json:"rootSessionId,omitempty"`
-	SessionID                  string `json:"sessionId,omitempty"`
-	JobID                      string `json:"jobId,omitempty"`
-	StartedAt                  string `json:"startedAt"`
-	FinishedAt                 string `json:"finishedAt,omitempty"`
-	Result                     string `json:"result,omitempty"`
-	Error                      string `json:"error,omitempty"`
-	StopReason                 string `json:"stopReason,omitempty"`
-	ResultTruncated            bool   `json:"resultTruncated,omitempty"`
-	ErrorTruncated             bool   `json:"errorTruncated,omitempty"`
-	ReceiptID                  string `json:"receiptId,omitempty"`
+	ParentJobID     string `json:"parentJobId"`
+	RootJobID       string `json:"rootJobId"`
+	Adopted         bool   `json:"adopted,omitempty"`
+	AdoptedAt       string `json:"adoptedAt,omitempty"`
+	ParentSessionID string `json:"parentSessionId,omitempty"`
+	RootSessionID   string `json:"rootSessionId,omitempty"`
+	SessionID       string `json:"sessionId,omitempty"`
+	JobID           string `json:"jobId,omitempty"`
+	StartedAt       string `json:"startedAt"`
+	FinishedAt      string `json:"finishedAt,omitempty"`
+	Result          string `json:"result,omitempty"`
+	Error           string `json:"error,omitempty"`
+	StopReason      string `json:"stopReason,omitempty"`
+	ResultTruncated bool   `json:"resultTruncated,omitempty"`
+	ErrorTruncated  bool   `json:"errorTruncated,omitempty"`
+	ReceiptID       string `json:"receiptId,omitempty"`
+	// BackgroundStopped names work this subagent's closing session stopped.
+	BackgroundStopped          []SubagentBackgroundWork `json:"backgroundStopped,omitempty"`
+	backgroundWaitedOn         []SubagentBackgroundWork
 	cancelled                  bool
 	cancel                     context.CancelFunc
 	done                       chan struct{}
@@ -642,10 +645,27 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	}
 	var result PromptResult
 	promptSequence := int64(0)
+	wakeSequence := 0
 	for {
 		var promptErr error
 		operationID := fmt.Sprintf("%s:prompt:%d", job.ID, promptSequence)
+		if wakeSequence > 0 {
+			operationID = fmt.Sprintf("%s:background:%d", job.ID, wakeSequence)
+		}
 		result, promptErr = bridge.promptForJob(runCtx, info.SessionID, job, operationID, nextPrompt, nil)
+		if promptErr == nil {
+			// The turn ending does not end what it started: see subagent_background.go.
+			parked := m.awaitSubagentBackgroundWork(runCtx, run, bridge, info.SessionID, childTabID, childChatID)
+			if parked.err != nil {
+				promptErr = parked.err
+			} else if parked.wakePrompt != "" {
+				wakeSequence++
+				m.updateSubagentActivity(id, "working", "Reading finished background work")
+				nextPrompt = parked.wakePrompt
+				continue
+			}
+			wakeSequence = 0
+		}
 		followup, hasFollowup := m.popSubagentFollowupOrSeal(id)
 		if hasFollowup {
 			promptSequence = followup.ID
@@ -1086,8 +1106,12 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	if job != nil {
 		result = cleanDraft(m.outputForJob(job))
 	}
+	owedStopped, servicesStopped := m.subagentBackgroundAtClose(run)
 	m.mu.Lock()
 	cancelled := run.cancelled
+	if len(owedStopped) == 0 {
+		owedStopped = run.backgroundWaitedOn
+	}
 	// A child hosted for another machine, ended because this daemon is stopping.
 	// Nobody asked for that, so it is not "cancelled", and the chat that asked has
 	// no other way to learn that its work died with this machine's restart.
@@ -1104,8 +1128,16 @@ func (m *Manager) finishSubagent(run *SubagentRun, job *Job, runErr error) {
 	} else if runErr != nil {
 		status = "failed"
 		errorText = redactSensitiveText(runErr.Error())
+	} else if len(owedStopped) > 0 {
+		// The last line of defence: whatever the wait above did or did not see,
+		// a parent never reads "completed" over work this close is about to kill.
+		status = "failed"
+	}
+	if len(owedStopped) > 0 && status == "failed" {
+		errorText = subagentBackgroundLostText(errorText, owedStopped)
 	}
 	m.mu.Lock()
+	run.BackgroundStopped = append(owedStopped, servicesStopped...)
 	run.Status = status
 	run.acceptingMessages = false
 	run.Phase = status
@@ -1885,6 +1917,7 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 	followup := subagentFollowup{ID: run.followupSeq, Text: message}
 	run.followups = append(run.followups, followup)
 	sessionID := run.SessionID
+	parked := run.Phase == subagentPhaseWaitingBackground
 	run.LatestActivity = "Coordinator message queued"
 	run.LastActivityAt = time.Now().UTC().Format(time.RFC3339Nano)
 	run.ProgressSequence++
@@ -1892,6 +1925,12 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 
 	if sessionID == "" {
 		return map[string]any{"ok": true, "delivery": "queued", "subagentId": id}, nil
+	}
+	// No turn is running to steer: the wait sends this as the next prompt. Asking
+	// the provider anyway could only lose it to one that accepts a steer with
+	// nothing to fold it into.
+	if parked {
+		return map[string]any{"ok": true, "delivery": "followup", "strategy": "waiting_background", "subagentId": id}, nil
 	}
 	steer := m.Steer(sessionID, message, nil, "")
 	strategy := asString(steer["strategy"])
@@ -2200,6 +2239,7 @@ func copySubagentRun(run *SubagentRun) SubagentRun {
 		copy.Attention = &attention
 		copy.NeedsAttention = attention.Active || attention.Sequence > run.attentionDeliveredSequence
 	}
+	copy.backgroundWaitedOn = nil
 	copy.cancelled = false
 	copy.cancel = nil
 	copy.done = nil
@@ -2207,6 +2247,7 @@ func copySubagentRun(run *SubagentRun) SubagentRun {
 	copy.parentChatID = ""
 	copy.parentTabID = ""
 	copy.attentionDeliveredSequence = 0
+	copy.BackgroundStopped = append([]SubagentBackgroundWork(nil), run.BackgroundStopped...)
 	start, startErr := time.Parse(time.RFC3339Nano, copy.StartedAt)
 	end := time.Now().UTC()
 	if copy.FinishedAt != "" {
