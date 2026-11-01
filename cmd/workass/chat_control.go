@@ -334,7 +334,7 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 	if err != nil {
 		return nil, errors.New("calling chat no longer exists")
 	}
-	controls, err := c.resolveControls(ctx, parent, params)
+	controls, err := c.resolveControlsWithinCeiling(ctx, parent, params)
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +343,9 @@ func (c *chatControlCoordinator) create(ctx context.Context, parentTabID, parent
 		cwd = fieldString(parent, "cwd")
 	}
 	if err := validateChatCWD(cwd); err != nil {
+		return nil, err
+	}
+	if err := permissionGateFrom(ctx).admit(ctx, newChatPermissionChange("chat.create", "create the chat", operationID, params, controls)); err != nil {
 		return nil, err
 	}
 	created, err := c.providerChats.CreateChatWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest)
@@ -391,7 +394,7 @@ func (c *chatControlCoordinator) createOnThisMachine(ctx context.Context, params
 		}
 		current["providerId"] = providerID
 	}
-	controls, err := c.resolveControls(ctx, current, params)
+	controls, err := c.resolveControlsWithinCeiling(ctx, current, params)
 	if err != nil {
 		return nil, err
 	}
@@ -400,6 +403,9 @@ func (c *chatControlCoordinator) createOnThisMachine(ctx context.Context, params
 		return nil, errors.New("cwd inherit has no meaning across machines; pass an absolute directory on the target machine or omit cwd")
 	}
 	if err := validateChatCWD(cwd); err != nil {
+		return nil, err
+	}
+	if err := permissionGateFrom(ctx).admit(ctx, newChatPermissionChange("chat.create", "create the chat", operationID, params, controls)); err != nil {
 		return nil, err
 	}
 	created, err := c.providerChats.CreateChatWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest)
@@ -451,6 +457,17 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 				return nil, errors.New("a forked subsession keeps its parent's provider, model, permissions and workspace")
 			}
 		}
+		// A fork keeps its parent's permissions, which are the caller's own unless
+		// the caller is narrower than the chat it acts for.
+		forkProvider, forkMode := c.providerChats.chatPermissionMode(parentTabID, parentChatID)
+		if err := permissionGateFrom(ctx).admit(ctx, permissionChange{
+			method: "chat.subsession", operationID: string(operationID),
+			summary: "fork this conversation into the subsession " + permissionChatWords(fieldString(params, "title"), "a new subsession"),
+			target:  "that forked subsession", tabID: parentTabID, chatID: parentChatID,
+			providerID: forkProvider, modeID: forkMode, contentDigest: permissionContentDigest(fieldString(params, "message")),
+		}); err != nil {
+			return nil, err
+		}
 		tabID, chatID := stableAgentChatIdentity("tab", operationID), stableAgentChatIdentity("chat", operationID)
 		if _, err := c.providerChats.Fork(ctx, map[string]any{
 			"tabId": parentTabID, "chatId": parentChatID, "newTabId": tabID, "newChatId": chatID,
@@ -485,7 +502,7 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 			if err != nil {
 				return nil, errors.New("calling chat no longer exists")
 			}
-			controls, err := c.resolveControls(ctx, parent, params)
+			controls, err := c.resolveControlsWithinCeiling(ctx, parent, params)
 			if err != nil {
 				return nil, err
 			}
@@ -494,6 +511,9 @@ func (c *chatControlCoordinator) subsession(ctx context.Context, parentTabID, pa
 				cwd = fieldString(parent, "cwd")
 			}
 			if err := validateChatCWD(cwd); err != nil {
+				return nil, err
+			}
+			if err := permissionGateFrom(ctx).admit(ctx, newChatPermissionChange("chat.subsession", "create the subsession", operationID, params, controls)); err != nil {
 				return nil, err
 			}
 			created, err = c.providerChats.CreateSubsessionWithIntentDigest(fieldString(params, "title"), cwd, controls, focus, operationID, intentDigest,
@@ -527,6 +547,19 @@ func derivedOperationID(prefix string, operationID providercontract.OperationID,
 		base = fmt.Sprintf("h-%x", sum[:16])
 	}
 	return providercontract.OperationID(prefix + base + suffix)
+}
+
+// newChatPermissionChange is one new chat or subsession, as the card describes
+// it. A first message runs at the new chat's level, so an approval covers it and
+// its digest binds to it.
+func newChatPermissionChange(method, verb string, operationID providercontract.OperationID, params map[string]any, controls resolvedChatControls) permissionChange {
+	message := fieldString(params, "message")
+	return permissionChange{
+		method: method, operationID: string(operationID),
+		summary: verb + " " + permissionChatWords(fieldString(params, "title"), "with no title") + permissionMessageWords(message),
+		target:  "that chat", providerID: controls.ProviderID, modeID: controls.ModeID,
+		contentDigest: permissionContentDigest(fieldString(params, "title") + "\x00" + message),
+	}
 }
 
 func headlessCreateIntentDigest(parentTabID, parentChatID string, params map[string]any) (string, error) {
@@ -620,6 +653,15 @@ func (c *chatControlCoordinator) configure(ctx context.Context, params map[strin
 	cwdChanged := cwd != fieldString(current, "cwd")
 	if running && (providerChanged || cwdChanged) {
 		return nil, fmt.Errorf("cannot change provider or cwd while job %s is running", jobID)
+	}
+	currentProvider, currentMode := c.providerChats.chatPermissionMode(tabID, chatID)
+	if err := permissionGateFrom(ctx).admit(ctx, permissionChange{
+		method: "chat.configure", operationID: string(operationID),
+		summary: "change the chat " + permissionChatWords(fieldString(current, "title"), "this chat"),
+		target:  "that chat", tabID: tabID, chatID: chatID, providerID: controls.ProviderID, modeID: controls.ModeID,
+		reconfigures: true, currentProviderID: currentProvider, currentModeID: currentMode,
+	}); err != nil {
+		return nil, err
 	}
 	if err := c.providerChats.ConfigureChat(ctx, tabID, chatID, cwd, controls, operationID); err != nil {
 		return nil, err

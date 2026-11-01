@@ -13,7 +13,7 @@ import (
 // and nothing else: it can never obtain a permission the caller did not hold,
 // and never one the link was not given (docs/specs/fleet-runtime.md §6, §11).
 // The vocabulary is the read/edit/full intent the provider lanes already use
-// (`PermissionIntentForMode`), so this is a narrowing of something that already
+// (`PermissionLevel`), so this is a narrowing of something that already
 // exists rather than a second permission model beside it.
 //
 // `sandbox.max_depth` is REMOVED by decision (§15). What bounds escalation is
@@ -174,7 +174,7 @@ func fleetForwardedWorkFrom(ctx context.Context) (fleetForwardedWork, bool) {
 // a home that will not accept a narrowed command answers immediately with the
 // capability it lacks — never a silent queue and never a generic denial (§16.4).
 func fleetNarrowedCapabilityError(capability, method, limit string) error {
-	return fmt.Errorf("this command arrived over a fleet link with %s access, which does not carry %s; %s needs full access on the link that forwards it",
+	return fmt.Errorf("this command arrived over a fleet link with %s access, which does not carry %s; %s needs full access. Raise the calling chat first: call workass_configure_chat on your own chat with permission_intent full, which asks the user on your machine, then retry",
 		limit, capability, method)
 }
 

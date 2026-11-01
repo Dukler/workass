@@ -1293,6 +1293,32 @@ func (s *ForkService) RunOwner(runID string) (chatID, tabID string, ok bool) {
 	return file.ChatID, firstNonEmpty(run.TabID, file.TabID), true
 }
 
+// PointPermissionMode is the selection a fork point's children run at.
+func (s *ForkService) PointPermissionMode(forkPointID string) (providerID, modeID string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, point := s.lookupPointLocked(strings.TrimSpace(forkPointID))
+	if point == nil {
+		return "", "", false
+	}
+	return point.ProviderID, strings.TrimSpace(point.ModeID), true
+}
+
+// RunPermissionMode is the selection one run's children run at.
+func (s *ForkService) RunPermissionMode(runID string) (providerID, modeID string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, run := s.lookupRunLocked(strings.TrimSpace(runID))
+	if run == nil {
+		return "", "", false
+	}
+	_, point := s.lookupPointLocked(run.ForkPointID)
+	if point == nil {
+		return "", "", false
+	}
+	return point.ProviderID, strings.TrimSpace(point.ModeID), true
+}
+
 // PointOwner returns the chat that owns a fork point, for authorization.
 func (s *ForkService) PointOwner(forkPointID string) (chatID, tabID string, ok bool) {
 	s.mu.Lock()

@@ -344,6 +344,11 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	if err != nil {
 		return SubagentRun{}, err
 	}
+	if opts.HostedForOrigin {
+		if err := refuseHostedModeAboveLimit(providerID, modeID, opts.LimitIntent); err != nil {
+			return SubagentRun{}, err
+		}
+	}
 	modelLabel := subagentModelLabel(m.subagentModelName(ctx, providerID, modelID), modelID, effort)
 	cwd := strings.TrimSpace(opts.CWD)
 	if cwd == "" || strings.EqualFold(cwd, "inherit") {

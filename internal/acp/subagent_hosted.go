@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -85,10 +86,9 @@ func narrowHostedSubagentIntent(opts SubagentSpawnOptions) SubagentSpawnOptions 
 	}
 	intent := strings.ToLower(strings.TrimSpace(opts.PermissionIntent))
 	if intent == "" || intent == "inherit" {
-		// An explicit mode_id is the caller naming a mode on THIS machine; the
-		// ceiling still applies to it, but naming its replacement is not this
-		// function's job — resolveSubagentSelection validates it against the
-		// provider and the ceiling is applied there by the same substitution.
+		// An explicit mode_id is the caller naming a mode on THIS machine. The
+		// ceiling still applies to it: refuseHostedModeAboveLimit answers for it
+		// once it has been resolved against the provider.
 		if strings.TrimSpace(opts.ModeID) == "" {
 			opts.PermissionIntent = canonicalHostedIntent(limit)
 		}
@@ -98,6 +98,22 @@ func narrowHostedSubagentIntent(opts SubagentSpawnOptions) SubagentSpawnOptions 
 		opts.PermissionIntent = canonicalHostedIntent(limit)
 	}
 	return opts
+}
+
+// refuseHostedModeAboveLimit holds whatever a hosted spawn resolved to against its
+// ceiling. It refuses rather than substituting: a caller that named an exact mode
+// should learn it cannot have it, not find a different one running.
+func refuseHostedModeAboveLimit(providerID, modeID, limitIntent string) error {
+	limit := hostedIntentRank(limitIntent)
+	if limit == 0 || limit == hostedIntentRank("full") || strings.TrimSpace(modeID) == "" {
+		return nil
+	}
+	level := PermissionLevel(providerID, modeID)
+	if rank := hostedIntentRank(level); rank > 0 && rank <= limit {
+		return nil
+	}
+	return fmt.Errorf("permission_ceiling: this subagent would run at %s (%s), above the %s limit this command arrived with, so this machine will not start it. Name a mode within the limit, or raise the calling chat first with workass_configure_chat, which asks the user on your machine; a chat at full access can ask for anything",
+		modeID, firstNonEmpty(level, "unrecognized level"), canonicalHostedIntent(limit))
 }
 
 func hostedIntentRank(intent string) int {

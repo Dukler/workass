@@ -119,6 +119,9 @@ func newHostedJobFleet(t *testing.T) hostedJobFleet {
 	hosting.manager.SetProcessLifecycleObserver(hostingFleet.ObserveProcess)
 
 	asking := newStatelessMCPTestHarness(t)
+	// Starting a job on another machine takes full access, and the mock's default
+	// `ask` is not it. It used to pass because `ask` translated to no limit at all.
+	setChatModeAsHuman(t, asking, "mcp-tab", "mcp-chat", "bypass", "asking-owner-full-access")
 	away := serveMeshHome(t, "m-away", secret, asking.handler.agentControl)
 	var watcher *fleetWatcher
 	mesh := monitorMeshDialer(t, "m-away", secret, func(peerID, channel string, payload any) {

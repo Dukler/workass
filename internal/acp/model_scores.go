@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"workass/internal/agenttext"
@@ -451,27 +452,53 @@ func (m *Manager) agentCatalogV2(ctx context.Context, parent *Job) map[string]an
 	}
 }
 
-// CallerPermissionIntent is one chat's own permission ceiling, in the
-// provider-neutral read/edit/full vocabulary, for the fleet edge that must
-// state a limit it can only narrow (docs/specs/fleet-runtime.md §6).
-//
-// It is the same reading inherited subagent permission already does — the
-// parent's effective mode, translated to an intent — which is the precedent the
-// spec names: a delegated run's authority is DERIVED from its parent's rather
-// than chosen freely. An unresolvable mode returns empty, which means unknown
-// and never full.
-func (m *Manager) CallerPermissionIntent(ownerKey, chatID, tabID string) string {
+// ChatPermissionMode is the mode one chat's session is actually running with, for
+// a chat with no durable mode to read. It is the same reading inherited subagent
+// permission does: the running job's effective mode, or the live session's when
+// no turn is running. Empty means unknown, never full.
+func (m *Manager) ChatPermissionMode(chatID, tabID string) (string, string) {
 	if m == nil {
-		return ""
+		return "", ""
 	}
-	_, _, parent, ok := m.subagentOwnerContext(ownerKey, chatID, tabID)
-	if !ok || parent == nil {
-		return ""
+	chatID, tabID = strings.TrimSpace(chatID), strings.TrimSpace(tabID)
+	m.mu.Lock()
+	job := m.runningJobForIdentityLocked(chatID, tabID)
+	m.mu.Unlock()
+	if job == nil {
+		job = m.subagentParentDefaults(chatID, tabID)
 	}
-	modeID := strings.TrimSpace(m.effectiveSubagentParentMode(parent))
-	if modeID == "" {
-		return ""
+	providerID := firstNonEmpty(strings.TrimSpace(job.ProviderID), strings.TrimSpace(job.startOpts.ProviderID))
+	return providerID, strings.TrimSpace(m.effectiveSubagentParentMode(job))
+}
+
+// SubagentPermissionMode is the selection one tracked subagent was started with.
+func (m *Manager) SubagentPermissionMode(subagentID string) (string, string, bool) {
+	subagentID = strings.TrimSpace(subagentID)
+	if m == nil || subagentID == "" {
+		return "", "", false
 	}
-	providerID := firstNonEmpty(strings.TrimSpace(parent.ProviderID), strings.TrimSpace(parent.startOpts.ProviderID))
-	return permissionIntentForMode(providerID, modeID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run := m.subagents[subagentID]
+	if run == nil {
+		return "", "", false
+	}
+	return run.ProviderID, strings.TrimSpace(run.ModeID), true
+}
+
+// ResolveSubagentPermission answers what a spawn with these options would run at,
+// by the same resolution the spawn performs, and starts nothing.
+func (m *Manager) ResolveSubagentPermission(ctx context.Context, opts SubagentSpawnOptions) (string, string, error) {
+	if m == nil {
+		return "", "", errors.New("subagent spawn requires the ACP manager")
+	}
+	chatID, tabID, parent, ok := m.subagentOwnerContext(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID)
+	if !ok {
+		return "", "", errors.New("no running Workass turn owns this subagent request")
+	}
+	if parent == nil {
+		parent = m.subagentParentDefaults(chatID, tabID)
+	}
+	providerID, _, _, modeID, err := m.resolveSubagentSelection(ctx, parent, opts)
+	return providerID, modeID, err
 }

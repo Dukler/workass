@@ -669,7 +669,7 @@ shell, NOT the daemon.
 8. **Redaction before anything leaves the server**: secret-shaped strings
    (api_key|token|secret|password|credential|bearer) are scrubbed from tool
    previews, logs, config reads, and UI payloads.
-9. **Permission flow**: `session/request_permission` → forward to controller
+9. **The permission ceiling** (owner, 2026-11-01): an agent's tools hand out permissions up to the caller's own current level with no prompt and lower them freely; above it, including its own chat, the human answers a question card, a forwarded command answers to its stated `limit` on the machine it reaches, and a human action is never capped (`cmd/workass/permission_ceiling.go`). **Permission flow**: `session/request_permission` → forward to controller
    client → wait for the person; cancel outstanding requests when a job/session
    dies. (`main.js:2373-2411`) Workass arms NO deadline of its own — the old
    180s fallback/deny (and the hosts' 120s peer-request cap) expired cards a
