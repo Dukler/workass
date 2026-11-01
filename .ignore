@@ -1,0 +1,7 @@
+# Default search scope for ripgrep and tools built on it. These stay tracked and
+# readable by explicit path (or rg --no-ignore): they are vendored modules, built
+# renderer output with minified lines, captured evidence and design mocks.
+/vendor/
+/cmd/workass/embedded/
+/docs/evidence/
+/desktop/docs/mocks/

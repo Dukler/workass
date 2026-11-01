@@ -131,8 +131,14 @@ Device tokens are presented on WebSocket connect as a query parameter after the
 one-time approval flow:
 
 ```text
-ws://<host>:8788/?deviceToken=<64-hex-token>&deviceName=<name>
+wss://<host>:8788/?deviceToken=<64-hex-token>&deviceName=<name>
 ```
+
+To call a channel on a running daemon by hand, use
+`node scripts/wire-call.mjs --url wss://127.0.0.1:PORT --insecure CHANNEL '["arg"]'`.
+It prints the reply as JSON and exits nonzero on an error or timeout. Instead of
+writing a WebSocket client, use it for live checks; off loopback, put the device
+token in the URL.
 
 The daemon-served `/lan-bridge.js` stores `deviceToken`, `deviceId`, and device name in browser
 `localStorage` under `workass.lan.*` keys and adds `deviceToken` to every reconnect URL. Tokens are

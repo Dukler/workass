@@ -1,16 +1,15 @@
-# workass — executor rules (Codex / any non-Claude agent)
+# workass — executor rules (any agent)
 
 You are building part of the workass campaign from a closed spec. You have NO
 design authority: build exactly what the spec says; if the spec seems wrong or
 impossible, report it — never substitute your own design, never "improve"
 scope. Log suggestions separately; do not act on them.
 
-## Read first (in order)
-1. `docs/PORT-SPEC.md` — binding laws for everything you build here.
-2. `docs/PROVIDER-LANE-ARCHITECTURE.md` — provider/chat architecture,
-   implementation order, and acceptance gates. Your prompt wins when it is
-   more specific.
-3. `desktop/acp/README.md` — mock ACP server + probe usage (your test oracle).
+## Read first
+`docs/RULES.md`: every binding law in one line, and a table of which section of
+`docs/PORT-SPEC.md`, `docs/PROVIDER-LANE-ARCHITECTURE.md` or another doc to read
+for what you are touching. Those full texts remain binding. Your prompt wins when
+it is more specific.
 
 ## Fast handoff for Workass changes
 - For every bugfix request, reproduce the reported failure in an isolated dev
@@ -24,10 +23,11 @@ scope. Log suggestions separately; do not act on them.
   new test or send a correction only when that review or acceptance reveals a
   concrete gap. Keep the correction limited to that gap.
 - Run the full automated test matrix with `node scripts/test-suite.mjs`; it
-  runs renderer, shell, fresh Go, and all `scripts/tests/*.test.mjs` tests once,
-  concurrently, and reports suite timing, counts, and complete log paths. The
-  10-second target is reported after all suites finish; it never kills tests.
-  For iterative checks, run focused commands directly, for example
+  runs renderer, shell, fresh Go, all `scripts/tests/*.test.mjs` tests and every
+  shell contract once, concurrently, and reports failures first, then suite
+  timing, counts, and complete log paths. The 10-second target is reported after
+  all suites finish; it never kills tests. `scripts/gate.sh` adds
+  `--rerun-failed`: see the rerun rule below. For iterative checks, run focused commands directly, for example
   `node --test scripts/tests/release-pipeline.test.mjs` or
   `go test ./internal/acp -run TestName -count=1`. Build, typecheck, vet, and
   embedded-renderer snapshot validation remain separate gate phases.
@@ -56,8 +56,15 @@ scope. Log suggestions separately; do not act on them.
 - Never delete assertions, add skips to hit the budget, reuse cached pass
   results, retry until green, shorten production/safety timeouts, or kill work
   at 10 seconds. Report existing conditional skips.
+- One exception to retrying (owner, 2026-11-01): the repository gate reruns each
+  failed test once, by itself, after the whole matrix has finished, so machine
+  load does not fail a release. A pass needs positive proof of that exact test,
+  does not fail the gate and is named on a `WORKASS_TEST_FLAKE name=...` line,
+  which `scripts/release/ship.sh` repeats after publishing. A second failure
+  fails the gate, and so does any failure no test name accounts for. A flake is
+  a bug to fix, not a pass to ignore.
 - For test/harness changes, reuse one measured full-suite result from the
-  owning gate or Luna handoff; do not duplicate full gates for review. If
+  owning gate or agent handoff; do not duplicate full gates for review. If
   performance regresses, inspect the logged critical path and make one bounded
   fix; do not blindly rerun or profile unrelated code. Docs-only changes need
   `git diff --check` and no test execution.
@@ -83,15 +90,17 @@ scope. Log suggestions separately; do not act on them.
   Never run an installer or filesystem swap directly. Active work never blocks a
   permitted activation, and permission never expands to unnamed machines or
   profiles.
-- The `invoke/reply/event` wire protocol in `desktop/lan-server.js` is FROZEN.
-  New server code speaks it byte-compatibly; the renderer is not modified to
-  accommodate the server.
-- ACP landmines in PORT-SPEC.md §Landmines are non-negotiable behaviors, not
+- The `invoke/reply/event` wire protocol in `docs/PORT-SPEC.md` §2, served by
+  `internal/wire/wire.go`, is FROZEN. New server code speaks it byte-compatibly;
+  the renderer is not modified to accommodate the server.
+- ACP landmines in `docs/PORT-SPEC.md` §3 are non-negotiable behaviors, not
   suggestions. Preserve every one in ported code.
 - Any ACP stdio server: stdout = JSON-RPC ONLY. Diagnostics → stderr.
 - Never touch: `desktop/scripts/Rebuild-Relaunch.ps1`, `desktop/scripts/build-lite.ps1`,
   Windows launch scripts, `desktop/vendor/`, `desktop/package.json`
   (no new npm dependencies — the production machine has no registry access).
+  The named files are not tracked in this repository; the rule applies wherever
+  they exist.
 - Zero third-party dependencies without the spec explicitly granting them.
   Go work is stdlib-first; the spec names any allowed exception.
   GRANTED EXCEPTION (2026-07-10): `desktop/renderer2/` is React 19 + Vite +

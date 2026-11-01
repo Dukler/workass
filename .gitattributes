@@ -1,2 +1,8 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# Built renderer snapshot: minified output is unreadable as a line diff. The gate
+# compares it with `diff -qr` on disk, never through git diff, and -diff changes
+# neither status, merges nor cherry-picks.
+cmd/workass/embedded/** linguist-generated=true -diff
+# Vendored Go modules keep their diffs: an update is worth reviewing.
+vendor/** linguist-generated=true

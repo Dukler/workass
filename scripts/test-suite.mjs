@@ -6,13 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { createTemporaryFixtureVolume } from './test-fixture-volume.mjs';
+import { nodeEventReporterArgs, settleFailures, testFailedLine, testFlakeLine } from './test-rerun.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const limitMs = 10_000;
 
 export function fullSuiteCommands(repo = root) {
   const shellContracts = files(path.join(repo, 'scripts/tests'), /\.test\.sh$/).map(file => ({
-    name: `script_contract_${path.basename(file, '.test.sh')}`, command: 'sh', args: [file], cwd: repo,
+    name: `script_contract_${path.basename(file, '.test.sh')}`, command: 'sh', args: [file], cwd: repo, rerunWhole: true,
   }));
   const scriptTestFiles = files(path.join(repo, 'scripts/tests'), /\.test\.mjs$/);
   const heavyScriptTests = ['release-pipeline-gates.test.mjs', 'release-pipeline-ship.test.mjs', 'release-pipeline-receipts.test.mjs', 'release-pipeline.test.mjs'];
@@ -27,11 +28,11 @@ export function fullSuiteCommands(repo = root) {
   const artifactFixture = rendererGroups[2].findIndex(file => path.basename(file) === 'remote-artifact-routing.test.ts');
   if (artifactFixture >= 0) rendererGroups[0].push(...rendererGroups[2].splice(artifactFixture, 1));
   return [
-    ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true })),
-    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=3', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true },
+    ...rendererGroups.map((group, index) => ({ name: `renderer_tests_${index + 1}`, command: 'node', args: ['--experimental-strip-types', '--test', '--test-isolation=none', '--test-concurrency=1', ...group], cwd: path.join(repo, 'desktop/renderer2'), requireTestReport: true, nodeEvents: true })),
+    { name: 'shell_tests', command: 'node', args: ['--test', '--test-concurrency=3', ...files(path.join(repo, 'desktop/shell'), /\.test\.js$/)], cwd: repo, requireTestReport: true, nodeEvents: true },
     { name: 'go_tests', command: 'node', args: [path.join(repo, 'scripts/test-go-suite.mjs'), '--cwd', repo], cwd: repo, requireTestReport: true, requireGoReport: true },
-    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...orderedScriptTests], cwd: repo, requireTestReport: true },
-    ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: [path.join(repo, 'scripts/test-native-host-suite.mjs'), isolatedCodexHostTest], cwd: repo, requireTestReport: true }] : []),
+    { name: 'script_tests', command: 'node', args: ['--test', '--test-concurrency=4', ...orderedScriptTests], cwd: repo, requireTestReport: true, nodeEvents: true },
+    ...(isolatedCodexHostTest ? [{ name: 'codex_native_host_tests', command: 'node', args: [path.join(repo, 'scripts/test-native-host-suite.mjs'), isolatedCodexHostTest], cwd: repo, requireTestReport: true, nodeEventsEnv: true }] : []),
     ...shellContracts,
   ];
 }
@@ -128,6 +129,7 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
   abortSignal?.addEventListener('abort', onAbort, { once: true });
   const results = await Promise.all(commands.map(spec => new Promise(resolve => {
     const logPath = path.join(logDir, `${spec.name}.log`);
+    const eventsPath = spec.nodeEvents || spec.nodeEventsEnv ? path.join(logDir, `${spec.name}.events.jsonl`) : undefined;
     const log = fs.createWriteStream(logPath, { flags: 'w' });
     const childStarted = performance.now();
     let output = '';
@@ -147,15 +149,20 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
     log.on('error', error => { sinkError = error; stopChildren(); });
     const finishSpawnError = error => {
       spawnError = error;
-      log.end(() => resolve({ name: spec.name, code: 127, signal: null, elapsedMs: performance.now() - childStarted, ...testSummary(output), logPath, spawnError: error.message, failureDetail: failureDetail(output) }));
+      log.end(() => resolve({ name: spec.name, code: 127, signal: null, elapsedMs: performance.now() - childStarted, ...testSummary(output), logPath, eventsPath, spawnError: error.message, failureDetail: failureDetail(output) }));
     };
     const launch = fixture => {
       if (interrupted) return finishSpawnError(new Error('interrupted before suite start'));
       const env = { ...(spec.env ?? process.env) };
+      // Left by an outer `node --test`; it would turn a suite's runner into a
+      // child reporter that never prints its totals.
+      delete env.NODE_TEST_CONTEXT;
       if (fixture && spec.fixtureTempEnv) Object.assign(env, { TMPDIR: fixture.root, TMP: fixture.root, TEMP: fixture.root });
       if (spec.fixtureRootIpc) { env.WORKASS_TEST_FIXTURE_IPC = '1'; delete env.WORKASS_TEST_FIXTURE_ROOT; }
+      if (spec.nodeEventsEnv) env.WORKASS_TEST_EVENTS_FILE = eventsPath;
+      const args = spec.nodeEvents ? [...nodeEventReporterArgs(eventsPath), ...(spec.args ?? [])] : spec.args ?? [];
       try {
-      child = spawnCommand(spec.command, spec.args ?? [], { cwd: spec.cwd ?? root, env, stdio: spec.fixtureRootIpc ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+      child = spawnCommand(spec.command, args, { cwd: spec.cwd ?? root, env, stdio: spec.fixtureRootIpc ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
       children.add(child);
       child.stdout.on('data', append);
       child.stderr.on('data', append);
@@ -167,7 +174,7 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
           try { completeOutput = fs.readFileSync(logPath, 'utf8'); } catch {}
           const summary = testSummary(completeOutput);
           const reportError = spec.requireTestReport && !validTestReport(completeOutput, { go: spec.requireGoReport });
-          resolve({ name: spec.name, code: sinkError || reportError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, spawnError: spawnError?.message, sinkError: sinkError?.message, reportError: reportError ? 'required test report missing, empty, or failed' : undefined, failureDetail: code === 0 && !sinkError ? (reportError ? failureDetail(completeOutput) : undefined) : failureDetail(completeOutput) });
+          resolve({ name: spec.name, code: sinkError || reportError ? 1 : (code ?? 127), signal, elapsedMs: performance.now() - childStarted, ...summary, logPath, eventsPath, spawnError: spawnError?.message, sinkError: sinkError?.message, reportError: reportError ? 'required test report missing, empty, or failed' : undefined, failureDetail: code === 0 && !sinkError ? (reportError ? failureDetail(completeOutput) : undefined) : failureDetail(completeOutput) });
         };
         if (sinkError) { log.destroy(); finish(); }
         else log.end(finish);
@@ -200,13 +207,34 @@ export async function runSuiteMatrix(commands, { logDir = fs.mkdtempSync(path.jo
   return { results, elapsedMs, correctness, performanceStatus, logDir, interrupted };
 }
 
-function printReport(report) {
+// Failures lead, one line each; passing suites and the total follow. A suite
+// whose failures were all named needs no second copy of its raw output. A flaky
+// suite keeps its first-run numbers: the rerun never rewrites what happened.
+export function formatReport(report) {
+  const errors = [];
+  const lines = [];
+  const named = new Set((report.failedTests ?? []).map(failure => failure.suite));
+  const suiteState = result => (result.code === 0 && !result.spawnError ? 'passed' : result.flaky ? 'flaky' : 'failed');
+  for (const failure of report.failedTests ?? []) errors.push(testFailedLine(failure));
+  if (report.rerunSkipped) errors.push(`WORKASS_TEST_RERUN_SKIPPED reason=${report.rerunSkipped.reason} count=${report.rerunSkipped.count} limit=${report.rerunSkipped.limit}`);
   for (const result of report.results) {
-    const state = result.code === 0 && !result.spawnError ? 'passed' : 'failed';
-    console.log(`WORKASS_TEST_SUITE name=${result.name} status=${state} exit=${result.code} seconds=${(result.elapsedMs / 1000).toFixed(3)} tests=${result.tests ?? 'unknown'} top_level=${result.topLevelTests ?? 'unknown'} subtests=${result.subtests ?? 'unknown'} passed=${result.passed ?? 'unknown'} failed=${result.failed ?? 'unknown'} skipped=${result.skipped ?? 0} log=${result.logPath}`);
-    if (state === 'failed') console.error(`WORKASS_TEST_SUITE_FAILURE name=${result.name} exit=${result.code} signal=${result.signal ?? 'none'}${result.spawnError ? ` spawn_error=${result.spawnError}` : ''}${result.sinkError ? ` log_sink_error=${result.sinkError}` : ''}${result.reportError ? ` report_error=${result.reportError}` : ''}${result.failureDetail ? `\n${result.failureDetail}` : ''} log=${result.logPath}`);
+    if (suiteState(result) !== 'failed') continue;
+    const detail = !named.has(result.name) && result.failureDetail ? `\n${result.failureDetail}` : '';
+    errors.push(`WORKASS_TEST_SUITE_FAILURE name=${result.name} exit=${result.code} signal=${result.signal ?? 'none'}${result.spawnError ? ` spawn_error=${result.spawnError}` : ''}${result.sinkError ? ` log_sink_error=${result.sinkError}` : ''}${result.reportError ? ` report_error=${result.reportError}` : ''}${result.unattributed ? ` unattributed=${JSON.stringify(result.unattributed)}` : ''}${detail} log=${result.logPath}`);
   }
-  console.log(`WORKASS_TEST_SUITE_TOTAL correctness=${report.correctness ? 'passed' : 'failed'} performance=${report.performanceStatus} seconds=${(report.elapsedMs / 1000).toFixed(3)} budget_seconds=10.000 logs=${report.logDir}`);
+  for (const flake of report.flakes ?? []) lines.push(testFlakeLine(flake));
+  for (const result of report.results) {
+    lines.push(`WORKASS_TEST_SUITE name=${result.name} status=${suiteState(result)} exit=${result.code} seconds=${(result.elapsedMs / 1000).toFixed(3)} tests=${result.tests ?? 'unknown'} top_level=${result.topLevelTests ?? 'unknown'} subtests=${result.subtests ?? 'unknown'} passed=${result.passed ?? 'unknown'} failed=${result.failed ?? 'unknown'} skipped=${result.skipped ?? 0} log=${result.logPath}`);
+  }
+  const rerunFields = report.rerun ? `reruns=${report.reruns.length} flakes=${report.flakes.length} rerun_seconds=${report.rerunSeconds.toFixed(3)}` : 'reruns=off';
+  lines.push(`WORKASS_TEST_SUITE_TOTAL correctness=${report.correctness ? 'passed' : 'failed'} performance=${report.performanceStatus} seconds=${(report.elapsedMs / 1000).toFixed(3)} budget_seconds=10.000 ${rerunFields} logs=${report.logDir}`);
+  return { errors, lines };
+}
+
+function printReport(report) {
+  const { errors, lines } = formatReport(report);
+  for (const line of errors) console.error(line);
+  for (const line of lines) console.log(line);
 }
 
 export function isMainModule(argvPath = process.argv[1], modulePath = fileURLToPath(import.meta.url)) {
@@ -219,6 +247,10 @@ export async function runSuiteLifecycle({
   createFixture = createTemporaryFixtureVolume,
   runMatrix = runSuiteMatrix,
   signalTarget = process,
+  commandSpecs = fullSuiteCommands,
+  // Off by default: a plain run reports one pass of every suite. Only the
+  // repository gate asks for failed tests to run a second time.
+  rerunFailed = false,
 } = {}) {
   const startedAt = performance.now();
   let fixture;
@@ -233,7 +265,7 @@ export async function runSuiteLifecycle({
     let resolveFixture, rejectFixture;
     const fixturePromise = new Promise((resolve, reject) => { resolveFixture = resolve; rejectFixture = reject; });
     const creation = Promise.resolve().then(createFixture).then(value => { fixture = value; resolveFixture(value); return value; }, error => { rejectFixture(error); throw error; });
-    const commands = fullSuiteCommands().map(spec => spec.name === 'go_tests'
+    const commands = commandSpecs().map(spec => spec.name === 'go_tests'
       ? { ...spec, fixtureRootIpc: true }
       : { ...spec, fixtureTempEnv: true });
     if (interrupted) rejectFixture(new Error('interrupted during fixture provisioning'));
@@ -241,6 +273,10 @@ export async function runSuiteLifecycle({
     try { await creation; } catch (error) { lifecycleError = error; }
     if (!interrupted) report = await matrix;
     else { await matrix; }
+    // Every suite has exited by now, so a rerun competes with nothing of ours.
+    if (report && !interrupted && !lifecycleError && !report.interrupted) {
+      await settleFailures(report, commands, { rerun: rerunFailed, tempRoot: fixture?.root, abortSignal: abortController.signal });
+    }
   } catch (error) {
     lifecycleError = error;
   } finally {
@@ -263,7 +299,13 @@ export async function runSuiteLifecycle({
 }
 
 if (isMainModule()) {
-  const { report, lifecycleError } = await runSuiteLifecycle();
+  const argv = process.argv.slice(2);
+  const unknown = argv.filter(arg => arg !== '--rerun-failed');
+  if (unknown.length) {
+    console.error(`unknown argument: ${unknown[0]}\nusage: node scripts/test-suite.mjs [--rerun-failed]`);
+    process.exit(2);
+  }
+  const { report, lifecycleError } = await runSuiteLifecycle({ rerunFailed: argv.includes('--rerun-failed') });
   printReport(report);
   if (lifecycleError) console.error(`WORKASS_TEST_SUITE_FIXTURE_FAILURE ${lifecycleError.stack ?? lifecycleError}`);
   process.exitCode = report.correctness ? 0 : 1;

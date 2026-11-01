@@ -477,6 +477,7 @@ test('canonical pipeline stages both platforms from one verified input and publi
   assert.equal(rendererPackage.scripts.test, 'node --experimental-strip-types --test tests/*.test.ts');
   assert.equal(rendererPackage.scripts.benchmark, 'node --experimental-strip-types --test tests/*.bench.ts');
   assert.ok(suiteRunner > goBuild);
+  assert.match(gate, /run_gate_phase test_suites node scripts\/test-suite\.mjs --rerun-failed/);
   assert.match(gate, /renderer_prepare sh -c 'cd desktop\/renderer2 && npx tsc --noEmit && npm run build --silent/);
   assert.ok(rendererBuild >= 0 && rendererBuild < goBuild);
   assert.ok(rendererSnapshot >= 0 && rendererSnapshot < goBuild);

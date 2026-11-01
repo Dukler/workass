@@ -1,5 +1,5 @@
 #!/bin/sh
-# One-command gate: lanes run this themselves; Fable reads the last line only.
+# One-command gate: lanes run this themselves; read the last line only.
 set -e -o pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -39,5 +39,7 @@ fi
 
 run_gate_phase go_build go build ./...
 run_gate_phase go_vet go vet ./...
-run_gate_phase test_suites node scripts/test-suite.mjs
+# A failed test runs once more by itself after the whole matrix has finished. A
+# pass there is named on a WORKASS_TEST_FLAKE line; a second failure fails here.
+run_gate_phase test_suites node scripts/test-suite.mjs --rerun-failed
 echo "GATE_PASS"
