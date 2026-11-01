@@ -413,6 +413,12 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 		ProviderID:  bridge.ProviderID(),
 		harnessTurn: true,
 	}
+	// A turn nobody started through JobStartOptions still runs on the chat's live
+	// selection, and a child it spawns inherits from this job as from any other.
+	if live, ok := bridge.liveSession(sessionID); ok {
+		job.CWD = live.Info.CWD
+		job.startOpts = liveSessionStartDefaults(live.Info)
+	}
 	// The harness's own input is already running: a direction the user sends
 	// into this turn is a steer, which waits on exactly this boundary.
 	job.markInputDispatched()
@@ -480,6 +486,7 @@ func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string, eviden
 	job.Status, job.StopReason, job.Error = harnessTerminalOutcome(terminalReason, stopReason, job.cancelled)
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)
+	m.adoptSubagentsForParentLocked(firstNonEmpty(job.VisibleJobID, job.ID))
 	m.mu.Unlock()
 	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
@@ -526,6 +533,7 @@ func (m *Manager) abandonAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 	job.StopReason = "engine-crash"
 	m.rememberFinishedJobLocked(job.ID)
 	delete(m.jobs, job.ID)
+	m.adoptSubagentsForParentLocked(firstNonEmpty(job.VisibleJobID, job.ID))
 	m.mu.Unlock()
 	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
