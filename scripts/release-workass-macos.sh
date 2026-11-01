@@ -80,6 +80,7 @@ for tool in xcrun hdiutil ditto shasum plutil spctl; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing release tool: $tool" >&2; exit 1; }
 done
 workass_codesign_prepare distribution
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" check-key
 
 stage_root=$(mktemp -d "$repo_root/.dev/macos-release.$version.XXXXXX")
 cleanup() { rm -rf "$stage_root"; }
@@ -208,6 +209,7 @@ const updates = {
 fs.writeFileSync(releasePath, `${JSON.stringify(release, null, 2)}\n`);
 fs.writeFileSync(updatesPath, `${JSON.stringify(updates, null, 2)}\n`);
 NODE
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" sign --manifest "$stage_root/$feed_name"
 cp "$stage_root/$feed_name" "$stage_root/release.json"
 
 rm -rf "$output_root"

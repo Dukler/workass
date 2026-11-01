@@ -65,6 +65,7 @@ if [ -z "$release_input" ]; then
     command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
   done
 fi
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" check-key
 
 offline_flags=''
 [ "$offline" -eq 1 ] && offline_flags='--offline'
@@ -143,7 +144,7 @@ ditto "$node_source" "$stage/node/$target"
 ditto "$frontier_hosts_source" "$stage/frontier-hosts/$target"
 
 ditto "$renderer_source/." "$stage/resources/renderer"
-for shell_file in main.js preload.js view-server.js connected-artifacts.js browser-manager.js browser-viewport.js browser-observation.js browser-snapshot-view.js browser-read.js browser-pip.js browser-pip-preload.js browser-webview-policy.js browser-outline.js browser-actions.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js render-frame-guard.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-progress.js update-manager.js update-worker.js; do
+for shell_file in release-manifest-signature.js main.js preload.js view-server.js connected-artifacts.js browser-manager.js browser-viewport.js browser-observation.js browser-snapshot-view.js browser-read.js browser-pip.js browser-pip-preload.js browser-webview-policy.js browser-outline.js browser-actions.js browser-control-server.js runtime-profile.js runtime-bootstrap.js certificate-pins.js render-frame-guard.js app-icon.js image-copy.js profile-singleton.js update-lock-recovery.js update-progress.js update-manager.js update-worker.js; do
   cp "$repo_root/desktop/shell/$shell_file" "$stage/resources/app/$shell_file"
 done
 node "$repo_root/desktop/scripts/check-shell-dependencies.cjs" "$stage/resources/app"
@@ -195,8 +196,8 @@ const release = {
   platform: 'windows',
   arch: 'amd64',
   portable: true,
-  // Informational only. Portable Windows updates trust the immutable GitHub
-  // release manifest over HTTPS plus the archive's exact SHA-256 and size.
+  // Informational only. Portable Windows updates need no Authenticode: the
+  // independent check is the ed25519 signature added to this manifest below.
   authenticode: false,
   artifacts: {
     update: {
@@ -209,6 +210,7 @@ const release = {
 };
 fs.writeFileSync(file, `${JSON.stringify(release, null, 2)}\n`);
 NODE
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" sign --manifest "$release_dir/workass-windows-amd64-release.json"
 
 echo "WORKASS_WINDOWS_PORTABLE_READY"
 echo "version=$version"

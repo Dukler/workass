@@ -2,6 +2,8 @@ package scheduledmessage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,6 +134,46 @@ func TestAfterSecondsFiresExactlyOnceAtTheRightTime(t *testing.T) {
 	list := r.s.List("tab", "chat")
 	if len(list) != 1 || list[0].Status != StatusFired || list[0].SettledAt == nil {
 		t.Fatalf("list = %+v", list)
+	}
+}
+
+func TestAuthorizingMessageIDTravelsWithoutChangingOtherEntries(t *testing.T) {
+	base := map[string]any{"message": "apply it", "operation_id": "op-1", "after_seconds": float64(60)}
+	plain, err := ParseRequest(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The hash of a request without the id is what it always was, so an entry
+	// already on disk still recognizes its own retry.
+	sum := sha256.Sum256([]byte(strings.Join([]string{"apply it", "after_seconds", "60", "0"}, "\x00")))
+	if plain.hash() != hex.EncodeToString(sum[:]) {
+		t.Fatal("the request hash changed for a request with no authorizing message")
+	}
+	withID := map[string]any{"message": "apply it", "operation_id": "op-1", "after_seconds": float64(60), "authorizing_message_id": "owner-1"}
+	carrying, err := ParseRequest(withID)
+	if err != nil || carrying.AuthorizingMessageID != "owner-1" {
+		t.Fatalf("request = %#v err=%v", carrying, err)
+	}
+	if carrying.hash() == plain.hash() {
+		t.Fatal("reusing an operation id for a different permission would read as a retry")
+	}
+	text := Text(Entry{ID: "sm-1", Condition: Condition{Kind: "at", At: time.Unix(0, 0)}, Message: "apply it", AuthorizingMessageID: "owner-1"})
+	if !strings.HasSuffix(text, "apply it\n\n[authorizing_message_id for workass_apply_update: owner-1]") {
+		t.Fatalf("delivered text = %q", text)
+	}
+	if text := Text(Entry{ID: "sm-1", Condition: Condition{Kind: "at", At: time.Unix(0, 0)}, Message: "apply it"}); strings.Contains(text, "authorizing_message_id") {
+		t.Fatalf("an ordinary message names a permission: %q", text)
+	}
+	now := time.Unix(1000, 0)
+	if due := plain.Due(now); !due.Equal(now.Add(60 * time.Second)) {
+		t.Fatalf("after_seconds due = %v", due)
+	}
+	at := now.Add(time.Hour)
+	if due := (Request{Condition: Condition{Kind: "at", At: at}}).Due(now); !due.Equal(at) {
+		t.Fatalf("at due = %v", due)
+	}
+	if due := (Request{Condition: Condition{Kind: "file"}, ExpiresAfter: time.Hour}).Due(now); !due.Equal(at) {
+		t.Fatalf("condition due = %v", due)
 	}
 }
 

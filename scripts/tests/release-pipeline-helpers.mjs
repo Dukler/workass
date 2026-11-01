@@ -5,6 +5,29 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { TEST_TRUSTED_KEY_ENV, signManifest } from '../release/lib/manifest-signature.mjs';
+
+// A key generated for this test process. The real signing key is never read by a
+// test, and these scripts trust this one only through the test environment
+// variable, which every tool spawned below inherits.
+const generatedKey = crypto.generateKeyPairSync('ed25519');
+export const testSigningKey = {
+  privateKey: generatedKey.privateKey,
+  publicKey: generatedKey.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64'),
+};
+process.env[TEST_TRUSTED_KEY_ENV] = testSigningKey.publicKey;
+
+export function signedFeed(feed) {
+  return `${JSON.stringify(signManifest(feed, testSigningKey))}\n`;
+}
+
+// A manifest with nothing but what its signature needs, for a test about bytes.
+export function signedStubFeed(platform, arch, version) {
+  return signedFeed({
+    schemaVersion: 1, product: 'Workass', version, platform, arch,
+    artifacts: { update: { name: 'stub', url: 'stub', sha256: 'a'.repeat(64), size: 1 } },
+  });
+}
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const releaseRoot = path.join(repoRoot, 'scripts', 'release');
@@ -41,7 +64,7 @@ export function makeMacCandidate(candidate, version, build) {
   const archiveBytes = Buffer.from('mac archive');
   const feedRoot = path.join(candidate, 'macos-feed');
   write(path.join(feedRoot, archiveName), archiveBytes);
-  write(path.join(feedRoot, 'workass-darwin-arm64-release.json'), `${JSON.stringify({
+  write(path.join(feedRoot, 'workass-darwin-arm64-release.json'), signedFeed({
     schemaVersion: 1,
     product: 'Workass',
     version,
@@ -50,7 +73,7 @@ export function makeMacCandidate(candidate, version, build) {
     arch: 'arm64',
     designatedRequirement: 'identifier "com.workass.app"',
     artifacts: { update: { name: archiveName, url: archiveName, sha256: sha256(archiveBytes), size: archiveBytes.length } },
-  })}\n`);
+  }));
   write(path.join(feedRoot, 'SHA256SUMS'), `${sha256(archiveBytes)}  ${archiveName}\n`);
   const app = path.join(candidate, 'macos-app', 'Workass.app', 'Contents', 'Resources');
   write(path.join(app, 'app', 'package.json'), JSON.stringify({ version }));
@@ -62,7 +85,7 @@ export function makeWindowsCandidate(candidate, version) {
   const bundleName = `Workass-${version}-windows-amd64`;
   const archiveBytes = Buffer.from('windows archive');
   write(path.join(root, `${bundleName}.zip`), archiveBytes);
-  write(path.join(root, 'workass-windows-amd64-release.json'), `${JSON.stringify({
+  write(path.join(root, 'workass-windows-amd64-release.json'), signedFeed({
     schemaVersion: 1,
     product: 'Workass',
     version,
@@ -76,7 +99,7 @@ export function makeWindowsCandidate(candidate, version) {
       sha256: sha256(archiveBytes),
       size: archiveBytes.length,
     } },
-  })}\n`);
+  }));
   write(path.join(root, 'SHA256SUMS'), `${sha256(archiveBytes)}  ${bundleName}.zip\n`);
   const bundle = path.join(root, bundleName);
   write(path.join(bundle, 'resources', 'app', 'package.json'), JSON.stringify({ version }));
@@ -121,7 +144,7 @@ export function makeLinuxCandidate(candidate, version, commitSha, {
       size: archiveBytes.length,
     } },
   };
-  write(path.join(root, 'workass-linux-amd64-release.json'), `${JSON.stringify(feed)}\n`);
+  write(path.join(root, 'workass-linux-amd64-release.json'), signedFeed(feed));
   write(path.join(root, 'SHA256SUMS-linux-amd64'), `${sha256(archiveBytes)}  ${archiveName}\n`);
   const bundle = path.join(root, bundleName);
   write(path.join(bundle, 'manifest.json'),

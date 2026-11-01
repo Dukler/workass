@@ -16,6 +16,7 @@ import {
   repoRoot,
   run,
   sha256,
+  signedStubFeed,
   write,
 } from './release-pipeline-helpers.mjs';
 
@@ -59,7 +60,7 @@ test('Windows verify-only mode performs readback without a release mutation', (t
   const manifestName = 'workass-windows-amd64-release.json';
   const archive = Buffer.from('windows archive');
   write(path.join(releaseDir, archiveName), archive);
-  write(path.join(releaseDir, manifestName), 'windows manifest');
+  write(path.join(releaseDir, manifestName), signedStubFeed('windows', 'amd64', version));
   write(path.join(releaseDir, 'SHA256SUMS'), `${sha256(archive)}  ${archiveName}\n`);
   const asset = (name) => {
     const local = fileArtifact(path.join(releaseDir, name));
@@ -132,10 +133,10 @@ test('one GitHub release carries both the Windows and the headless Linux manifes
   const windowsArchive = Buffer.from('windows archive');
   const linuxArchive = Buffer.from('linux daemon tree');
   write(path.join(releaseDir, windowsArchiveName), windowsArchive);
-  write(path.join(releaseDir, windowsManifestName), 'windows manifest');
+  write(path.join(releaseDir, windowsManifestName), signedStubFeed('windows', 'amd64', version));
   write(path.join(releaseDir, 'SHA256SUMS'), `${sha256(windowsArchive)}  ${windowsArchiveName}\n`);
   write(path.join(linuxDir, linuxArchiveName), linuxArchive);
-  write(path.join(linuxDir, linuxManifestName), 'linux manifest');
+  write(path.join(linuxDir, linuxManifestName), signedStubFeed('linux', 'amd64', version));
   write(path.join(linuxDir, 'SHA256SUMS-linux-amd64'), `${sha256(linuxArchive)}  ${linuxArchiveName}\n`);
   const asset = (dir, name) => {
     const local = fileArtifact(path.join(dir, name));

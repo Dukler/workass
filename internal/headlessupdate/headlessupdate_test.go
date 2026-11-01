@@ -72,6 +72,14 @@ type harness struct {
 
 func newHarness(t *testing.T, currentVersion, releaseVersion, reportedVersion string, restart string) *harness {
 	t.Helper()
+	return newHarnessWithFeed(t, currentVersion, releaseVersion, reportedVersion, restart, func(manifest map[string]any) []byte {
+		return signManifestJSON(t, manifest)
+	})
+}
+
+// newHarnessWithFeed lets a test decide what the published manifest looks like.
+func newHarnessWithFeed(t *testing.T, currentVersion, releaseVersion, reportedVersion string, restart string, publish func(map[string]any) []byte) *harness {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the headless service updater targets POSIX service hosts")
 	}
@@ -103,20 +111,18 @@ func newHarness(t *testing.T, currentVersion, releaseVersion, reportedVersion st
 			"sha256": hex.EncodeToString(digest[:]), "size": len(archive),
 		}},
 	}
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	encoded := publish(manifest)
 	mux.HandleFunc("/feed.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(encoded) })
 
 	h.manager = New(Options{
-		Executable: filepath.Join(installRoot, "workass"),
-		StateDir:   stateDir,
-		Version:    currentVersion,
-		GOOS:       "linux",
-		GOARCH:     "amd64",
-		FeedURL:    h.server.URL + "/feed.json",
-		Env:        func(string) string { return "" },
+		Executable:          filepath.Join(installRoot, "workass"),
+		StateDir:            stateDir,
+		Version:             currentVersion,
+		GOOS:                "linux",
+		GOARCH:              "amd64",
+		FeedURL:             h.server.URL + "/feed.json",
+		ReleaseManifestKeys: []string{testReleasePublicKey},
+		Env:                 func(string) string { return "" },
 		ReadFile: func(name string) ([]byte, error) {
 			if name == "/proc/self/cgroup" {
 				return []byte("0::/user.slice/user-1000.slice/user@1000.service/app.slice/workass.service\n"), nil

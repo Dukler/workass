@@ -19,6 +19,8 @@ import {
   repoRoot,
   run,
   sha256,
+  signedFeed,
+  signedStubFeed,
   write,
 } from './release-pipeline-helpers.mjs';
 
@@ -172,7 +174,7 @@ test('candidate receipt binds both archives, both feeds, input, version, and com
     designatedRequirement: 'identifier "com.workass.app"',
     artifacts: { update: { name: macArchiveName, url: macArchiveName, sha256: sha256(macArchiveBytes), size: macArchiveBytes.length } },
   };
-  write(path.join(macFeedRoot, 'workass-darwin-arm64-release.json'), `${JSON.stringify(macFeed)}\n`);
+  write(path.join(macFeedRoot, 'workass-darwin-arm64-release.json'), signedFeed(macFeed));
   write(path.join(macFeedRoot, 'SHA256SUMS'), `${sha256(macArchiveBytes)}  ${macArchiveName}\n`);
   write(path.join(candidate, 'macos-app', 'Workass.app', 'Contents', 'Resources', 'app', 'package.json'), JSON.stringify({ version }));
   write(path.join(candidate, 'macos-app', 'Workass.app', 'Contents', 'Resources', 'runtime', 'manifest.json'),
@@ -197,7 +199,7 @@ test('candidate receipt binds both archives, both feeds, input, version, and com
       size: windowsArchiveBytes.length,
     } },
   };
-  write(path.join(windowsRoot, 'workass-windows-amd64-release.json'), `${JSON.stringify(windowsFeed)}\n`);
+  write(path.join(windowsRoot, 'workass-windows-amd64-release.json'), signedFeed(windowsFeed));
   write(path.join(windowsRoot, 'SHA256SUMS'), `${sha256(windowsArchiveBytes)}  ${windowsBundleName}.zip\n`);
   const windowsBundle = path.join(windowsRoot, windowsBundleName);
   write(path.join(windowsBundle, 'resources', 'app', 'package.json'), JSON.stringify({ version }));
@@ -253,19 +255,19 @@ test('paired publication receipt binds exact Mac bytes and verified GitHub asset
   };
   for (const target of [path.join(candidate, 'macos-feed'), macosOutput]) {
     write(path.join(target, archiveName), macArchive);
-    write(path.join(target, 'workass-darwin-arm64-release.json'), `${JSON.stringify(macFeed)}\n`);
+    write(path.join(target, 'workass-darwin-arm64-release.json'), signedFeed(macFeed));
     write(path.join(target, 'SHA256SUMS'), `${sha256(macArchive)}  ${archiveName}\n`);
   }
 
   const windowsRoot = path.join(candidate, 'windows', version);
   const windowsArchiveName = `Workass-${version}-windows-amd64.zip`;
   write(path.join(windowsRoot, windowsArchiveName), 'windows archive');
-  write(path.join(windowsRoot, 'workass-windows-amd64-release.json'), 'windows feed');
+  write(path.join(windowsRoot, 'workass-windows-amd64-release.json'), signedStubFeed('windows', 'amd64', version));
   write(path.join(windowsRoot, 'SHA256SUMS'), 'windows sums');
   const linuxRoot = path.join(candidate, 'linux', version);
   const linuxArchiveName = `Workass-${version}-linux-amd64.tar.gz`;
   write(path.join(linuxRoot, linuxArchiveName), 'linux archive');
-  write(path.join(linuxRoot, 'workass-linux-amd64-release.json'), 'linux feed');
+  write(path.join(linuxRoot, 'workass-linux-amd64-release.json'), signedStubFeed('linux', 'amd64', version));
   write(path.join(linuxRoot, 'SHA256SUMS-linux-amd64'), 'linux sums');
   write(path.join(candidate, 'input-manifest.json'), 'input');
   const candidateReceipt = {

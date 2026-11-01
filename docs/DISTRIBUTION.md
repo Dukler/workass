@@ -107,7 +107,10 @@ shell-only or daemon-only automatic update path.
 
 The updater:
 
-1. downloads only over HTTPS and enforces the manifest's exact size and SHA-256;
+1. verifies the manifest's offline signature against the keys pinned in the
+   installed app, on every platform, before it offers or stages anything (see
+   "Release manifest signature" below); then downloads only over HTTPS and
+   enforces the manifest's exact size and SHA-256;
 2. inspects archive paths before extraction and stages beside the installed app;
 3. verifies the incoming app's platform signature, version, bundled daemon,
    runtime manifest, and mutual designated requirement with the installed app;
@@ -124,9 +127,103 @@ The updater:
    records `healthy`, `rollback_healthy`, or `failed`.
 
 The UI exposes this through the same compact sidebar update card used for
-provider updates; it does not add a separate Settings section. Updates are
-user-clicked only: Workass never enters or schedules an update on its own,
-and a user click updates immediately regardless of running work.
+provider updates; it does not add a separate Settings section. Workass never
+enters or schedules an update on its own. A user click updates immediately
+regardless of running work. An agent may apply one only with the owner's
+permission, which `workass_apply_update` proves by naming the owner's own message
+(see "Agent activation" below); no click is needed, so a programmed update stays
+hands-off.
+
+### Release manifest signature
+
+HTTPS, the size and the SHA-256 all come from the same GitHub release as the bytes
+they describe, so a compromised account or asset satisfies every one of them. The
+check that does not is an ed25519 signature over each platform's manifest, made at
+publish time with an offline key and verified against keys pinned in the shipped
+binaries.
+
+- **Format.** One additive field in the manifest,
+  `"signature": { "algorithm": "ed25519", "keyId": "...", "value": "<base64>" }`,
+  so a client that predates it reads the same manifest it always read. The signed
+  bytes are the canonical form built from the manifest's fields, in one fixed order
+  and length-prefixed: schema version, product, version, build, platform, arch,
+  `portable`, `headless`, designated requirement, notes, and the update artifact's
+  name, URL, SHA-256 and size.
+- **Where it is verified.** `verifyReleaseSignature` in
+  `desktop/shell/update-manager.js` for macOS, Windows and the Mac local feed, at
+  discovery and again before the first byte is staged, and `Check` in
+  `internal/headlessupdate` on Linux. `verify-candidate` and `verify-publication`
+  make the same check, and `publish-windows.sh` makes it before it can reach GitHub.
+- **Failing closed.** A missing, malformed, wrong or tampered signature leaves the
+  update card in its failed state with a plain sentence, and nothing is downloaded.
+  There is no environment override and no way for a release to name its own key.
+- **Replay.** A real signature on an old release still never installs: a release that
+  is not newer than the installed version is not offered and cannot be applied.
+- **Windows** needs no Authenticode. This signature is the independent check there.
+- **Older installed clients** ignore the field and keep updating, with no more
+  protection than they had. The protection starts with the first installed build that
+  carries the pinned keys.
+
+The private key is at
+`$HOME/Library/Application Support/Workass/signing/release-manifest-ed25519.key`
+(base64 of the 64-byte ed25519 private key, mode 0600), outside the repository. The
+`stage-*` scripts read it at publish time only, and stop before the build if it is
+missing, readable by others, or not one the updaters pin. `WORKASS_RELEASE_MANIFEST_KEY`
+moves the path for tests.
+
+**If the key is lost:** no new release can be signed, and installed clients will
+refuse any release that is not. Nothing already installed breaks, and those machines
+simply stop being offered updates. Recovery is one manual install per machine: make a
+new key, pin it, build, and replace the app or daemon by hand on each machine, as a
+first install does. After that, in-app updates work again. Keep an offline backup of
+the key so this never has to happen.
+
+**If the key is exposed:** treat it as lost, and do it quickly. A published release
+cannot withdraw trust from the old key, only a release that removes it from the list
+can, so anything still running a build that pins it trusts it until updated.
+
+**To rotate while the old key still works:**
+
+1. Generate the new key at a new path outside the repository, mode 0600.
+2. Add its public half to both lists, `pinnedReleaseManifestKeys` in
+   `internal/headlessupdate/signature.go` and `PINNED_RELEASE_MANIFEST_KEYS` in
+   `desktop/shell/release-manifest-signature.js`. Keep the old key. A test holds the
+   two lists equal.
+3. Publish a release signed with the old key, and let every machine take it.
+4. Point the lane at the new key and publish. Machines on step 3's build accept it;
+   a machine still older than that refuses it and needs step 3's release first.
+5. Remove the old key from both lists in a later release.
+
+### Agent activation
+
+`workass_apply_update` has no click, because the owner wants to be able to say "after
+you are done with this update" and walk away. It has one human step instead: an
+agent passes `authorizing_message_id`, the id of a message in the calling chat
+(`workass_read_chat` lists them, with `origin`). The daemon that holds the chat
+checks, from its own durable record:
+
+- the message is in this exact chat, and was not copied in by a fork;
+- its origin is `human`. Origin is stamped by the daemon when the turn is admitted,
+  and agent sends, relayed agent sends, scheduled text and notices are stamped
+  otherwise. A row with no recorded origin is refused and the agent is told to ask
+  for a new message;
+- its text mentions an update, in English or Spanish; and
+- it is at most 8 days old: the scheduler's 7-day limit plus one day, so the longest
+  programmed update still works.
+
+One message authorizes one activation per machine and target version, recorded
+durably in `update-authorizations.json` under the state directory before the updater
+is asked. Replaying the same `operation_id` reads its receipt; any other operation
+for that message, machine and version is refused. A programmed update carries the
+owner's message id through `workass_schedule_message` and names it on delivery.
+Applying to another machine is checked here, on the side that holds the chat. That
+machine's own `app:update-apply` channel stays the authenticated controller surface
+it always was, and the UI's click path needs no id. A delegated subagent has no
+update tool.
+
+This proves the owner wrote a message about updating. It cannot prove which update
+they meant, so an agent is still bound by the rule in `AGENTS.md`, including which
+machines were named.
 
 ### macOS local update channel
 
@@ -165,7 +262,8 @@ an HTTP server and never weakens the transactional
 daemon/controller/catalog/browser health gates. Its local signature preserves
 bundle identity and macOS privacy grants without an Apple account.
 `scripts/stage-updates.sh` and the platform packagers remain internal lanes,
-not normal publication entrypoints.
+not normal publication entrypoints. The local feed is signed and verified the
+same way as the public one, so a dogfood build needs the signing key on this Mac.
 
 The packaged shell checks once shortly after launch and then polls this local
 manifest every 30 seconds. Publishing a dogfood build therefore makes the
@@ -223,10 +321,11 @@ manual daemon-only operation uses `workass --headless`. Signed upstream binaries
 are left byte-for-byte intact.
 The bundle contains the transactional updater and emits
 `workass-windows-amd64-release.json`. Portable Windows builds update through
-GitHub without requiring Authenticode: Workass verifies the latest stable
-release manifest over HTTPS, the archive's exact size and SHA-256, safe ZIP
-paths, the embedded platform/version metadata, and the required PE32+ x86-64
-runtime files before the quiescent swap. A failed health/controller/catalog
+GitHub without requiring Authenticode: Workass verifies the manifest's offline
+signature (see "Release manifest signature"), then the latest stable release
+manifest over HTTPS, the archive's exact size and SHA-256, safe ZIP paths, the
+embedded platform/version metadata, and the required PE32+ x86-64 runtime
+files before the quiescent swap. A failed health/controller/catalog
 recovery rolls back to the previous extracted directory. Authenticode remains
 recommended for reducing Windows reputation warnings, but it is not an update
 gate for this private portable lane. Builds that predate this capability need

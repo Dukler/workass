@@ -35,6 +35,21 @@ type Request struct {
 	Condition    Condition     // At is zero for after_seconds until scheduled
 	After        time.Duration // set for after_seconds
 	ExpiresAfter time.Duration // zero for "at" and after_seconds
+	// AuthorizingMessageID carries the id of the owner's message behind a
+	// programmed update, so it reaches the agent when the message comes due. The
+	// caller checks it; this package only keeps and delivers it.
+	AuthorizingMessageID string
+}
+
+// Due is the latest moment this request can come due, if scheduled now.
+func (r Request) Due(now time.Time) time.Time {
+	switch {
+	case r.Condition.Kind == "at" && !r.Condition.At.IsZero():
+		return r.Condition.At
+	case r.After > 0:
+		return now.Add(r.After)
+	}
+	return now.Add(r.ExpiresAfter)
 }
 
 var conditionParams = []string{"at", "after_seconds", "when_tcp_up", "when_file_exists", "when_pid_exits"}
@@ -72,6 +87,14 @@ func ParseRequest(params map[string]any) (Request, error) {
 	if len(present) != 1 {
 		return req, errors.New("pass exactly one of at, after_seconds, when_tcp_up, when_file_exists, when_pid_exits")
 	}
+	authorizing, err := stringParam(params, "authorizing_message_id")
+	if err != nil {
+		return req, err
+	}
+	if len(authorizing) > maxOperationIDLen {
+		return req, fmt.Errorf("authorizing_message_id is too long: at most %d characters are allowed", maxOperationIDLen)
+	}
+	req.AuthorizingMessageID = authorizing
 	req.OperationID = operationID
 	req.Message = message
 	req.Field = present[0]
@@ -154,9 +177,13 @@ func ParseRequest(params map[string]any) (Request, error) {
 // hash covers the raw request fields, never the computed At, so a retried
 // after_seconds call hashes identically.
 func (r Request) hash() string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		r.Message, r.Field, r.Value, strconv.FormatInt(int64(r.ExpiresAfter/time.Second), 10),
-	}, "\x00")))
+	fields := []string{r.Message, r.Field, r.Value, strconv.FormatInt(int64(r.ExpiresAfter/time.Second), 10)}
+	// Only when present: a request without it hashes as it always did, so entries
+	// already on disk still recognize their own retries.
+	if r.AuthorizingMessageID != "" {
+		fields = append(fields, r.AuthorizingMessageID)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 

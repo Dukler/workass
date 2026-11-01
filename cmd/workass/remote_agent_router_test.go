@@ -170,7 +170,7 @@ func TestStatelessMCPRoutesUpdaterStatusAndAuthorizedApplyWithoutExposingOwner(t
 		"name": "workass_apply_update",
 		"arguments": map[string]any{
 			"machine_id": "m-work", "expected_current_version": "1.2.3", "expected_target_version": "1.2.4",
-			"authorization": "update m-work from 1.2.3 to 1.2.4", "operation_id": "update-work-1.2.4",
+			"authorizing_message_id": statelessMCPOwnerMessageID, "operation_id": "update-work-1.2.4",
 		},
 	})
 	if status != http.StatusOK || response["error"] != nil || remote.method != "update.apply" {

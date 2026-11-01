@@ -23,6 +23,7 @@ const {
   spawnVisibleUpdateProgress,
   terminateUpdateProgress,
 } = require('./update-progress');
+const { verifyReleaseManifestSignature } = require('./release-manifest-signature');
 
 const DEFAULT_FEED_ROOT = 'https://github.com/Dukler/workass/releases/latest/download/';
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -1956,6 +1957,9 @@ class UpdateManager {
     if (!validAgentUpdateOperationID(operationId)) throw new Error('authorized update requires a valid caller-stable operation_id');
     if (!machineId) throw new Error('authorized update requires an exact machine_id');
     if (!parseVersion(currentVersion) || !parseVersion(targetVersion)) throw new Error('authorized update requires exact X.Y.Z current and target versions');
+    // A fence against a confused caller, not permission: every word of it is
+    // public. The owner's permission is proved on the daemon that holds the
+    // calling chat, before this is ever reached (update_authorization.go).
     const expectedAuthorization = `update ${machineId} from ${currentVersion} to ${targetVersion}`;
     if (String(request.authorization ?? '') !== expectedAuthorization) {
       throw new Error('authorized update text does not exactly match the machine and versions');
@@ -2787,7 +2791,9 @@ class UpdateManager {
     if (!background && !pinnedAtStart) this.publish({ phase: 'checking', error: null, blockers: null });
     try {
       const raw = await this.deps.fetchManifest(this.feedURL);
-      const manifest = snapshotReleaseManifest(validateReleaseManifest(raw, { platform: this.platform, arch: this.arch }));
+      const validated = validateReleaseManifest(raw, { platform: this.platform, arch: this.arch });
+      this.verifyReleaseSignature(validated);
+      const manifest = snapshotReleaseManifest(validated);
       this.manifest = manifest;
       const available = compareVersions(this.currentVersion, manifest.version) < 0;
       const pinned = this.pinnedRelease();
@@ -2851,6 +2857,14 @@ class UpdateManager {
     }
   }
 
+  // The check that is independent of GitHub, on every OS and on the Mac local
+  // feed: nothing about a release is believed until its manifest verifies against
+  // a key pinned in this build. Only a test can name other keys.
+  verifyReleaseSignature(manifest) {
+    return verifyReleaseManifestSignature(manifest, this.deps.releaseManifestPublicKeys
+      ? { publicKeys: this.deps.releaseManifestPublicKeys } : {});
+  }
+
   check(options = {}) {
     if (this.discoveryPromise) return this.discoveryPromise;
     const discovery = this.runDiscovery(options);
@@ -2901,6 +2915,9 @@ class UpdateManager {
     if (!this.manifest || compareVersions(this.currentVersion, this.manifest.version) >= 0) throw new Error('no Workass update is available');
     if (this.state.targetVersion !== this.manifest.version) throw new Error('the offered Workass release changed before download');
     release = snapshotReleaseManifest(this.manifest);
+    // Immediately before anything is written: the exact release about to be
+    // staged, whatever happened to the offer since discovery.
+    this.verifyReleaseSignature(release);
     this.activeRelease = release;
     if (this.transactionCleanupPromise) {
       // Startup cleanup runs in a worker against the same transactions tree.

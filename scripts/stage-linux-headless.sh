@@ -78,6 +78,7 @@ if [ -z "$release_input" ]; then
     command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
   done
 fi
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" check-key
 
 offline_flags=''
 [ "$offline" -eq 1 ] && offline_flags='--offline'
@@ -178,6 +179,7 @@ const release = {
 };
 fs.writeFileSync(file, `${JSON.stringify(release, null, 2)}\n`);
 NODE
+node "$repo_root/scripts/release/lib/manifest-signature.mjs" sign --manifest "$release_dir/$feed_name"
 
 echo "WORKASS_LINUX_HEADLESS_READY"
 echo "version=$version"

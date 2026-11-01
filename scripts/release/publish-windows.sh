@@ -63,6 +63,9 @@ if [ -n "$linux_release_dir" ]; then
   done
   (cd "$linux_release_dir" && shasum -a 256 -c "$linux_checksums") >/dev/null
 fi
+# A release every client would refuse never leaves this machine.
+node "$script_dir/lib/manifest-signature.mjs" verify --manifest "$release_dir/$manifest"
+[ -z "$linux_release_dir" ] || node "$script_dir/lib/manifest-signature.mjs" verify --manifest "$linux_release_dir/$linux_manifest"
 release_title="Workass $version — Windows portable"
 [ -z "$linux_release_dir" ] || release_title="Workass $version — Windows portable + Linux headless"
 gh auth status >/dev/null

@@ -27,6 +27,9 @@ type statelessMCPTestHarness struct {
 	client  *http.Client
 }
 
+// statelessMCPOwnerMessageID is the person's message the harness's chat holds.
+const statelessMCPOwnerMessageID = "mcp-owner-turn"
+
 func newStatelessMCPTestHarness(t *testing.T) statelessMCPTestHarness {
 	return newStatelessMCPTestHarnessWithProviders(t, nil)
 }
@@ -72,8 +75,8 @@ func newStatelessMCPTestHarnessWithOptions(t *testing.T, providers []acp.Provide
 	}
 	if _, err := runtime.Start(ctx, map[string]any{
 		"tabId": "mcp-tab", "chatId": "mcp-chat", "providerId": "mock", "cwd": root,
-		"prompt":        "[mock:permission] hold the actor-owned parent turn",
-		"userMessageId": "mcp-owner-turn", "assistantMessageId": "mcp-owner-assistant",
+		"prompt":        "[mock:permission] hold the actor-owned parent turn, and update when you can",
+		"userMessageId": statelessMCPOwnerMessageID, "assistantMessageId": "mcp-owner-assistant",
 	}, "human"); err != nil {
 		manager.Reset()
 		t.Fatalf("start actor-owned MCP parent turn: %v", err)

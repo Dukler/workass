@@ -97,10 +97,17 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	}
 	applySchema := mapFromAnyMain(apply["inputSchema"])
 	applyRequired := applySchema["required"].([]string)
-	for _, field := range []string{"machine_id", "expected_current_version", "expected_target_version", "authorization", "operation_id"} {
+	for _, field := range []string{"machine_id", "expected_current_version", "expected_target_version", "authorizing_message_id", "operation_id"} {
 		if !containsString(applyRequired, field) {
 			t.Fatalf("update apply schema does not require %q: %#v", field, applySchema)
 		}
+	}
+	// Still accepted, so a caller that sends it is not broken, and no longer enough.
+	if containsString(applyRequired, "authorization") {
+		t.Fatalf("update apply schema still requires the public sentence: %#v", applySchema)
+	}
+	if mapFromAnyMain(applySchema["properties"])["authorization"] == nil {
+		t.Fatalf("update apply schema no longer accepts authorization: %#v", applySchema)
 	}
 	if byName["workass_host_html"] != nil {
 		t.Fatal("legacy workass_host_html alias must not be advertised")
