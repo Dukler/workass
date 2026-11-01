@@ -80,3 +80,6 @@ The gate inside the first `ship.sh` failed on another test bug:
 daemon renamed `.turn-diagnostics.pending` away mid-walk. Under the same churn, `os.CopyFS` gives that
 exact error 5/200; the copy that tolerates it passes 200/200. Nothing was published by that attempt.
 
+Published artifact: the same rig sealed from the released `Workass-0.1.258-darwin-arm64.zip`, real
+Haiku. Stop on the held prompt, new chats: 0/10 ran, follow-up alive 10/10. Timed Stops: 0/12 ran.
+
