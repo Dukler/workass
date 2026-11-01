@@ -33,6 +33,14 @@ func (h *agentControlHandler) callFork(r *http.Request, method string, params ma
 		if err != nil {
 			return nil, err
 		}
+		if err := h.admitPermission(r.Context(), h.permissionCallerFor(r.Context(), ownerKey, callerTab, callerChat), permissionChange{
+			method: method, operationID: fieldString(params, "operation_id"),
+			summary: "mark a fork point, whose fork children would keep its level",
+			target:  "that fork point's children", tabID: tabID, chatID: chatID,
+			providerID: parent.ProviderID, modeID: firstNonEmptyString(fieldString(params, "mode_id"), parent.ModeID),
+		}); err != nil {
+			return nil, err
+		}
 		point, err := h.forks.CreateForkPoint(r.Context(), parent, acp.ForkPointOptions{
 			Name: fieldString(params, "name"), OperationID: fieldString(params, "operation_id"),
 			ModeID: fieldString(params, "mode_id"), Effort: fieldString(params, "effort"), AddDirs: stringSliceField(params["add_dirs"]),
@@ -57,6 +65,16 @@ func (h *agentControlHandler) callFork(r *http.Request, method string, params ma
 		pointID := fieldString(params, "fork_point_id")
 		if err := h.fenceForkOwner(h.forks.PointOwner(pointID)); err != nil {
 			return nil, err
+		}
+		if providerID, modeID, known := h.forks.PointPermissionMode(pointID); known {
+			if err := h.admitPermission(r.Context(), h.permissionCallerFor(r.Context(), ownerKey, callerTab, callerChat), permissionChange{
+				method: method, operationID: fieldString(params, "operation_id"),
+				summary: "start fork children from a fork point", target: "that fork point's children",
+				tabID: callerTab, chatID: callerChat, providerID: providerID, modeID: modeID,
+				contentDigest: permissionContentDigest(pointID),
+			}); err != nil {
+				return nil, err
+			}
 		}
 		opts := acp.ForkRunOptions{
 			ForkPointID: pointID, Concurrency: intField(params, "concurrency"),
@@ -119,6 +137,16 @@ func (h *agentControlHandler) callFork(r *http.Request, method string, params ma
 		runID := fieldString(params, "run_id")
 		if err := h.fenceForkOwner(h.forks.RunOwner(runID)); err != nil {
 			return nil, err
+		}
+		if providerID, modeID, known := h.forks.RunPermissionMode(runID); known {
+			if err := h.admitPermission(r.Context(), h.permissionCallerFor(r.Context(), ownerKey, callerTab, callerChat), permissionChange{
+				method: method, operationID: fieldString(params, "operation_id"),
+				summary: "retry a fork child", target: "that fork child",
+				tabID: callerTab, chatID: callerChat, providerID: providerID, modeID: modeID,
+				contentDigest: permissionContentDigest(runID + "\x00" + fieldString(params, "child_id")),
+			}); err != nil {
+				return nil, err
+			}
 		}
 		child, err := h.forks.RetryChild(runID, fieldString(params, "child_id"), fieldString(params, "message"), fieldString(params, "operation_id"))
 		if err != nil {

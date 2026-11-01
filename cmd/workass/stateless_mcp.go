@@ -173,8 +173,11 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(409, "this subagent's parent chat is no longer available")
 			return
 		}
+		// It acts for its parent and is not its parent: what it may hand out is
+		// capped by its own level, which can be narrower.
+		childRequest := r.WithContext(withPermissionSubagent(r.Context(), strings.TrimPrefix(chatID, subagentTabPrefix)))
 		value, err = h.manager.WithActorOwner(parentChatID, parentTabID, func(parentOwner string) (any, error) {
-			return dispatcher.callTool(r, call, parentOwner, parentChatID, parentTabID)
+			return dispatcher.callTool(childRequest, call, parentOwner, parentChatID, parentTabID)
 		})
 	} else {
 		value, err = dispatcher.callTool(r, call, owner, chatID, tabID)

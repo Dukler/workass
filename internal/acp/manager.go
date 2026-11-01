@@ -277,6 +277,11 @@ type permissionResolver struct {
 
 var errNoRunningWorkassQuestionCaller = errors.New("no running foreground Workass turn owns this question")
 
+// IsNoRunningQuestionCaller reports a card refused because no turn could own it.
+func IsNoRunningQuestionCaller(err error) bool {
+	return errors.Is(err, errNoRunningWorkassQuestionCaller)
+}
+
 // ValidateWorkassQuestionCaller fences provider-neutral questions to the exact
 // live foreground session that supplied the CLI capability. It intentionally
 // does not inspect provider capabilities: every attached ACP can use the tool.

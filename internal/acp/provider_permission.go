@@ -51,3 +51,33 @@ func (qwenProviderPermissionPolicy) Candidates(intent string) []string {
 func (qwenProviderPermissionPolicy) Intent(modeID string) string {
 	return genericProviderPermissionPolicy{}.Intent(modeID)
 }
+
+// permissionLevelAliases ranks the modes no provider policy claims as an intent.
+// They are real modes that the read/edit/full mapping has no use for, because
+// nothing ever selects them BY intent: a mode that asks before everything sits
+// with `default`, and `guardian` with the other modes that act on their own within
+// bounds. Keys are lower case.
+var permissionLevelAliases = map[string]string{
+	"ask": "read", "always-ask": "read", "default": "read",
+	"guardian": "edit",
+}
+
+// PermissionLevel ranks one mode by what it allows without a human, in the
+// read/edit/full vocabulary every provider already maps to. A mode nothing knows
+// returns empty, which means unknown and never high: PermissionLevelRank keeps
+// it apart from every real level, and callers decide what unknown costs them.
+func PermissionLevel(providerID, modeID string) string {
+	modeID = strings.TrimSpace(modeID)
+	if modeID == "" {
+		return ""
+	}
+	if level := permissionIntentForMode(providerID, modeID); level != "" {
+		return level
+	}
+	return permissionLevelAliases[strings.ToLower(modeID)]
+}
+
+// PermissionLevelRank orders levels: read 1, edit 2, full 3, anything else 0.
+func PermissionLevelRank(level string) int {
+	return hostedIntentRank(level)
+}

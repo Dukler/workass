@@ -217,20 +217,23 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		case "chat.read":
 			return h.chats.read(params)
 		case "chat.create":
-			return h.chats.create(r.Context(), tabID, chatID, params)
+			return h.chats.create(h.withPermissionGate(r.Context(), ownerKey, tabID, chatID), tabID, chatID, params)
 		case "chat.subsession":
-			return h.chats.subsession(r.Context(), tabID, chatID, params)
+			return h.chats.subsession(h.withPermissionGate(r.Context(), ownerKey, tabID, chatID), tabID, chatID, params)
 		case "chat.rename":
 			return h.chats.rename(params)
 		case "chat.settle":
 			return h.chats.settle(params)
 		case "chat.configure":
-			return h.chats.configure(r.Context(), params)
+			return h.chats.configure(h.withPermissionGate(r.Context(), ownerKey, tabID, chatID), params)
 		case "chat.focus":
 			return h.chats.focus(params)
 		case "chat.delete":
 			return h.chats.delete(params)
 		case "chat.send":
+			if err := h.admitSend(r.Context(), ownerKey, tabID, chatID, params); err != nil {
+				return nil, err
+			}
 			return h.chats.send(params)
 		case "chat.cancel":
 			return h.chats.cancel(params)
@@ -264,6 +267,10 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 		if h.chats == nil || h.chats.providerChats == nil {
 			return nil, errors.New("subagent spawn requires the durable chat actor")
+		}
+		params, err := h.admitSpawn(r.Context(), ownerKey, tabID, chatID, params)
+		if err != nil {
+			return nil, err
 		}
 		spawnOrigin := fleetCommandOrigin{}
 		if work, forwarded := fleetForwardedWorkFrom(r.Context()); forwarded && !work.Origin.empty() {
@@ -327,12 +334,18 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
 		}
+		if err := h.admitSubagentWork(r.Context(), request.Method, ownerKey, tabID, chatID, params); err != nil {
+			return nil, err
+		}
 		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
 			Kind: chat.BackgroundMessageAgent, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
 			Message: &chat.MessageAgentAction{WorkID: fieldString(params, "id"), Message: fieldString(params, "message")},
 		})
 	case "agent.retry":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
+			return nil, err
+		}
+		if err := h.admitSubagentWork(r.Context(), request.Method, ownerKey, tabID, chatID, params); err != nil {
 			return nil, err
 		}
 		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
@@ -539,6 +552,9 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
 		}
+		if err := h.refuseGrantBelowFull(r.Context(), ownerKey, tabID, chatID, fieldString(params, "decision")); err != nil {
+			return nil, err
+		}
 		return h.runBackgroundAction(r, tabID, chatID, chat.BackgroundAction{
 			Kind: chat.BackgroundAgentPermission, OperationID: providercontract.NormalizeOperationID(fieldString(params, "operation_id")),
 			Permission: &chat.AgentPermissionAction{WorkID: fieldString(params, "subagent_id"), Decision: fieldString(params, "decision")},
@@ -619,6 +635,17 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 	if limit := h.callerFleetLimit(ctx, params); limit != "" {
 		forwarded[fleetLimitParam] = limit
 	}
+	if method == "chat.send" {
+		// What the human just approved is what the home has to be told, or it would
+		// refuse the very send they said yes to.
+		approved, err := h.admitRemoteSend(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		if approved != "" {
+			forwarded[fleetLimitParam] = approved
+		}
+	}
 	if origin := h.callerFleetOrigin(ctx, params); !origin.empty() {
 		forwarded[fleetOriginParam] = origin.payload()
 	}
@@ -696,24 +723,21 @@ func stripDestinationMachineTags(params map[string]any, machineID string) error 
 }
 
 // callerFleetLimit is the caller's own permission ceiling, in the read/edit/full
-// vocabulary. A chat whose effective mode cannot be resolved states nothing
-// rather than claiming full: unstated is how every peer behaved before the
-// envelope existed, and the home resolves it the same way for both.
+// vocabulary. It always states one for a chat: a level it cannot read is the
+// lowest, because the home reads silence as a peer that predates the envelope,
+// which is full access.
 //
 // Work that itself arrived over a link carries that link's effective limit
 // onward unchanged, which is what makes narrowing transitive without a counter.
 func (h *agentControlHandler) callerFleetLimit(ctx context.Context, params map[string]any) string {
-	if work, forwarded := fleetForwardedWorkFrom(ctx); forwarded {
-		return canonicalFleetLimit(work.Limit)
-	}
-	if h == nil || h.manager == nil {
+	if h == nil {
 		return ""
 	}
-	return h.manager.CallerPermissionIntent(
+	return h.permissionCallerFor(ctx,
 		fieldString(params, "owner_key"),
-		fieldString(params, "parent_chat_id"),
 		fieldString(params, "parent_tab_id"),
-	)
+		fieldString(params, "parent_chat_id"),
+	).statedLevel()
 }
 
 // callerFleetOrigin stamps who asked. An origin that arrived with the command

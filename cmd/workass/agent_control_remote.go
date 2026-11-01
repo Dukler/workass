@@ -74,9 +74,13 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 	// not carry schedule.*" tells them which capability is missing, where "no
 	// remote form" would send them looking for a routing mistake they did not
 	// make.
+	// The renderer relay has no envelope and forwards params as they are, so a
+	// limit it carried is still in them. A caller's stated limit binds however
+	// it travelled.
+	statedLimit := firstNonEmptyString(fieldString(payload, "limit"), fieldString(mapFromAnyMain(payload["params"]), fleetLimitParam))
 	forwarded := fleetForwardedWork{
 		Peer:        strings.TrimSpace(caller.Peer),
-		Limit:       fleetEffectiveLimit(caller.Grant, fieldString(payload, "limit")),
+		Limit:       fleetEffectiveLimit(caller.Grant, statedLimit),
 		Origin:      fleetOriginFrom(payload["origin"]),
 		OperationID: strings.TrimSpace(fieldString(payload, "operation_id")),
 	}
@@ -100,6 +104,8 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 	}
 	delete(params, "machine_id")
 	delete(params, "owner_key")
+	delete(params, fleetLimitParam)
+	delete(params, fleetOriginParam)
 	if forwarded.OperationID != "" && strings.TrimSpace(fieldString(params, "operation_id")) == "" {
 		// One operation id for "launch there" and "record here". Carrying the
 		// caller's key into the local apply is what makes a replay produce
@@ -115,7 +121,7 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 	case remoteAgentMachineScoped:
 		switch method {
 		case "chat.create":
-			return h.chats.createOnThisMachine(ctx, params)
+			return h.chats.createOnThisMachine(h.withPermissionGate(ctx, "", "", ""), params)
 		case "agent.catalog":
 			return h.manager.MachineAgentCatalog(ctx), nil
 		case "chat.list":
