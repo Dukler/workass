@@ -141,8 +141,9 @@ record says *which peer is actually linked to me right now*.
   subscriptions and monitors at once; entities keep existing at their homes,
   and every affected watcher is told `link_revoked{peer, at}` on the same
   monitor stream as `home_down` — never silence, and never a fake outcome.
-- **Discovery** is what already exists: the multicast beacon and machine book
-  (`internal/machinebook`), plus addresses a human typed.
+- **Discovery** is what already exists: the TCP sweep and machine book
+  (`internal/machinebook`, PORT-SPEC 2026-11-01 discovery law), plus addresses a
+  human typed.
 - **Identity before credentials.** Before any token is presented, the dialer
   requires the address to prove it is the expected daemon: read the identity
   card at `/workass/health` and match `machineId` (and the pinned certificate),

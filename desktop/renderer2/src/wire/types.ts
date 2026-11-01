@@ -915,6 +915,7 @@ export interface WorkassApi {
   machinesForget?: (machineId: string) => Promise<unknown>;
   machinesNickname?: (machineId: string, nickname: string) => Promise<{ ok?: boolean; error?: string; machines?: unknown[]; self?: { machineId?: string; name?: string } } | undefined>;
   machinesRefresh?: () => Promise<unknown>;
+  machinesScan?: () => Promise<unknown>;
   onMachinesChanged?: (cb: (payload: { machines?: unknown[]; self?: { machineId?: string; name?: string } }) => void) => void;
   // The fleet key, readable from the app instead of a terminal. Listing is
   // non-secret; the other three are refused (fleet:not-local) unless this client

@@ -212,7 +212,7 @@ const LANBridgeJS = `(() => {
     // renderer simply never calls them, and an older daemon answers "unknown
     // channel", which feature detection upstream reads as absent.
     machinesList: () => invoke('machines:list'), machinesAdd: (address) => invoke('machines:add', { address }),
-    machinesForget: (machineId) => invoke('machines:forget', { machineId }), machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname }), machinesRefresh: () => invoke('machines:refresh'),
+    machinesForget: (machineId) => invoke('machines:forget', { machineId }), machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname }), machinesRefresh: () => invoke('machines:refresh'), machinesScan: () => invoke('machines:scan'),
     // The fleet key, readable without a terminal. Listing is non-secret; the
     // other three answer fleet:not-local unless this client is on the machine
     // that holds the key, so the secret never crosses the network.

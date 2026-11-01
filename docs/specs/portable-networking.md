@@ -1,7 +1,6 @@
 # Portable networking: one app, any network
 
-Status: DESIGN v3, after two contrarian reviews. Nothing here is built.
-Owner decisions are listed in §9.
+Status: DESIGN v4, after two contrarian reviews. Discovery (§6) is built; the rest is not.
 
 ## 1. Goal
 
@@ -12,11 +11,10 @@ account.
 - **G1** One machine: works offline from the first launch.
 - **G2** Same network: machines on default ports find each other with no
   configuration. A custom port is typed once at first pairing.
-- **G3** Different networks: machines connect after one pairing, through NAT,
-  with no third-party product.
+- **G3** Different networks: machines connect over any VPN the owner already runs,
+  with no VPN embedded in Workass.
 - **G4** The certificate never needs a human, including at expiry.
-- **G5** Hardened hosts: works with TCP only, one port, no admin rights, no UDP,
-  and on a side that can accept no inbound connection.
+- **G5** Hardened hosts: works with TCP only, one port, no admin rights and no UDP.
 - **G6** No security regression: end-to-end pinned TLS, nothing in the middle can
   read or forge traffic, no central account.
 
@@ -47,7 +45,7 @@ The gaps:
   name errors.
 - **F5 Replacing the certificate unpairs every client.** The pin covers the whole
   certificate.
-- **F6 Nothing crosses NAT.**
+- **F6 Nothing crosses NAT by itself.** A VPN does that, once F2 is fixed.
 - **F7 Trust is weaker than the design assumed.** See §3.
 - **F8 No listener hardening.** The HTTP server sets no timeouts, pending approvals
   are uncapped, lockout is per connection, and `0.0.0.0` is dual-stack in Go, so a
@@ -109,82 +107,47 @@ Two verifier policies replace one:
   an agent's site sign-ins. A book entry must never relax TLS for a public site
   there.
 
-This alone makes overlay and VPN addresses work, with no embedded VPN. Public
-addresses stay behind §9.3. The renderer also gains the route ladder that only the
+This alone makes overlay and VPN addresses work, with no embedded VPN. The renderer also gains the route ladder that only the
 Go mesh has today, so it falls back instead of stopping at the first address.
 Refused routes expire or scope per network, because RFC1918 addresses collide
 across networks.
 
-## 6. Discovery by network type (F1)
+## 6. Discovery by network type (F1). BUILT
 
 A network is **associated** only while a stored peer completes a pinned handshake
 on it right now. Subnets collide and cards can be forged, so neither counts.
 
-| Network | Behaviour |
+| Situation | Behaviour |
 |---|---|
-| Associated | Today's automatic sweep and cadence, plus multicast announce/listen, which also carries custom ports |
-| Unassociated | No automatic sweep or multicast. Sweep only while the Machines pane is open |
-| Windows production profile | Unchanged, under the 2026-09-25 law |
+| Associated network | Automatic sweep at today's cadence, on ports 80 and 8788 |
+| Holds a fleet key and knows no machine | Automatic sweep, so a headless machine can find its fleet |
+| Anywhere else | No automatic sweep. A sweep runs while the Machines pane is open, or when an agent calls `workass_discover_machines` |
+| Windows | Unchanged under the 2026-09-25 law: port 80, every network |
 
-Sweeps probe the default ports `{80, 8788}`. Connected peers also gossip their
-current addresses over authenticated links, which needs no scanning and handles
-roaming. A headless daemon that has just joined a fleet by key runs one bounded
-sweep, since nobody will ever open its Machines pane. UDP is an opportunistic addition, never required (G5). This amends the
-2026-07-10 and 2026-09-09 laws, so it waits for §9.2. The stale docs get corrected
-regardless.
+The law is in PORT-SPEC (2026-11-01). The agent tool takes no address on purpose: a
+prompt-injected agent must not be able to point enrolment at an arbitrary host. A
+custom port or a VPN address is typed by a person, once. Peer address gossip, which
+would handle roaming over VPN, is not built.
 
-## 7. Built-in relay (G3, G5, G6)
+## 7. Reaching a machine over the internet
 
-Any reachable daemon can relay, as can the same binary on a small server
-(`workass relay`). It is a pure splice.
+The owner's decision (2026-11-01): always through a VPN, and Workass is not exposed
+to the internet directly. So a VPN address is just another route, and §5 is what
+makes it work. No relay, no public addresses and no project-run infrastructure are
+planned.
 
-```
-target -> relay   upgrade /workass/relay/listen    (control, heartbeat)
-client -> relay   upgrade /workass/relay/dial?target=<rendezvous id>
-relay  -> target  "incoming <stream>" on the control channel
-target -> relay   upgrade /workass/relay/accept?stream=<id>
-relay splices; inner TLS 1.3 runs client <-> target, pinned
-```
-
-- **One outbound TCP per stream.** TCP supplies isolation and flow control, so no
-  multiplexer and no dependency.
-- **Reaches restrictive networks.** A WebSocket-shaped upgrade on a port list held
-  as data, with 443 first. Honours system proxies. Outer TLS is not the trust
-  anchor, so an inspecting proxy cannot read the inner session.
-- **The daemon is unchanged above the listener.** A `relayListener` feeds streams
-  into the same `tls.NewListener` + `http.Server`, so a relayed connection is an
-  ordinary wire session.
-- **The relay sees only ciphertext.** Device tokens stay inside inner TLS.
-- **Admission for an untrusted relay.** A rendezvous token derived from the fleet
-  key under its own domain separator, with no fleet key and no stored account on
-  the relay, and per-token caps.
-- **Locality law.** A relayed connection is never local, on every gate, through the
-  §3 helper. Human pairing is refused over a relay, and no route is learned from a
-  relayed peer.
-
-**Clients:**
-
-- Go mesh: a custom dial function.
-- Electron: one loopback forwarder owned by the local daemon. The renderer connects
-  to `wss://<machineId>.localhost:<port>`, and the forwarder routes on SNI to the
-  right peer, reading the name with a stdlib `GetConfigForClient` peek that writes
-  nothing. It is a separate listener, and an unknown name closes the connection and
-  never reaches the daemon, which auto-pairs loopback peers. Each peer gets its own
-  hostname, so each has exactly one pin; a shared loopback host would let one peer's
-  key satisfy another's pin. Chromium's handling of these names needs rig proof
-  before this is final.
-- Plain browsers: LAN only, because they cannot hold a pin.
-- Phone: a native transport, in its own spec in its own repo.
-
-**Why nested TLS rather than SNI passthrough:** browsers send no SNI for IP
-literals, and DNS names would need central infrastructure.
+**Deferred, not designed further:** a built-in relay. If that ever changes, the shape
+that survived review was a pure splice with nested TLS, one outbound TCP per stream,
+a WebSocket-shaped upgrade on port 443 honouring system proxies, a rendezvous token
+derived from the fleet key, and a relayed connection never counting as local on any
+gate.
 
 ## 8. Rejected
 
 | Option | Why |
 |---|---|
-| Embed Caddy | Its unique value here is publicly trusted certificates, which reach only a public node, not NAT |
-| Let's Encrypt IP certificates | Available since January 2026, but a public-IP node only. Deferred, not rejected, for a future public relay serving plain browsers |
+| Embed Caddy | Its unique value here is publicly trusted certificates, which only a public node can get |
+| Let's Encrypt IP certificates | Available since January 2026, but for a public-IP node only |
 | Embed `tsnet` | Still needs a control server, and Tailscale's module carries several hundred requirements |
 | iroh, Syncthing's relay pool, Cloudflare quick tunnels | Public relays are not offered for this: not for production, built for another app, or testing-only |
 | WebRTC / QUIC hole punching | Needs UDP, a large stack, and still a signalling server |
@@ -193,31 +156,17 @@ literals, and DNS names would need central infrastructure.
 
 ## 9. Owner decisions
 
-1. **Who runs the default relay?** Two machines that are both outbound-only cannot
-   meet without a third party. "Bring your own" is not "just runs". The options:
-   ship with a project-run relay, which amends fleet-runtime §15 and adds cost and
-   abuse handling, or require one reachable machine you own. Recommendation: build
-   bring-your-own first with admission designed for an open relay, so a project
-   relay later is a data change, and decide before P4 ships.
-2. **Discovery law amendment** (§6).
-3. **Public addresses.** Direct public routes require public-key enrolment (the
-   replacement `fleet.go` already promises), because a symmetric key means one
-   stolen machine opens every reachable daemon. P4 itself requires real rotation,
-   and public-key enrolment is a separate spec. Rotation revokes every device
-   enrolled under the old key id, distributes the new key only over surviving links
-   (never under the old key, which would hand it to the thief), and rotates the
-   rendezvous token.
+All settled on 2026-11-01: no relay and no direct internet exposure (§7), and the
+discovery amendment (§6).
 
 ## 10. Phases
 
-| Phase | Work | Gate |
+| Phase | Work | Status or gate |
 |---|---|---|
-| P0 | §3 trust and hardening | An on-path rig with a forged card and a stripped proof gets no enrolment, on every client class; locality denial tests on every gate |
-| P1 | §5 address trust and renderer ladder | Client reaches an overlay-range address; browser partition still refuses a public forged certificate |
-| P2 | §4 certificate lifecycle | Clock-forward rig: reissue at restart, every client class reconnects with no re-approval, including past expiry |
-| P3 | §6 discovery and gossip, after §9.2 | Address change reconnects with no human; no sweep on an unassociated network |
-| P4 | §7 relay, Go mesh then Electron, plus key rotation | Two daemons with all inbound firewalled exchange chats; capture at the relay shows no plaintext; works through an HTTP proxy on 443; a stolen key and stolen tokens are refused over relay and LAN after rotation |
-| Later | Public routes after public-key enrolment | Own spec |
+| Discovery | §6 | Built. Live: the installed build found 1 of 3 machines on a real LAN, this one found all 3 in 7.4 s; idle with nothing known it knocked 0 times |
+| P0 | §3 trust and hardening | Not built. An on-path rig with a forged card and a stripped proof gets no enrolment, on every client class; locality denial tests on every gate |
+| P1 | §5 address trust and renderer ladder | Not built. Client reaches a VPN-range address; browser partition still refuses a forged public certificate |
+| P2 | §4 certificate lifecycle | Not built. Clock-forward rig: reissue at restart, every client class reconnects with no re-approval, including past expiry |
 
 Separate specs: phone transport, and install (signing, `workass install --user`,
 first-run reachability check, which is UI and therefore mock-first). Fleet features

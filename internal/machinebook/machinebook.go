@@ -243,8 +243,8 @@ func (b *Book) discover(ctx context.Context, address string, probe func(context.
 	if err != nil {
 		return Entry{}, false, err
 	}
-	if !isPort80Address(normalized) {
-		return Entry{}, false, errors.New("automatic discovery probes only TCP port 80")
+	if !isSweepAddress(normalized) {
+		return Entry{}, false, errors.New("automatic discovery probes only TCP ports 80 and 8788")
 	}
 	card, probeErr := probe(ctx, normalized)
 	if probeErr != nil {

@@ -22,11 +22,11 @@ it, because that machine is a reach-into machine by design.
 
 Two things ride with it:
 
-- `--beacon` (default on, `WORKASS_DAEMON_BEACON=0` to disable) uses
-  `239.87.87.88:48788` so daemons can find each other. A LAN-bound daemon
-  listens and announces; a loopback-bound controller listens without
-  announcing an unreachable endpoint. It never sweeps a subnet and probes only
-  the source address of a packet it received.
+- `--beacon` (default on, `WORKASS_DAEMON_BEACON=0` to disable) enables
+  automatic discovery: a TCP sweep of `/workass/health` on directly attached
+  private networks, under the PORT-SPEC 2026-11-01 discovery law. Nothing sends
+  multicast; `machinebook.Beacon` has no production caller. An explicit sweep
+  (`machines:scan`, `workass_discover_machines`) works with it disabled too.
 - Binding LAN now logs a warning naming exactly what is readable on that
   network. `secure: false` in the health card is truthful and stays false until
   E5 puts a certificate on the port. Badge it.

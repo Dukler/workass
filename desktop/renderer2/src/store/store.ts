@@ -3389,6 +3389,12 @@ export class Store {
     }
   }
 
+  /** Ask the daemon to sweep the network now. Results arrive as machines:changed. */
+  async scanForMachines(): Promise<void> {
+    if (!has('machinesScan')) return;
+    try { await call('machinesScan'); } catch { /* an older daemon, or a sweep that will run again */ }
+  }
+
   private async reloadMachines(reconnect = false): Promise<void> {
     if (!has('machinesList')) return;
     try {

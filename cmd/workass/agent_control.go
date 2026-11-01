@@ -28,6 +28,8 @@ type agentControlHandler struct {
 	// machine take the ordinary local path, so "machine" is a uniform argument
 	// rather than a switch between two different tools.
 	selfMachineID string
+	// machineDiscovery runs an asked-for network sweep. Nil with no machine book.
+	machineDiscovery *machineDiscovery
 	// stateDir is where a status answered with no renderer finds the last update
 	// receipt, one level up in the data root.
 	stateDir      string
@@ -175,6 +177,14 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		}
 	}
 	switch request.Method {
+	case "machines.discover":
+		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
+			return nil, err
+		}
+		if h.machineDiscovery == nil {
+			return nil, errors.New("this Workass installation has no machine book, so it cannot discover machines")
+		}
+		return h.machineDiscovery.discoverMachines(r.Context()), nil
 	case "update.targets", "update.status", "update.apply":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err

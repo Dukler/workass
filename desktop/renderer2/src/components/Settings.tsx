@@ -504,6 +504,7 @@ function AtajosPanel() {
 
 
 // ---- máquinas (remote-plan E3) -------------------------------------------
+const MACHINE_SCAN_MS = 30_000;
 // One visible ceremony only: discovery finds the other Workass, this client
 // requests access, and the controller on the other machine approves it. The
 // compatibility wire still understands manual/fleet enrolment, but ordinary
@@ -516,6 +517,15 @@ function MaquinasPanel() {
   const paired = app.machines.filter((machine) => machine.paired);
   const nearby = app.machines.filter((machine) => !machine.paired);
   const incoming = app.accessRequests;
+
+  // On a network with none of this user's machines the daemon does not sweep by
+  // itself, so an open pane is what asks. Refresh keeps a machine that just came
+  // up from waiting for the pane to be reopened.
+  useEffect(() => {
+    void store.scanForMachines();
+    const timer = window.setInterval(() => { void store.scanForMachines(); }, MACHINE_SCAN_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const togglePhoneQR = () => {
     if (!app.fleetCanReveal) return;

@@ -428,6 +428,10 @@ func main() {
 	if machineBook != nil {
 		logger.Printf("[workass] registered %d machine wire channels", registerMachineHandlers(hub, machineBook, identity))
 	}
+	discovery := newMachineDiscovery(machineBook, runtime.GOOS, func() bool {
+		return fleetKeys != nil && len(fleetKeys.Keys()) > 0
+	}, logger.Printf)
+	registerMachineDiscoveryHandler(hub, discovery)
 	// The daemon's own outbound half. Until now internal/wire only ACCEPTED
 	// sockets, so the renderer was the fleet's only bridge and closing the app
 	// closed the fleet (docs/specs/fleet-runtime.md §1). With a mesh, a command
@@ -457,6 +461,7 @@ func main() {
 	// difference is that remote calls now work with the app closed (§12).
 	agentControl.remoteChats = newFleetMeshRouter(fleetMesh.mesh, rendererAgentRouter, identity.MachineID, logger.Printf)
 	agentControl.selfMachineID = identity.MachineID
+	agentControl.machineDiscovery = discovery
 	if registerAgentControlWireHandler(hub, agentControl) {
 		logger.Printf("[workass] registered the fleet agent control channel %s", remoteAgentControlChannel)
 	}
@@ -606,9 +611,10 @@ func main() {
 		logger.Printf("[workass] fleet mesh supervising %d peer link(s)", linked)
 	}
 	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
-		Bind:   *bind,
-		Port:   *port,
-		Beacon: *beacon,
+		Bind:      *bind,
+		Port:      *port,
+		Beacon:    *beacon,
+		Discovery: discovery,
 		// Discovery is what already exists: every book refresh is also when a
 		// newly-sighted machine of this fleet becomes a peer with a heartbeat.
 		OnBook: fleetMesh.SyncFromBook,

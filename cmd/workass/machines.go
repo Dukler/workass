@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"workass/internal/machinebook"
@@ -15,6 +16,103 @@ import (
 // machineChannelCount is how many wire channels the machine book adds. Headless
 // first, per E1: the book is provable from a CLI before a pixel exists.
 const machineChannelCount = 5
+
+// machineSweepTimeout bounds an asked-for sweep. A full one takes under 8 s.
+const machineSweepTimeout = 20 * time.Second
+
+// machineDiscovery owns the network sweep, so the background loop, the Machines
+// pane and the agent tool all share one scanner and one sweep at a time.
+type machineDiscovery struct {
+	book     *machinebook.Book
+	scanner  *machinebook.Scanner
+	onChange atomic.Pointer[func()]
+}
+
+// newMachineDiscovery applies the sweep policy for this platform. Windows keeps
+// exactly today's behaviour under the 2026-09-25 endpoint-protection law: port 80
+// only, on every network. Everywhere else also probes the daemon's default port,
+// and sweeps on its own only where one of this user's machines is present, or
+// while a machine holding a fleet key still knows no other machine.
+func newMachineDiscovery(book *machinebook.Book, goos string, hasFleetKey func() bool, logf func(string, ...any)) *machineDiscovery {
+	if book == nil {
+		return nil
+	}
+	discovery := &machineDiscovery{book: book}
+	discovery.scanner = &machinebook.Scanner{
+		Book: book,
+		Logf: logf,
+		OnChange: func(machinebook.Entry) {
+			discovery.notify()
+		},
+	}
+	if goos != "windows" {
+		discovery.scanner.Ports = []int{machinebook.DiscoveryPort, machinebook.DaemonPort}
+		discovery.scanner.Gate = func(ctx context.Context) bool {
+			if hasFleetKey != nil && hasFleetKey() && len(book.List()) == 0 {
+				return true
+			}
+			return book.OnAssociatedNetwork(ctx)
+		}
+	}
+	return discovery
+}
+
+func (d *machineDiscovery) notify() {
+	if callback := d.onChange.Load(); callback != nil {
+		(*callback)()
+	}
+}
+
+// sweepNow sweeps immediately and returns what that sweep added to the book.
+func (d *machineDiscovery) sweepNow(ctx context.Context) []machinebook.Entry {
+	known := make(map[string]struct{})
+	for _, entry := range d.book.List() {
+		known[entry.MachineID] = struct{}{}
+	}
+	sweepCtx, cancel := context.WithTimeout(ctx, machineSweepTimeout)
+	defer cancel()
+	d.scanner.SweepNow(sweepCtx)
+	var found []machinebook.Entry
+	for _, entry := range d.book.List() {
+		if _, existed := known[entry.MachineID]; !existed {
+			found = append(found, entry)
+		}
+	}
+	return found
+}
+
+// registerMachineDiscoveryHandler adds the one channel the Machines pane uses to
+// ask for a sweep while it is open. Results also arrive as machines:changed.
+func registerMachineDiscoveryHandler(hub *wire.Hub, discovery *machineDiscovery) {
+	if discovery == nil {
+		return
+	}
+	hub.Register("machines:scan", func(args []any) (any, error) {
+		found := discovery.sweepNow(context.Background())
+		return map[string]any{"ok": true, "found": len(found), "machines": discovery.book.List()}, nil
+	})
+}
+
+// discoverMachines answers the agent tool: every machine in the book, by exact id,
+// after a sweep run right now.
+func (d *machineDiscovery) discoverMachines(ctx context.Context) map[string]any {
+	found := d.sweepNow(ctx)
+	describe := func(entries []machinebook.Entry) []map[string]any {
+		rows := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			address := ""
+			if len(entry.Endpoints) > 0 {
+				address = entry.Endpoints[0].Address
+			}
+			rows = append(rows, map[string]any{
+				"machine_id": entry.MachineID, "name": entry.Name, "nickname": entry.Nickname,
+				"address": address, "status": entry.Status, "reason": entry.Reason, "version": entry.Version,
+			})
+		}
+		return rows
+	}
+	return map[string]any{"newly_found": describe(found), "machines": describe(d.book.List())}
+}
 
 // machineRefreshInterval stays fast even when full discovery sweeps back off,
 // so a machine that dies is marked
@@ -148,6 +246,9 @@ type machinePresenceOptions struct {
 	Bind   string
 	Port   int
 	Beacon bool
+	// Discovery is the shared sweep. Beacon decides only whether it runs on its
+	// own; a person or an agent can still ask for one.
+	Discovery *machineDiscovery
 	// OnBook runs after every refresh that changed the book. The fleet mesh
 	// reads it there rather than owning a clock of its own: a machine sighted by
 	// discovery becomes a peer with a heartbeat on the same tick that noticed it
@@ -178,6 +279,10 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 		})
 	}
 
+	if opts.Discovery != nil {
+		opts.Discovery.onChange.Store(&broadcast)
+	}
+
 	go func() {
 		ticker := time.NewTicker(machineRefreshInterval)
 		defer ticker.Stop()
@@ -197,15 +302,13 @@ func startMachinePresence(ctx context.Context, book *machinebook.Book, hub *wire
 		logger.Printf("[workass] automatic port-80 discovery is disabled (--beacon=false)")
 		return
 	}
-	scanner := &machinebook.Scanner{
-		Book:     book,
-		OnChange: func(machinebook.Entry) { broadcast() },
-		Logf:     logger.Printf,
+	if opts.Discovery == nil {
+		return
 	}
 	go func() {
-		if err := scanner.Run(ctx); err != nil {
-			logger.Printf("[workass] automatic port-80 discovery stopped: %v", err)
+		if err := opts.Discovery.scanner.Run(ctx); err != nil {
+			logger.Printf("[workass] automatic discovery stopped: %v", err)
 		}
 	}()
-	logger.Printf("[workass] automatic machine discovery probing private LAN hosts on TCP port %d", machinebook.DiscoveryPort)
+	logger.Printf("[workass] automatic machine discovery probing private LAN hosts")
 }

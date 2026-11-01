@@ -2,9 +2,12 @@ package machinebook
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,5 +142,115 @@ func TestDiscoveryRescanFindsMachineAppearingAfterStableScan(t *testing.T) {
 	}
 	if scanner.scan(t.Context()) {
 		t.Fatal("unchanged endpoint prevents discovery backoff")
+	}
+}
+
+func TestSweepPortsCoverTheDaemonDefaultAndNothingElse(t *testing.T) {
+	for address, want := range map[string]bool{
+		"192.168.50.71:80":   true,
+		"192.168.50.71:8788": true,
+		"192.168.50.71:443":  false,
+		"192.168.50.71:9000": false,
+	} {
+		if got := isSweepAddress(address); got != want {
+			t.Fatalf("isSweepAddress(%s) = %v, want %v", address, got, want)
+		}
+	}
+}
+
+// A sweep of port 80 alone could never find a macOS or Linux daemon, which is the
+// reason this port is swept at all.
+func TestBookAcceptsADaemonOnItsDefaultPortFromASweep(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-mac", "mac", 1))
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, daemon.address())
+		},
+	}
+	book, err := Open(Options{StateDir: t.TempDir(), SelfID: "m-self", WireVersion: 1, HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("open book: %v", err)
+	}
+	if _, _, err := book.Discover(context.Background(), "192.168.50.20:8788"); err != nil {
+		t.Fatalf("a daemon on its default port was refused: %v", err)
+	}
+	if _, _, err := book.Discover(context.Background(), "192.168.50.20:9000"); err == nil {
+		t.Fatal("a sweep reached a port it has no reason to probe")
+	}
+}
+
+func TestGateStopsTheLoopButNotAnAskedForSweep(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-other", "other", 1))
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, daemon.address())
+		},
+	}
+	book, err := Open(Options{StateDir: t.TempDir(), SelfID: "m-self", WireVersion: 1, HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("open book: %v", err)
+	}
+	var gateCalls atomic.Int32
+	scanner := &Scanner{
+		Book: book, Interval: time.Millisecond, ProbeTimeout: time.Second,
+		Candidates: []string{"192.168.50.20:8788"},
+		Gate:       func(context.Context) bool { gateCalls.Add(1); return false },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- scanner.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for gateCalls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gateCalls.Load() == 0 {
+		t.Fatal("the loop never consulted its gate")
+	}
+	if probes := daemon.probes.Load(); probes != 0 {
+		t.Fatalf("a gated loop probed %d times", probes)
+	}
+	if !scanner.SweepNow(context.Background()) {
+		t.Fatal("an asked-for sweep found nothing")
+	}
+	if entries := book.List(); len(entries) != 1 || entries[0].MachineID != "m-other" {
+		t.Fatalf("book after asked-for sweep: %#v", entries)
+	}
+}
+
+func TestAssociationRequiresTheStoredCertificateOnAnAttachedNetwork(t *testing.T) {
+	daemon := newFakeDaemon(t, identityDoc("m-home", "home", 1))
+	sum := sha256.Sum256(daemon.server.Certificate().Raw)
+	real := hex.EncodeToString(sum[:])
+	loopback := []*net.IPNet{{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)}}
+	elsewhere := []*net.IPNet{{IP: net.IPv4(192, 168, 50, 0), Mask: net.CIDRMask(24, 32)}}
+
+	book := func(fingerprint string) *Book {
+		t.Helper()
+		b, err := Open(Options{StateDir: t.TempDir(), SelfID: "m-self", WireVersion: 1})
+		if err != nil {
+			t.Fatalf("open book: %v", err)
+		}
+		b.entries["m-home"] = Entry{
+			MachineID: "m-home", CertFingerprint: fingerprint,
+			Endpoints: []Endpoint{{Kind: KindLAN, Address: daemon.address()}},
+		}
+		return b
+	}
+	ctx := context.Background()
+	if !book(real).associated(ctx, loopback) {
+		t.Fatal("the stored certificate answering on an attached network must count")
+	}
+	if book(strings.Repeat("0", 64)).associated(ctx, loopback) {
+		t.Fatal("a different certificate at a remembered address must not count")
+	}
+	if book(real).associated(ctx, elsewhere) {
+		t.Fatal("an address on no attached network must not count")
+	}
+	if book("").associated(ctx, loopback) {
+		t.Fatal("a machine with no stored certificate must not count")
 	}
 }

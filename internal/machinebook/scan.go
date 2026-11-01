@@ -13,10 +13,14 @@ import (
 	"time"
 )
 
-// DiscoveryPort is the only port automatic managed-machine discovery probes.
-// PORT-SPEC's network law fixes this at TCP 80 because that is the sole inbound
-// port available on the managed Windows machine.
+// DiscoveryPort is the port every sweep probes. PORT-SPEC's network law fixes it
+// at TCP 80 because that is the sole inbound port available on a managed Windows
+// machine.
 const DiscoveryPort = 80
+
+// DaemonPort is where macOS and Linux daemons listen by default. A sweep of port
+// 80 alone can never find them (owner amendment 2026-11-01).
+const DaemonPort = 8788
 
 const (
 	defaultScanConcurrency = 32
@@ -24,9 +28,13 @@ const (
 	maxStableScanInterval  = time.Minute
 )
 
-// Scanner discovers Workass daemons by probing /workass/health on TCP port 80
-// across this host's private directly-connected LAN. It sends no multicast or
-// broadcast packets and never scans a public address range.
+// sweepSettle is how recent a finished sweep must be for a caller that waited
+// behind it to reuse its answer rather than knock on every address again.
+const sweepSettle = 5 * time.Second
+
+// Scanner discovers Workass daemons by probing /workass/health across this host's
+// private directly-connected LAN. It sends no multicast or broadcast packets and
+// never scans a public address range.
 type Scanner struct {
 	Book         *Book
 	Interval     time.Duration
@@ -34,6 +42,15 @@ type Scanner struct {
 	Concurrency  int
 	OnChange     func(Entry)
 	Logf         func(format string, args ...any)
+
+	// Ports are the ports each host is probed on. Empty means DiscoveryPort.
+	Ports []int
+	// Gate decides whether Run may sweep right now. Nil always may. It never
+	// applies to SweepNow, which is a person or an agent asking.
+	Gate func(context.Context) bool
+
+	sweep     sync.Mutex
+	lastSweep time.Time
 
 	// Candidates is a deterministic test seam. Production leaves it empty and
 	// derives private candidates from active LAN interfaces.
@@ -55,7 +72,10 @@ func (s *Scanner) Run(ctx context.Context) error {
 	step := func() {
 		candidates := s.candidates()
 		if schedule.due(time.Now(), strings.Join(candidates, "\n")) {
-			changed := s.scanCandidates(ctx, candidates)
+			changed := false
+			if s.Gate == nil || s.Gate(ctx) {
+				changed = s.locked(ctx, candidates)
+			}
 			schedule.finished(time.Now(), changed)
 		}
 	}
@@ -98,10 +118,43 @@ func (s *scanSchedule) finished(now time.Time, changed bool) {
 func (s *Scanner) candidates() []string {
 	candidates := append([]string(nil), s.Candidates...)
 	if len(candidates) == 0 {
-		candidates = privateLANPort80Candidates()
+		networks := privateLANNetworks()
+		ports := s.Ports
+		if len(ports) == 0 {
+			ports = []int{DiscoveryPort}
+		}
+		for _, port := range ports {
+			candidates = append(candidates, scanCandidates(networks, port)...)
+		}
 	}
 	sort.Strings(candidates)
 	return candidates
+}
+
+// SweepNow sweeps immediately, whatever Gate says, and reports whether the book
+// changed. One sweep runs at a time. A caller that waited behind another sweep
+// reuses that answer instead of probing every address a second time.
+func (s *Scanner) SweepNow(ctx context.Context) bool {
+	if s == nil || s.Book == nil {
+		return false
+	}
+	started := time.Now()
+	s.sweep.Lock()
+	defer s.sweep.Unlock()
+	if s.lastSweep.After(started) && time.Since(s.lastSweep) < sweepSettle {
+		return false
+	}
+	changed := s.scanCandidates(ctx, s.candidates())
+	s.lastSweep = time.Now()
+	return changed
+}
+
+func (s *Scanner) locked(ctx context.Context, candidates []string) bool {
+	s.sweep.Lock()
+	defer s.sweep.Unlock()
+	changed := s.scanCandidates(ctx, candidates)
+	s.lastSweep = time.Now()
+	return changed
 }
 
 func (s *Scanner) scan(ctx context.Context) bool {
@@ -145,7 +198,7 @@ func (s *Scanner) scanCandidates(ctx context.Context, candidates []string) bool 
 				}
 				if changed {
 					discovered.Store(true)
-					s.logf("[machines] auto-detected %s (%s) at %s over TCP 80", entry.Name, entry.MachineID, address)
+					s.logf("[machines] auto-detected %s (%s) at %s", entry.Name, entry.MachineID, address)
 					if s.OnChange != nil {
 						s.OnChange(entry)
 					}
@@ -210,6 +263,12 @@ func (s *Scanner) logf(format string, args ...any) {
 // IPv4 LANs. Each interface is capped to its local /24 when the configured
 // prefix is broader, preventing an accidental sweep of a corporate /16.
 func privateLANPort80Candidates() []string {
+	return scanCandidates(privateLANNetworks(), DiscoveryPort)
+}
+
+// privateLANNetworks lists the private IPv4 networks this host is directly
+// attached to. VPN and other point-to-point interfaces are not among them.
+func privateLANNetworks() []*net.IPNet {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -235,7 +294,7 @@ func privateLANPort80Candidates() []string {
 			networks = append(networks, &net.IPNet{IP: append(net.IP(nil), ip...), Mask: append(net.IPMask(nil), ipnet.Mask...)})
 		}
 	}
-	return scanCandidates(networks, DiscoveryPort)
+	return networks
 }
 
 func scannableInterface(iface net.Interface) bool {
@@ -296,6 +355,12 @@ func scanCandidates(networks []*net.IPNet, port int) []string {
 		}
 	}
 	return out
+}
+
+// isSweepAddress reports whether automatic discovery may probe this address.
+func isSweepAddress(address string) bool {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	return err == nil && (port == strconv.Itoa(DiscoveryPort) || port == strconv.Itoa(DaemonPort))
 }
 
 func isPort80Address(address string) bool {

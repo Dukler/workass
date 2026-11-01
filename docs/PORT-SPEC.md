@@ -40,6 +40,14 @@ changes. Do not rewrite unchanged provider controls or chat obligations, copy
 committed chat history for periodic obligation checks, or repeatedly resolve
 already-imported assistant images during streaming.
 
+User law 2026-11-01 (discovery): outside Windows, sweeps also probe the daemon's
+default port 8788, and the daemon sweeps by itself only while a machine from its
+book completes a pinned TLS handshake on an attached network, or while it holds a
+fleet key and knows no machine. Anywhere else a sweep runs only when asked: the
+Machines pane while open, or the `workass_discover_machines` tool. Windows keeps
+port 80 on every network. This amends the 2026-07-10 network line and the
+2026-09-09 "retain automatic discovery" line; the 2026-09-09 backoff still applies.
+
 User law 2026-09-25 (Windows endpoint protection): production Windows provider
 tools use the signed bundled Node runtime and Workass tools client; never launch
 the unsigned Workass Go PE as a transient shell CLI. The signed Node shim is

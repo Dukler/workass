@@ -85,6 +85,7 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	"chat.list":         remoteAgentMachineScoped,
 	"update.status":     remoteAgentMachineScoped,
 	"agent.question":    remoteAgentLocalOnly,
+	"machines.discover": remoteAgentLocalOnly,
 	"html.render":       remoteAgentLocalOnly,
 	"artifact.host":     remoteAgentLocalOnly,
 	"schedule.create":   remoteAgentLocalOnly,
@@ -135,6 +136,7 @@ var remoteAgentMachineTaggedEntity = map[string]bool{
 // agent sees, so an explicit reason here is the difference between a retry and
 // a dead end.
 var remoteAgentLocalOnlyReasons = map[string]string{
+	"machines.discover": "workass_discover_machines scans the network this daemon is attached to; to scan from another machine, run it in a chat on that machine",
 	"agent.question":    "workass_ask_user_question always asks the person at this controller; it has no remote form",
 	"html.render":       "workass_render_html renders into the calling chat on this machine; to show a page in a chat on another machine send its markdown with workass_send_chat_message",
 	"artifact.host":     "workass_host_artifact serves a file from this machine's workspace; run it on the machine that holds the file and send the returned link to the remote chat",

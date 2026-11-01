@@ -87,6 +87,7 @@ func agentMCPTools() []map[string]any {
 			"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": agenttext.Get("schema.agentMCPTools.01")},
 		}, "tab_id", "chat_id"), true, false, true, false),
 		tool("workass_list_chats", agenttext.Get("tools.workass_list_chats"), object(map[string]any{}), true, false, true, false),
+		tool("workass_discover_machines", agenttext.Get("tools.workass_discover_machines"), object(map[string]any{}), true, false, true, true),
 		tool("workass_list_update_targets", agenttext.Get("tools.workass_list_update_targets"), object(map[string]any{}), true, false, true, false),
 		tool("workass_get_update_status", agenttext.Get("tools.workass_get_update_status"), object(map[string]any{
 			"machine_id": str(agenttext.Get("schema.agentMCPTools.guidance.04")),
@@ -430,6 +431,8 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "chat.diagnostics"
 	case "workass_list_chats":
 		method = "chat.list"
+	case "workass_discover_machines":
+		method = "machines.discover"
 	case "workass_list_update_targets":
 		method = "update.targets"
 	case "workass_get_update_status":
