@@ -19,7 +19,7 @@ instructions. The environment and initial history seed are separate first-input
 behavior. `internal/acp/subagents.go` assembles another instruction wrapper.
 `internal/acp/tool_context.go` generates session-owned CLI context files.
 
-History seeding and missing-message imports have their own binding rules; removing
+History seeding and missing-message imports have their own rules; removing
 boilerplate must not remove those legitimate cross-provider history operations.
 Existing native histories must not be rewritten to erase old boilerplate.
 
@@ -47,7 +47,7 @@ They do not define a general persistent system/developer-instruction field.
 Native harnesses may have additional configuration mechanisms, but those are
 provider integrations, not features implied by ACP compatibility.
 
-The repository's 2026-09-09 law in `docs/PORT-SPEC.md` and
+The repository's 2026-09-09 decision in `docs/PORT-SPEC.md` and
 `docs/WORKASS-TOOLS.md` requires Workass-owned tools to use CLI/API and explicitly
 removes Workass MCP endpoints. Therefore a universal MCP discovery interface
 cannot be implemented as an unannounced fallback under the current spec.

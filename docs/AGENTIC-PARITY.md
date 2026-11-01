@@ -8,7 +8,7 @@ Codex app: queue-or-steer follow-ups, diff review, fork-through-turn,
 token budgets, remote pairing). ACP note: model/agent features live
 agent-side; workass owns the CLIENT/DAEMON side listed here.
 
-## Daemon features (Sol lanes, serialized)
+## Daemon features
 D1. **Provider-owned compaction** — usage% is tracked per lane (normalize usage
     meta keys incl. workass.mock/*). Native compaction advances the same
     provider thread and reports a verified checkpoint through its adapter.
@@ -63,7 +63,7 @@ R7. **Notifications** — permission requests + turn completion via Web
     Notifications (opt-in in Ajustes), controller device only.
 R8. **Transcript export** — copy/export chat as markdown.
 
-## Packaging (P5, Sol) — required for "everything working"
+## Packaging (P5) — required for "everything working"
 P5a. go:embed renderer2 dist (flag keeps --renderer-dir override);
 P5b. cross-compile matrix + Windows :80 defaults + service wrapper scripts
      (NOT replacing the blessed rebuild flow; installs alongside);
@@ -79,6 +79,3 @@ B2. **Real-agent canary** — Qwen Code + LM Studio per desktop/acp/README:
     oracle (model quality never a test oracle).
 B3. Fix findings; re-run B1+B2 green → campaign STOPS. Assist next (on
     user's word only).
-
-Routing: D-lanes Sol (one at a time, internal/acp collision domain);
-R-lanes Opus (renderer2 domain); tracks run parallel. Fable gates each.

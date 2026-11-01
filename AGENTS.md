@@ -1,141 +1,51 @@
-# workass — executor rules (any agent)
+# Workass
 
-You are building part of the workass campaign from a closed spec. You have NO
-design authority: build exactly what the spec says; if the spec seems wrong or
-impossible, report it — never substitute your own design, never "improve"
-scope. Log suggestions separately; do not act on them.
+An agentic chat command center. A Go daemon owns all state and hosts provider chats (Claude Code, Codex, Pi, OMP, Devin, other ACP agents); the React UI, Electron shell and phone app are clients over one WebSocket protocol.
 
-## Read first
-`docs/RULES.md`: every binding law in one line, and a table of which section of
-`docs/PORT-SPEC.md`, `docs/PROVIDER-LANE-ARCHITECTURE.md` or another doc to read
-for what you are touching. Those full texts remain binding. Your prompt wins when
-it is more specific.
+## Layout
 
-## Fast handoff for Workass changes
-- For every bugfix request, reproduce the reported failure in an isolated dev
-  or test profile before changing the product code. Record the observed behavior
-  and its cause, then repeat the same scenario after the fix. If reproduction
-  is blocked, report the blocker rather than guessing at a fix.
-- A completed agent handoff with a scoped commit/diff and passing test commands
-  is test evidence. Inspect the changed code once; do not rerun the same tests
-  merely to duplicate the agent's result.
-- Run one focused dev-profile acceptance for the behavior being shipped. Add a
-  new test or send a correction only when that review or acceptance reveals a
-  concrete gap. Keep the correction limited to that gap.
-- Run the full automated test matrix with `node scripts/test-suite.mjs`; it
-  runs renderer, shell, fresh Go, all `scripts/tests/*.test.mjs` tests and every
-  shell contract once, concurrently, and reports failures first, then suite
-  timing, counts, and complete log paths. The 10-second target is reported after
-  all suites finish; it never kills tests. `scripts/gate.sh` adds
-  `--rerun-failed`: see the rerun rule below. For iterative checks, run focused commands directly, for example
-  `node --test scripts/tests/release-pipeline.test.mjs` or
-  `go test ./internal/acp -run TestName -count=1`. Build, typecheck, vet, and
-  embedded-renderer snapshot validation remain separate gate phases.
-- Once the handoff and dev acceptance pass, move promptly to the canonical
-  release command when publication is authorized. That command owns the broad
-  repository gate; do not run another full gate in advance just for review.
-- A child handoff never authorizes publication or update activation by itself.
-  Apply the current-human authorization rules below for those actions.
+- `cmd/workass` daemon plus `tools` and `run` CLI
+- `internal/acp` bridges, subagents; `internal/chat` actor; `internal/wire` protocol; `internal/agenttext/catalog.json` all text sent to agents
+- `scripts/*-native-host.mjs` provider hosts; `scripts/release/` releases
+- `desktop/renderer2` UI, embedded from `cmd/workass/embedded/dist`; `desktop/shell` Electron; `desktop/acp` mock server, probes
 
-## Keep the test suite fast and useful
-- The full automated suite must finish within 10 seconds on the current Mac
-  reference host with normal compiler caching and fresh execution (`-count=1`).
-  Measure from command start through fixture provisioning and child/volume
-  cleanup. Include renderer, shell, all Go packages, JS script tests, and every
-  shell contract. Time typecheck, build, vet, and package separately; they do
-  not count toward the whole-suite 10-second target.
-- Use virtual clocks or stdlib `synctest` for timing assertions where
-  applicable. Use explicit barriers/events for async readiness; never use
-  arbitrary wall-clock sleeps. Preserve real ACP stdio/process integration and
-  assertions against actual production paths, not copied logic.
-- Each fixture owns and cleans its timers, subprocesses, pipes, servers, and
-  temporary data. Cancel and join children/readers before cleanup or terminal
-  receipts; cover pending-startup cancellation. Parallelize only genuinely
-  isolated environment/global state, use bounded workers, and memoize shared
-  async setup.
-- Never delete assertions, add skips to hit the budget, reuse cached pass
-  results, retry until green, shorten production/safety timeouts, or kill work
-  at 10 seconds. Report existing conditional skips.
-- One exception to retrying (owner, 2026-11-01): the repository gate reruns each
-  failed test once, by itself, after the whole matrix has finished, so machine
-  load does not fail a release. A pass needs positive proof of that exact test,
-  does not fail the gate and is named on a `WORKASS_TEST_FLAKE name=...` line,
-  which `scripts/release/ship.sh` repeats after publishing. A second failure
-  fails the gate, and so does any failure no test name accounts for. A flake is
-  a bug to fix, not a pass to ignore.
-- For test/harness changes, reuse one measured full-suite result from the
-  owning gate or agent handoff; do not duplicate full gates for review. If
-  performance regresses, inspect the logged critical path and make one bounded
-  fix; do not blindly rerun or profile unrelated code. Docs-only changes need
-  `git diff --check` and no test execution.
-- See [docs/TEST-SUITE-10S-SPEC.md](docs/TEST-SUITE-10S-SPEC.md) for design and
-  acceptance.
+## Build, test, release
 
-## Hard rules
-- Video and audio tests run muted (owner, 2026-11-01). Mute every player, app and
-  test page during playback tests so nothing plays on the owner's speakers. Use
-  sound only when the test is about audio output itself.
-- Applying a Workass update needs the owner's permission (owner law 2026-10-31,
-  superseding the now-only law of 2026-09-03; this file is where the rule lives,
-  Workass no longer injects it). Permission may be for an update now, or for a
-  programmed update: a stated time, or a stated condition such as "when the
-  research is done", for stated machines. Scheduling or waiting to apply it is
-  allowed only under such a permission, and uses the existing scheduled messages
-  and conditions (`workass_schedule_message`), with the owner's words quoted in
-  the message. Builds, publishes, tests, other agents and older permissions for
-  other updates grant nothing. A failed update isn't retried without new
-  permission. A UI click is the owner's permission for its exact machine.
-  `workass_apply_update` takes the exact versions observed when it is called and
-  one stable operation id; a replay of that id only reads its durable receipt.
-  Never run an installer or filesystem swap directly. Active work never blocks a
-  permitted activation, and permission never expands to unnamed machines or
-  profiles.
-- The `invoke/reply/event` wire protocol in `docs/PORT-SPEC.md` §2, served by
-  `internal/wire/wire.go`, is FROZEN. New server code speaks it byte-compatibly;
-  the renderer is not modified to accommodate the server.
-- ACP landmines in `docs/PORT-SPEC.md` §3 are non-negotiable behaviors, not
-  suggestions. Preserve every one in ported code.
-- Any ACP stdio server: stdout = JSON-RPC ONLY. Diagnostics → stderr.
-- Never touch: `desktop/scripts/Rebuild-Relaunch.ps1`, `desktop/scripts/build-lite.ps1`,
-  Windows launch scripts, `desktop/vendor/`, `desktop/package.json`
-  (no new npm dependencies — the production machine has no registry access).
-  The named files are not tracked in this repository; the rule applies wherever
-  they exist.
-- Zero third-party dependencies without the spec explicitly granting them.
-  Go work is stdlib-first; the spec names any allowed exception.
-  GRANTED EXCEPTION (2026-07-10): `desktop/renderer2/` is React 19 + Vite +
-  TypeScript. npm/node run ONLY on the Mac dev machine; production ships the
-  built static bundle (embedded via go:embed in P5). Never add npm steps to
-  anything the Windows machine executes.
-- Never rename referenced files/identifiers; add aliases if needed.
-- Secrets: anything matching api_key|token|secret|password|credential|bearer
-  is redacted before it reaches logs, UI payloads, or documents.
-- Tests run against `desktop/acp/mock-server.mjs` fixtures — model quality is
-  NEVER a test oracle.
-- Do not modify files outside your lane's declared manifest.
+- Build: `go build ./...`. Renderer: `npm run build` in `desktop/renderer2`, `scripts/sync-renderer2.sh`, commit the embedded output.
+- One test: `go test ./internal/acp -run NAME -count=1`; `node --test scripts/tests/NAME.test.mjs`.
+- All: `node scripts/test-suite.mjs`. `sh scripts/gate.sh` adds build, vet and one rerun per failed test; a pass there prints `WORKASS_TEST_FLAKE name=...`.
+- Release: `scripts/release/ship.sh` publishes and installs nothing.
 
-## Windows endpoint-protection constraints
-- Production Windows provider tools use the signed bundled Node runtime and
-  Workass tools client. Never launch the unsigned Workass Go PE as a transient
-  shell CLI. The signed Node shim is the sole new Windows-layout exception;
-  legacy layouts use the in-process daemon entrypoint.
-- Do not use tasklist or PowerShell process-query loops for RSS sampling or the
-  raw-MCP guard. Do not sweep shortcuts through PowerShell, WScript, or
-  ie4uinit. Preserve the existing tool capabilities, frozen LAN protocol,
-  security checks, and package compatibility.
-- On the Work-laptop Windows development machine, do not build or run unsigned
-  Go executables or tests. Use the Mac development machine or Windows CI.
-- These constraints do not establish endpoint-protection approval or prove that all
-  endpoint-protection alerts are resolved. LAN peer-discovery and updater
-  behavior are unchanged by this lane; related design options remain open.
+## Dev daemon
 
-## Internal evidence and final handoff
-- Keep exact commands and their complete output in Workass's internal tool/event
-  history and existing profile/build logs. Do not repeat raw receipts in the
-  final response unless the user explicitly asks for them or an exact error is
-  necessary to explain a failure.
-- In the final response, report each relevant verification as the command plus
-  its one-line outcome. Mention changed files naturally with clickable
-  `path:line` references; do not emit exhaustive manifests or byte/line counts.
-- If anything was skipped, failed, or remains uncertain, say so explicitly with
-  the reason. Concision must never hide a verification gap.
+`WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass --port 18791 --beacon=false` runs the mock provider on loopback. Call it: `node scripts/wire-call.mjs --url wss://127.0.0.1:18791 --insecure CHANNEL '[]'`. `desktop/scripts/dev-launch-macos.sh` starts the dev app.
+
+## Known traps
+
+- Frame shapes `{t:'invoke',id,channel,args}`, `{t:'reply',id,result,error}`, `{t:'event',channel,payload}` stay byte-compatible: older clients and the phone app depend on them, and on referenced file, id and path names.
+- Client terminals are off because they crash the engine (APIINT-14).
+- ACP stdout carries JSON-RPC only; another line breaks the peer's parser.
+- One owner per session and one `session/prompt` at a time per bridge: racing prompts wedge the engine.
+- A lane resumes its exact native thread; a replacement session would split the provider's context.
+- Secret-shaped text is redacted before logs and UI payloads (`docs/PORT-SPEC.md` §3 item 8).
+- Production Windows has no npm registry and runs endpoint protection, so its tools CLI is a signed Node shim.
+- Tests assert against `desktop/acp/mock-server.mjs` because model output varies.
+- A `workass run` job survives daemon restarts; other detached processes are untracked until `workass_register_external_work`.
+- Playback tests reach the speakers unless muted.
+
+## Read when touching
+
+| Touching | Read |
+|---|---|
+| Wire, remote mounts | `docs/PORT-SPEC.md` §2 |
+| ACP bridge, permissions, steering, queue | `docs/PORT-SPEC.md` §3 |
+| Lanes, providers | `docs/PROVIDER-LANE-ARCHITECTURE.md` |
+| Hibernation, lease, artifacts | `docs/PORT-SPEC.md` §4 |
+| Agent tools | `docs/WORKASS-TOOLS.md` |
+| Updates, signing | `docs/DISTRIBUTION.md`, `docs/MACOS-SIGNING.md` |
+| Discovery, pairing | `docs/specs/portable-networking.md` |
+| Windows | `docs/specs/endpoint-protection-compliance.md` |
+| Profiles, daemons | `docs/ENVIRONMENTS.md`, `docs/DAEMON-DEV.md` |
+| Test suite | `docs/TEST-SUITE-10S-SPEC.md` |
+| Mock, probes | `desktop/acp/README.md` |
+| Linux | `docs/LINUX-HEADLESS.md` |

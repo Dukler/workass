@@ -21,7 +21,7 @@ Status: USER-REPORTED LIVE FAILURE; APPROVED FOR DEV IMPLEMENTATION BY THE
    remains `hace unos segundos` for the first minute. The user requires a
    visibly fresh timestamp.
 
-## Binding behavior
+## Behavior
 
 - A successful provider catalog probe is authoritative for Claude model IDs.
   Later live-session catalog updates are partial capability updates: they may

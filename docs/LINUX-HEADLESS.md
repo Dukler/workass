@@ -156,10 +156,7 @@ From a client, with the server mounted and paired:
 //        "operation_id": "<caller-stable id>" }
 ```
 
-When `workass_apply_update` may be called is the owner's permission rule in
-`AGENTS.md` (owner law 2026-10-31, superseding the current-human-order-only law
-of 2026-09-03): an update now, or a programmed update at a stated time or
-condition for stated machines. Replaying the same `operation_id` reads its
+Replaying the same `operation_id` reads its
 durable receipt back and cannot start a second activation.
 
 ## Diagnosing

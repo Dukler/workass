@@ -36,7 +36,7 @@ const (
 	htmlRenderMutationKind       = "html:render"
 	htmlRenderMutationMethod     = "html.render"
 	htmlRenderStoreMarker        = "<!--workass-html-render-v1-->"
-	htmlRenderResultMessage      = "Shown to the user where this call sits in your reply. Don't announce, describe or restate the page; add only what it doesn't say."
+	htmlRenderResultMessage      = "Shown to the user where this call sits in your reply."
 	htmlRenderViewportHeightNote = "The frame grows to fit the page, so a size that follows the viewport makes it grow again and again. Let content set the height, or use fixed pixel heights."
 )
 

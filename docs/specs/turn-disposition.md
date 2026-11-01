@@ -15,14 +15,14 @@ failed turns onto `done`, and v1 left a phantom `working` record on an idle
 chat after a cancel — both reproducing, inside the new ledger, the exact
 phantom-state dishonesty this spec exists to kill.
 
-## Binding laws for this lane (restated verbatim — the builder does not inherit them)
+## Constraints for this lane
 
 - Never rename referenced files/ids/paths; add aliases if a new name is needed.
 - Do NOT commit. Do NOT touch files outside the scope below (the tree has
   extensive unrelated uncommitted work — leave it exactly as found).
 - stdout purity for any ACP server code: JSON-RPC only on stdout, diagnostics
   to stderr.
-- Wire contract (`invoke/reply/event`, `desktop/lan-server.js`) is frozen. New
+- Wire contract (`invoke/reply/event`, `internal/httpserve/lan_bridge.go`) is frozen. New
   event payload FIELDS are additive-only. **This lane adds NO new channel.**
 - User-visible UI chrome requires a mock the user approves BEFORE it exists.
   **This lane ships no chrome** — see Non-goals.
@@ -401,7 +401,7 @@ Go, in `internal/acp/disposition_test.go` unless noted:
 Renderer, in `desktop/renderer2/tests/`:
 
 20. A `job:event` payload carrying an unknown additive `disposition` field is
-    tolerated and changes no rendered state (wire-contract law).
+    tolerated and changes no rendered state (wire-contract rule).
 21. `disposition` is absent from `job:start` payloads when unknown.
 
 ## Build order
@@ -529,12 +529,12 @@ _workass_claude_turn
     promptId, notificationType, message (bounded)  // Notification
 ```
 
-**Laws for the host half — each one is a rejection criterion:**
+**Constraints for the host half:**
 
 1. **Redaction before send.** `background_tasks[].command` and `.description`,
    and `session_crons[].prompt`, are free text that can carry secrets or paths.
    They are **never** emitted. Only `id`/`type`/`status` and
-   `schedule`/`recurring` cross the wire. (`Wire contract` + secrets law.)
+   `schedule`/`recurring` cross the wire. (`Wire contract` + secrets rule.)
 2. **Bounded.** At most 20 entries per array, `notificationType` and `error`
    clipped to 200 chars. Everything else is dropped, and a `truncated` count is
    sent instead.
@@ -648,8 +648,8 @@ layer and would have false-alarmed every legitimate sub-hour park.
 | `session_crons` never populates (unproven signal) | a self-scheduled wake looks like nothing scheduled ⇒ immediate false `stalled` | The immediate-stall path requires `backgroundTasks` **and** `sessionCrons` both empty **and** `terminalReason == "completed"` **and** no daemon-side park evidence. There is deliberately **no** config switch: an early stall is self-healing — the wake reopens the obligation on its next turn, costing one wrong pill for one tick — while a late one costs an hour. A flag here would only have kept the 90-minute grace alive under another name. |
 | Hooks disabled (`disableAllHooks`, policy settings) | no harness evidence at all | Absent evidence ⇒ v2 path verbatim. Never a verdict. |
 | Older CLI without `background_tasks` | field is `undefined`, not `[]` | `undefined` is *unknown*, `[]` is *empty*. Only `[]` proves quiet. Unknown ⇒ v2 path. |
-| Hook fires inside a subagent | every Agent tool call ends the session turn | V3.1 law 3, pinned by test. |
-| `UserPromptSubmit` callback slow/throws | the user's prompt is blocked for 30s or fails | V3.1 law 4, pinned by test. |
+| Hook fires inside a subagent | every Agent tool call ends the session turn | V3.1 rule 3, pinned by test. |
+| `UserPromptSubmit` callback slow/throws | the user's prompt is blocked for 30s or fails | V3.1 rule 4, pinned by test. |
 | Harness-born turn adopted while a human turn is running | two jobs on one chat | Adoption requires *no running job*; a race loses to the human turn, which is the safe direction. |
 | Continuation job never ends (adopted, then the SDK dies) | phantom `working` — the incident this spec exists to kill | The adopted job ends on the same `result`/`Stop` path as any other, and v2's restart reconciliation already stalls a `working` obligation with no running job. |
 
@@ -760,7 +760,7 @@ obligation open", which would pin a phantom `working`.
 **D5 — Harness evidence is buffered per session, latest-wins, consumed only at
 job end.** Steers mint a new `prompt_id` per direction and produce several
 Stops per job (the host deliberately spans SDK turn boundaries). An
-intermediate `ended`/`failed` never settles a running job. Law: hook callbacks
+intermediate `ended`/`failed` never settles a running job. Rule: hook callbacks
 notify only — they never touch `activePrompt`, `steerBoundaries` or
 `settlePrompt`. That is the whole no-regression argument. Add a steer test.
 

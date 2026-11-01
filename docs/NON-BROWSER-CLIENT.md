@@ -5,7 +5,7 @@ to any client that is not the injected browser shim. It answers six questions
 asked from that repo and corrects two premises they rested on.
 
 The authoritative sources stay what they were: `docs/PORT-SPEC.md` for the
-binding laws, `internal/httpserve/lan_bridge.go` for the browser bridge, and
+design, `internal/httpserve/lan_bridge.go` for the browser bridge, and
 `internal/wire/wire.go` for the daemon. Where this file disagrees with those,
 they win.
 
@@ -24,7 +24,7 @@ Two things ride with it:
 
 - `--beacon` (default on, `WORKASS_DAEMON_BEACON=0` to disable) enables
   automatic discovery: a TCP sweep of `/workass/health` on directly attached
-  private networks, under the PORT-SPEC 2026-11-01 discovery law. Nothing sends
+  private networks, as PORT-SPEC's 2026-11-01 discovery note describes. Nothing sends
   multicast; `machinebook.Beacon` has no production caller. An explicit sweep
   (`machines:scan`, `workass_discover_machines`) works with it disabled too.
 - Binding LAN now logs a warning naming exactly what is readable on that

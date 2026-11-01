@@ -6,7 +6,7 @@ implementation to Luna in small, closed tasks. Ten seconds is a ceiling, not
 a duration to aim for or a process-killing deadline. This spec grants
 test-infrastructure changes only.
 
-Owner amendment, 2026-11-01: the "no automatic flaky retries" line below still
+Amendment, 2026-11-01: the "no automatic flaky retries" line below still
 holds for `node scripts/test-suite.mjs`. The repository gate alone passes
 `--rerun-failed`, which reruns each failed test once, by itself, after the matrix
 has finished, and names every pass on a `WORKASS_TEST_FLAKE` line. See `AGENTS.md`.
@@ -180,4 +180,4 @@ second goal remains unachieved until the combined measurements prove it.
 
 All tests use fresh temporary test state and deterministic mock fixtures. No
 production data or processes. Existing PORT-SPEC and provider-lane contracts
-remain binding; no dependency additions or forbidden build-script edits.
+remain; no dependency additions or forbidden build-script edits.

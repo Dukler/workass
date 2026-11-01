@@ -18,7 +18,7 @@ var entries = func() map[string]string {
 	return values
 }()
 
-// Get fails loudly for a programmer error rather than silently omitting policy.
+// Get fails loudly for a programmer error rather than silently omitting text.
 func Get(key string) string {
 	value, ok := entries[key]
 	if !ok {

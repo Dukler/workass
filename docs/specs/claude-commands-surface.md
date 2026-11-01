@@ -3,8 +3,8 @@
 Status: SPEC (approved scope: data plumbing only; a separate mock lane owns all visuals).
 Scope: host `scripts/claude-native-host.mjs` → daemon `internal/acp` → wire → renderer data contract.
 
-## Binding laws (restated; violations are rejected)
-- The `invoke/reply/event` wire contract (PORT-SPEC §2, `desktop/lan-server.js`, `internal/httpserve/lan_bridge.go`) is FROZEN. Everything below is ADDITIVE: new optional fields on existing payloads, new channels. An old renderer ignores unknown fields/channels; an old daemon answers "unknown channel" (feature-detect precedent: `lan_bridge.go` comment at the `machines:*` api entries). Precedent: role/obligation fields.
+## Constraints for this lane
+- The `invoke/reply/event` wire contract (PORT-SPEC §2, `internal/httpserve/lan_bridge.go`) is FROZEN. Everything below is ADDITIVE: new optional fields on existing payloads, new channels. An old renderer ignores unknown fields/channels; an old daemon answers "unknown channel" (feature-detect precedent: `lan_bridge.go` comment at the `machines:*` api entries). Precedent: role/obligation fields.
 - ONE engine per chat; `session/prompt` serialized per bridge. Nothing here starts turns or multiplexes engines.
 - Secrets redacted before display or send: catalog strings pass the daemon's existing redaction prefilter (`internal/acp/redact_prefilter.go`) before any emit or reply.
 - Never rename referenced ids/paths. Every name below is NEW; nothing existing is renamed.
@@ -31,7 +31,7 @@ Clamps (host applies; daemon RE-applies defensively — host binary and daemon c
 - `commands` ≤ 512 entries; `agents` ≤ 128; `availableOutputStyles` ≤ 64.
 - Per string: `name`/`argumentHint`/`model`/style names ≤ 80 chars, `description` ≤ 200, `aliases` ≤ 4 × 80. Clip, never drop, a too-long field; DROP overflow entries and count them in `*Truncated` (precedent: `boundedTurnList`/`clipTurnField` in the host).
 - Worst case ≈ 380 KiB — fine for the wire, but NEVER persisted: not into `session-state.json`, not into chat archives (64 MiB hydration lesson). Memory only, everywhere.
-- Semantics law (host's own turn-evidence rule): absent field = UNKNOWN (old host); `[]` = proven empty. Never collapse the two.
+- Semantics rule (host's own turn-evidence rule): absent field = UNKNOWN (old host); `[]` = proven empty. Never collapse the two.
 
 ## 3. Host (`scripts/claude-native-host.mjs`)
 H1. Capture. In `openQuery()` (~L472+), after `const initialized = await query.initializationResult()`: build `this.commandCatalog = clampCatalog(initialized)` from `commands`, `agents`, `output_style`, `available_output_styles` (clamps of §2, `asOf: Date.now()`). Keep the existing `modelRows` line untouched.
@@ -63,7 +63,7 @@ Verified against the SDK types: there is NO dedicated command field on user mess
 
 ## 6. Renderer contract (data only — mock lane owns visuals)
 - Inputs: `SessionInfo.commandCatalog` (new-lane/exact-resume reply), `chat:commands` event, `chat:commands-get` on hydration/reconnect for the active chat.
-- Replace wholesale on every payload; render `*Truncated > 0` as "list clamped"; filter/fuzzy-match client-side; long names clamp visually (standing law).
+- Replace wholesale on every payload; render `*Truncated > 0` as "list clamped"; filter/fuzzy-match client-side; long names clamp visually (standing rule).
 - Feature detection: channel error or `supported:false` → hide the surface entirely; `commandCatalog:null` → UNKNOWN (hide palette, allow free-typed `/…` text); `commands:[]` → proven empty state.
 - Never persist the catalog into renderer session state (`session:save`).
 

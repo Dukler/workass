@@ -162,7 +162,7 @@ Agent tools, all using the existing optional exact `tab_id`:
   observed effective metrics, generations, visibility and supported capture
   modes. Success requires observed CSS metrics to match, not just a sent CDP
   command. Reads remain read-only and require no operation ID.
-- Add optional `visible` to `workass_browser_open`. Owner law 2026-10-31,
+- Add optional `visible` to `workass_browser_open`. Decision 2026-10-31,
   replacing the legacy pane request and the visible popup window of cf5294c5:
   agents browse out of sight. Omitted or `false` creates or navigates an owned
   background page without requesting the pane. A page's `window.open` is a hidden

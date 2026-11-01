@@ -20,7 +20,7 @@ account.
 
 Binding constraints: frozen `invoke/reply/event` wire; Go stdlib-first with no new
 third-party dependency unless granted; no npm on Windows; PORT-SPEC network and
-discovery laws (2026-07-10, 2026-09-09, 2026-09-25); no feature may be lost.
+discovery rules (2026-07-10, 2026-09-09, 2026-09-25); no feature may be lost.
 
 ## 2. What exists today
 
@@ -147,9 +147,9 @@ on it right now. Subnets collide and cards can be forged, so neither counts.
 | Associated network | Automatic sweep at today's cadence, on ports 80 and 8788 |
 | Holds a fleet key and knows no machine | Automatic sweep, so a headless machine can find its fleet |
 | Anywhere else | No automatic sweep. A sweep runs while the Machines pane is open, or when an agent calls `workass_discover_machines` |
-| Windows | Unchanged under the 2026-09-25 law: port 80, every network |
+| Windows | Unchanged under the 2026-09-25 rule: port 80, every network |
 
-The law is in PORT-SPEC (2026-11-01). The agent tool takes no address on purpose: a
+The rule is in PORT-SPEC (2026-11-01). The agent tool takes no address on purpose: a
 prompt-injected agent must not be able to point enrolment at an arbitrary host. A
 custom port or a VPN address is typed by a person, once. Peer address gossip, which
 would handle roaming over VPN, is not built.

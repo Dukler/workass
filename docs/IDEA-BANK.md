@@ -1,7 +1,7 @@
 # Workass idea bank
 
 This is the parking lot for promising product and architecture ideas that are
-not yet binding work. Entries preserve the motivation, evidence, constraints,
+not yet planned work. Entries preserve the motivation, evidence, constraints,
 and unanswered decisions so they can be reconsidered without quietly changing
 `docs/PORT-SPEC.md` or a promoted architecture document.
 

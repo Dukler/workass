@@ -182,9 +182,9 @@ whole to the SDK — already fixed at manager.go:2325 and live since the
 **WP-H latches**: clear `planUsageLoadingByProvider` in `finally`; update
 waiters get a deadline + chainActive reset.
 
-## Binding laws (restate to every executor)
+## Constraints for this lane
 
-- Wire contract frozen: `invoke/reply/event` in desktop/lan-server.js
+- Wire contract frozen: `invoke/reply/event` in `internal/httpserve/lan_bridge.go`
   unchanged; ALL new channels/fields additive + feature-detected (`has()`);
   renderer must work against old daemon and vice versa.
 - stdout purity for ACP servers; secrets redacted before display/send.

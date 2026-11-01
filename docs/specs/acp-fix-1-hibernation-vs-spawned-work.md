@@ -9,13 +9,13 @@ hibernation at 16:45, 17:49 and 19:46:23 on 2026-07-17 — the last exactly
 workflow supervisor died leaving "no completion record"; only detached
 kill-isolated chunks survived.
 
-## Binding laws for this lane (restated verbatim — the builder does not inherit them)
+## Constraints for this lane
 - Never rename referenced files/ids/paths; add aliases if a new name is needed.
 - Do NOT commit. Do NOT touch files outside the scope below (the tree has
   extensive unrelated uncommitted work — leave it exactly as found).
 - stdout purity for any ACP server code: JSON-RPC only on stdout, diagnostics
   to stderr (not expected to be touched here, but binding).
-- Wire contract (`invoke/reply/event`, desktop/lan-server.js) is frozen; new
+- Wire contract (`invoke/reply/event`, `internal/httpserve/lan_bridge.go`) is frozen; new
   event payload FIELDS are additive-only.
 - Every claim in your final report needs a receipt: the command you ran and
   its outcome.

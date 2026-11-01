@@ -11,11 +11,11 @@ selection; `workass_create_chat` inheriting it failed with
 'model "claude-fable-5[high]" is not available for provider "claude"'.
 Composite ids appear as KEYS in the chat's stored per-model controls map.
 
-## Binding laws for this lane (restated verbatim — the builder does not inherit them)
+## Constraints for this lane
 - Never rename referenced files/ids/paths/JSON keys; add aliases only.
 - Do NOT commit. Do NOT touch files outside scope (tree has extensive
   unrelated uncommitted work — leave it exactly as found).
-- Wire contract (`invoke/reply/event`, desktop/lan-server.js) is frozen; new
+- Wire contract (`invoke/reply/event`, `internal/httpserve/lan_bridge.go`) is frozen; new
   event payload FIELDS are additive-only; the renderer must keep working
   unchanged.
 - The frozen renderer contract represents model+effort as `base[effort]`

@@ -34,7 +34,7 @@ Implementation lane: `internal/appinstall/`, `cmd/workass/main.go`,
 `desktop/shell/update-progress.js`, their tests, `desktop/renderer2/src/app-updater.ts`,
 `desktop/renderer2/src/components/Sidebar.tsx`, the updater renderer tests,
 the generated `cmd/workass/embedded/dist/` renderer snapshot, and
-this document plus the superseding law in `docs/PORT-SPEC.md`.
+this document plus the superseding rule in `docs/PORT-SPEC.md`.
 
 Acceptance: deterministic ZIP replacement and failure fixtures preserve data;
 blocked files/invalid ZIP paths cannot start deletion; explicit commit and exact

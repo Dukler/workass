@@ -1,6 +1,6 @@
 package httpserve
 
-// LANBridgeJS mirrors desktop/lan-server.js LAN_BRIDGE_JS for browser clients.
+// LANBridgeJS is the wire bridge injected into browser clients.
 const LANBridgeJS = `(() => {
   const TOKEN_KEY = 'workass.lan.deviceToken';
   const DEVICE_ID_KEY = 'workass.lan.deviceId';

@@ -1,12 +1,11 @@
 # Workass provider lanes and chat engine
 
-Status: binding architecture and implementation checklist.
+Background reference: the provider and chat architecture and its implementation checklist.
 
 This document defines how one Workass chat may use multiple providers without
 losing provider-native context, replaying transcripts into replacement sessions,
 or duplicating provider-specific chat behavior across the daemon, renderer, and
-native hosts. `docs/PORT-SPEC.md` remains the binding product law; this document
-is its detailed provider/chat architecture.
+native hosts. It is the detailed provider/chat counterpart of `docs/PORT-SPEC.md`.
 
 ## 1. Required outcome
 
@@ -277,7 +276,7 @@ The reducer emits typed effects. Effects are durably recorded before an external
 provider call. Their receipts return as commands; effect executors never mutate
 state directly.
 
-### 5.3 Foreground and queue laws
+### 5.3 Foreground and queue
 
 - Exactly one foreground turn owns the visible response stream.
 - Steering always targets the lane that owns the running turn.
@@ -297,7 +296,7 @@ state directly.
 - Permissions and background work retain their originating lane even after the
   foreground provider changes.
 - Events from stale connection generations are rejected before reduction.
-- **Provider-started turns (user law 2026-10-11).** A harness may start a turn
+- **Provider-started turns (decision 2026-10-11).** A harness may start a turn
   with no Workass prompt: Claude Code answering a background-task
   notification, a scheduled wake, or a peer message. That is one live native
   session continuing, exactly as in Claude Code itself. The adapter reports it
@@ -375,7 +374,7 @@ If a provider exposes no in-place compaction, Workass does not silently replace
 its thread. The lane reports its finite context capability and blocks at a safe
 boundary before exhaustion. Any fork/reset is explicit.
 
-## 8. Failure and edge-case laws
+## 8. Failure and edge cases
 
 ### Exact resume
 
@@ -552,7 +551,7 @@ No intermediate phase is production-ready by itself.
 
 ### Phase A — source of truth and characterization
 
-- [x] Replace the obsolete native-resume fallback law.
+- [x] Replace the obsolete native-resume fallback.
 - [x] Record this architecture and its acceptance gates.
 - [x] Characterize current create/resume/steer/compaction behavior.
 - [x] Add source-contract tests for provider branching boundaries.

@@ -21,7 +21,6 @@ config/environments/local/*.local.env
 # Agent / AI-tool internal state (personal paths, scratchpads, local settings)
 .claude/
 .devin/
-CLAUDE.md
 .agents/
 
 # Compiled daemon binaries (build artifacts; produced by scripts/build-daemon.sh)

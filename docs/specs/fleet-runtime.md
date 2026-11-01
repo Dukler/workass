@@ -26,16 +26,16 @@ failure analysis all stand, but they now describe **one layer inside this
 runtime** rather than a fabric bolted beside it. Where the two disagree, this
 file wins. `docs/SUPERVISED-JOBS-WIP.md` remains absorbed.
 
-## Binding laws for this lane (restated — executors do not inherit memory)
+## Constraints for this lane
 
 - Wire contract `invoke/reply/event` is FROZEN: new channels and additive
   fields only; no existing field changes meaning.
-- Identifier law: never rename an existing field, id, path or function. A
+- Identifier rule: never rename an existing field, id, path or function. A
   global id **contains** today's local id; it does not replace it.
 - One writer per entity; one engine per chat; stdout purity for ACP code.
 - `RedactSensitiveText` before any free text is persisted, emitted or sent,
   and again on arrival from a peer. Secrets never travel in argv.
-- A wake is never a user message (the 2026-10-16 law).
+- A wake is never a user message (the 2026-10-16 rule).
 - Chrome needs an operator-approved mock before it exists.
 - Receipts: every claim in a lane report needs the command and its output.
 
@@ -105,7 +105,7 @@ e.g. wa:m-7f3ad2/chat/app-chat-1792187130561
 ```
 
 - `type ∈ {chat, turn, subagent, process, wait, fork, forkrun, peer}`.
-- The **local id is today's id, unchanged** (identifier law). Existing ids are
+- The **local id is today's id, unchanged** (identifier rule). Existing ids are
   valid local parts forever.
 - The home is embedded, so routing needs no directory service and no lookup
   round trip.
@@ -142,7 +142,7 @@ record says *which peer is actually linked to me right now*.
   and every affected watcher is told `link_revoked{peer, at}` on the same
   monitor stream as `home_down` — never silence, and never a fake outcome.
 - **Discovery** is what already exists: the TCP sweep and machine book
-  (`internal/machinebook`, PORT-SPEC 2026-11-01 discovery law), plus addresses a
+  (`internal/machinebook`, PORT-SPEC 2026-11-01 discovery rule), plus addresses a
   human typed.
 - **Identity before credentials.** Before any token is presented, the dialer
   requires the address to prove it is the expected daemon: read the identity
@@ -276,7 +276,7 @@ The envelope around a forwarded command is small and fixed:
   60 s (the hourly cap is gone, §14h), suppressed when a live waiter
   will consume the result, when the parent turn was stopped, or when the parent
   cancelled the child — delivered as a task-notification notice, never a user
-  message (the 2026-10-16 law and the five `aa53975e` anti-regressions, carried
+  message (the 2026-10-16 rule and the five `aa53975e` anti-regressions, carried
   over verbatim from `delegation-fabric.md` §7).
 
 ## 8. Consistency model
@@ -472,7 +472,7 @@ bridge; `docs/WORKASS-TOOLS.md` recipes for monitors; retire polling and mirror
 doctrine from agent-facing docs. **Also update `CLAUDE.md`'s detached-lane
 paragraph**: it still states that the daemon "never injects a synthetic chat
 message or starts a turn on completion", which `f9a096f1` (2026-10-16) already
-changed for subagents and which P4 extends to every entity. The law it should
+changed for subagents and which P4 extends to every entity. The rule it should
 state is the current one: a completion reaches a chat only as a
 task-notification notice, never as a user message, and never for a
 non-actionable event.

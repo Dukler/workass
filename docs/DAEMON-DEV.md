@@ -198,7 +198,7 @@ broadcasts:
 ```
 
 The lease is runtime-only; after restart, first approved connect wins again. Hand-over is implicit
-(PORT-SPEC, user law 2026-07-26): an approved device that performs a mutating invoke takes the lease.
+(PORT-SPEC, 2026-07-26): an approved device that performs a mutating invoke takes the lease.
 Device administration (`lan:access-decide`, `lan:revoke`, fleet admin) still requires a lease granted
 by the daemon or a loopback client; a lease a remote device took for itself does not qualify.
 

@@ -18,7 +18,7 @@ Consequently the handoff has no durable completion record and cannot wake the
 Codex conversation after the daemon replacement. The user must intervene to
 resume it.
 
-## Binding behavior
+## Behavior
 
 - Passive observation of provider-native Bash/Agent/Workflow events remains
   Claude-specific and unchanged.
@@ -28,7 +28,7 @@ resume it.
 - Existing owner, path, redaction, receipt, no-pin, persistence, and wake rules
   remain unchanged.
 - The environment brief and MCP tool description must state the same
-  provider-neutral tracking law. They must not teach a Claude-only exception.
+  provider-neutral tracking rule. They must not teach a Claude-only exception.
 - A registered Codex external lane must survive a daemon-manager restart,
   settle from its done marker, dispatch one durable wake, and persist
   `wake=delivered` exactly like a Claude lane.

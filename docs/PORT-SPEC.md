@@ -1,51 +1,51 @@
-# PORT-SPEC — binding laws for the workass Go daemon
+# PORT-SPEC — design notes for the workass Go daemon
 
-User law 2026-10-10 (macOS server lifecycle): opening Workass starts its
-bundled server directly, as on Windows. Remove automatic daemon service
-installation, login startup, and process respawn on macOS, including development
-launch, rebuild rollback, and the headless service installer. Killing the server
-leaves it stopped until an explicit app launch or recovery. Legacy LaunchAgents
-may be unloaded and deleted, but never reinstalled or enabled. Bounded one-shot
-rebuild/update workers remain permitted; they must not supervise or respawn the
-server. This supersedes older macOS LaunchAgent bootstrap requirements below.
+Background reference: how the daemon works and why, accumulated over time. The code is the current truth.
 
-User law 2026-09-16 (Windows updater simplification): an authorized Windows
-update downloads the release ZIP once outside the installation, cleanly closes
-the shell/daemon, replaces release-owned application files, and launches Workass.
-Use the incoming native installer command, not a renamed Node worker,
-PowerShell process sweeps, or robocopy. Do not snapshot or restore mutable state,
-roll back, or gate success on daemon health, model discovery, controller state,
-or a progress-window heartbeat. Preserve chats, settings, workspaces, unrelated
-files, download integrity/path checks, exact installation identity, explicit
-current-human activation authority, and durable failure receipts. Locks fail
+macOS server lifecycle (2026-10-10): opening Workass starts its bundled server
+directly, as on Windows. There is no automatic daemon service installation, login
+startup, or process respawn on macOS, including development launch, rebuild
+rollback, and the headless service installer. Killing the server leaves it stopped
+until an explicit app launch or recovery. Legacy LaunchAgents may be unloaded and
+deleted, and nothing reinstalls or enables them. Bounded one-shot rebuild/update
+workers do not supervise or respawn the server. This supersedes older macOS
+LaunchAgent bootstrap text below.
+
+Windows updater (2026-09-16): a Windows update downloads the release ZIP once
+outside the installation, cleanly closes the shell/daemon, replaces release-owned
+application files, and launches Workass. It uses the incoming native installer
+command, not a renamed Node worker, PowerShell process sweeps, or robocopy. It does
+not snapshot or restore mutable state, roll back, or gate success on daemon health,
+model discovery, controller state, or a progress-window heartbeat. Chats, settings,
+workspaces, unrelated files, download integrity/path checks, exact installation
+identity, and durable failure receipts are preserved. Locks fail
 before deletion; interrupted extraction retains the ZIP without automatic retry.
-This supersedes the older Windows mirror/rollback/progress requirements below;
-macOS update behavior and development verification gates are unchanged.
-See `specs/windows-zip-updater.md` for the implementation lane and acceptance.
+This supersedes the older Windows mirror/rollback/progress text below; macOS update
+behavior is separate.
+See `specs/windows-zip-updater.md`.
 
-User law 2026-09-09: Workass-owned tools use the direct authenticated Workass
-CLI/API, not MCP. Remove their MCP endpoints, stdio proxy, descriptors, protocol
-negotiation and discovery instructions, with no backward-compatible exposure.
-Existing vendor/user MCP integrations remain supported. This supersedes older
-Workass MCP transport requirements below; exact chat ownership, mutation
-receipts, redaction and current-human update authorization remain binding.
-Ordinary session/turn lifecycle must not capture automatic Git snapshots.
-See `WORKASS-TOOLS.md` for the CLI contract.
+Tools transport (2026-09-09): Workass-owned tools use the direct authenticated
+Workass CLI/API, not MCP. Their MCP endpoints, stdio proxy, descriptors, protocol
+negotiation and discovery instructions are gone, with no backward-compatible
+exposure. Existing vendor/user MCP integrations remain supported. This supersedes
+older Workass MCP transport text below; exact chat ownership, mutation receipts and
+redaction carry over. Ordinary session/turn lifecycle captures no automatic Git
+snapshots. See `WORKASS-TOOLS.md` for the CLI contract.
 
-User law 2026-09-09 (performance): retain automatic new-machine discovery,
-but back off unchanged full LAN scans (10, 20, 40, at most 60 seconds).
-Keep known-machine liveness checks at 10 seconds; detect interface changes at
-that cadence and reset the discovery delay on topology or discovered-machine
-changes. Do not rewrite unchanged provider controls or chat obligations, copy
-committed chat history for periodic obligation checks, or repeatedly resolve
-already-imported assistant images during streaming.
+Performance (2026-09-09): automatic new-machine discovery backs off unchanged full
+LAN scans (10, 20, 40, at most 60 seconds). Known-machine liveness checks stay at
+10 seconds; interface changes are detected at that cadence and reset the discovery
+delay, as do discovered-machine changes. Unchanged provider controls and chat
+obligations are not rewritten, committed chat history is not copied for periodic
+obligation checks, and already-imported assistant images are not resolved again
+during streaming.
 
-Security law 2026-11-01 (enrolment): a client verifies the daemon's certificate proof
+Enrolment (2026-11-01): a client verifies the daemon's certificate proof
 before sending any enrolment proof, and a missing proof means none is sent. A card
 never replaces a known machine's certificate unless a fleet key proves it. Pairing is
 refused from a source that is not private. See `docs/specs/portable-networking.md` §3.
 
-User law 2026-11-01 (discovery): outside Windows, sweeps also probe the daemon's
+Discovery (2026-11-01): outside Windows, sweeps also probe the daemon's
 default port 8788, and the daemon sweeps by itself only while a machine from its
 book completes a pinned TLS handshake on an attached network, or while it holds a
 fleet key and knows no machine. Anywhere else a sweep runs only when asked: the
@@ -53,22 +53,18 @@ Machines pane while open, or the `workass_discover_machines` tool. Windows keeps
 port 80 on every network. This amends the 2026-07-10 network line and the
 2026-09-09 "retain automatic discovery" line; the 2026-09-09 backoff still applies.
 
-User law 2026-09-25 (Windows endpoint protection): production Windows provider
-tools use the signed bundled Node runtime and Workass tools client; never launch
-the unsigned Workass Go PE as a transient shell CLI. The signed Node shim is
-the only new Windows-layout exception. Legacy layouts use the in-process
-daemon entrypoint. Do not use tasklist or PowerShell process-query loops for
-RSS sampling or the raw-MCP guard, and do not sweep shortcuts through
-PowerShell, WScript, or ie4uinit. Preserve tool capabilities, security checks,
-the frozen protocol, and package compatibility. On the Work-laptop Windows
-development machine, do not build or run unsigned Go executables or tests; use
-the Mac development machine or Windows CI. This policy does not guarantee
-endpoint-protection approval or establish that all alerts are fixed. LAN peer discovery
-and updater behavior are unchanged; related design options remain outstanding.
+Windows endpoint protection (2026-09-25): production Windows provider tools use
+the signed bundled Node runtime and Workass tools client, not the unsigned
+Workass Go PE as a transient shell CLI, to avoid endpoint-protection alerts. The signed
+Node shim is the only new Windows-layout exception. Legacy layouts use the
+in-process daemon entrypoint. RSS sampling and the raw-MCP guard use no tasklist or
+PowerShell process-query loops, and shortcuts are not swept through PowerShell,
+WScript, or ie4uinit, for the same reason. Unsigned Go executables and tests are
+built and run on the Mac development machine or Windows CI, not on a Windows work
+laptop. None of this guarantees endpoint-protection approval or establishes that
+all alerts are fixed.
 
-Status: v1 (2026-07-09, Fable). The wire-contract inventory (§2b) is produced
-by an extraction lane and reviewed before P1 starts; everything else here is
-final unless the user changes scope.
+First written 2026-07-09 as the design of the Go port.
 
 ## 1. Target architecture
 
@@ -80,11 +76,11 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   `app-config.json`) so current tools interoperate.
 - **ACP bridge manager** — one engine subprocess per chat; lifecycle states
   `warm | active | idle | hibernated`; spare-session pre-warm pool.
-  MULTI-PROVIDER MODEL (user law 2026-07-10): there is NO global provider.
+  MULTI-PROVIDER MODEL (decision 2026-07-10): there is NO global provider.
   The daemon holds a provider REGISTRY (mock/devin/qwen/claude/codex/omp/custom
   from config); all enabled providers are available simultaneously; each chat
   binds its provider at session creation. Bridges/spares are per-provider.
-  SELECTION UX (user law 2026-07-10b): ONE model selector in the composer,
+  SELECTION UX (decision 2026-07-10b): ONE model selector in the composer,
   grouped by provider (small section dividers per agent, all models of all
   enabled agents listed); choosing a model binds the chat's provider. The
   daemon aggregates per-provider catalogs into one grouped catalog event.
@@ -106,7 +102,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   AUTH: workass stores NO credentials — installed agent CLIs self-auth
   (plug-and-play, Goal 5); only custom-command providers accept env config.
   No API-key UI anywhere.
-  PROVIDER DETECTION — FINAL DESIGN (normative, 2026-07-10):
+  PROVIDER DETECTION (2026-07-10):
   1. The user NEVER writes provider config. providers.json is a
      DAEMON-OWNED CACHE: written by detection, read at boot, regenerated
      if deleted. The only human input it persists is explicit
@@ -140,7 +136,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   Acceptance: fresh state dir + no providers.json + cold boot → composer
   offers every installed agent and every running local server with zero
   user action, on Mac (qwen/LM Studio) and Windows (devin) alike.
-  FRONTIER AGENTS: CLAUDE CODE + CODEX — FINAL DESIGN (normative, 2026-07-22):
+  FRONTIER AGENTS: CLAUDE CODE + CODEX (2026-07-22):
   Workass follows T3 Code's direct-provider boundary. Zed ACP compatibility
   adapters MUST NOT participate in discovery, packaging, or any runtime
   process tree.
@@ -172,7 +168,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      a Claude or Codex ACP package. Packaged builds include one portable Node
      runtime for the official JavaScript SDK/hosts; the vendor CLIs remain
      user-owned installs and are never copied by Workass.
-  5. TOS LAWS (binding, violations rejected): use only the official Agent SDK
+  5. VENDOR TERMS OF SERVICE: Workass uses only the official Agent SDK
      and official vendor executables/protocols; Workass NEVER reads, stores,
      proxies, or forwards OAuth tokens or files under `~/.claude` / `~/.codex`;
      no API-key UI for these subscription providers; login and token refresh
@@ -306,12 +302,11 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
      become idle, and settles as soon as every record is terminal. It MUST NOT
      mix these items into the global proc/engine surface or require optional
      explicit registration. Agent MCP exposes exact-pair read-only list and
-     receipt tools; a pair mismatch is rejected. TERMINAL DELIVERY (user law
+     receipt tools; a pair mismatch is rejected. TERMINAL DELIVERY (decision
      2026-08-10): ordinary Claude background receipts remain internal state
      only. Settling that work MUST NOT enqueue a synthetic chat message, start
      or resume an agent turn, create pending wake state, hold an obligation
-     open, or block an app update. Narrow exception (current human request,
-     2026-09-24): a Workass tracked subagent's durable done/failed receipt may
+     open, or block an app update. Narrow exception (2026-09-24): a Workass tracked subagent's durable done/failed receipt may
      enqueue one receipt-keyed, internal agent-origin continuation for its exact
      owning tab/chat. An active coordinator wait consumes the existing result
      and suppresses that continuation. The actor queue/outbox owns delivery and
@@ -373,7 +368,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   that must seize the lease to see a card drags every prompt off the desktop
   its owner is working at. The lease exists to stop two devices answering the
   same card, not to stop one of them reading it.
-  PAIRING REWORK (user law 2026-07-10, supersedes PIN): NO PIN ceremony.
+  PAIRING REWORK (decision 2026-07-10, supersedes PIN): NO PIN ceremony.
   Unknown device connects → daemon emits `lan:access-request`
   {requestId, ip, deviceName, userAgent} to the CONTROLLER (and desktop
   shell) → host approves/denies via `lan:access-decide` (channel names
@@ -387,7 +382,7 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   `GET /workass/health` → {app:"workass", version, name} identity JSON.
 - **agent API** — environment brief injection, app-state query, notify(),
   show() (plan Goal 7; v1 in P2).
-- **macOS release identity** (user law 2026-07-19): every production
+- **macOS release identity** (decision 2026-07-19): every production
   `Workass.app` and standalone Workass daemon build is signed with one
   persistent cryptographic identity. Ad-hoc/CDHash-only production signatures
   are forbidden because macOS treats each rebuild as new code and invalidates
@@ -409,27 +404,21 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   and notary receipts. The Electron shell itself is exact-version pinned and
   fetched only at Mac build time from its official release; its published
   checksum is verified before development activation or release packaging, and
-   an arbitrary global Electron install is never a release input. Update
-   activation follows the owner's permission rule in `AGENTS.md` (owner law
-   2026-10-31, superseding the current-human-order-only law of 2026-09-03 and
-   the click-only wording of 2026-08-25): it now allows a programmed update
-   under the owner's permission, and Workass no longer injects the rule into
-   agents. The updater is fenced by exact observed current/target versions and
+   an arbitrary global Electron install is never a release input. The updater is
+   fenced by exact observed current/target versions and
    one stable operation id; a replay of the same operation id is receipt readback
-   only. An authorized activation is never blocked by active foreground turns
+   only. An activation is never blocked by active foreground turns
    or tracked asynchronous work. The drain records any
    interrupted work in the durable receipt, stops the shell and daemon before
    replacement, and rolls back after failed health, controller, or catalog
    recovery.
-- **Windows portable updates** (user law 2026-08-10): extracted Windows builds
+- **Windows portable updates** (decision 2026-08-10): extracted Windows builds
   update from the platform-specific manifest on the latest stable GitHub
   Release. Authenticode is not required for this private portable lane. The
   shell accepts only an HTTPS feed for the exact Windows/amd64 portable target,
   verifies the archive's declared size and SHA-256 before extraction, rejects
   unsafe archive paths, revalidates the embedded release/shell versions and
-   required PE32+ x86-64 runtime files, then uses the same current-human-
-   authorized daemon handoff (never blocked by active work, per user laws
-   2026-08-25 and 2026-09-03) and
+   required PE32+ x86-64 runtime files, then uses the same daemon handoff (never blocked by active work) and
    health/controller/catalog gates. Windows must not require the
   portable installation directory itself to be renameable: the verified
   incoming release and complete rollback snapshot live under the external
@@ -440,10 +429,10 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   handoff diagnostics, but a shell may surface one only when its previous/target
   version proves that the receipt belongs to the currently running release. A
   freshly extracted target never inherits another copy's stale failure or
-  rollback UI and continues polling the stable feed. Builds predating this law
+  rollback UI and continues polling the stable feed. Builds predating this
   require one manual portable replacement before in-app updates can bootstrap
   themselves.
-- **Visible independent update ownership** (user law 2026-08-20): activation
+- **Visible independent update ownership** (decision 2026-08-20): activation
   and rollback filesystem effects belong to a verified updater worker outside
   the mutable installation tree, never Electron's primary shell process. A
   separate progress process must prove its exact transaction identity and a
@@ -457,9 +446,8 @@ One Go binary, `workass`, an always-on daemon that owns ALL state. Clients
   releases stage and verify their updater runtime from the incoming artifact so
   an outgoing release cannot permanently pin updater behavior.
 
-Zero third-party Go dependencies unless this spec grants them. WebSocket is
-hand-rolled RFC 6455 exactly as `desktop/lan-server.js` already proves
-(server side of the same codec). JSON via encoding/json.
+Third-party Go dependencies are few and listed in `go.mod`. WebSocket is
+hand-rolled RFC 6455 in `internal/wire/`. JSON via encoding/json.
 
 ## 2. Wire protocol (FROZEN)
 
@@ -480,37 +468,34 @@ blocking Stop.
 
 Args are an ARRAY spread into the handler (matches Electron IPC arity).
 Handlers are the same set the renderer's `window.api` maps to — the mapping
-in `desktop/lan-server.js` (`LAN_BRIDGE_JS`) is the authoritative client-side
-enumeration. Static file serving + `/lan-bridge.js` injection behavior is
+in `internal/httpserve/lan_bridge.go` (`LANBridgeJS`) is the authoritative
+client-side enumeration. Static file serving + `/lan-bridge.js` injection behavior is
 preserved so today's renderer runs against the daemon without edits.
 
 ### 2b. Channel inventory
-Extracted to `docs/WIRE-CONTRACT.md` (lane deliverable): every channel with
-direction, args shape, result shape, error behavior, side effects, and the
-`main.js` handler location. Channels that are Electron-shell-local (dialogs,
-clipboard, window state) are listed in their own section — they stay in the
-shell, NOT the daemon.
+The daemon's handlers are registered in `cmd/workass/` and `internal/wire/wire.go`;
+`docs/NON-BROWSER-CLIENT.md` describes them for a client without a DOM. Channels
+that are Electron-shell-local (dialogs, clipboard, window state) stay in the shell
+(`desktop/shell/`), NOT the daemon.
 
 ## 3. ACP landmines (each one was learned the hard way — all preserved)
 
-1. **Client terminals OFF by default.** Advertising `terminal:true` triggers
-   the APIINT-14 engine crash. Opt-in env `ASSISTANT_ACP_CLIENT_TERMINALS=1`
-   only. (`desktop/main.js:291-297`)
-2. **Cold-init timeout 60s** (`ASSISTANT_ACP_INIT_TIMEOUT_MS`): the Devin CLI
-   is itself Electron; first launch is slow. (`main.js:298-301`)
-3. **Bounded stderr tail** (default 16KB, `ASSISTANT_ACP_STDERR_TAIL_CHARS`)
+1. **Client terminals OFF.** Advertising `terminal:true` triggers the APIINT-14
+   engine crash. (`internal/acp/bridge.go`)
+2. **Cold-init timeout 60s** (`defaultInitTimeout`, `internal/acp/types.go`): the
+   Devin CLI is itself Electron; first launch is slow.
+3. **Bounded stderr tail** (`defaultStderrTailBytes`, 16KB)
    kept per engine and dumped on exit so a `code:1` crash is diagnosable.
    Engine stdout is NEVER tapped into logs (it is JSON-RPC noise).
-4. **Don't code multiple agents like shit** (user wording, 2026-07-11 —
-   final form of the old "one engine per chat" rule). History: the legacy
+4. **No accidental multi-agent driving** (2026-07-11, final form of the old
+   "one engine per chat" text). History: the legacy
    app crashed because a dual LAN/local state split ACCIDENTALLY drove
-   one chat with two engines — bad coding, not an inherent limit. The
-   actual laws that survive:
+   one chat with two engines — bad coding, not an inherent limit. What remains:
    a. No unmanaged concurrency: never let two code paths race the same
       session/engine by accident (single owner per session; serialized
       prompts per bridge, item 5). Also never multiplex unrelated chats
       onto one engine process — a wedged engine must not poison other
-      conversations. (`main.js:2346-2349`)
+      conversations.
    b. Provider switching is free at turn boundaries: `job:start` with a
       different providerId detaches the old session (slow close in
       background), rebinds the chat, and the resurrect path resumes that
@@ -523,13 +508,12 @@ shell, NOT the daemon.
       deterministic, bounded semantic Workass-history seed immediately before
       the current user request. This is legal only for that unused lane. Once
       any input is consumed, later gaps follow item 6's exact-thread delta or
-      receipt-bearing import law; they never receive another initial seed. Mid-turn switch
+      receipt-bearing import path; they never receive another initial seed. Mid-turn switch
       rejected. Regression:
       TestWireProviderSwitchMidChatSharesContext.
-   c. DELIBERATE multi-agent per chat (subagents) is implemented and is not a
-      violation. Each concurrent child gets its own session/engine and one
+   c. DELIBERATE multi-agent per chat (subagents) is implemented. Each concurrent child gets its own session/engine and one
       explicit owner: the spawning turn while that turn runs, then the chat
-      itself (user law 2026-07-16: a parent turn ending — done, failed, or
+      itself (decision 2026-07-16: a parent turn ending — done, failed, or
       cancelled — never cancels running children; they are ADOPTED by the
       chat, keep their Turnos visibility and event routing unchanged, and
       settle into the same bounded durable receipts). Explicit cancellation
@@ -564,7 +548,7 @@ shell, NOT the daemon.
       adopted children through the same tools (first touch re-binds event and
       wait routing to the live turn), and an authenticated owner with NO
       currently running turn may still spawn, list, wait, message, retry, and
-      cancel (user law 2026-07-16 — coordinators continuing after harness
+      cancel (decision 2026-07-16 — coordinators continuing after harness
       background-task notifications run outside any Workass job): a spawn
       without a live turn is born adopted and anchors its visible events to
       the chat's most recent visible turn when one is resolvable.
@@ -578,8 +562,8 @@ shell, NOT the daemon.
       resolved controls/delivery ids. Agent-authored FIFO rows are daemon-drained
       so they survive renderer loss; React only rehydrates the authoritative
       snapshot and may never double-drive them.
-5. **Serialized `session/prompt` per bridge** (prompt queue). (`main.js:2484`)
-6. **Exact provider lanes; no replacement-session fallback** (user law
+5. **Serialized `session/prompt` per bridge** (prompt queue).
+6. **Exact provider lanes; no replacement-session fallback** (decision
    2026-08-10, supersedes the 2026-07-12 resurrection order): Workass owns the
    visible semantic chat ledger; each provider owns the hidden context of one
    immutable provider-native thread per exact Workass provider lane. A lane is
@@ -634,7 +618,7 @@ shell, NOT the daemon.
    stable operation id. An ambiguous acknowledgement never causes an automatic
    resend.
 
-   **Provider-turn ownership correction (user law 2026-09-03):** the provider
+   **Provider-turn ownership correction (decision 2026-09-03):** the provider
    harness is the only authority for whether an admitted turn is running or
    terminal. Workass sends one standard `session/prompt` for an actor operation
    and consumes that request's ordinary events/result. It MUST NOT poll a
@@ -653,7 +637,7 @@ shell, NOT the daemon.
    A provider-started turn (a harness waking itself on a background-task
    notification, a scheduled wake, or a peer message) is the same live native
    session continuing. It is not a Workass delivery. The chat owns it when idle
-   and declines it otherwise, and it never closes the session (user law
+   and declines it otherwise, and it never closes the session (decision
    2026-10-11; PROVIDER-LANE-ARCHITECTURE §5.3). Workass itself still never
    starts a turn when ordinary background work settles.
 
@@ -661,17 +645,16 @@ shell, NOT the daemon.
    retains the full visible ledger and records only typed lane-private coverage
    and checkpoint metadata; it never overwrites visible history with a provider
    summary or fabricates a context reset. The complete identity, state-machine,
-   migration, and conformance laws are binding in
+   migration, and conformance design is in
    `docs/PROVIDER-LANE-ARCHITECTURE.md`.
 7. **MCP fanout guard**: engines can over-spawn MCP subprocesses; a periodic
-   guard watches and reaps. Port the guard, not just the spawn.
-   (`main.js:794-836`)
+   guard watches and reaps. (`internal/acp/mcp_guard_windows.go`)
 8. **Redaction before anything leaves the server**: secret-shaped strings
    (api_key|token|secret|password|credential|bearer) are scrubbed from tool
    previews, logs, config reads, and UI payloads.
-9. **The permission ceiling** (owner, 2026-11-01): an agent's tools hand out permissions up to the caller's own current level with no prompt and lower them freely, and `ask`, `always-ask` and `default` rank with edit; above it, meaning Full access from below or a read-only or plan chat raising itself, the human answers a question card, a forwarded command answers to its stated `limit` on the machine it reaches, and a human action is never capped (`cmd/workass/permission_ceiling.go`). **Permission flow**: `session/request_permission` → forward to controller
+9. **The permission ceiling** (2026-11-01): an agent's tools hand out permissions up to the caller's own current level with no prompt and lower them freely, and `ask`, `always-ask` and `default` rank with edit; above it, meaning Full access from below or a read-only or plan chat raising itself, the human answers a question card, a forwarded command answers to its stated `limit` on the machine it reaches, and a human action is never capped (`cmd/workass/permission_ceiling.go`). **Permission flow**: `session/request_permission` → forward to controller
    client → wait for the person; cancel outstanding requests when a job/session
-   dies. (`main.js:2373-2411`) Workass arms NO deadline of its own — the old
+   dies. Workass arms NO deadline of its own — the old
    180s fallback/deny (and the hosts' 120s peer-request cap) expired cards a
    user was still reading and answered "nothing chosen" on their behalf; the
    origin harness owns that clock now (user 2026-07-25). `PermissionTimeout`
@@ -681,8 +664,7 @@ shell, NOT the daemon.
     (auto for read-only consulta drafts, dangerous for operative tasks;
     global override env `ASSISTANT_DEVIN_PERMISSION_MODE`).
 11. **Stream coalescing**: stdout token bursts flushed on ~16ms ticks,
-    thoughts ~24ms — do not forward every chunk as its own event.
-    (`main.js:1563-1567`)
+    thoughts ~24ms, rather than forwarding every chunk as its own event.
 12. **stdout purity** for any ACP server we ship: JSON-RPC only; stderr for
     diagnostics.
 13. **Provider-aware steering** (user correction 2026-07-12): never infer native
@@ -700,7 +682,7 @@ shell, NOT the daemon.
     not acknowledgement. Timeout → uncertain: never re-send, never interrupt.
     Explicit rejection only occurs when no live turn exists, so it never
     interrupts either. The `_workass_claude_steer_consumed` session update is
-    the semantic "applied" receipt. **Claude Code 2.1 delivery (user law
+    the semantic "applied" receipt. **Claude Code 2.1 delivery (decision
     2026-10-11, "do it how Claude Code does it"):** when the CLI reports
     `command_lifecycle` frames, the host delivers a steer exactly as Claude
     Code delivers a message typed while it works — priority `next`, folded into
@@ -744,7 +726,7 @@ shell, NOT the daemon.
     clear the editor. Remove matching-text deletion workarounds.
     while a turn is running, ordinary `Enter` appends one durable FIFO follow-up
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
-    provider-aware steering law above (`Ctrl+Enter` on Windows/Linux). One
+    provider-aware steering path above (`Ctrl+Enter` on Windows/Linux). One
     shortcut submits directly, even with slash/@ autocomplete open, without
     first placing the direction in the FIFO (user correction 2026-09-22).
     `Shift+Enter` remains newline. The send
@@ -818,7 +800,7 @@ shell, NOT the daemon.
     request commits, navigation controls lock while it is in flight, and the
     second half of a double-click may not click through into a replacement row
     at the same screen coordinate.
-17. **Typed final answers remain typed** (user law 2026-07-14): only when a
+17. **Typed final answers remain typed** (decision 2026-07-14): only when a
     provider explicitly marks an assistant chunk as `commentary` or
     `final_answer`, preserve that
     exact phase through stream coalescing, the additive `job:event` payload,
@@ -892,7 +874,7 @@ shell, NOT the daemon.
   engines recycle after RSS/age thresholds only at a positively quiescent
   boundary. Per-engine RSS is logged and exposed to the UI.
 - **Controller lease**: one controller device at any instant, but the
-  handover is IMPLICIT (user law 2026-07-26, supersedes "takeover is
+  handover is IMPLICIT (decision 2026-07-26, supersedes "takeover is
   explicit"). Acting on any device takes the lease and broadcasts
   `lan:controller-changed`; nothing asks a human to "take control" first.
   Rationale: one human owns the whole fleet (no accounts by design), so an
@@ -908,7 +890,7 @@ shell, NOT the daemon.
   live `job:event` stream regardless of the lease. First connect from an
   unknown device → controller-approval flow (lan:access-request →
   approve → silent token issuance); see §1 — the PIN ceremony is
-  superseded (user law 2026-07-10).
+  superseded (decision 2026-07-10).
 - **Mock hosting**: the daemon serves the repo's design mocks read-only under
   `/workass/mocks/` (no-cache, traversal-guarded) when a mocks directory is
   configured, so review mocks never depend on throwaway ad-hoc servers dying
@@ -946,17 +928,13 @@ shell, NOT the daemon.
   mutable data root), with the env override honored by both and the legacy
   `~/.workass` location retained as a read fallback — never as a silently
   divergent default.
-- **Environment brief** (user law 2026-09-15, superseding the earlier
-  environment-prompt rules): use the user's minimal template to describe
-  Workass context, available tools, artifact delivery, and archive location.
-  Runtime identity and attachment counts are facts, not response directives.
-  Do not inject UI/external-browser prohibitions, delegation mandates,
-  greeting/continuation instructions, visualization workflow, or final-answer
-  style rules. One short language line precedes each current request; omit
-  duplicate language prose from the seed. Preserve current-human updater
-  authorization, exact targets, stable operation IDs, context-file secrecy,
-  and clearly delimited historical context. These prompt changes do not alter
-  tool permissions, provider-native instructions, or provider lifecycle.
+- **Environment brief**: describes Workass context, available tools, artifact
+  delivery, and archive location. Runtime identity and attachment counts are
+  facts. Workass-authored text says how tools work and which fits which job; it
+  sets no reply language, tone, scope or other agent behaviour. Exact targets,
+  stable operation IDs, and clearly delimited historical context remain. The text
+  does not alter tool permissions, provider-native instructions, or provider
+  lifecycle.
 
 ## 5. Verification strategy (how lanes prove their work cheaply)
 
@@ -975,9 +953,8 @@ The provider/chat refactor phases and acceptance gates are maintained in
 `docs/PROVIDER-LANE-ARCHITECTURE.md`. Other work uses the explicit phase gates
 in this specification and its task prompt; no absent external plan is required.
 
-## 7. ACP event-semantics index (pointers, not new law)
-One map from event family to the binding text above, so nobody re-derives a
-contract from code. Each entry is where that semantics is normatively pinned.
+## 7. ACP event-semantics index
+One map from event family to the text above that describes it.
 
 - **Steering** — §3 landmines 13 (provider-aware dispatch: Codex `{turnId}`
   admission wait, Claude native live steer via `_workass/claude/steer` with

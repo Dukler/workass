@@ -1,7 +1,7 @@
 # Windows endpoint-protection constraints
 
 Authority: the user's 2026-09-25 instruction for the Work-laptop Workass
-endpoint-protection work. This is a binding constraint on Windows provider
+endpoint-protection work. This covers Windows provider
 tool launch and related process/shortcut handling; it does not authorize
 changes to LAN peer discovery or updater behavior.
 

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// DiscoveryPort is the port every sweep probes. PORT-SPEC's network law fixes it
+// DiscoveryPort is the port every sweep probes. PORT-SPEC's network note fixes it
 // at TCP 80 because that is the sole inbound port available on a managed Windows
 // machine.
 const DiscoveryPort = 80

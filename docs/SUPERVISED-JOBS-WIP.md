@@ -109,7 +109,7 @@ routes, which is a real new capability at the edge of the frozen wire
 contract. **I think this is the decision the review should settle first**,
 because everything else hangs off it.
 
-**(2) Supervised jobs deliberately break the external-work ownership law.**
+**(2) Supervised jobs deliberately break the external-work ownership rule.**
 `external.register` and `external.settle` are `remoteAgentLocalOnly` on
 purpose, with the reason "external work tracks a process on this machine and
 must stay in the exact owning Workass chat"
@@ -122,11 +122,11 @@ contract and deserves the gate's attention rather than my own judgement.
 
 **(3) One record or two?** Jobs could be a new `kind` of `SpawnedWorkItem`,
 inheriting rail, obligation, receipts and wake for free — but inheriting the
-same-chat-same-machine law from (2). Or a separate `internal/jobs` store that
+same-chat-same-machine rule from (2). Or a separate `internal/jobs` store that
 must re-earn every one of those integrations. My lean: authoritative record in
 a new store, **projected** as a spawned-work row so every existing surface
 shows it. But that is a dual write, and this repo has already been burned by
-mirrored state (the two-bridge mirror law). The projection must be
+mirrored state (the two-bridge mirror rule). The projection must be
 derive-only, one direction, no write-back.
 
 **(4) `stalled` is not terminal, yet must still be news.** The spec keeps a

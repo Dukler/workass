@@ -5,22 +5,25 @@ import (
 	"testing"
 )
 
-const expectedPerTurnLanguageRule = "Response language for this turn: use the language of the current human-authored user request below."
-
-func TestWorkassLanguageRuleIsAdjacentToEveryTurn(t *testing.T) {
+func TestWorkassSetsNoReplyLanguage(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{})
 	t.Cleanup(func() { manager.Reset() })
 
-	firstResult := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, "Continue this work in English.")
-	assertPerTurnLanguageBoundary(t, firstResult, "Continue this work in English.")
-
-	// The language boundary must repeat on an already-used provider session.
-	secondResult := buildUserRequestBlock("Keep answering in English.", true)
-	assertPerTurnLanguageBoundary(t, secondResult, "Keep answering in English.")
+	first := manager.buildAppChatPrompt(JobStartOptions{HumanAuthored: true}, "Continue this work in English.")
+	second := buildUserRequestBlock("Keep answering in English.", true)
+	for _, prompt := range []string{first, second} {
+		if strings.Contains(strings.ToLower(prompt), "response language") {
+			t.Fatalf("the prompt sets a reply language: %q", prompt)
+		}
+	}
+	if !strings.HasSuffix(first, "User request:\nContinue this work in English.") ||
+		!strings.HasSuffix(second, "User request:\nKeep answering in English.") {
+		t.Fatalf("current request is not delimited: %q / %q", first, second)
+	}
 }
 
-func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
+func TestLocalizedWorkassToolCardIsIsolatedFromHumanProse(t *testing.T) {
 	t.Parallel()
 	request := "Usar una herramienta\n" +
 		"mcp.workass-agent.workass_agent_catalog\n" +
@@ -29,10 +32,9 @@ func TestLocalizedWorkassToolCardCannotSelectHumanReplyLanguage(t *testing.T) {
 		"Workass agent coordinator is unavailable\n\n" +
 		"???? what is this why"
 	prompt := buildUserRequestBlock(request, true)
-	ruleAt := strings.Index(prompt, expectedPerTurnLanguageRule)
 	cardAt := strings.Index(prompt, "<workass_tool_card>\nUsar una herramienta")
 	humanAt := strings.Index(prompt, "User request:\n???? what is this why")
-	if ruleAt < 0 || cardAt < 0 || humanAt < 0 || ruleAt > cardAt || cardAt > humanAt {
+	if cardAt < 0 || humanAt < 0 || cardAt > humanAt {
 		t.Fatalf("localized tool card was not isolated from human prose: %q", prompt)
 	}
 	if strings.Count(prompt, "Usar una herramienta") != 1 ||
@@ -47,20 +49,5 @@ func TestOrdinaryMCPMentionIsNotMisclassifiedAsToolCard(t *testing.T) {
 	prompt := buildUserRequestBlock(request, true)
 	if strings.Contains(prompt, "<workass_tool_card>") || !strings.Contains(prompt, "User request:\n"+request) {
 		t.Fatalf("ordinary request was rewritten as a tool card: %q", prompt)
-	}
-}
-
-func assertPerTurnLanguageBoundary(t *testing.T, prompt, request string) {
-	t.Helper()
-	if strings.Count(prompt, expectedPerTurnLanguageRule) != 1 || strings.Contains(prompt, "Language rule:") {
-		t.Fatalf("language guidance must appear once per turn: %q", prompt)
-	}
-	ruleAt := strings.LastIndex(prompt, expectedPerTurnLanguageRule)
-	requestAt := strings.LastIndex(prompt, "User request:\n"+request)
-	if ruleAt < 0 || requestAt < 0 || ruleAt > requestAt {
-		t.Fatalf("per-turn language boundary is missing or misplaced: rule=%d request=%d prompt=%q", ruleAt, requestAt, prompt)
-	}
-	if strings.Contains(prompt[ruleAt:requestAt], "Previous conversation") {
-		t.Fatalf("restored history appears between the language rule and current request: %q", prompt[ruleAt:])
 	}
 }

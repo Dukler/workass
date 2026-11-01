@@ -22,7 +22,7 @@ speak newline-delimited JSON-RPC on stdin/stdout. Claude and Codex instead use
 Workass-owned native hosts so their official transports satisfy the same lane
 contract without leaking vendor behavior into chat code.
 
-The launcher in `desktop/main.js` supports these providers through `app-config.json`:
+The daemon supports these providers through `app-config.json`:
 
 | Provider | Command | Purpose |
 |---|---|---|

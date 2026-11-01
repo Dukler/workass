@@ -560,8 +560,8 @@ class ClaudeSession {
       pathToClaudeCodeExecutable: executable,
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(process.env.WORKASS_INSTRUCTIONS_FILE ? { append: readFileSync(process.env.WORKASS_INSTRUCTIONS_FILE, 'utf8') } : {}) },
       // A delegated child does not load the user's own instruction file. The
-      // repo's does still load: the laws a child works under belong to the
-      // repository, not to the person who happens to be driving.
+      // repo's does still load: a child works in the repository, and that file
+      // describes the repository, not the person who happens to be driving.
       settingSources: process.env.WORKASS_SUBAGENT === '1'
         ? ['project', 'local']
         : ['user', 'project', 'local'],

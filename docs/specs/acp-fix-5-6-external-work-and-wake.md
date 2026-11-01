@@ -1,6 +1,6 @@
 # Fix 5+6 — tracked external lanes (wake-on-settle removed)
 
-Status: Fix 6 remains built. Fix 5 was superseded by user law 2026-08-10.
+Status: Fix 6 remains built. Fix 5 was superseded by decision 2026-08-10.
 Scope: Go daemon (`internal/acp`,
 `cmd/workass`) + one new shell script. NO renderer changes (external kind
 renders via the existing generic fallback in `SpawnedWorkCard.tsx`).
@@ -16,13 +16,13 @@ B. **Historical behavior, now removed.** Workass briefly woke an idle chat on
    behavior. Terminal records now remain internal receipts until explicitly
    read.
 
-## Binding laws (restate: executors do not inherit memory)
+## Constraints for this lane
 
 - Wire contract `invoke/reply/event` is FROZEN. Only additive JSON fields.
 - One engine per chat; serialized session/prompt per bridge; stdout purity.
 - Secrets: `RedactSensitiveText` before any tail/summary is persisted or
   emitted. Never persist raw prompts or native session ids in receipts.
-- Identifier law: never rename existing fields/functions; add.
+- Identifier rule: never rename existing fields/functions; add.
 - Dev daemon only; prod untouched. Blessed rebuild scripts only.
 - Receipts: every claim in the lane log needs command + output.
 

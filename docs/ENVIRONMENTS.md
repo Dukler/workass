@@ -68,7 +68,7 @@ service. Killing the server leaves it stopped until the app is opened again or
 explicit recovery is requested. Old daemon LaunchAgents are removed on startup. See
 `docs/DISTRIBUTION.md`.
 
-## Rebuild law
+## Rebuilds
 
 Rebuild commands accept an explicit profile:
 

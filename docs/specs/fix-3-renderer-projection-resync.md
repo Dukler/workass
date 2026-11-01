@@ -13,7 +13,7 @@ exactly the claude∩~/Workspace/workass cohort while workass_list_chats kept
 returning all chats; full app restart rebuilt it; (c) reopening chats kept
 loading stale history afterwards.
 
-## Binding laws for this lane (restated verbatim — the builder does not inherit them)
+## Constraints for this lane
 - The `invoke/reply/event` wire protocol is FROZEN. Everything below is
   additive: new DOM event + window global in the injected shim, one extra
   replayed event to fresh clients, tombstone files, log lines. No channel

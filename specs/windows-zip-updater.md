@@ -1,6 +1,6 @@
 # Windows ZIP updater
 
-This lane implements the Windows updater law in `docs/PORT-SPEC.md`.
+This lane implements the Windows updater described at the top of `docs/PORT-SPEC.md`.
 
 Owned implementation: `internal/appinstall/`, the native install-update entry in
 `cmd/workass/main.go`, and the Windows handoff in `desktop/shell/update-manager.js`.

@@ -215,7 +215,7 @@ func (h *agentControlHandler) admitPermission(ctx context.Context, caller permis
 		return fmt.Errorf("%s: this command came from another machine with a %s limit, and %s would run at %s, which is above it. This machine cannot show the user a card for it. Raise the calling chat first: call workass_configure_chat on your own chat with permission_intent set to what you need, which asks the user on your machine. Then retry this call",
 			permissionCeilingCode, caller.statedLevel(), change.target, permissionModeWords(change.providerID, change.modeID))
 	case permissionCallerSubagent:
-		return fmt.Errorf("%s: this subagent runs at %s, and %s would run at %s, which is above it. A subagent cannot ask the user. Finish with what you have and tell your parent agent exactly what you need; it can do this itself if its own level allows, or ask the user",
+		return fmt.Errorf("%s: this subagent runs at %s, and %s would run at %s, which is above it. A subagent cannot ask the user. Its parent agent can do this itself if its own level allows, or ask the user",
 			permissionCeilingCode, caller.statedLevel(), change.target, permissionModeWords(change.providerID, change.modeID))
 	}
 	allowed, status, err := h.askPermissionRaise(ctx, caller, change)
@@ -229,7 +229,7 @@ func (h *agentControlHandler) admitPermission(ctx context.Context, caller permis
 	if allowed {
 		return nil
 	}
-	return fmt.Errorf("%s: the user was asked to let this chat run %s at %s and the card ended as %s. Nothing changed. A retry with this operation_id reads the same answer; ask a new one only if the user wants it",
+	return fmt.Errorf("%s: the user was asked to let this chat run %s at %s and the card ended as %s. Nothing changed. A retry with this operation_id reads the same answer; a new operation_id asks again",
 		permissionDeniedCode, change.target, permissionModeWords(change.providerID, change.modeID), status)
 }
 

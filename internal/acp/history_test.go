@@ -19,30 +19,10 @@ func TestEnvironmentBriefIncludesChatArchivePath(t *testing.T) {
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	if !strings.Contains(result, archivePath) ||
 		!strings.Contains(result, "{role, content, status, at}") ||
-		!strings.Contains(result, expectedPerTurnLanguageRule) ||
 		!strings.Contains(result, "User request:\nread referenced chat") {
 		t.Fatalf("environment brief missing archive discovery paragraph:\n%s", result)
 	}
 	t.Logf("trace env brief archive path=%s", archivePath)
-}
-
-func TestEnvironmentBriefCurrentRequestLanguageUsesHumanRequest(t *testing.T) {
-	t.Parallel()
-	result := buildUserRequestBlock("Continue this work in English.", true)
-	rule := expectedPerTurnLanguageRule
-	if !strings.Contains(result, rule) ||
-		!strings.Contains(result, "User request:\nContinue this work in English.") {
-		t.Fatalf("current-request language boundary is missing:\n%s", result)
-	}
-	if strings.Index(result, rule) > strings.Index(result, "User request:\nContinue this work in English.") {
-		t.Fatalf("per-turn language rule must govern the current request:\n%s", result)
-	}
-
-	spanishResult := buildUserRequestBlock("Continuá este trabajo en español.", true)
-	if !strings.Contains(spanishResult, rule) ||
-		!strings.Contains(spanishResult, "User request:\nContinuá este trabajo en español.") {
-		t.Fatalf("current Spanish request lost its language boundary:\n%s", spanishResult)
-	}
 }
 
 func TestFirstInputInitialContextSeedIsIncludedOnce(t *testing.T) {

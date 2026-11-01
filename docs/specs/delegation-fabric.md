@@ -28,18 +28,18 @@ daemons, so the mac becomes actual 'parent chat daemon' communicating with
 desktop-versus-headless role: those are properties a peer advertises, never
 assumptions the design makes.
 
-## Binding laws for this lane (restated — executors do not inherit memory)
+## Constraints for this lane
 
 - Wire contract `invoke/reply/event` is FROZEN. New channels and additive
   payload fields only; no existing field changes meaning.
-- Identifier law: never rename an existing field, id, path or function. Add.
+- Identifier rule: never rename an existing field, id, path or function. Add.
 - One engine per chat; serialized session/prompt per bridge; stdout purity for
   ACP code (JSON-RPC on stdout, diagnostics on stderr).
 - `RedactSensitiveText` before any free text is persisted, emitted or sent,
   and again on receipt from a peer. Never persist raw prompts or
   provider-native session ids.
 - A wake is never a user message. Completion reaches a chat only as a
-  task-notification notice (the 2026-10-16 law, §7).
+  task-notification notice (the 2026-10-16 rule, §7).
 - Secrets never travel in argv (`cmd/workass/fleet_cli.go`: "The key is never
   taken from argv" — argv is world-readable through `ps` and lands in shell
   history).
@@ -273,7 +273,7 @@ Properties that matter:
   identical from the outside, and that is how four live jobs told nobody.
 - **Authorization never rides argv.** The delegation token comes from
   `--delegation-token-file` (0600, consumed and unlinked) or an env var — not
-  the command line (binding law, `fleet_cli.go`).
+  the command line (`fleet_cli.go`).
 - **Absence is still evidence.** If the supervisor itself dies (OOM, reboot),
   there is a pid that is gone and no `settled` event: the host appends
   `lost{evidence}`. Nothing can report `running` forever.

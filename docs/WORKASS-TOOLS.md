@@ -76,8 +76,7 @@ actor. Delegated agents receive the control catalog without browser actions,
 questions, or subagent orchestration, and every call acts for the exact chat
 that spawned them (as a Claude Code subagent works inside its parent's
 session and cannot delegate further).
-The context file contains a private capability; never print it or paste it into
-a prompt. Its path stays stable for that process; its exact owner binding is
+The context file contains a private capability. Its path stays stable for that process; its exact owner binding is
 refreshed before use, and a missing context file is recreated. A new attachment
 gets a new process path. Context is removed on session close/reset. Old
 authority is rejected after detachment even if a caller retained the file.
@@ -87,9 +86,9 @@ of silently switching to another owner.
 Context errors never echo the private context file path. When
 `WORKASS_TOOL_CONTEXT` is unset the process was not launched by a Workass chat
 engine. A missing context file means the chat that launched the process was
-deleted, or the daemon cleaned up a context left over from before a restart:
-long-running helpers should not poll, ask the chat to use
-`workass_schedule_message` instead. A rejected credential (`401`) means either
+deleted, or the daemon cleaned up a context left over from before a restart; for
+delayed work ask the chat to use `workass_schedule_message` instead of a detached
+helper. A rejected credential (`401`) means either
 the chat that launched the process was deleted, or the context was issued by an
 engine that has since stopped (contexts written before chat-lifetime tokens
 carry an engine owner key that dies with its engine); for delayed work use
@@ -340,9 +339,7 @@ and durable operation receipts. Mutations require a caller-stable
 `operation_id`, except a wait, where it is optional. An uncertain response is not
 permission to issue a fresh mutation: reuse the same id and exact arguments for
 receipt readback. Updating
-an application still requires the current human's explicit instruction naming
-the exact machine and the observed versions. Publication does not authorize
-activation.
+an application takes the exact machine and the observed versions.
 
 There is no provider tool registration or MCP certificate injection. Ordinary
 chat lifecycle also performs no automatic Git capture before or after turns.

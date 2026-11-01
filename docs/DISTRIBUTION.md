@@ -114,7 +114,7 @@ The updater:
 2. inspects archive paths before extraction and stages beside the installed app;
 3. verifies the incoming app's platform signature, version, bundled daemon,
    runtime manifest, and mutual designated requirement with the installed app;
-4. asks the daemon for a user-clicked handoff (user law 2026-08-25). The
+4. asks the daemon for a user-clicked handoff. The
    daemon atomically blocks new turns, subagents, tracked external work, and
    provider updates for the handoff window; active work never blocks the
    click and is recorded in the durable receipt instead;
@@ -129,9 +129,8 @@ The updater:
 The UI exposes this through the same compact sidebar update card used for
 provider updates; it does not add a separate Settings section. Workass never
 enters or schedules an update on its own. A user click updates immediately
-regardless of running work. When an agent may call `workass_apply_update` is the
-owner's rule in `AGENTS.md`; the tool takes the exact machine, the expected
-versions and a stable operation id.
+regardless of running work. `workass_apply_update` takes the exact machine, the
+expected versions and a stable operation id.
 
 ### Release manifest signature
 

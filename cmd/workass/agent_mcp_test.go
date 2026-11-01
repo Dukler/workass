@@ -87,10 +87,10 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 		t.Fatalf("update status tool is not a read-only diagnostic surface: %#v", status)
 	}
 	apply := byName["workass_apply_update"]
-	if apply == nil || !strings.Contains(toString(apply["description"]), "AGENTS.md") {
-		t.Fatalf("update apply tool does not point at the owner's rule in AGENTS.md: %#v", apply)
+	if apply == nil {
+		t.Fatal("update apply tool is not advertised")
 	}
-	for _, removed := range []string{"CURRENT human", "orders installation", "Never infer", "never schedule"} {
+	for _, removed := range []string{"CURRENT human", "orders installation", "Never infer", "never schedule", "AGENTS.md"} {
 		if strings.Contains(toString(apply["description"]), removed) {
 			t.Fatalf("update apply tool still injects the policy (%q): %#v", removed, apply)
 		}

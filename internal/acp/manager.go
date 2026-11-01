@@ -1910,8 +1910,6 @@ func buildContextHistoryBlock(messages []providercontract.ContextMessage, delta 
 		strings.Join(lines, "\n\n") + agenttext.Get("history.suffix")
 }
 
-var perTurnLanguageRule = agenttext.Get("rules.language")
-
 var perTurnBrowserRule = agenttext.Get("rules.browser")
 
 func (m *Manager) buildUserRequestBlock(userText string, humanAuthored bool) string {
@@ -1934,19 +1932,19 @@ func buildUserRequestBlockWithToolRules(userText string, humanAuthored bool, bro
 	// Keep generated tool-card evidence separate from the current user request.
 	if humanAuthored {
 		if card, request, ok := splitWorkassToolCardPrefix(userText); ok {
-			return perTurnLanguageRule + browserRule +
+			return browserRule +
 				agenttext.Get("request.toolcard.prefix") + card +
 				agenttext.Get("request.toolcard.suffix") + request
 		}
 	}
-	return perTurnLanguageRule + browserRule + agenttext.Get("request.prefix") + userText
+	return browserRule + agenttext.Get("request.prefix") + userText
 }
 
 // splitWorkassToolCardPrefix recognizes only the concrete serialized card
 // shape emitted by Workass: a localized label, an MCP tool identifier, two
 // duration rows, result text, then a blank line and the person's prose. It
-// preserves both parts verbatim while giving the model an unambiguous language
-// boundary. Ordinary messages that merely mention MCP are never rewritten.
+// preserves both parts verbatim while giving the model an unambiguous boundary
+// between them. Ordinary messages that merely mention MCP are never rewritten.
 func splitWorkassToolCardPrefix(text string) (card, request string, ok bool) {
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
 	lines := strings.Split(normalized, "\n")

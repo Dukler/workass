@@ -24,7 +24,7 @@ browser, a phone — are views over a WebSocket wire protocol.
 - `desktop/renderer2` — the React + TypeScript UI (built and embedded).
 - `desktop/shell` — the Electron shell (a thin view over the daemon).
 - `desktop/acp` — ACP dev infra and the deterministic mock server (test oracle).
-- `docs/PORT-SPEC.md` — binding laws for the Go port (wire protocol, ACP
+- `docs/PORT-SPEC.md` — design notes for the Go port (wire protocol, ACP
   lifecycle, landmines).
 - `scripts/` — build, release, and vendoring scripts.
 
@@ -36,7 +36,7 @@ go build ./...
 ```
 
 The renderer is built and embedded via `scripts/sync-renderer2.sh` (invoked by
-the build scripts). See `docs/` for the port spec, wire contract, and release
+the build scripts). See `AGENTS.md` and `docs/` for the port spec and release
 process.
 
 ## License

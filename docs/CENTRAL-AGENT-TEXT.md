@@ -1,9 +1,11 @@
 # Central agent instruction text
 
-User-authorized scope: all Workass-authored prompt/guide blocks, history and
+Scope: all Workass-authored prompt/guide blocks, history and
 attachment framing, delegation wrappers, and tool/schema guidance have one
 editable source: internal/agenttext/catalog.json. Go embeds and selects named
 entries; existing assembly, authority, session and delivery behavior remains.
+The text says what tools do, their arguments, results and errors, which fits which
+job, and how to invoke the CLI. It sets no agent behaviour or policy.
 Browser wording advertises availability without directing exclusive use.
 Native delivery remains Codex/Claude/OpenCode; Devin/custom ACP retain fallback.
 Ordinary UI labels, diagnostic errors, protocol identifiers, user content and

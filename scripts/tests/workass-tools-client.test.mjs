@@ -6,7 +6,7 @@ import test from 'node:test';
 import { parseCallFlags, run, ToolError } from '../workass-tools.mjs';
 
 const NOT_LAUNCHED_MESSAGE = 'WORKASS_TOOL_CONTEXT is not set; this process was not launched by a Workass chat engine';
-const MISSING_MESSAGE = 'Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart; long-running helpers should not poll — ask the chat to use workass_schedule_message';
+const MISSING_MESSAGE = 'Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper';
 const UNAUTHORIZED_MESSAGE = 'Workass rejected this context\'s credential: the chat that launched this process was deleted, or the context was issued by an engine that has since stopped. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper';
 
 function io() {

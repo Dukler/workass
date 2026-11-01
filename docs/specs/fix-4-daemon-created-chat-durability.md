@@ -10,7 +10,7 @@ srv-tab-18c3375375ec40d8-77a) returned ok, then vanished: absent from
 inspection confirms both chats were written to session-state.json and later
 erased; only transcript-text remnants remain (nothing to clean up).
 
-## Binding laws for this lane (restated verbatim — the builder does not inherit them)
+## Constraints for this lane
 - Never rename referenced files/ids/paths/JSON keys; new fields are
   additive-only (wire contract `invoke/reply/event` is frozen; the renderer
   must keep working unchanged).

@@ -1,7 +1,7 @@
 # Dream subagent experience
 
 This document is the implementation map for Workass's agent-facing
-orchestration experience. Binding behavior lives in `PORT-SPEC.md`; this file
+orchestration experience. The behavior is described in `PORT-SPEC.md`; this file
 keeps the product sequence and acceptance receipts readable.
 
 ## Experience contract
