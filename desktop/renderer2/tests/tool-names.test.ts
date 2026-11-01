@@ -41,7 +41,7 @@ test('Codex phrase titles and raw command titles both read as actions', () => {
 
   // Codex titles an execute call with the whole command line: the row shows the
   // action and hands the command to the detail column instead of eating the line.
-  const cmd = '/bin/zsh -lc "ssh desktoppc-vpn \'powershell -NoProfile -Command …\'"';
+  const cmd = '/bin/zsh -lc "ssh desktop-vpn \'powershell -NoProfile -Command …\'"';
   const ran = toolPresentation(tool({ title: cmd, toolKind: 'execute' }));
   assert.equal(ran.label, 'Ejecutar un comando');
   assert.equal(ran.icon, 'run');

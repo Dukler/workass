@@ -9,7 +9,7 @@ import path from 'node:path';
 
 const oauthDir = path.join(os.homedir(), 'AppData', 'Roaming', 'devin', 'mcp', 'oauth');
 const refreshHelper = path.join(os.homedir(), '.config', 'devin', 'scripts', 'Refresh-AtlassianMcpOAuth.ps1');
-const JIRA_SITE = process.env.ASSISTANT_JIRA_SITE || 'https://your-site.atlassian.net';
+const JIRA_SITE = String(process.env.ASSISTANT_JIRA_SITE || '').replace(/\/+$/, '');
 const MCP_PROTOCOL_VERSION = '2026-07-28';
 
 export function refreshAtlassianOAuth() {

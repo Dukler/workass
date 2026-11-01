@@ -36,7 +36,7 @@ one tag carries every non-Mac target and each client resolves its own manifest
 through `/releases/latest/download/`.
 
 The archive layout **is** the install layout: every entry sits directly in the
-install root (`/data/workass/runtime` on buildbox). That is what lets the
+install root (`~/workass/runtime` in the examples below). That is what lets the
 daemon's own updater rename the new tree into place without a translation
 table.
 
@@ -54,9 +54,9 @@ in the fleet. `--arch arm64` already works in the staging script and
 ## Installing from the release alone
 
 ```sh
-install_root=/data/workass/runtime
-mkdir -p "$install_root" /data/workass/state
-chmod 700 /data/workass/state
+install_root=$HOME/workass/runtime
+mkdir -p "$install_root" $HOME/workass/state
+chmod 700 $HOME/workass/state
 curl -fLo /tmp/workass-linux.tar.gz \
   https://github.com/Dukler/workass/releases/latest/download/Workass-<version>-linux-amd64.tar.gz
 curl -fLo /tmp/SHA256SUMS-linux-amd64 \
@@ -71,10 +71,10 @@ Then a `systemd --user` unit, no root beyond `loginctl enable-linger`:
 ```ini
 [Service]
 Type=simple
-WorkingDirectory=/data/workass
-ExecStart=/data/workass/runtime/workass -headless -bind lan -port 8788 -state-dir /data/workass/state
-Environment=PATH=/data/workass/runtime/node/linux-amd64/bin:/usr/local/bin:/usr/bin:/bin
-Environment=WORKASS_NODE=/data/workass/runtime/node/linux-amd64/bin/node
+WorkingDirectory=%h/workass
+ExecStart=%h/workass/runtime/workass -headless -bind lan -port 8788 -state-dir %h/workass/state
+Environment=PATH=%h/workass/runtime/node/linux-amd64/bin:/usr/local/bin:/usr/bin:/bin
+Environment=WORKASS_NODE=%h/workass/runtime/node/linux-amd64/bin/node
 Restart=on-failure
 RestartSec=5
 ```
@@ -117,13 +117,13 @@ What the updater replaces: `workass`, `workass-tools`, `workass-agent`,
 
 What it installs only when absent: `node/<platform>-<arch>/`. A
 hand-provisioned host may hold a fuller Node than the release prunes to — the
-one on buildbox keeps `npm`, which is how Pi and Codex were installed beside
+one an operator installed may keep `npm`, which is how Pi and Codex were installed beside
 it — and an update is not a licence to take an operator's tool away. The
 release still carries Node so a first install from the release alone is
 complete.
 
-What it never touches: anything outside the install root. `/data/workass/pi`,
-`/data/workass/codex`, `/data/workass/state` and the unit file are not the
+What it never touches: anything outside the install root. `~/workass/pi`,
+`~/workass/codex`, `~/workass/state` and the unit file are not the
 release's to own.
 
 ## Jobs across an update
@@ -137,10 +137,10 @@ and does not survive: its row fails with that reason, and its owner gets one not
 
 ## Reading and driving it from another machine
 
-From the Mac, with buildbox mounted and paired:
+From a client, with the server mounted and paired:
 
 ```jsonc
-// workass_list_update_targets  -> buildbox's exact machineId
+// workass_list_update_targets  -> the server's exact machineId
 // workass_get_update_status    { "machine_id": "<id>" }
 //   -> { headless: true, diagnostics: { strategy: "linux-systemd-user",
 //        state: { supported, currentVersion, availableVersion, phase }, receipt } }
@@ -160,8 +160,8 @@ cannot start a second activation.
 
 ```sh
 journalctl --user -u workass.service -n 100
-cat /data/workass/state/headless-update/receipt.json
-ls /data/workass/runtime/.workass-update/
+cat $HOME/workass/state/headless-update/receipt.json
+ls $HOME/workass/runtime/.workass-update/
 ```
 
 The receipt is the record that survives the restart it causes: the process that
