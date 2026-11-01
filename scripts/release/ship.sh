@@ -101,7 +101,7 @@ NODE
 else
   code=$?
   echo "WORKASS_RELEASE_FAILED version=$version log=$run_log" >&2
-  tail -24 "$run_log" >&2
+  node "$script_dir/lib/failure-summary.mjs" "$run_log" >&2 2>/dev/null || tail -n 8 "$run_log" >&2
   exit "$code"
 fi
 
@@ -114,6 +114,8 @@ echo "release=$release"
 echo "log=$run_log"
 echo "seconds=$((finished - started))"
 echo "activation=not-requested"
+# A test that only passed its rerun did not fail the release, and stays visible.
+node "$script_dir/lib/failure-summary.mjs" --flakes "$run_log" 2>/dev/null || true
 
 # Retention after every publish: older release candidates, finished scratch and
 # leftover Brave copies go (scripts/dev-disk-hygiene.sh). Never fails a release.

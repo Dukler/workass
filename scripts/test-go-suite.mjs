@@ -218,6 +218,25 @@ export function inspectCaseOutput(name, code, output) {
   };
 }
 
+// One line of cause for a failed case, taken from its own output. Parallel tests
+// interleave, so a line belongs to whichever test Go last announced.
+export function goFailureCause(name, code, signal, output) {
+  let current = null;
+  let cause = null;
+  let logged = null;
+  let panic = null;
+  for (const line of output.split(/\r?\n/)) {
+    const announced = line.match(/^\s*(?:=== (?:RUN|NAME|CONT|PAUSE)\s+|--- (?:PASS|SKIP|FAIL): )(\S+)/);
+    if (announced) { current = announced[1]; continue; }
+    if (/^panic: /.test(line)) panic ??= line.trim();
+    if (current !== name && !current?.startsWith(`${name}/`)) continue;
+    // A test's own assertion beats production code logging while it ran.
+    if (!cause && /^\s*\S+_test\.go:\d+:/.test(line)) cause = line.trim();
+    if (!logged && /^\s*\S+\.go:\d+:/.test(line)) logged = line.trim();
+  }
+  return cause ?? panic ?? logged ?? (signal ? `killed by ${signal}` : `no result for this test (exit ${code})`);
+}
+
 export function partitionSerialCases(names, serialNames = SERIAL_TESTS) {
   return { serial: names.filter(name => serialNames.has(name)), parallel: names.filter(name => !serialNames.has(name)) };
 }
@@ -392,6 +411,9 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
   const summary = {
     ok: false, interrupted: null, cwd, workers, race,
     heavyPackages: {}, otherPackages: [], packageOutcomes: [],
+    // What a later single-test rerun needs: every failing case by name with the
+    // exact binary that ran it, and every failure no test name accounts for.
+    failedCases: [], unattributedFailures: [], agentFixture: null,
     otherGo: { tests: 0, topLevelTests: 0, nestedTests: 0, passed: 0, failed: 0, skipped: 0 },
     elapsedMs: 0, jsonlPath, summaryPath,
   };
@@ -411,6 +433,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       const cachedAgent = path.join(binaryCache, 'workass-agent');
       await run(go, ['build', '-trimpath', '-o', cachedAgent, './cmd/workass-agent'], 'compile-agent-fixture');
       agentFixture = path.join(root, 'native-acp-fixture');
+      summary.agentFixture = cachedAgent;
       await link(cachedAgent, agentFixture);
     }
     const heavyImportPaths = new Set(HEAVY_PACKAGES.map(pkg => packages.find(name => name.endsWith(pkg.slice(1))) ?? `workass/${pkg.slice(2)}`));
@@ -467,7 +490,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       const names = parseTestList(listing.stdout);
       if (!names.length) throw new Error(`${pkg} test binary discovered no Test, Example, or Fuzz cases`);
       if (new Set(names).size !== names.length) throw new Error(`${pkg} test listing contains duplicate case names`);
-      const item = { pkg, label, binary, packageCwd, names };
+      const item = { pkg, importPath, label, binary, cachedBinary, packageCwd, names };
       buildAndList.push(item);
       const { serial, parallel } = partitionSerialCases(names);
       item.serialCases = serial;
@@ -487,6 +510,13 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       await run(go, ['test', ...raceFlag, '-p', String(compilerParallelism), '-c', '-o', `${binaryCache}${path.sep}`, ...packageIds], `compile-${group.id}`);
       for (const task of workForGroup(group)) enqueue(task);
     };
+    const recordFailedCase = (importPath, binary, cwd, name, inspected, result) => {
+      summary.failedCases.push({
+        package: importPath, name, binary, cwd,
+        first: inspected.rootFailures ? 'failed' : inspected.rootRuns === 0 ? 'not_run' : 'incomplete',
+        cause: goFailureCause(name, result.code, result.signal, `${result.stdout}\n${result.stderr}`),
+      });
+    };
     const executeBatch = async (batch, worker) => {
       const { item } = batch;
       const tempDir = await commandTemp(`worker-${worker}-${item.label}-batch-${batch.id}`, { testBinary: true });
@@ -496,8 +526,13 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       const target = summary.heavyPackages[item.pkg];
       if (batch.boundary === 'serial') target.serialElapsedMs += result.elapsedMs;
       appendJsonLine(jsonl, { event: 'batch-end', package: item.pkg, batch: batch.id, worker, names: batch.names, elapsedMs: result.elapsedMs, code: result.code, signal: result.signal, spawnError: result.spawnError, stdout: result.stdout, stderr: result.stderr });
+      let batchFailedCases = 0;
       for (const name of batch.names) {
         const inspected = inspectCaseOutput(name, result.code, result.stdout);
+        if (inspected.coverageError || inspected.rootPasses + inspected.rootSkips !== 1 || inspected.nestedFailed) {
+          batchFailedCases++;
+          recordFailedCase(item.importPath, item.cachedBinary, item.packageCwd, name, inspected, result);
+        }
         const record = { package: item.pkg, name, worker, batch: batch.id, boundary: batch.boundary, cwd: item.packageCwd, elapsedMs: result.elapsedMs, code: result.code, signal: result.signal, spawnError: result.spawnError, ...inspected };
         target.cases.push(record);
         appendJsonLine(jsonl, { event: 'case', ...record });
@@ -509,7 +544,10 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
         target.nestedPassed += inspected.nestedPassed;
         target.nestedFailed += inspected.nestedFailed;
       }
-      if (result.code !== 0) failures.push(`${item.pkg} batch ${batch.id} failed with exit ${result.code}`);
+      if (result.code !== 0) {
+        failures.push(`${item.pkg} batch ${batch.id} failed with exit ${result.code}`);
+        if (!batchFailedCases) summary.unattributedFailures.push(`${item.pkg} batch ${batch.id} exited ${result.code} with every case passing`);
+      }
     };
     const executePackage = async work => {
       const { hasTests } = work;
@@ -531,6 +569,9 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
       const result = await spawnLogged(binary, ['-test.v', '-test.count=1', '-test.parallel=2'], { cwd: packageCwd, spawn, env: envFor(tempDir, { testBinary: true }) }, active);
       const inspected = names.map(name => ({ name, ...inspectCaseOutput(name, result.code, result.stdout) }));
       let packageOutcome = result.code === 0 && inspected.every(item => !item.coverageError && !item.rootFailures) ? 'pass' : 'fail';
+      const failedHere = inspected.filter(item => item.coverageError || item.rootFailures || item.nestedFailed);
+      for (const item of failedHere) recordFailedCase(work.package, cachePath, packageCwd, item.name, item, result);
+      if (result.code !== 0 && !failedHere.length) summary.unattributedFailures.push(`${work.package} exited ${result.code} with every test passing`);
       for (const item of inspected) {
         summary.otherGo.topLevelTests++;
         summary.otherGo.tests++;
@@ -559,6 +600,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
           else await executePackage(work);
         } catch (error) {
           failures.push(error.message);
+          summary.unattributedFailures.push(error.message);
           if (error.result && !summary.commandFailure) summary.commandFailure = { label: error.label, code: error.result.code, signal: error.result.signal, spawnError: error.result.spawnError, stdout: error.result.stdout, stderr: error.result.stderr };
         } finally {
           pendingTasks--;
@@ -570,6 +612,12 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
     const rejection = settled.find(item => item.status === 'rejected');
     if (rejection) throw rejection.reason;
     if (interrupted) throw new Error(`interrupted by ${interrupted}`);
+    // A rerun can clear only what ran and failed by name, never a case that was
+    // discovered and then not executed.
+    for (const item of buildAndList) {
+      const target = summary.heavyPackages[item.pkg];
+      if (failures.length && target.cases.length !== target.discovered) summary.unattributedFailures.push(`${item.pkg} coverage mismatch: discovered ${target.discovered}, ran ${target.cases.length}`);
+    }
     if (failures.length) throw new Error(failures.join('; '));
     for (const item of buildAndList) {
       const result = summary.heavyPackages[item.pkg];
@@ -585,6 +633,7 @@ export async function runGoSuite({ cwd = process.cwd(), logDir, cacheDir, fixtur
     if (!summary.ok) throw new Error('one or more Go cases failed or were missing');
   } catch (error) {
     summary.error = error.message;
+    if (!summary.failedCases.length && !summary.unattributedFailures.length) summary.unattributedFailures.push(error.message);
     if (error.result) summary.commandFailure = { label: error.label, code: error.result.code, signal: error.result.signal, spawnError: error.result.spawnError, stdout: error.result.stdout, stderr: error.result.stderr };
     if (interrupted) summary.interrupted = interrupted;
     if (jsonlError) summary.logError = jsonlError.message;

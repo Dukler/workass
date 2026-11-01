@@ -5,9 +5,14 @@ them.
 
 | Profile | Daemon | Renderer | Data root | App |
 |---|---:|---:|---|---|
-| `prod` | `127.0.0.1:8788` | `127.0.0.1:8798` | `~/Library/Application Support/Workass` | `/Applications/Workass.app` |
+| `prod` | LAN bind, port `8788` | `127.0.0.1:8798` | `~/Library/Application Support/Workass` | `/Applications/Workass.app` |
 | `dev` | `127.0.0.1:18788` | `127.0.0.1:8799` | `<repo>/.dev/profiles/default` | source Electron |
 | `test` | OS-assigned | OS-assigned | a required temporary directory | headless |
+
+Production on Windows has its own file, `config/environments/windows-prod.env`:
+LAN bind, port `80`, data under `%LOCALAPPDATA%\Workass`. Linux hosts are headless;
+see `docs/LINUX-HEADLESS.md`. The daemon serves TLS only, so its URLs are `https`
+and `wss`.
 
 The checked-in, non-secret source of truth is `config/environments/*.env`.
 Machine-local overrides may be placed in
@@ -22,8 +27,8 @@ Derived paths under each data root are:
 state/       canonical chats, archives, checkpoints, native sessions
 electron/    profile-specific Chromium/Electron data
 run/         browser-control and runtime descriptors
-runtime/     installed production daemon and ACP adapters
-logs/        development/test logs when applicable
+runtime/     installed production daemon and native provider hosts
+logs/        development/test logs (prod logs: ~/Library/Logs/Workass/prod)
 ```
 
 ## Development
@@ -37,9 +42,12 @@ release input.
 
 ## Production package
 
-`scripts/package-workass-macos.sh` builds the renderer, runs shell/profile
-tests, signs `Workass.app` and the standalone daemon with one persistent
-identity, installs the app through a stop/stage/swap/rollback transaction, and
+Publishing a release to every platform is `scripts/release/ship.sh`; see
+`docs/DISTRIBUTION.md`. It never installs or activates anything.
+
+`scripts/package-workass-macos.sh` builds the renderer, runs the repository gate
+and package contracts, signs `Workass.app` and the standalone daemon with one
+persistent identity, installs the app through a stop/stage/swap/rollback transaction, and
 requires controller authority plus a non-empty provider catalog. It rejects
 ad-hoc/CDHash-only code and rejects any ordinary update whose designated
 requirement is incompatible with the installed release. The downloaded Workass
@@ -54,7 +62,7 @@ distribution requires Developer ID signing and notarization. See
 install or relaunch the local production profile. It produces a versioned,
 self-contained, Developer ID-signed and notarized DMG plus update ZIP. The app
 is built from a checksum-verified pinned Electron runtime and contains its
-daemon, ACP adapters, and pinned portable Node runtime. Opening the app starts
+daemon, native provider hosts, and pinned portable Node runtime. Opening the app starts
 its bundled server directly if needed, without installing a login or restart
 service. Killing the server leaves it stopped until the app is opened again or
 explicit recovery is requested. Old daemon LaunchAgents are removed on startup. See

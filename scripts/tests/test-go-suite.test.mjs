@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, access, symlink } from 'node:f
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runGoSuite, parseTestList, anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight, isMainModule } from '../test-go-suite.mjs';
+import { goFailureCause, runGoSuite, parseTestList,anchoredTestPattern, partitionBatches, partitionSerialCases, inspectCaseOutput, orderWorkByWeight, isMainModule } from '../test-go-suite.mjs';
 
 const names = ['TestAlpha', 'TestBeta', 'ExampleWidget', 'FuzzParse'];
 
@@ -469,6 +469,29 @@ test('case failures propagate after other cases run and preserve failure detail'
   assert.equal(result.heavyPackages['./cmd/workass'].cases.length, names.length, 'assigned work drains after a worker sees a failed batch');
   assert.equal(result.otherGo.tests, 16, 'remaining package work also drains after a heavy batch failure');
   assert.match(await readFile(result.jsonlPath, 'utf8'), /deliberate failure detail/);
+  const named = result.failedCases.filter(item => item.package === 'workass/internal/acp');
+  assert.deepEqual(named.map(item => item.name), ['TestBeta']);
+  assert.equal(named[0].first, 'failed');
+  assert.match(named[0].binary, /acp\.test$/);
+  assert.equal(result.unattributedFailures.length, 0, 'every failure here has a test name');
+});
+
+test('a Go batch that exits nonzero while every case passed has no test to rerun', async t => {
+  const f = await fixture(t, { packageFail: true });
+  const result = await runGoSuite({ cwd: f.root, logDir: f.logs, go: f.go, workers: 2, signalHandlers: false, spawn: inProcessGoSpawn({ packageFail: true }).spawn });
+  assert.equal(result.ok, false);
+  assert.ok(result.unattributedFailures.length > 0);
+});
+
+test('a failed case gets the line of its own output as its cause', () => {
+  const output = [
+    '=== RUN   TestOther', '=== RUN   TestBroken', '=== PAUSE TestBroken', '=== NAME  TestOther', '    other_test.go:1: not this one',
+    '=== NAME  TestBroken', '2026/11/01 12:00:00 wire.go:1910: production log line', '    wire.go:7: also a log', '    broken_test.go:42: wanted 1, got 2', '--- FAIL: TestBroken (0.00s)',
+  ].join('\n');
+  assert.equal(goFailureCause('TestBroken', 1, null, output), 'broken_test.go:42: wanted 1, got 2');
+  assert.equal(goFailureCause('TestBroken', 2, null, '=== RUN   TestBroken\npanic: nil map\n'), 'panic: nil map');
+  assert.equal(goFailureCause('TestBroken', -1, 'SIGKILL', ''), 'killed by SIGKILL');
+  assert.equal(goFailureCause('TestBroken', 1, null, ''), 'no result for this test (exit 1)');
 });
 
 test('other-package command failures propagate with complete output', async t => {
