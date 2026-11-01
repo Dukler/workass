@@ -15,6 +15,7 @@ func TestFleetQRRefusesToPromiseLANAccessFromLoopbackDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, fleetQRPath, nil)
+	req.Host = "127.0.0.1:8788"
 	req.RemoteAddr = "127.0.0.1:54321"
 	rec := httptest.NewRecorder()
 
@@ -34,6 +35,7 @@ func TestFleetQRDrawsOnlyForLocalViewerOfLANDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := httptest.NewRequest(http.MethodGet, fleetQRPath+"?host=192.168.50.13:8788", nil)
+	local.Host = "127.0.0.1:8788"
 	local.RemoteAddr = "127.0.0.1:54321"
 	localRec := httptest.NewRecorder()
 	newFleetQRHandler(keys, 8788, "lan", nil).ServeHTTP(localRec, local)

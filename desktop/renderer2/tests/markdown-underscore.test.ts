@@ -32,6 +32,21 @@ test('standalone underscore emphasis still renders', () => {
   assert.equal(html('(_aside_)'), '(<i>aside</i>)');
 });
 
+// A reply's link is one click from an OS handler: file:, smb: and search-ms: each
+// launch something. The default is refusal, so an unheard-of scheme is covered.
+test('links are allowed only for http, https, mailto and relative targets', () => {
+  for (const target of ['file:///etc/passwd', 'FILE:///etc/passwd', 'fi\tle:///etc/passwd', 'smb://192.0.2.1/share', 'search-ms:query=x',
+    'ms-msdt:/id', 'ftp://example.com/a', 'blob:http://example.com/a', 'workass-unknown://x', 'C:\\Windows\\calc.exe']) {
+    const out = html(`[label](${target})`);
+    assert.ok(!out.includes('<a'), `${target} rendered an anchor: ${out}`);
+    assert.ok(out.includes('label'), out);
+  }
+  for (const target of ['http://example.com/a', 'https://example.com/a:b', 'HTTPS://example.com', 'mailto:someone@example.com',
+    '/workass/artifacts/abc/index.html', './notes/a.md', '../a.md', '#section', 'src/a.ts:12', '?x=a:b']) {
+    assert.match(html(`[label](${target})`), /<a [^>]*href="/, target);
+  }
+});
+
 // 2026-10-11 QA L8: javascript:/data: links reached the DOM as anchors.
 test('links with executing schemes render as plain text', () => {
   for (const target of ['javascript:window.__xss=3', 'JAVA\tSCRIPT:alert(1)', 'data:text/html,hi', 'vbscript:x']) {

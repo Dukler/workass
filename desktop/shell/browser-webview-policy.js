@@ -66,4 +66,28 @@ function hardenWebviewAttach(webPreferences, params, { partition }) {
   return { allow: true };
 }
 
-module.exports = { hardenWebviewAttach, resolveBrowserHost, SETTINGS_FILE };
+// What may leave the app for the OS. A link in a reply or a hosted page is one
+// click from whatever handler its scheme names, and file:, smb: and search-ms:
+// each launch something, so this is an allowlist. The URL parser removes what a
+// browser would ignore ("fi\tle:"), so the check sees what the OS would.
+const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+
+function isSafeExternalURL(url) {
+  if (typeof url !== 'string') return false;
+  try { return EXTERNAL_PROTOCOLS.has(new URL(url).protocol); } catch { return false; }
+}
+
+// Returns whether the URL was handed to the OS. The launch itself is not awaited
+// by any caller, so its failure is reported here rather than left unhandled.
+function openExternalIfSafe(nativeShell, url, log = console.error) {
+  if (!isSafeExternalURL(url)) {
+    log(`[shell] refused to open a link with a disallowed scheme: ${String(url).slice(0, 200)}`);
+    return Promise.resolve(false);
+  }
+  return Promise.resolve(nativeShell.openExternal(url)).then(() => true, (err) => {
+    log(`[shell] could not open a link: ${err && err.message || err}`);
+    return true;
+  });
+}
+
+module.exports = { hardenWebviewAttach, isSafeExternalURL, openExternalIfSafe, resolveBrowserHost, SETTINGS_FILE };

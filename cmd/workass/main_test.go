@@ -155,7 +155,7 @@ func (gate *fakeAppUpdateGate) CancelUpdateDrain()                       { gate.
 
 func updateControlRequest(t *testing.T, handler http.HandlerFunc, remoteAddr, updateID string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "https://workass.local/workass/update", strings.NewReader(`{"updateId":"`+updateID+`"}`))
+	request := httptest.NewRequest(http.MethodPost, "https://127.0.0.1:8788/workass/update", strings.NewReader(`{"updateId":"`+updateID+`"}`))
 	request.RemoteAddr = remoteAddr
 	recorder := httptest.NewRecorder()
 	handler(recorder, request)

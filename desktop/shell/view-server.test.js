@@ -242,7 +242,7 @@ test('serves local renderer, proxies HTTP, and stamps the tunneled shell WebSock
   const viewPort = Number(new URL(view.url).port);
   const upgraded = await new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port: viewPort }, () => {
-      socket.write('GET /?deviceName=test HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC1rZXk=\r\nSec-WebSocket-Version: 13\r\n\r\n');
+      socket.write(`GET /?deviceName=test HTTP/1.1\r\nHost: 127.0.0.1:${viewPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC1rZXk=\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     });
     let data = '';
     socket.on('data', (chunk) => {
@@ -392,4 +392,122 @@ test('shell control routes refuse foreign origins, cross-site fetches and rebind
   assert.equal(await send('POST', '/__workass-shell/recover', { host: self }), 200);
   assert.equal(await send('GET', '/__workass-shell/screenshot?click=%23ok', { host: `localhost:${port}` }), 200);
   assert.deepEqual(calls, ['recover', 'recover', 'click:#ok']);
+});
+
+// DNS rebinding made a foreign site this server's same-origin peer, and it read
+// the fleet code; a cross-site POST stopped the daemon. Every route and every
+// upgrade is the same door, so the guard stands in front of all of them.
+async function guardedViewRig(t) {
+  const renderer = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-view-guard-'));
+  fs.writeFileSync(path.join(renderer, 'index.html'), '<!doctype html><head></head><body>local-index</body>');
+  t.after(() => fs.rmSync(renderer, { recursive: true, force: true }));
+  const proxied = [];
+  const upgraded = [];
+  const daemon = http.createServer((req, res) => {
+    proxied.push({ method: req.method, url: req.url, headers: req.headers });
+    req.resume();
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('daemon-http');
+  });
+  daemon.on('upgrade', (req, socket) => {
+    upgraded.push({ url: req.url, headers: req.headers });
+    socket.end('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nUPSTREAM');
+  });
+  await new Promise((resolve) => daemon.listen(0, '127.0.0.1', resolve));
+  t.after(() => daemon.close());
+  const view = await createViewServer({ daemonURL: `http://127.0.0.1:${daemon.address().port}`, rendererDir: renderer, port: 0 });
+  t.after(() => view.close());
+  const port = Number(new URL(view.url).port);
+  const send = (method, pathname, headers) => new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port, method, path: pathname, headers }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+  const upgrade = (headers) => new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port }, () => {
+      const lines = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('');
+      socket.write(`GET /?deviceName=test HTTP/1.1\r\n${lines}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC1rZXk=\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    });
+    let data = '';
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('upgrade timeout')); }, 2000);
+    socket.on('data', (chunk) => { data += chunk.toString('utf8'); });
+    socket.on('error', () => { clearTimeout(timer); resolve(data); });
+    socket.on('close', () => { clearTimeout(timer); resolve(data); });
+  });
+  return { port, view, proxied, upgraded, send, upgrade, self: `127.0.0.1:${port}` };
+}
+
+test('every view route refuses a Host that is not this view server', async (t) => {
+  const { port, proxied, upgraded, send, upgrade, view } = await guardedViewRig(t);
+  const calls = [];
+  view.setArtifactBridge({ handle: (_req, res) => { calls.push('bridge'); res.end('x'); }, close() {} });
+  for (const host of [`rebind.attacker.example:${port}`, `127.0.0.1.attacker.example:${port}`, '127.0.0.1:1', `localhost:${port + 1}`, '127.0.0.1']) {
+    for (const route of ['/', '/index.html', '/workass/fleet-qr.svg', '/workass/connected-artifacts/a/index.html', '/workass/artifacts/@remote/a/index.html', '/__workass-shell/status']) {
+      const reply = await send('GET', route, { host });
+      assert.equal(reply.status, 403, `${host} ${route}`);
+      assert.doesNotMatch(reply.body, /local-index|daemon-http/);
+    }
+    assert.equal((await send('POST', '/workass/recovery/shutdown', { host })).status, 403, host);
+    assert.match(await upgrade({ Host: host }), /^HTTP\/1\.1 403/, host);
+  }
+  assert.deepEqual(proxied, [], 'a refused request reached the daemon');
+  assert.deepEqual(upgraded, [], 'a refused upgrade reached the daemon');
+  assert.deepEqual(calls, [], 'a refused request reached the artifact bridge');
+});
+
+test('a state-changing request or upgrade from another origin never reaches the daemon', async (t) => {
+  const { proxied, upgraded, send, upgrade, self } = await guardedViewRig(t);
+  for (const headers of [
+    { origin: 'https://attacker.invalid' },
+    { origin: 'http://localhost:3000' },
+    { origin: 'http://127.0.0.1:3000' },
+    { origin: `https://${self}` },
+    { origin: 'null' },
+    { 'sec-fetch-site': 'cross-site' },
+    { 'sec-fetch-site': 'same-site' },
+  ]) {
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']) {
+      assert.equal((await send(method, '/workass/recovery/shutdown', { host: self, ...headers })).status, 403, `${method} ${JSON.stringify(headers)}`);
+    }
+    const lines = { Host: self };
+    if (headers.origin) lines.Origin = headers.origin;
+    if (headers['sec-fetch-site']) lines['Sec-Fetch-Site'] = headers['sec-fetch-site'];
+    assert.match(await upgrade(lines), /^HTTP\/1\.1 403/, JSON.stringify(headers));
+  }
+  assert.deepEqual(proxied, []);
+  assert.deepEqual(upgraded, []);
+});
+
+test('legitimate view callers keep working', async (t) => {
+  const { port, proxied, upgraded, send, upgrade, self } = await guardedViewRig(t);
+  // The window's renderer, a browser opened at the port, and curl.
+  assert.match((await send('GET', '/', { host: self, 'sec-fetch-site': 'none' })).body, /local-index/);
+  assert.match((await send('GET', '/', { host: `localhost:${port}` })).body, /local-index/);
+  assert.equal((await send('POST', '/daemon-route', { host: self, origin: `http://${self}`, 'sec-fetch-site': 'same-origin' })).status, 200);
+  assert.equal((await send('POST', '/daemon-route', { host: `localhost:${port}`, origin: `http://localhost:${port}` })).status, 200);
+  assert.equal((await send('POST', '/daemon-route', { host: self })).status, 200);
+  // A hosted page lives in a sandboxed frame: an opaque origin and cross-site
+  // metadata on every asset it loads, and on a video's CORS-mode requests.
+  assert.equal((await send('GET', '/workass/artifacts/a/app.js', { host: self, 'sec-fetch-site': 'cross-site' })).body, 'daemon-http');
+  assert.equal((await send('GET', '/workass/artifacts/a/clip.mp4', { host: self, origin: 'null', 'sec-fetch-site': 'cross-site' })).body, 'daemon-http');
+  assert.equal(proxied.length, 5);
+
+  // The real window's socket: the daemon cannot tell the proxy's Origin from a
+  // foreign port by itself, so the proxy says which origin it just verified.
+  assert.match(await upgrade({ Host: self, Origin: `http://${self}`, 'Sec-Fetch-Site': 'same-origin', 'X-Workass-View-Origin': 'https://forged.invalid', 'X-Workass-Shell': '0' }), /101 Switching/);
+  assert.equal(upgraded[0].headers.origin, `http://${self}`);
+  assert.equal(upgraded[0].headers['x-workass-view-origin'], `http://${self}`);
+  assert.equal(upgraded[0].headers['x-workass-shell'], '1');
+  assert.notEqual(upgraded[0].headers.host, self);
+  // Whichever loopback name the page was opened under is its origin.
+  assert.match(await upgrade({ Host: `localhost:${port}`, Origin: `http://localhost:${port}` }), /101 Switching/);
+  assert.equal(upgraded[1].headers['x-workass-view-origin'], `http://localhost:${port}`);
+  // A non-browser client has no Origin to compare.
+  assert.match(await upgrade({ Host: self }), /101 Switching/);
+  assert.equal(upgraded[2].headers.origin, undefined);
 });

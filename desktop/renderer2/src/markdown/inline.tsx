@@ -29,14 +29,20 @@ export interface InlineMediaResolver {
 // and bare-URL autolinks follow, as Claude Code's markdown renders them.
 const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\*)|((?<![\p{L}\p{N}_])__[^_]+__(?![\p{L}\p{N}_]))|(\*[^*\s][^*]*\*)|((?<![\p{L}\p{N}_])_[^_\s][^_]*_(?![\p{L}\p{N}_]))|(~~[^~\n]+~~)|(https?:\/\/[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'"])/u;
 
-// Schemes that execute or embed content instead of navigating. Browsers ignore
-// control characters and spaces inside a scheme ("java\tscript:"), so those
-// are removed before the check.
-const UNSAFE_LINK_SCHEME = /^(?:javascript|vbscript|data):/i;
+// A link in a reply is one click from whatever handler its scheme names: some
+// execute or embed content, and file:, smb: and search-ms: launch an OS handler.
+// So only these schemes become anchors; a target with no scheme is relative to
+// this window (artifact links, repository paths). Browsers ignore control
+// characters and spaces inside a scheme ("java\tscript:"), so those are removed
+// before the check. Image targets never come through here, so a local file:
+// image still resolves through the message's media.
+const LINK_SCHEME = /^([a-z][a-z0-9+.-]*):/i;
+const ALLOWED_LINK_SCHEMES = new Set(['http', 'https', 'mailto']);
 
 export function safeLinkHref(href: string): string {
   const compact = String(href || '').replace(/[\u0000-\u0020]+/g, '');
-  return UNSAFE_LINK_SCHEME.test(compact) ? '' : href;
+  const scheme = compact.match(LINK_SCHEME)?.[1].toLowerCase();
+  return scheme && !ALLOWED_LINK_SCHEMES.has(scheme) ? '' : href;
 }
 
 export function normalizeMarkdownTarget(raw: string): string {

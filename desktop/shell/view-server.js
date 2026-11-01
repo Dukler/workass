@@ -11,25 +11,38 @@ const net = require('node:net');
 const path = require('node:path');
 const tls = require('node:tls');
 
-// The shell's control routes drive the user's real window (recover, reload,
-// take-control, synthesized clicks) and expose its DOM. Their callers are this
-// window's own renderer and local scripts (curl, node), never another site: a
-// page in any local browser could otherwise POST here without being able to
-// read the reply. Require a loopback Host (no DNS rebinding), no foreign
-// Origin, and no cross-site fetch metadata.
-function shellControlRequestAllowed(req) {
-  const host = String(req.headers.host || '').trim().toLowerCase();
-  const hostname = host.replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1');
-  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) return false;
+// Everything this server answers acts for the owner: the shell's control routes
+// drive the user's real window (recover, reload, take-control, synthesized
+// clicks) and expose its DOM, and the proxy reaches every daemon route, the fleet
+// join code and daemon shutdown among them. A page in any local browser can reach
+// this port, and a rebinding page even looks same-origin to itself, so:
+//  - Every request and upgrade must name this server in its Host.
+//  - The control routes, state-changing methods and upgrades must also be
+//    same-origin. Their callers are this window's own renderer and local scripts
+//    (curl, node), never another site.
+// Other GETs need only the Host: a hosted page lives in a sandboxed frame, so
+// every asset it loads, a video's CORS-mode requests included, arrives with an
+// opaque origin and cross-site metadata. A foreign page cannot read those replies.
+const LOOPBACK_HOSTNAMES = ['127.0.0.1', 'localhost', '::1'];
+const READ_ONLY_METHODS = new Set(['GET', 'HEAD']);
+
+// This server's own origin as the request names it, or '' for any other Host.
+// Comparing the port too refuses a name that only reached us by accident.
+function originFromHost(req, { hostnames, port }) {
+  let parsed;
+  try { parsed = new URL(`http://${String(req.headers.host || '').trim().toLowerCase()}`); } catch { return ''; }
+  if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return '';
+  if (!hostnames.includes(parsed.hostname.replace(/^\[(.*)\]$/, '$1'))) return '';
+  return Number(parsed.port || 80) === port ? parsed.origin : '';
+}
+
+// No Origin is a local script: every browser sends one on a state-changing
+// request and on an upgrade.
+function sameOriginRequest(req, viewOrigin) {
   const site = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
   if (site && site !== 'same-origin' && site !== 'none') return false;
-  const origin = String(req.headers.origin || '').trim();
-  if (!origin) return true;
-  try {
-    return new URL(origin).host.toLowerCase() === host;
-  } catch {
-    return false;
-  }
+  const origin = String(req.headers.origin || '').trim().toLowerCase();
+  return !origin || origin === viewOrigin;
 }
 
 const MIME = {
@@ -167,7 +180,12 @@ function tlsConnectOptions(daemon, port) {
   return options;
 }
 
-function proxyUpgrade(req, socket, head, daemon) {
+function refuseUpgrade(socket) {
+  socket.on('error', () => {});
+  socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+}
+
+function proxyUpgrade(req, socket, head, daemon, viewOrigin) {
   const secure = daemon.protocol === 'https:';
   const port = Number(daemon.port || (secure ? 443 : 80));
   const upstream = secure
@@ -185,11 +203,14 @@ function proxyUpgrade(req, socket, head, daemon) {
       // This loopback-only stamp identifies the one renderer service that owns
       // the mounted-machine credential book. It is transport metadata, never a
       // device credential, and prevents a regular localhost tab from racing it.
-      if (name.toLowerCase() === 'x-workass-shell') continue;
+      if (name.toLowerCase() === 'x-workass-shell' || name.toLowerCase() === 'x-workass-view-origin') continue;
       const rendered = name.toLowerCase() === 'host' ? daemon.host : (Array.isArray(value) ? value.join(', ') : value);
       headers.push(`${name}: ${rendered}`);
     }
     headers.push('x-workass-shell: 1');
+    // Host now names the daemon, so it cannot tell this origin from a page on any
+    // other loopback port by itself. This is the origin the guard just verified.
+    headers.push(`x-workass-view-origin: ${viewOrigin}`);
     const prefix = daemon.pathname === '/' ? '' : daemon.pathname.replace(/\/$/, '');
     upstream.write(`${req.method} ${prefix}${req.url} HTTP/${req.httpVersion}\r\n${headers.join('\r\n')}\r\n\r\n`);
     if (head && head.length) upstream.write(head);
@@ -235,10 +256,13 @@ function createViewServer({
   let recoveryFn = null;
   let takeControlFn = null;
   let artifactBridge = null;
+  const guard = { hostnames: [...new Set([...LOOPBACK_HOSTNAMES, host])], port };
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
-    if (pathname.startsWith('/__workass-shell/') && !shellControlRequestAllowed(req)) {
+    const viewOrigin = originFromHost(req, guard);
+    const needsSameOrigin = pathname.startsWith('/__workass-shell/') || !READ_ONLY_METHODS.has(req.method);
+    if (!viewOrigin || (needsSameOrigin && !sameOriginRequest(req, viewOrigin))) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('forbidden');
       return;
@@ -436,7 +460,11 @@ function createViewServer({
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
   });
-  server.on('upgrade', (req, socket, head) => proxyUpgrade(req, socket, head, daemon));
+  server.on('upgrade', (req, socket, head) => {
+    const viewOrigin = originFromHost(req, guard);
+    if (!viewOrigin || !sameOriginRequest(req, viewOrigin)) { refuseUpgrade(socket); return; }
+    proxyUpgrade(req, socket, head, daemon, viewOrigin);
+  });
 
   return new Promise((resolve, reject) => {
     const onError = (err) => reject(err);
@@ -445,6 +473,7 @@ function createViewServer({
       server.off('error', onError);
       const addr = server.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+      guard.port = actualPort;
       resolve({
         server,
         url: `http://${host}:${actualPort}`,

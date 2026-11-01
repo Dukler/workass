@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"workass/internal/fleet"
 	"workass/internal/lease"
 )
 
@@ -820,11 +821,11 @@ func formatMessage(format string, args ...any) string {
 	return strings.TrimSpace(fmt.Sprintf(format, args...))
 }
 
-// Any page a local browser shows can open a WebSocket to localhost. Loopback
-// trust must not pair it silently: a foreign Origin waits for approval like a
-// LAN device, while the daemon's own pages and the shell's view server (any
-// loopback port) and Origin-less native clients still auto-pair.
-func TestLocalhostAutoApproveRequiresLoopbackOrigin(t *testing.T) {
+// Any page a local browser shows can open a WebSocket to localhost, including a
+// page on another loopback port. Loopback trust must not pair it silently: only
+// a client with no Origin, this daemon's own origin, and the view server's own
+// origin auto-pair; everything else waits for approval like a LAN device.
+func TestLocalhostAutoApproveOnlyForExactOwnOrigins(t *testing.T) {
 	manager, _, _ := testLeaseManager(t)
 	hub := NewHub(Options{Lease: manager, TrustLocalhost: true})
 	hub.Register("state:get", func(args []any) (any, error) {
@@ -832,26 +833,86 @@ func TestLocalhostAutoApproveRequiresLoopbackOrigin(t *testing.T) {
 	})
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
 	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const view = "http://127.0.0.1:8799"
+	stamped := "X-Workass-Shell: 1\r\nX-Workass-View-Origin: " + view + "\r\n"
 
-	for _, origin := range []string{"https://attacker.example", "http://127.0.0.1.attacker.example", "null", "file://"} {
-		client := dialWSPathWithHeaders(t, server.URL, "/?deviceName=page", "Zm9yZWlnbi1vcmlnaW4=", "Origin: "+origin+"\r\n")
+	for _, tc := range []struct{ name, host, headers string }{
+		{"foreign site", addr, "Origin: https://attacker.example\r\n"},
+		{"lookalike host", addr, "Origin: http://127.0.0.1.attacker.example\r\n"},
+		{"opaque origin", addr, "Origin: null\r\n"},
+		{"file page", addr, "Origin: file://\r\n"},
+		{"page on another localhost port", addr, "Origin: http://localhost:3000\r\n"},
+		{"page on another 127.0.0.1 port", addr, "Origin: http://127.0.0.1:3000\r\n"},
+		{"page on another ::1 port", addr, "Origin: http://[::1]:3000\r\n"},
+		{"own port under the wrong scheme", addr, "Origin: https://" + addr + "\r\n"},
+		{"own port under another name", addr, "Origin: http://localhost:" + port + "\r\n"},
+		{"DNS rebinding: origin matches a foreign Host", "rebind.attacker.example:" + port, "Origin: http://rebind.attacker.example:" + port + "\r\n"},
+		{"view origin with no stamp", addr, "X-Workass-View-Origin: " + view + "\r\nOrigin: " + view + "\r\n"},
+		// An older view server forwards every Origin and stamps it anyway, so a
+		// stamp alone proves nothing about the page.
+		{"stamp with no declared origin", addr, "X-Workass-Shell: 1\r\nOrigin: " + view + "\r\n"},
+		{"stamped foreign page", addr, stamped + "Origin: http://localhost:3000\r\n"},
+		{"view server declaring a foreign origin", addr, "X-Workass-Shell: 1\r\nX-Workass-View-Origin: https://attacker.example\r\nOrigin: https://attacker.example\r\n"},
+	} {
+		client := dialWSWithHost(t, server.URL, tc.host, "/?deviceName=page", "Zm9yZWlnbi1vcmlnaW4=", tc.headers)
 		access := readEvent(t, client)
 		if access.Channel != "lan:access-state" || access.Payload["state"] != "waiting" || access.Payload["deviceToken"] != nil {
-			t.Fatalf("origin %q was paired by loopback trust instead of waiting for approval: %+v", origin, access.Payload)
+			t.Errorf("%s was paired by loopback trust instead of waiting for approval: %+v", tc.name, access.Payload)
 		}
 		_ = client.conn.Close()
 	}
-	for _, origin := range []string{"", "https://127.0.0.1:8788", "http://127.0.0.1:8798", "https://localhost:28784", "http://[::1]:9000"} {
-		headers := ""
-		if origin != "" {
-			headers = "Origin: " + origin + "\r\n"
-		}
-		client := dialWSPathWithHeaders(t, server.URL, "/?deviceName=local", "bG9jYWwtb3JpZ2lu", headers)
+	for _, tc := range []struct{ name, host, headers string }{
+		{"native client with no Origin", addr, ""},
+		{"daemon's own page", addr, "Origin: http://" + addr + "\r\n"},
+		{"daemon's own page by name", "localhost:" + port, "Origin: http://localhost:" + port + "\r\n"},
+		{"app window through the view server", addr, stamped + "Origin: " + view + "\r\n"},
+		{"browser tab through the view server", addr, "X-Workass-Shell: 1\r\nX-Workass-View-Origin: http://localhost:8799\r\nOrigin: http://localhost:8799\r\n"},
+		{"local script through the view server", addr, stamped},
+	} {
+		client := dialWSWithHost(t, server.URL, tc.host, "/?deviceName=local", "bG9jYWwtb3JpZ2lu", tc.headers)
 		access := readEvent(t, client)
 		if access.Payload["state"] != "approved" {
-			t.Fatalf("local origin %q lost loopback trust: %+v", origin, access.Payload)
+			t.Errorf("%s lost loopback trust: %+v", tc.name, access.Payload)
 		}
 		_ = client.conn.Close()
+	}
+}
+
+// The attack end to end: a page on another loopback port opens the daemon's
+// socket and asks for the fleet key. It must get no token, no lease and no key.
+func TestForeignLoopbackPageCannotReadTheFleetKey(t *testing.T) {
+	manager, _, _ := testLeaseManager(t)
+	store, err := fleet.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := store.EnsureKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(Options{Lease: manager, TrustLocalhost: true})
+	hub.SetFleet(store, "m-origin-test")
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+
+	page := dialWSPathWithHeaders(t, server.URL, "/?deviceName=page", "cGFnZS1vbi1wb3J0LTMwMA==", "Origin: http://localhost:3000\r\n")
+	defer page.conn.Close()
+	access := readEvent(t, page)
+	if access.Payload["state"] != "waiting" || access.Payload["deviceToken"] != nil {
+		t.Errorf("page access = %+v, want waiting with no token", access.Payload)
+	}
+	sendInvoke(t, page, 1, "fleet:reveal")
+	reply, _ := readReplyFor(t, page, 1)
+	if strings.Contains(fmt.Sprint(reply.Result), key.Secret) {
+		t.Fatal("a foreign loopback page read the fleet key")
+	}
+	if code := errorCode(t, reply); code != "lan:access-pending" {
+		t.Fatalf("reveal error = %q, want lan:access-pending", code)
 	}
 }
 
