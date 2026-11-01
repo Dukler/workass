@@ -14,7 +14,7 @@ import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
 import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache, type WireCacheEntry } from './wire-cache';
 import { applyShellDelta, isShellDelta, pageSettledBefore, parseDeferredChats, type SessionPageRequest } from './session-page';
-import { browserApi, localBrowserOwnsChat } from '../browser';
+import { browserApi, localBrowserOwnsChat, type WorkassBrowserOpenRequest } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
   queuedAttachmentsReady, queuedDraftMessage, queuedJob, queuedMessage, releaseDraftImages,
@@ -484,6 +484,8 @@ function writeBrowserPresentation(value: Record<string, BrowserPresentation> | u
 
 export class Store {
   private readonly toastTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly browserPages = new Map<string, string>();
+  private readonly browserAsks = new Map<string, string>();
   state: AppState;
   private versions = new Map<string, number>();
   private listeners = new Map<string, Set<() => void>>();
@@ -4065,7 +4067,7 @@ export class Store {
     applyTheme(this.state.theme);
     applyDensity(this.state.density);
     this.installSystemThemeListener();
-    browserApi()?.onOpenRequest((chatId?: string) => this.onBrowserOpenRequest(chatId));
+    browserApi()?.onOpenRequest((chatId, request) => this.onBrowserOpenRequest(chatId, request));
     browserApi()?.onState((state) => this.onBrowserState(state));
     // Mount the machine book before hydration, so a remote machine's chats
     // arrive in the same list rather than appearing a beat later (E3).
@@ -4473,16 +4475,45 @@ export class Store {
   toggleRailWide() { this.state.panes.railWide = !this.state.panes.railWide; this.bumpApp(); }
   // An agent's explicit browser.open (opt-in + per-chat, user law 2026-07-12)
   // marks the OWNING chat and nothing else: never the active tab, never another
-  // chat, and a request without a chat is a no-op. Unless that chat's pane
-  // already shows the browser, the page floats over it instead of taking the
-  // right column (approved mock browser-pip-v1, as t3code does).
-  onBrowserOpenRequest(chatId?: string) {
+  // chat, and a request without a chat is a no-op. Agents browse out of sight; a
+  // current shell asks only when the agent needs the person, and says why: that
+  // page opens in the chat's panel, with the reason above it (a native page draws
+  // over any toast there), and a toast names it if that chat is not on screen. An
+  // older shell's bare request floats the page over the chat (mock browser-pip-v1).
+  onBrowserOpenRequest(chatId?: string, request?: WorkassBrowserOpenRequest) {
     if (!chatId) return;
     const target = this.state.chats.find((chat) => chat.chatId === chatId || chat.id === chatId);
     if (!target) return;
+    if (request?.reason) {
+      this.browserPages.set(target.id, request.pageKey ?? '');
+      this.browserAsks.set(target.id, request.reason);
+      if (this.browserPresentationFor(target.id)) this.clearBrowserPresentation(target.id);
+      this.setChatPane(target, 'browser');
+      this.bumpChat(target);
+      if (this.state.activeId !== target.id) this.addToast(`Te necesita en el navegador: ${target.title}`, request.reason);
+      return;
+    }
     if (chatPane(target) === 'browser' || this.browserPresentationFor(target.id)) return;
     this.setBrowserPresentation(target.id, 'float');
     this.bumpChat(target);
+  }
+  // Which of the chat's pages its panel shows: its own page unless a person (or
+  // an ask of the agent's) picked a tab one of its pages opened. Tabs die with
+  // the shell, so this is not remembered across a reload.
+  browserPageFor(tabId: string): string {
+    return this.browserPages.get(tabId) || tabId;
+  }
+  browserAskFor(tabId: string): string {
+    return this.browserAsks.get(tabId) ?? '';
+  }
+  dismissBrowserAsk(tabId: string) {
+    this.browserAsks.delete(tabId);
+    this.bumpApp(false);
+  }
+  selectBrowserPage(tabId: string, key: string) {
+    this.browserPages.set(tabId, key === tabId ? '' : key);
+    this.browserAsks.delete(tabId);
+    this.bumpApp(false);
   }
   // Closing the separate window brings the page back, floating.
   onBrowserState(state: { chatId: string; poppedOut?: boolean }) {
@@ -4495,6 +4526,7 @@ export class Store {
     // The pane and the floating player never show the same page at once.
     const chat = this.active();
     if (chat && this.browserPresentationFor(chat.id)) this.clearBrowserPresentation(chat.id);
+    if (chat) this.browserAsks.delete(chat.id);
     this.setActivePane('browser');
   }
   browserPresentationFor(tabId: string): BrowserPresentation | null {
@@ -4514,6 +4546,8 @@ export class Store {
   // The pane's "Flotante": the page leaves the right column and floats.
   floatBrowser() {
     const chat = this.active(); if (!chat) return;
+    this.browserPages.delete(chat.id);
+    this.browserAsks.delete(chat.id);
     if (chatPane(chat) === 'browser') this.setChatPane(chat, null);
     this.setBrowserPresentation(chat.id, 'float');
     this.bumpChat(chat);

@@ -196,6 +196,32 @@ test('an agent page floats over its chat unless that chat already shows the brow
   subject.clearToastTimers?.();
 });
 
+test('an agent asking for the person opens that page in its own chat\'s panel and says why, without switching chats', () => {
+  const subject = new StoreCtor();
+  const target = chat('tab-ask');
+  const other = chat('tab-other');
+  subject.state.chats = [target, other];
+  subject.state.activeId = 'tab-other';
+  subject.onBrowserOpenRequest('chat-tab-ask', { reason: 'Enter your second factor', pageKey: 'chat-tab-ask#tab3' });
+  assert.equal(target.pane, 'browser');
+  assert.equal(subject.browserPageFor('tab-ask'), 'chat-tab-ask#tab3');
+  assert.equal(subject.browserPresentationFor('tab-ask'), null, 'docked, not floating');
+  assert.equal(subject.state.activeId, 'tab-other', 'never switches the active chat');
+  assert.equal(other.pane, undefined);
+  assert.match(subject.state.toasts.at(-1)!.body, /second factor/, 'that chat is not on screen: a toast says why');
+  assert.equal(subject.browserAskFor('tab-ask'), 'Enter your second factor', 'and its panel will');
+  const toasts = subject.state.toasts.length;
+  subject.state.activeId = 'tab-ask';
+  subject.onBrowserOpenRequest('chat-tab-ask', { reason: 'Solve the captcha' });
+  assert.equal(subject.state.toasts.length, toasts, 'a native page draws over a toast in the chat on screen; the panel says it');
+  assert.equal(subject.browserPageFor('tab-ask'), 'tab-ask', 'an ask with no page is the chat\'s own page');
+  subject.selectBrowserPage('tab-ask', 'chat-tab-ask#tab3');
+  assert.equal(subject.browserAskFor('tab-ask'), '', 'the person has moved on');
+  subject.selectBrowserPage('tab-ask', 'tab-ask');
+  assert.equal(subject.browserPageFor('tab-ask'), 'tab-ask', 'a person can go back to the chat\'s own page');
+  subject.clearToastTimers?.();
+});
+
 test('float, full screen, separate window and dock move one page between places, never two at once', () => {
   const subject = new StoreCtor();
   const target = chat('tab-move', 'browser');

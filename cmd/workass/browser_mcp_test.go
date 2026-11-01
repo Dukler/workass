@@ -370,3 +370,15 @@ func TestBrowserMCPRejectsLegacyCamelOperationID(t *testing.T) {
 		t.Fatalf("legacy operation id result = %s", encoded)
 	}
 }
+
+func TestBrowserOpenCarriesTheAsksReasonAndTabToTheShell(t *testing.T) {
+	method, mutates, _, fields, err := browserMCPToolBoundary("workass_browser_open")
+	if err != nil || method != "browser.open" || !mutates {
+		t.Fatalf("boundary = %q %v %v", method, mutates, err)
+	}
+	for public, shell := range map[string]string{"reason": "reason", "tab_id": "tabId", "visible": "visible", "url": "url"} {
+		if fields[public] != shell {
+			t.Errorf("field %s maps to %q, want %q", public, fields[public], shell)
+		}
+	}
+}

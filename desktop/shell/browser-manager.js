@@ -159,10 +159,8 @@ const SNAPSHOT_CHILD_FRAMES_BUDGET_MS = 8000;
 // mount again) a page's <webview> before it reports that the page is not up.
 const GUEST_ATTACH_TIMEOUT_MS = 20000;
 const PRESENTATION_READY_SLACK_MS = 2000;
-// A popup window shown to the person: its page is the window's size, never
-// below the smallest viewport the tools accept.
-const POPUP_WINDOW_MIN_WIDTH = 320;
-const POPUP_WINDOW_MIN_HEIGHT = 240;
+// A popup is the person's only right after their own press in that page.
+const PERSON_POPUP_MS = 3000;
 const EDITOR_PAGE_CALL_TIMEOUT_MS = 3000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
@@ -625,7 +623,9 @@ class BrowserManager {
     // macOS focuses the view for a click before it hands it the mouse-down, so
     // the person's press gives the page the focus the app just took back.
     on('before-mouse-event', (_event, mouse) => {
-      if (!mouse || mouse.type !== 'mouseDown' || entry.pointerDown || !entry.crashLeftAppFocused) return;
+      if (!mouse || mouse.type !== 'mouseDown' || entry.pointerDown) return;
+      entry.personPressedAt = Date.now();
+      if (!entry.crashLeftAppFocused) return;
       entry.crashLeftAppFocused = false;
       try { wc.focus(); } catch { /* the page is closing */ }
     });
@@ -709,12 +709,16 @@ class BrowserManager {
     });
     wc.setWindowOpenHandler((details) => {
       const url = String(details && details.url || '');
-      // A page an agent is driving opens links and popups as tabs of the
-      // same chat, which the agent can list and drive.
+      // A page an agent has used opens links and popups as hidden tabs of the
+      // same chat, which the agent can list and drive and a person can open in
+      // the panel: never a window, whatever the page asks for and however long
+      // ago the agent last touched it. Only a press of the person's own, in
+      // that page, a moment ago, opens a window.
       // The popup keeps its opener (window.opener, postMessage: sign-in and
       // payment popups) and its request (a form's POST): Chromium creates
       // its webContents, Workass only hosts it.
-      if (current() && agentDriven(entry) && /^https?:\/\//i.test(url)) {
+      const persons = Date.now() - (entry.personPressedAt || 0) < PERSON_POPUP_MS;
+      if (current() && !persons && (agentDriven(entry) || entry.agentActiveAt > 0) && /^https?:\/\//i.test(url)) {
         if (!this.popupTabAllowed(entry, url)) return { action: 'deny' };
         return {
           action: 'allow',
@@ -1605,6 +1609,10 @@ class BrowserManager {
         // Electron otherwise focuses a page on screen whenever a new document
         // commits, by any route, taking the person's typing from the composer.
         focusOnNavigation: false,
+        // Out of sight is the normal place for these pages: without this one the
+        // agent stopped driving goes document.hidden, timers at 1 Hz, no frames,
+        // and sites that wait for a visible page never draw.
+        backgroundThrottling: false,
       },
     });
     const entry = this.newEntry(chatId, view);
@@ -2327,14 +2335,13 @@ class BrowserManager {
   }
 
   // Whether a native view paints on its own: it is in a window that is on
-  // screen (the app window, its pop-out window, a popup's window).
+  // screen (the app window, its pop-out window).
   viewOffScreen(entry) {
     const showing = (win) => {
       try { return !!win && !win.isDestroyed?.() && win.isVisible?.() === true && win.isMinimized?.() !== true; } catch { return false; }
     };
     if (this.attachedView === entry.view) return !showing(this.win);
-    const own = entry.popupWindow || entry.pipWindow;
-    return !(own && showing(own));
+    return !(entry.pipWindow && showing(entry.pipWindow));
   }
 
   // Whether the app window is on screen: its <webview> guests then produce
@@ -3406,18 +3413,31 @@ class BrowserManager {
         entry.chatId = tabId;
         this.entries.set(tabId, entry);
         if (this.activeId === key) this.activeId = tabId;
+        for (const other of this.entries.values()) if (other.extraTab && other.ownerChatId === key) other.ownerChatId = tabId;
         return;
       }
     }
   }
 
-  // browser.open is opt-in and per-chat: ask the renderer to mark the OWNING
-  // chat's pane (never steal the active view) and ensure a live entry exists so
-  // the agent can drive the browser immediately — visible or in the background.
+  // browser.open makes sure a live entry exists so the agent can drive the page
+  // at once, out of sight. Nothing is shown unless the agent explicitly asks with
+  // visible:true and the reason it needs the person, which opens that page in the
+  // OWNING chat's panel (never another chat, never a window, never the focus).
   // The renderer adopts the background entry when the user opens that chat.
   openConversation(params) {
     const conversationId = String(params.chatId || '').trim();
-    if (params.tabId != null) return this.ownedEntryForTab(params.tabId, conversationId);
+    const reason = redactPageMessage(String(params.reason || '').trim(), 300);
+    if (params.visible === true && !reason) {
+      throw new Error('visible:true needs reason: what the person must do on this page, in their words. Without it the page stays hidden; omit visible to keep browsing.');
+    }
+    const askPerson = (entry) => {
+      if (params.visible === true && conversationId) this.requestOpen(conversationId, { reason, ...(entry && entry.extraTab ? { pageKey: entry.chatId } : {}) });
+    };
+    if (params.tabId != null) {
+      const entry = this.ownedEntryForTab(params.tabId, conversationId);
+      askPerson(entry);
+      return entry;
+    }
     if (!conversationId) {
       // No conversation context (should not happen from the daemon): reuse the
       // active/first entry rather than orphan a new background view.
@@ -3426,12 +3446,23 @@ class BrowserManager {
       if (entries.length) return entries[0];
       throw new Error('no Workass browser tab is available');
     }
-    if (params.visible !== false) this.requestOpen(conversationId);
-    const matched = this.primaryEntryFor(conversationId);
-    if (matched) return matched;
-    const entry = this.create(conversationId);
+    const entry = this.primaryEntryFor(conversationId) || this.create(conversationId);
     entry.conversationId = conversationId;
+    askPerson(entry);
     return entry;
+  }
+
+  // The pages of a chat for the person's panel: its own, then the tabs its pages
+  // opened. `key` is what activate and the rest of the panel's calls take.
+  pagesFor(chatId, conversationId) {
+    const belongs = (entry) => this.entryBelongsToChat(entry, chatId) || (!!conversationId && this.entryBelongsToChat(entry, conversationId));
+    const pages = this.browserEntries().filter((entry) => !!String(chatId || '').trim() && belongs(entry));
+    return pages.sort((a, b) => Number(!!a.extraTab) - Number(!!b.extraTab)).map((entry) => ({
+      key: entry.chatId,
+      primary: !entry.extraTab,
+      url: redactPageMessage(entry.url || DEFAULT_URL, 1024),
+      title: redactPageMessage(entry.title || ''),
+    }));
   }
 
   // The chat's own page (not a tab one of its pages opened).
@@ -3442,7 +3473,7 @@ class BrowserManager {
   // A link or popup an agent's page opened becomes a tab of the same chat,
   // in the background, that the agent lists and drives by its tab id.
   popupWebPreferences() {
-    return { partition: this.partition, nodeIntegration: false, nodeIntegrationInSubFrames: false, contextIsolation: true, sandbox: true, navigateOnDragDrop: false, focusOnNavigation: false };
+    return { partition: this.partition, nodeIntegration: false, nodeIntegrationInSubFrames: false, contextIsolation: true, sandbox: true, navigateOnDragDrop: false, focusOnNavigation: false, backgroundThrottling: false };
   }
 
   popupTabAllowed(opener, url) {
@@ -3484,9 +3515,6 @@ class BrowserManager {
     if (typeof view.webContents.once === 'function') {
       view.webContents.once('destroyed', () => { if (this.isCurrentEntry(tab, lifecycleToken)) this.close(tab.chatId); });
     }
-    // A window.open popup is shown to the person as on main; a link opened
-    // in a new tab stays in the background.
-    if (disposition === 'new-window') this.showPopupWindow(tab);
     opener.pendingTabs = (opener.pendingTabs || 0) + 1;
     touchActivity(opener);
     let pending = true;
@@ -3496,7 +3524,6 @@ class BrowserManager {
       pushEvent(opener, {
         type: 'tab_opened', tab_id: this.tabIdOf(tab), url: redactPageMessage(url, 1024),
         how: disposition === 'new-window' ? 'window_open' : 'link_new_tab', opener: true,
-        ...(tab.popupWindow ? { in_window: true } : {}),
       });
       settled();
       return true;
@@ -3512,14 +3539,10 @@ class BrowserManager {
   // A popup's first document is Chromium's to load (with its opener and
   // request); it gets a capture surface, CDP and the chat's viewport.
   async initializePopup(tab, lifecycleToken) {
-    // A popup in a window of its own paints there; a background tab gets a
-    // hidden host.
-    if (!tab.popupWindow) {
-      await this.ensureCaptureHost(tab);
-      this.assertCurrentEntry(tab, lifecycleToken);
-      await this.attachToCaptureHost(tab, false);
-      this.assertCurrentEntry(tab, lifecycleToken);
-    }
+    await this.ensureCaptureHost(tab);
+    this.assertCurrentEntry(tab, lifecycleToken);
+    await this.attachToCaptureHost(tab, false);
+    this.assertCurrentEntry(tab, lifecycleToken);
     tab.initialDocumentReady = true;
     if (!await this.ensureCDP(tab)) throw new Error('browser page debugger is unavailable');
     this.assertCurrentEntry(tab, lifecycleToken);
@@ -3527,80 +3550,6 @@ class BrowserManager {
     tab.viewportGeneration = 1;
     try { await tab.view.webContents.debugger.sendCommand('Runtime.enable'); } catch { /* basic control remains */ }
     return true;
-  }
-
-  // A window.open popup of an agent-driven page (a sign-in, a payment, a
-  // 3-D Secure check) is shown in a window of its own, 980x760 as on main,
-  // because a second factor, a captcha or a passkey needs the person; it
-  // stays a tab the agent lists and drives. Its page is the window's size.
-  // The person closing the window closes the tab, and the other way round.
-  // It comes up behind the keyboard: the agent opened it, and the person may be
-  // typing somewhere else.
-  showPopupWindow(tab) {
-    if (!this.BrowserWindow) return false;
-    let win;
-    try {
-      win = new this.BrowserWindow({
-        width: 980, height: 760, minWidth: POPUP_WINDOW_MIN_WIDTH, minHeight: POPUP_WINDOW_MIN_HEIGHT,
-        show: false,
-        title: 'workass browser', backgroundColor: '#ffffff',
-        webPreferences: { partition: this.partition, nodeIntegration: false, contextIsolation: true, sandbox: true },
-      });
-    } catch {
-      return false;
-    }
-    tab.popupWindow = win;
-    const size = () => {
-      const [width, height] = win.getContentSize();
-      return {
-        bounds: { x: 0, y: 0, width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) },
-        viewport: {
-          width: Math.min(3840, Math.max(POPUP_WINDOW_MIN_WIDTH, Math.round(width))),
-          height: Math.min(2160, Math.max(POPUP_WINDOW_MIN_HEIGHT, Math.round(height))),
-        },
-      };
-    };
-    const first = size();
-    win.contentView.addChildView(tab.view);
-    try { win.showInactive(); } catch { /* headless fake */ }
-    tab.view.setBounds(first.bounds);
-    tab.viewport = { ...tab.viewport, ...first.viewport };
-    win.on('resize', () => {
-      if (tab.popupWindow !== win || win.isDestroyed() || !this.isCurrentEntry(tab)) return;
-      const next = size();
-      tab.view.setBounds(next.bounds);
-      void this.serialize(tab, () => this.setViewportSerialized(tab, next.viewport, false)).catch(() => this.deferViewport(tab, next.viewport));
-    });
-    win.on('close', () => {
-      try { win.contentView.removeChildView(tab.view); } catch { /* already detached */ }
-    });
-    win.on('closed', () => {
-      if (tab.popupWindow !== win) return;
-      tab.popupWindow = null;
-      if (this.isCurrentEntry(tab)) this.close(tab.chatId);
-    });
-    return true;
-  }
-
-  // A capture that borrowed the hidden host gives a popup back to its window.
-  restorePopupWindow(entry) {
-    const win = entry.popupWindow;
-    if (!win || win.isDestroyed?.()) return;
-    if (entry.captureHostAttached && entry.captureHost && !entry.captureHost.isDestroyed()) {
-      try { entry.captureHost.contentView.removeChildView(entry.view); } catch { /* host is closing */ }
-      entry.captureHostAttached = false;
-    }
-    try { win.contentView.addChildView(entry.view); } catch { return; }
-    const [width, height] = win.getContentSize();
-    entry.view.setBounds({ x: 0, y: 0, width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) });
-  }
-
-  releasePopupWindow(entry) {
-    const win = entry.popupWindow;
-    if (!win) return;
-    entry.popupWindow = null;
-    try { win.contentView.removeChildView(entry.view); } catch { /* already detached */ }
-    try { if (!win.isDestroyed()) win.destroy(); } catch { /* already gone */ }
   }
 
   // workass_browser_close: a tab a page opened goes away; the chat's own page
@@ -5444,7 +5393,6 @@ class BrowserManager {
           entry.captureHostAttached = false;
           temporaryHost.destroy();
         }
-        this.restorePopupWindow(entry);
         const restored = await this.readEffectiveViewport(entry);
         const expected = options.expectedPageState;
         if (expected) {
@@ -5503,7 +5451,6 @@ class BrowserManager {
         entry.visible = wasVisible;
         await this.applyAndReadDeviceEmulation(entry, entry.viewport, entry.presentationScale || 1);
       }
-      this.restorePopupWindow(entry);
     }
     throw new Error(`browser capture failed on the first surface (${String(firstError && firstError.message || firstError)}) and the same-page hidden host (${String(fallbackError && fallbackError.message || fallbackError)})`);
   }
@@ -6148,6 +6095,7 @@ class BrowserManager {
       entry.captureHostAttached = false;
     }
     this.entries.delete(id);
+    if (entry.extraTab) { try { this.onState({ chatId: id, closed: true }); } catch { /* renderer may be reloading */ } }
     entry.observations.clear();
     entry.screenshots.clear();
     entry.diagnostics.length = 0;
@@ -6167,7 +6115,6 @@ class BrowserManager {
     entry.executionContexts.clear();
     entry.frames.clear();
     this.releasePipWindow(entry);
-    this.releasePopupWindow(entry);
     if (entry.guestWaiter) entry.guestWaiter.settle(false);
     // The tabs this page opened go with it (they hold renderers and count
     // against the chat's tab limit).

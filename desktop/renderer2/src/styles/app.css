@@ -1782,6 +1782,10 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .brw2nav:hover:not(:disabled) { background: var(--line); color: var(--ink); }
 .brw2nav:disabled { color: var(--faint); opacity: .5; cursor: default; }
 .brw2nav.loading { color: var(--acc); }
+.brw2pages { flex: none; width: 100%; min-width: 0; height: 28px; margin-bottom: 6px; background: var(--field); border: 1px solid transparent; border-radius: 8px; padding: 0 8px; font-size: 12px; color: var(--ink2); text-overflow: ellipsis; }
+.brw2pages:focus { outline: none; border-color: color-mix(in srgb, var(--acc) 55%, transparent); }
+.brw2ask { flex: none; display: flex; align-items: center; gap: 6px; margin-bottom: 6px; padding: 2px 2px 2px 10px; border-radius: 8px; background: var(--field); font-size: 12px; line-height: 1.35; color: var(--ink); }
+.brw2ask span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .brw2url { flex: 1; min-width: 0; background: var(--field); border: 1px solid transparent; border-radius: 8px; padding: 6px 12px; font-size: 12px; color: var(--ink2); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .brw2url::placeholder { color: var(--faint); }
 .brw2url:focus { outline: none; background: var(--panel); border-color: color-mix(in srgb, var(--acc) 55%, transparent); }

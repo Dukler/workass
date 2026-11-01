@@ -33,8 +33,9 @@ contextBridge.exposeInMainWorld('workassBrowser', {
   command: (chatId, command, value) => ipcRenderer.invoke('workass-browser:command', { chatId, command, value }),
   setViewport: (chatId, width, height) => ipcRenderer.invoke('workass-browser:set-viewport', { chatId, width, height }),
   resetViewport: (chatId) => ipcRenderer.invoke('workass-browser:reset-viewport', { chatId }),
+  pages: (chatId, conversationId) => ipcRenderer.invoke('workass-browser:pages', { chatId, conversationId }),
   onOpenRequest: (callback) => {
-    const listener = (_event, chatId) => callback(chatId || undefined);
+    const listener = (_event, chatId, request) => callback(chatId || undefined, request || undefined);
     ipcRenderer.on('workass-browser:open-request', listener);
     return () => ipcRenderer.removeListener('workass-browser:open-request', listener);
   },

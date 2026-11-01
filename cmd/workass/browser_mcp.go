@@ -113,7 +113,7 @@ func browserMCPTools() []map[string]any {
 	}, "action")
 	return []map[string]any{
 		tool("workass_browser_list", agenttext.Get("tools.workass_browser_list"), object(map[string]any{}), true, true),
-		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{"url": map[string]any{"type": "string"}, "visible": map[string]any{"type": "boolean"}, "operation_id": operationID}, "operation_id"), false, false),
+		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "visible": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "operation_id": operationID}, "operation_id"), false, false),
 		tool("workass_browser_navigate", agenttext.Get("tools.workass_browser_navigate"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
 		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{
 			"tab_id":            tabID,
@@ -306,7 +306,7 @@ func browserMCPToolBoundary(name string) (string, bool, bool, map[string]string,
 	case "workass_browser_list":
 		return "browser.list", false, false, fields(), nil
 	case "workass_browser_open":
-		return "browser.open", true, false, fields("url", "url", "visible", "visible"), nil
+		return "browser.open", true, false, fields("tab_id", "tabId", "url", "url", "visible", "visible", "reason", "reason"), nil
 	case "workass_browser_navigate":
 		return "browser.navigate", true, false, fields("tab_id", "tabId", "url", "url"), nil
 	case "workass_browser_snapshot":

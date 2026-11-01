@@ -551,23 +551,18 @@ test('finding 4: a popup an agent-driven page opens keeps its opener (createWind
   manager.destroy();
 });
 
-test('finding 4, open: a window.open popup of an agent-driven page can still be seen and used by the person, as on main', async () => {
+test('finding 4, open: a window.open popup of an agent-driven page opens no window; the person reaches it in the panel', async () => {
   const { manager, profile } = viewHost();
   await manager.browserControl('browser.open', { chatId: 'chat-auth', visible: false });
   const entry = manager.browserEntries().find((candidate) => candidate.chatId === 'chat-auth');
   const before = Window.made.length;
   const reply = entry.view.webContents.windowOpenHandler({ url: 'https://accounts.example/approve', disposition: 'new-window', frameName: '', features: '' });
   assert.equal(reply.action, 'allow');
-  let shown = !reply.createWindow && (!reply.overrideBrowserWindowOptions || reply.overrideBrowserWindowOptions.show !== false);
-  if (reply.createWindow) {
-    const made = new Contents(profile);
-    reply.createWindow({ webContents: made, webPreferences: {} });
-    await settle();
-    // A sign-in that needs the person (two-factor, a captcha, a passkey)
-    // happens in a window they can see.
-    shown = Window.made.slice(before).some((win) => win.shownInactive && win.contentView.children.some((view) => view.webContents === made));
-  }
-  assert.ok(shown, 'the popup is only a hidden tab');
+  const made = new Contents(profile);
+  reply.createWindow({ webContents: made, webPreferences: {} });
+  await settle();
+  assert.equal(Window.made.slice(before).filter((win) => win.shownInactive || win.options?.show === true).length, 0, 'nothing on screen');
+  assert.ok(manager.pagesFor('chat-auth').some((page) => !page.primary), 'the person can pick it in the panel');
   manager.destroy();
 });
 

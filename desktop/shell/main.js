@@ -270,11 +270,11 @@ function createWindow(url, browserReporter, isController) {
     pipPreload: path.join(__dirname, 'browser-pip-preload.js'),
     downloadsDir: path.join(RUNTIME.dataRoot, 'browser-downloads'),
     chromeVersion: process.versions.chrome,
-    requestOpen: (chatId) => {
-      if (!win.isDestroyed()) win.webContents.send('workass-browser:open-request', chatId || null);
+    requestOpen: (chatId, request) => {
+      if (!win.isDestroyed()) win.webContents.send('workass-browser:open-request', chatId || null, request || null);
     },
     onState: (state) => {
-      if (browserReporter) browserReporter(state);
+      if (browserReporter && !state.closed) browserReporter(state);
       if (!win.isDestroyed()) win.webContents.send('workass-browser:state', state);
     },
   });
@@ -373,6 +373,7 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-browser:register-guest', (event, payload) => own(event) && payload
     ? browserManager.registerGuest(payload.hostKey, payload.webContentsId)
     : { ok: false, reason: 'untrusted renderer' });
+  ipcMain.handle('workass-browser:pages', (event, payload) => own(event) && payload ? browserManager.pagesFor(payload.chatId, payload.conversationId) : []);
   ipcMain.handle('workass-browser:hosts', (event) => own(event) ? browserManager.hostList() : []);
   ipcMain.on('workass-browser:host-mode', (event) => {
     event.returnValue = own(event) && browserManager ? browserManager.rendererHostMode() : 'view';
@@ -418,7 +419,7 @@ function createWindow(url, browserReporter, isController) {
     for (const requestSession of artifactRequestSessions) {
       try { requestSession.webRequest.onBeforeSendHeaders(null); } catch { /* older Electron */ }
     }
-    for (const channel of ['activate', 'resize', 'hide', 'pop-out', 'pop-in', 'close', 'command', 'set-viewport', 'reset-viewport', 'register-guest', 'hosts']) {
+    for (const channel of ['activate', 'resize', 'hide', 'pop-out', 'pop-in', 'close', 'command', 'set-viewport', 'reset-viewport', 'register-guest', 'hosts', 'pages']) {
       try { ipcMain.removeHandler(`workass-browser:${channel}`); } catch { /* ignore */ }
     }
     ipcMain.removeAllListeners('workass-browser:place');

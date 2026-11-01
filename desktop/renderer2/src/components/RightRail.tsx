@@ -25,7 +25,8 @@ export function RightRail({ chat }: { chat: Chat | null }) {
     return (
       <aside className="rail browser-col">
         <BrowserPanel
-          chatId={chat.id}
+          chatId={store.browserPageFor(chat.id)}
+          ownerChatId={chat.id}
           conversationId={chat.chatId}
           machineId={chat.machineId}
           artifactOrigin={store.browserArtifactMachineId(chat.machineId)}

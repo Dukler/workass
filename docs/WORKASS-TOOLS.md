@@ -108,9 +108,14 @@ them to open a human question; they can report the blocker to the parent.
 
 ## Owned browser observations
 
-`workass_browser_open` creates the page for the exact owning chat. Omit
-`visible` to keep the legacy pane request, or pass `visible:false` to navigate
-in the background. A new page starts at a logical 1440×900 CSS viewport at DPR
+`workass_browser_open` creates the page for the exact owning chat, out of sight:
+agents browse without the person seeing it, and no page, popup or `window.open`
+ever opens a window or takes focus. Tabs a page opens stay hidden too, with their
+opener, and a person can pick them in the chat's browser panel. Only when the
+person must act on a page (a sign-in, a second factor, a captcha, a passkey) ask
+them with `workass_ask_user_question`, then call `workass_browser_open` with
+`visible:true`, the `reason` and the page's `tab_id`: it opens in that chat's panel
+with the reason above it. A new page starts at a logical 1440×900 CSS viewport at DPR
 1. When shown, the browser pane sets the visible page viewport from its bounds;
 human resizing updates it again. `workass_browser_list` and
 `workass_browser_snapshot` report requested/effective metrics and generations.

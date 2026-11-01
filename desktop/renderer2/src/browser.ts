@@ -56,6 +56,8 @@ export interface WorkassBrowserState {
   host?: 'webview' | 'view';
   hostKey?: string;
   tabId?: number | null;
+  // A tab a page opened has gone.
+  closed?: boolean;
 }
 
 // One page the webview host asks this renderer to mount.
@@ -67,6 +69,11 @@ export interface WorkassBrowserHost {
   visible: boolean;
   poppedOut: boolean;
 }
+
+export interface WorkassBrowserOpenRequest { reason?: string; pageKey?: string; }
+
+// One page of a chat; `key` is the id the panel's calls take for it.
+export interface WorkassBrowserPage { key: string; primary: boolean; url: string; title: string; }
 
 export interface WorkassBrowserApi {
   supported: boolean;
@@ -91,7 +98,11 @@ export interface WorkassBrowserApi {
   command(chatId: string, command: 'navigate' | 'back' | 'forward' | 'reload' | 'stop', value?: string): Promise<WorkassBrowserState>;
   setViewport(chatId: string, width: number, height: number): Promise<WorkassBrowserState>;
   resetViewport(chatId: string): Promise<WorkassBrowserState>;
-  onOpenRequest(callback: (chatId?: string) => void): () => void;
+  // An agent's explicit ask (visible:true): the reason it needs the person and,
+  // for a tab one of the chat's pages opened, which page. An older shell sends neither.
+  onOpenRequest(callback: (chatId?: string, request?: WorkassBrowserOpenRequest) => void): () => void;
+  // Optional, newer shells: the chat's pages, for the person to pick from.
+  pages?(chatId: string, conversationId?: string): Promise<WorkassBrowserPage[]>;
   onState(callback: (state: WorkassBrowserState) => void): () => void;
 }
 

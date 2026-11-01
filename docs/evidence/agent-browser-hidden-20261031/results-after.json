@@ -1,0 +1,181 @@
+{
+ "front_before_launch": "\"LSDisplayName\"=\"Workass\" \"pid\"=30454",
+ "controller": true,
+ "controller_after_chat": true,
+ "chat_selected": true,
+ "after_open_a": {
+  "windows": 1,
+  "floatInRenderer": false
+ },
+ "tabs": [
+  {
+   "id": 4,
+   "url": "http://127.0.0.1:30193/opener",
+   "visible": false,
+   "opened_by": null
+  },
+  {
+   "id": 6,
+   "url": "http://127.0.0.1:30193/popup?auto",
+   "visible": false,
+   "opened_by": 4
+  },
+  {
+   "id": 8,
+   "url": "http://127.0.0.1:30193/popup",
+   "visible": false,
+   "opened_by": 4
+  },
+  {
+   "id": 10,
+   "url": "http://127.0.0.1:30193/b?fromlink",
+   "visible": false,
+   "opened_by": 4
+  }
+ ],
+ "windows_after_popups": [
+  {
+   "title": "workass",
+   "main": true,
+   "bounds": {
+    "x": 60,
+    "y": 60,
+    "width": 1400,
+    "height": 900
+   }
+  }
+ ],
+ "on_screen_after_popups": [
+  {
+   "id": 418245,
+   "h": 900,
+   "y": 60,
+   "w": 1400,
+   "x": 60,
+   "layer": 0
+  }
+ ],
+ "opener_got_message": [
+  "hello from popup",
+  "hello from popup"
+ ],
+ "popup_screenshot": {
+  "keys": [
+   "images",
+   "result"
+  ],
+  "file": null,
+  "raw": "{\"images\":[{\"mime_type\":\"image/png\",\"path\":\".dev/brig/new-1793492319705/tool-image-793691316.png\"}],\"result\":{\"capture_surface\":\"hidden_host\",\"css_capture_rect\":{\"height\":900,\"width\":1440,\"x\":0,\"y\":0},\"document_generation\":1,\"effective_viewport\":{\"device_scale_factor\""
+ },
+ "popup_click": {
+  "status": "clicked",
+  "text": "approved"
+ },
+ "opener_screenshot": "{\"images\":[{\"mime_type\":\"image/png\",\"path\":\".dev/brig/new-1793492319705/tool-image-3793854734.png\"}],\"result\":{\"capture_surface\":\"hidden_host\",\"css_capture_rect\":{\"height\":900,\"width\":1440,\"x\":0,\"y\":0},\"document_generation\":4,\"e",
+ "opener_click": "clicked",
+ "after_focus_and_fullscreen": {
+  "page": {
+   "focused": true
+  },
+  "windows": [
+   {
+    "title": "workass",
+    "main": true,
+    "fs": false
+   }
+  ],
+  "onScreen": [
+   {
+    "id": 418245,
+    "layer": 0,
+    "h": 900,
+    "x": 60,
+    "w": 1400,
+    "y": 60
+   }
+  ]
+ },
+ "idle_hidden_popup": {
+  "timerHz": 10,
+  "rafHz": 120.25,
+  "visibility": "visible",
+  "hidden": false,
+  "hasFocus": false
+ },
+ "idle_after_agent_drove_it": {
+  "timerHz": 10,
+  "rafHz": 120,
+  "visibility": "visible"
+ },
+ "gated_site": "DRAWN",
+ "after_crash": {
+  "front": true,
+  "windows": 1,
+  "tabAlive": true
+ },
+ "ask_without_reason": {
+  "error": "workass_browser_open: {\"error\":\"visible:true needs reason: what the person must do on this page, in their words. Without it the page stays hidden; omit visible to keep browsing.\"}\n"
+ },
+ "panel_after_refused_ask": false,
+ "after_ask": {
+  "panel": true,
+  "float": false,
+  "picker": {
+   "value": "conv-mvx30sfa-2#tab2",
+   "options": [
+    "Gated",
+    "Popup page",
+    "Popup page",
+    "Page B"
+   ]
+  },
+  "ask": "Aprobá el inicio de sesión en esta página",
+  "front": true,
+  "windows": [
+   "main"
+  ],
+  "onScreen": 1
+ },
+ "popup_when_shown": {
+  "tabVisible": true,
+  "url": "/popup"
+ },
+ "window_capture": true,
+ "click_on_shown_popup": "approved",
+ "after_pick_own": {
+  "panel": true,
+  "float": false,
+  "picker": {
+   "value": "conv-mvx30sfa-2",
+   "options": [
+    "Gated",
+    "Popup page",
+    "Popup page",
+    "Page B"
+   ]
+  },
+  "ask": null,
+  "visibleTabs": [
+   "http://127.0.0.1:30193/gated"
+  ],
+  "windows": 1
+ },
+ "after_close_panel": {
+  "panel": false,
+  "visibleTabs": 0
+ },
+ "screenshot_after_close": "{\"images\":[{\"mime_type\":\"image/png\",\"path\":\".dev/brig/new-1793492319705/tool-image-1293677821.png\"}],\"result\":{\"capture_surface\":\"hidden_host\",\"css_capture_rect\":{\"heig",
+ "samples": {
+  "n": 272,
+  "fronts": [
+   "\"LSDisplayName\"=\"Workass\" \"pid\"=30454"
+  ],
+  "electronFront": 0,
+  "focusedWindows": 0,
+  "maxVisibleWindows": 1,
+  "maxOnScreen": 1,
+  "offenders": [],
+  "offenderCount": 0
+ },
+ "front_after": "\"LSDisplayName\"=\"Workass\" \"pid\"=30454"
+}

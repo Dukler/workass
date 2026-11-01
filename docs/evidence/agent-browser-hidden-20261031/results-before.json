@@ -1,0 +1,72 @@
+{
+ "after_open_a": {
+  "windows": 1,
+  "floatInRenderer": true
+ },
+ "samples": {
+  "n": 87,
+  "fronts": [
+   "\"LSDisplayName\"=\"Workass\" \"pid\"=30454",
+   "\"LSDisplayName\"=\"Safari\" \"pid\"=70498"
+  ],
+  "electronFront": 0,
+  "focusedWindows": 0,
+  "maxVisibleWindows": 3,
+  "maxOnScreen": 3,
+  "offenders": [
+   {
+    "at": "opener page: window.open on a timer and on an agent click",
+    "title": "workass browser",
+    "bounds": {
+     "x": 374,
+     "y": 179,
+     "width": 980,
+     "height": 760
+    }
+   },
+   {
+    "at": "opener page: window.open on a timer and on an agent click",
+    "title": "workass browser",
+    "bounds": {
+     "x": 374,
+     "y": 179,
+     "width": 980,
+     "height": 760
+    }
+   },
+   {
+    "at": "opener page: window.open on a timer and on an agent click",
+    "title": "workass browser",
+    "bounds": {
+     "x": 374,
+     "y": 179,
+     "width": 980,
+     "height": 760
+    }
+   },
+   {
+    "at": "opener page: window.open on a timer and on an agent click",
+    "title": "workass browser",
+    "bounds": {
+     "x": 374,
+     "y": 179,
+     "width": 980,
+     "height": 760
+    }
+   },
+   {
+    "at": "opener page: window.open on a timer and on an agent click",
+    "title": "workass browser",
+    "bounds": {
+     "x": 374,
+     "y": 179,
+     "width": 980,
+     "height": 760
+    }
+   }
+  ],
+  "offenderCount": 77
+ },
+ "note": "Before the fix (HEAD 070ed71d shell and renderer). The rig stopped at its agent click, which timed out on the floated page in the covered app window.",
+ "failed": "Error: workass_browser_click: {\"error\":\"the page did not take dispatchMouseEvent within 5s\"}"
+}

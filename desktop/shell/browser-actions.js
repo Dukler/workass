@@ -74,10 +74,9 @@ function markAgentActive(entry) {
 // The page is the agent's to drive right now: not shown to the person, or an
 // agent call touched it moments ago.
 function agentDriven(entry) {
-  // A page in its separate window (popped out, or a popup shown in its own
-  // window) is in front of the person too.
+  // A page in its separate window is in front of the person too.
   const live = (win) => !!(win && !win.isDestroyed?.());
-  const poppedOut = !!(entry.pip || live(entry.pipWindow) || live(entry.popupWindow));
+  const poppedOut = !!(entry.pip || live(entry.pipWindow));
   return (entry.visible !== true && !poppedOut) || Date.now() - (entry.agentActiveAt || 0) < AGENT_RECENT_MS;
 }
 

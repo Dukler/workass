@@ -162,10 +162,15 @@ Agent tools, all using the existing optional exact `tab_id`:
   observed effective metrics, generations, visibility and supported capture
   modes. Success requires observed CSS metrics to match, not just a sent CDP
   command. Reads remain read-only and require no operation ID.
-- Add optional `visible` to `workass_browser_open`. Explicit `false` creates or
-  navigates an owned background page without requesting the pane. Preserve the
-  legacy omitted-field behavior. Explicit `true` uses the existing owning-chat
-  open request; it never selects another chat or steals OS focus.
+- Add optional `visible` to `workass_browser_open`. Owner law 2026-10-31,
+  replacing the legacy pane request and the visible popup window of cf5294c5:
+  agents browse out of sight. Omitted or `false` creates or navigates an owned
+  background page without requesting the pane. A page's `window.open` is a hidden
+  tab of the chat, never a window, unless the person pressed in that page a moment
+  ago. Explicit `true` requires `reason`, takes an optional `tab_id`, and is the
+  explicit ask for a page that needs the person: it opens that page in the
+  owning chat's panel and names the reason; it never selects another chat, opens
+  a window or steals OS focus. A person can pick any of the chat's pages in the panel.
 
 Keep viewport selection as shell-owned ephemeral page runtime state, retained
 while that page lives. Do not add a new durable chat/preferences store in this

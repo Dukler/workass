@@ -131,6 +131,7 @@ class FakeBrowserWindow extends EventEmitter {
   showInactive() { this.shownInactive = true; }
   constructor(options) {
     super();
+    FakeBrowserWindow.made.push(this);
     this.options = options;
     this.destroyed = false;
     this.bounds = { width: options.width, height: options.height };
@@ -184,6 +185,8 @@ function fixture(overrides = {}) {
   });
   return { manager, win, profile, sessions, states };
 }
+
+FakeBrowserWindow.made = [];
 
 test('uses one persistent profile and CDP-attached isolated views', async () => {
   const { manager, win, profile, sessions } = fixture();
@@ -1283,7 +1286,7 @@ test('provider-neutral browser control drives the same visible view', async () =
     void manager.activate({ chatId: 'tab-visible', conversationId, bounds: { x: 700, y: 60, width: 460, height: 680 } });
   } }));
   manager.setAgentControlReady(true);
-  const tab = await manager.browserControl('browser.open', { chatId: 'conversation-visible', url: 'localhost:5173' });
+  const tab = await manager.browserControl('browser.open', { chatId: 'conversation-visible', url: 'localhost:5173', visible: true, reason: 'Sign in here' });
   assert.equal(opened.length >= 1, true);
   assert.equal(opened[0], 'conversation-visible');
   assert.equal(tab.chatId, 'tab-visible');
@@ -1309,7 +1312,7 @@ test('browser.open runs in the background without stealing the visible view, the
   manager.setAgentControlReady(true);
 
   const tab = await manager.browserControl('browser.open', { chatId: 'conv-bg', url: 'example.com' });
-  assert.deepEqual(opened, ['conv-bg']);                 // renderer asked to mark the OWNING chat's pane
+  assert.deepEqual(opened, []);                          // agents browse out of sight: nothing is requested
   assert.equal(tab.conversationId, 'conv-bg');
   assert.equal(tab.active, false);                       // background: not the visible view
   assert.match(tab.url, /^https:\/\/example\.com/);
@@ -2197,9 +2200,9 @@ test('a native-view page off screen is held painting while an agent drives it, s
   manager.destroy();
 });
 
-test('a window.open popup of an agent-driven page is a window the person sees and a tab the agent drives; closing either ends both', async () => {
-  const { agentDriven } = require('./browser-actions');
+test('a window.open popup of an agent\'s page is a hidden tab the agent drives, never a window; closing it ends it', async () => {
   const { manager } = fixture({ requestOpen: () => {} });
+  const windowsBefore = FakeBrowserWindow.made.length;
   const ownerTab = await manager.browserControl('browser.open', { chatId: 'signin-owner', visible: false });
   const owner = manager.entries.get('signin-owner');
   const open = (url, disposition = 'new-window') => {
@@ -2208,39 +2211,93 @@ test('a window.open popup of an agent-driven page is a window the person sees an
     const made = new FakeWebContents(FakeView.profile);
     decision.createWindow({ webContents: made, webPreferences: {} });
     const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab && candidate.view.webContents === made);
-    return { made, tab, window: made.view.parentWindow };
+    return { made, tab };
   };
-  // A sign-in popup (a second factor, a captcha, a passkey needs the person).
+  const shownWindows = () => FakeBrowserWindow.made.slice(windowsBefore).filter((win) => !win.destroyed && (win.shownInactive || win.options.show !== false));
   const first = open('https://accounts.example/approve');
-  assert.ok(first.window instanceof FakeBrowserWindow, 'shown in a window of its own');
-  assert.equal(first.window.shownInactive, true, 'that the person can see, without taking their keyboard');
-  assert.deepEqual([first.window.options.width, first.window.options.height], [980, 760], 'as on main');
   assert.equal(await first.tab.ready, true);
-  assert.deepEqual([first.tab.viewport.width, first.tab.viewport.height], [980, 760], 'the page is the window\'s size');
-  assert.ok(manager.browserTabs('signin-owner').some((tab) => tab.id === first.made.id && tab.opened_by_tab_id === ownerTab.id), 'and the agent still drives it');
-  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.in_window === true));
-  first.tab.agentActiveAt = 0;
-  assert.equal(agentDriven(first.tab), false, 'in front of the person');
-  // A link opened in a new tab stays a background tab.
+  assert.equal(shownWindows().length, 0, 'no window comes up');
+  assert.equal(first.tab.visible, false);
+  assert.deepEqual([first.tab.viewport.width, first.tab.viewport.height], [1440, 900], 'it has the desktop viewport of any hidden page');
+  assert.ok(manager.browserTabs('signin-owner').some((tab) => tab.id === first.made.id && tab.opened_by_tab_id === ownerTab.id), 'and the agent drives it');
+  assert.ok(owner.events.some((event) => event.type === 'tab_opened' && event.how === 'window_open'));
+  // A link opened in a new tab is the same.
   const link = open('https://docs.example/page', 'foreground-tab');
   assert.equal(await link.tab.ready, true);
-  assert.notEqual(link.window && link.window.options.show, true);
-  assert.equal(link.tab.popupWindow, undefined);
-  // The person closes the window: the tab goes.
-  first.window.destroy();
+  assert.equal(shownWindows().length, 0);
+  // The agent closes the tab.
+  await manager.browserControl('browser.close', { chatId: 'signin-owner', tabId: link.made.id });
+  assert.equal(manager.entries.has(link.tab.chatId), false);
+  // The page closes itself (window.close() at the end of a sign-in).
+  first.made.emit('destroyed');
   assert.equal(manager.entries.has(first.tab.chatId), false);
-  assert.equal(first.made.closed, true);
-  // The agent closes the tab: the window goes.
-  const second = open('https://pay.example/3ds');
-  await second.tab.ready;
-  await manager.browserControl('browser.close', { chatId: 'signin-owner', tabId: second.made.id });
-  assert.equal(second.window.destroyed, true);
-  // The page closes itself (window.close() at the end of a sign-in): both go.
-  const third = open('https://accounts.example/done');
-  await third.tab.ready;
-  third.made.emit('destroyed');
-  assert.equal(manager.entries.has(third.tab.chatId), false);
-  assert.equal(third.window.destroyed, true);
+  manager.destroy();
+});
+
+test('a page the agent has used stays silent long after: its timer\'s popup is a hidden tab; a person\'s own press opens a window', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.activate({ chatId: 'shown', bounds: { x: 900, y: 80, width: 400, height: 640 } });
+  const entry = manager.entries.get('shown');
+  const decide = () => entry.view.webContents.windowOpenHandler({ url: 'https://popup.example/', disposition: 'new-window' });
+  entry.agentActiveAt = 0;
+  assert.equal(decide().createWindow, undefined, 'a page only a person ever used keeps its windows');
+  entry.agentActiveAt = Date.now() - 3600000;
+  assert.equal(typeof decide().createWindow, 'function', 'an hour after the agent, a popup nobody asked for is still hidden');
+  entry.view.webContents.emit('before-mouse-event', {}, { type: 'mouseDown' });
+  assert.equal(decide().createWindow, undefined, 'the person pressed in this page: the popup is theirs');
+  entry.personPressedAt = Date.now() - 60000;
+  assert.equal(typeof decide().createWindow, 'function', 'a press long ago does not count');
+  entry.agentActiveAt = Date.now();
+  entry.pointerDown = true;
+  entry.personPressedAt = 0;
+  entry.view.webContents.emit('before-mouse-event', {}, { type: 'mouseDown' });
+  assert.equal(typeof decide().createWindow, 'function', 'the agent\'s own press is not the person\'s');
+  manager.destroy();
+});
+
+test('browser.open shows nothing unless the agent asks with a reason, and then only that page of that chat', async () => {
+  const asks = [];
+  const { manager } = fixture({ requestOpen: (chatId, request) => asks.push([chatId, request]) });
+  await manager.browserControl('browser.open', { chatId: 'quiet' });
+  await manager.browserControl('browser.open', { chatId: 'quiet', visible: false });
+  assert.deepEqual(asks, [], 'omitted and false both stay hidden');
+  await assert.rejects(manager.browserControl('browser.open', { chatId: 'quiet', visible: true }), /needs reason/);
+  await assert.rejects(manager.browserControl('browser.open', { chatId: 'quiet', visible: true, reason: '   ' }), /needs reason/);
+  assert.deepEqual(asks, []);
+  await manager.browserControl('browser.open', { chatId: 'quiet', visible: true, reason: 'Enter your second factor' });
+  assert.deepEqual(asks, [['quiet', { reason: 'Enter your second factor' }]]);
+  const owner = manager.entries.get('quiet');
+  const made = new FakeWebContents(FakeView.profile);
+  owner.view.webContents.windowOpenHandler({ url: 'https://accounts.example/', disposition: 'new-window' }).createWindow({ webContents: made, webPreferences: {} });
+  const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab);
+  await tab.ready;
+  await manager.browserControl('browser.open', { chatId: 'quiet', tabId: made.id, visible: true, reason: 'Solve the captcha' });
+  assert.deepEqual(asks[1], ['quiet', { reason: 'Solve the captcha', pageKey: tab.chatId }]);
+  assert.deepEqual(manager.pagesFor('quiet').map((page) => [page.key, page.primary]), [['quiet', true], [tab.chatId, false]]);
+  // The person's panel shows that tab with the same calls as any page, and it goes back hidden.
+  await manager.activate({ chatId: tab.chatId, conversationId: 'quiet', bounds: { x: 900, y: 80, width: 400, height: 640 } });
+  assert.equal(tab.visible, true);
+  assert.equal(manager.primaryEntryFor('quiet'), owner, 'the chat\'s own page is still its own');
+  await manager.hide(tab.chatId);
+  assert.equal(tab.visible, false);
+  assert.equal(tab.captureHostAttached, true, 'still rendering out of sight');
+  manager.destroy();
+});
+
+test('a tab a page opened tells the panel when it goes, and adopting the chat keeps its tabs', async () => {
+  const { manager, states } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'conv-1' });
+  const owner = manager.entries.get('conv-1');
+  const made = new FakeWebContents(FakeView.profile);
+  owner.view.webContents.windowOpenHandler({ url: 'https://a.example/', disposition: 'new-window' }).createWindow({ webContents: made, webPreferences: {} });
+  const tab = [...manager.entries.values()].find((candidate) => candidate.extraTab);
+  await tab.ready;
+  await manager.activate({ chatId: 'ui-tab-1', conversationId: 'conv-1', bounds: { x: 900, y: 80, width: 400, height: 640 } });
+  assert.equal(tab.ownerChatId, 'ui-tab-1');
+  assert.deepEqual(manager.pagesFor('ui-tab-1', 'conv-1').map((page) => page.primary), [true, false]);
+  const key = tab.chatId;
+  manager.close(key);
+  assert.ok(states.some((state) => state.chatId === key && state.closed === true));
   manager.destroy();
 });
 

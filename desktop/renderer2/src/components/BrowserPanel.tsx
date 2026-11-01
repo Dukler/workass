@@ -2,12 +2,17 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   browserApi, browserPageHosted, browserViewportForBounds, localBrowserOwnsChat, sameBrowserBounds,
-  type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserState,
+  type WorkassBrowserApi, type WorkassBrowserBounds, type WorkassBrowserPage, type WorkassBrowserState,
 } from '../browser';
 import { presentBrowserPage, slotRect, SURFACE_Z_DOCKED, withdrawBrowserPage } from '../browser-surface';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { store, useApp } from '../store/store';
 import { IcBrowser, IcPip } from '../icons';
+
+export function browserPageLabel(page: WorkassBrowserPage): string {
+  if (page.title) return page.title;
+  try { return new URL(page.url).host || page.url; } catch { return page.url; }
+}
 
 function boundsFor(el: HTMLElement): WorkassBrowserBounds {
   const rect = el.getBoundingClientRect();
@@ -32,22 +37,25 @@ function initialState(chatId: string): WorkassBrowserState {
 // control still work underneath; they just stop shouting. The persistent-session
 // profile and CDP are daemon/shell concerns, not UI chrome.
 export function BrowserPanel(props: {
+  // The page this panel shows: the chat's own, or a tab one of its pages opened.
   chatId: string;
+  ownerChatId?: string;
   conversationId?: string;
   machineId?: string;
   artifactOrigin?: string;
   onClose: () => void;
 }) {
   const api = browserApi();
-  if (!api?.supported || !localBrowserOwnsChat(props.chatId, props.machineId)) return null;
+  if (!api?.supported || !localBrowserOwnsChat(props.ownerChatId ?? props.chatId, props.machineId)) return null;
   return <LocalBrowserPanel {...props} api={api} />;
 }
 
 function LocalBrowserPanel({
-  api, chatId, conversationId, machineId, artifactOrigin, onClose,
+  api, chatId, ownerChatId, conversationId, machineId, artifactOrigin, onClose,
 }: {
   api: WorkassBrowserApi;
   chatId: string;
+  ownerChatId?: string;
   conversationId?: string;
   machineId?: string;
   artifactOrigin?: string;
@@ -59,6 +67,23 @@ function LocalBrowserPanel({
   const [address, setAddress] = useState('');
   const hosted = browserPageHosted(api, state.host);
   const slot = useRef(Symbol('docked-pane'));
+  const owner = ownerChatId ?? chatId;
+  const [pages, setPages] = useState<WorkassBrowserPage[]>([]);
+  const ask = store.browserAskFor(owner);
+
+  // Agents' pages (and what those pages opened) stay out of sight until the
+  // person picks one here. A native select: its menu draws above a native page.
+  useEffect(() => {
+    if (!api.pages) return;
+    let current = true;
+    const refresh = () => { void api.pages!(owner, conversationId).then((next) => { if (current) setPages(next); }).catch(() => {}); };
+    refresh();
+    const stop = api.onState((next) => {
+      if (next.closed && next.chatId === chatId) store.selectBrowserPage(owner, owner);
+      refresh();
+    });
+    return () => { current = false; stop(); };
+  }, [api, owner, chatId, conversationId]);
 
   // The native-view host paints the page ABOVE all HTML, so an HTML overlay
   // (the image lightbox) can't cover it — it would show through the right
@@ -237,6 +262,19 @@ function LocalBrowserPanel({
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 4l8 8M12 4l-8 8" /></svg>
         </button>
       </form>
+      {pages.length > 1 && (
+        <select className="brw2pages" aria-label="Página del navegador" title="Página del navegador" value={chatId} onChange={(event) => store.selectBrowserPage(owner, event.target.value)}>
+          {pages.map((page) => <option key={page.key} value={page.key}>{browserPageLabel(page)}</option>)}
+        </select>
+      )}
+      {!!ask && (
+        <div className="brw2ask" role="status">
+          <span>{ask}</span>
+          <button type="button" className="brw2close" title="Descartar" aria-label="Descartar" onClick={() => store.dismissBrowserAsk(owner)}>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+        </div>
+      )}
       {state.error && <div className="brw2viewport-error" role="alert">{state.error}</div>}
       <div className="brw2view" ref={viewport}>
         {blank && (
