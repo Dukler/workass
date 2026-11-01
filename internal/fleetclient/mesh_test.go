@@ -274,17 +274,20 @@ func TestWrongIdentityIsRefusedBeforeAnyCredentialIsSent(t *testing.T) {
 	if peer, _ := store.Peer("m-home"); peer.Linked() {
 		t.Fatalf("a credential was derived for an impostor: %#v", peer)
 	}
-	// A refusal is not a cooldown. The route stays refused until a human changes
-	// it, because retrying it could only mean presenting a credential again.
+	// A cooldown rather than a standing refusal: nothing is presented on a retry, and
+	// whoever answered once must not be able to cut the route off after they leave.
 	peer, _ := store.Peer("m-home")
-	if len(peer.Routes) != 1 || !peer.Routes[0].Refused {
-		t.Fatalf("the refused address was not recorded: %#v", peer.Routes)
+	if len(peer.Routes) != 1 || peer.Routes[0].Refused || peer.Routes[0].CooldownUntil == "" {
+		t.Fatalf("the address should be cooling down: %#v", peer.Routes)
 	}
-	if !strings.Contains(peer.Routes[0].RefusedReason, "m-impostor") {
-		t.Fatalf("the refusal does not name who answered: %q", peer.Routes[0].RefusedReason)
+	if !strings.Contains(peer.Routes[0].LastError, "m-impostor") {
+		t.Fatalf("the failure does not name who answered: %q", peer.Routes[0].LastError)
 	}
-	if _, err := mesh.Invoke(context.Background(), "m-home", "test:echo", map[string]any{}); !errors.Is(err, ErrNoRoute) {
-		t.Fatalf("a refused route was tried again: %v", err)
+	if _, err := mesh.Invoke(context.Background(), "m-home", "test:echo", map[string]any{}); err == nil {
+		t.Fatal("a second attempt linked to an impostor")
+	}
+	if devices := impostor.lease.Devices(); len(devices) != 0 {
+		t.Fatalf("a retry presented something to the impostor: %#v", devices)
 	}
 }
 

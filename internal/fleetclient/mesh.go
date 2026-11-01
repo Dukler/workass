@@ -76,6 +76,12 @@ const (
 	StatusDown       = "down"
 )
 
+// ErrUnprovenIdentity reports an address that did not prove its certificate under
+// any key this daemon holds. No enrolment proof is sent to it. It is not a
+// refusal: a stripped proof says nothing about the address itself, and refusing
+// would let anyone on the path cut a route off until a human restored it.
+var ErrUnprovenIdentity = errors.New("that address did not prove its certificate under a fleet key")
+
 // ErrWrongIdentity reports an address that answered as a different daemon. It
 // is a refusal, not a failure to retry: no credential was sent and none will be.
 var ErrWrongIdentity = errors.New("that address is not the daemon it claims to be")
@@ -521,12 +527,11 @@ func (m *Mesh) dialPeer(ctx context.Context, peerID string) (Invoker, error) {
 			m.publish(State{Peer: peerID, Name: peer.Name, Status: StatusDown, Since: m.now(), Reason: err.Error()})
 			return nil, err
 		}
-		// A refusal is recorded against the address, because the address is the
-		// finding: it is the only thing a human can change about it.
+		// No credential goes out on a wrong identity, so retrying costs nothing. A
+		// permanent refusal would let anyone who answered once at this address cut
+		// the route off long after they left, so it cools down like any failure.
 		if errors.Is(err, ErrWrongIdentity) {
 			m.logf("[fleet] refused %s: %v", route.Address, err)
-			_ = m.store.RefuseRoute(peerID, route.Address, err.Error())
-			continue
 		}
 		if errors.Is(err, ErrRefusedCredential) || errors.Is(err, ErrNoKey) {
 			// The address is fine; the answer was no. Cooling it down would only
@@ -570,6 +575,12 @@ func (m *Mesh) dialRoute(ctx context.Context, peer Peer, route Route) (Invoker, 
 			route.Address, shortFingerprint(card.CertFingerprint), shortFingerprint(pinned))
 	}
 	token := strings.TrimSpace(peer.DeviceToken)
+	// A credential with no pinned certificate comes from an old peer file. Sending it
+	// would trust whatever certificate this card named, so enrol afresh under proof.
+	if token != "" && strings.TrimSpace(peer.CertFingerprint) == "" {
+		_ = m.store.ClearToken(peer.MachineID)
+		peer.DeviceToken, token = "", ""
+	}
 	presented := token != ""
 	fingerprint := firstNonEmpty(strings.TrimSpace(peer.CertFingerprint), strings.TrimSpace(card.CertFingerprint))
 	if token == "" {
@@ -636,6 +647,11 @@ func (m *Mesh) enroll(ctx context.Context, peer Peer, route Route, card machineb
 	if m.keys == nil || !m.keys.Has() {
 		return Peer{}, ErrNoKey
 	}
+	// With no fingerprint the socket below would not be pinned, so a proof could
+	// not be tied to the certificate actually on the other end.
+	if strings.TrimSpace(card.CertFingerprint) == "" {
+		return Peer{}, fmt.Errorf("%w: %s names no certificate", ErrUnprovenIdentity, route.Address)
+	}
 	link, err := m.dial(ctx, DialRequest{
 		Peer: peer.MachineID, Address: route.Address, DeviceName: m.linkName(),
 		Fingerprint: strings.TrimSpace(card.CertFingerprint), Logf: m.logf,
@@ -671,18 +687,27 @@ func (m *Mesh) enroll(ctx context.Context, peer Peer, route Route, card machineb
 	}
 	fingerprint := strings.TrimSpace(card.CertFingerprint)
 	proofs := mapOf(challenge["certProofs"])
+	attempted := false
 	for _, key := range m.keys.Keys() {
 		// The certificate is verified under the fleet key before the proof is
 		// sent, so trust-on-first-use never applies to a key-holder: a swapped
 		// certificate has a different fingerprint and forging the proof needs
-		// the key.
-		if fingerprint != "" && len(proofs) > 0 {
-			expected := fleet.CertProof(key.Secret, serverNonce, fingerprint)
-			if claimed := textOf(proofs[key.KeyID]); claimed != "" && claimed != expected {
-				return Peer{}, fmt.Errorf("%w: %s proved certificate %s under key %s incorrectly",
-					ErrWrongIdentity, route.Address, shortFingerprint(fingerprint), key.KeyID)
-			}
+		// the key. A missing proof is no proof. Answering anyway is what let a
+		// forged machine relay this daemon's answer to the real one and have its
+		// own socket approved. A daemon proves every key it holds, so a key with
+		// no proof is either one it does not hold or a stripped answer; neither
+		// gets a proof back.
+		claimed := textOf(proofs[key.KeyID])
+		if claimed == "" {
+			continue
 		}
+		if !fleet.CertProofMatches(key.Secret, serverNonce, fingerprint, claimed) {
+			// A cooldown rather than a refusal: anyone on the path can send junk, and
+			// a refusal stands until a human restores the route.
+			return Peer{}, fmt.Errorf("%w: %s proved certificate %s under key %s incorrectly",
+				ErrUnprovenIdentity, route.Address, shortFingerprint(fingerprint), key.KeyID)
+		}
+		attempted = true
 		proof := fleet.Proof(key.Secret, serverNonce, clientNonce, challengeMachine)
 		token := fleet.Token(key.Secret, serverNonce, clientNonce, challengeMachine)
 		reply, err := link.Invoke(ctx, "fleet:enroll", map[string]any{
@@ -735,7 +760,45 @@ func (m *Mesh) enroll(ctx context.Context, peer Peer, route Route, card machineb
 		m.logf("[fleet] linked to %s (%s) under key %s", peer.MachineID, route.Address, key.KeyID)
 		return saved, nil
 	}
+	if !attempted {
+		return Peer{}, fmt.Errorf("%w: %s", ErrUnprovenIdentity, route.Address)
+	}
 	return Peer{}, fmt.Errorf("%s refused every fleet key this daemon holds", peer.MachineID)
+}
+
+// ProveIdentity reports whether address holds this certificate and proves it under
+// a key this daemon holds. It sends nothing a listener could reuse: it only asks
+// for a challenge and checks the answer. The machine book uses it to accept a
+// certificate that really did change.
+func (m *Mesh) ProveIdentity(ctx context.Context, address, machineID, fingerprint string) bool {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if m == nil || m.keys == nil || !m.keys.Has() || fingerprint == "" {
+		return false
+	}
+	proveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	link, err := m.dial(proveCtx, DialRequest{
+		Peer: machineID, Address: address, DeviceName: m.linkName(), Fingerprint: fingerprint, Logf: m.logf,
+	})
+	if err != nil {
+		return false
+	}
+	defer link.Close(nil)
+	raw, err := link.Invoke(proveCtx, "fleet:challenge")
+	if err != nil {
+		return false
+	}
+	challenge := mapOf(raw)
+	if textOf(challenge["machineId"]) != machineID {
+		return false
+	}
+	nonce, proofs := textOf(challenge["serverNonce"]), mapOf(challenge["certProofs"])
+	for _, key := range m.keys.Keys() {
+		if fleet.CertProofMatches(key.Secret, nonce, fingerprint, textOf(proofs[key.KeyID])) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleRejection separates the two refusals a peer can make. One says "that
@@ -1170,8 +1233,11 @@ func pinnedTLSConfig(fingerprint string) *tls.Config {
 		return config
 	}
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		for _, raw := range rawCerts {
-			sum := sha256.Sum256(raw)
+		// Only the leaf. It is the one certificate the peer proved it holds the key
+		// for; anything after it in the chain is just bytes it chose to send, and a
+		// forger can send the real daemon's certificate there.
+		if len(rawCerts) > 0 {
+			sum := sha256.Sum256(rawCerts[0])
 			if hex.EncodeToString(sum[:]) == fingerprint {
 				return nil
 			}

@@ -97,6 +97,35 @@ test('certificate verification covers the renderer and isolated in-app browser s
 	}, 'persist:workass-browser'), [defaultSession], 'the same Electron session is configured only once');
 });
 
+test('a second machine at the same host cannot take over the pin', () => {
+  const pins = new CertificatePins();
+  const real = 'ab'.repeat(32);
+  const forged = 'cd'.repeat(32);
+  assert.equal(pins.trustEndpoint('192.168.1.71:80', real, 'm-real'), true);
+  assert.equal(pins.trustEndpoint('192.168.1.71:9000', forged, 'm-forged'), false, 'another port is the same host to Chromium');
+  const verdict = (fingerprint256) => pins.verify({
+    hostname: '192.168.1.71', verificationResult: 'net::ERR_CERT_AUTHORITY_INVALID', certificate: { fingerprint256 },
+  });
+  assert.equal(verdict(real), true);
+  assert.equal(verdict(forged), false);
+  pins.releaseEndpoint('192.168.1.71:80', 'm-forged');
+  assert.equal(verdict(real), true, 'only the holder can release it');
+  assert.equal(pins.trustEndpoint('192.168.1.71:80', forged, 'm-real'), true, 'the holder can change its own pin');
+  pins.releaseEndpoint('192.168.1.71:80', 'm-real');
+  assert.equal(pins.trustEndpoint('192.168.1.71:80', real, 'm-new'), true, 'a released host is free again');
+});
+
+test('a renderer reload frees remote pins and keeps the local daemon pin', () => {
+  const pins = new CertificatePins();
+  const local = 'ab'.repeat(32);
+  const remote = 'cd'.repeat(32);
+  assert.equal(pins.trustEndpoint('127.0.0.1:8788', local, 'local-daemon'), true);
+  assert.equal(pins.trustEndpoint('192.168.1.71:80', remote, 'm-forged'), true);
+  pins.releaseAllExcept('local-daemon');
+  assert.equal(pins.trustEndpoint('192.168.1.71:80', local, 'm-real'), true, 'the real machine can pin again');
+  assert.equal(pins.trustEndpoint('127.0.0.1:8788', remote, 'm-other'), false, 'the local daemon stays pinned');
+});
+
 test('pins never relax public hosts, unrelated TLS failures, or malformed fingerprints', () => {
   const pins = new CertificatePins();
   assert.equal(pins.trustEndpoint('example.com:443', fingerprint), false);

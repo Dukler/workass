@@ -20,6 +20,7 @@ import { hmacSha256, sha256, toHex, utf8 } from './sha256.ts';
 export const KEY_PREFIX = 'wf-';
 export const PROOF_CONTEXT = 'workass-fleet-proof-v1';
 export const TOKEN_CONTEXT = 'workass-fleet-token-v1';
+export const CERT_CONTEXT = 'workass-fleet-cert-v1';
 const SECRET_BYTES = 16;
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -27,6 +28,14 @@ export class FleetKeyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'FleetKeyError';
+  }
+}
+
+/** A machine that did not prove who it is. Not a verdict on the machine it claims to be. */
+export class FleetIdentityError extends FleetKeyError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FleetIdentityError';
   }
 }
 
@@ -98,6 +107,14 @@ export function fleetDeviceToken(key: string, serverNonce: string, clientNonce: 
   return derive(key, TOKEN_CONTEXT, serverNonce, clientNonce, machineId);
 }
 
+/**
+ * What a daemon sends to show that the certificate on this connection belongs to
+ * the fleet. Forging it needs the key. Mirrors `CertProof` in fleet.go.
+ */
+export function fleetCertProof(key: string, serverNonce: string, certFingerprint: string): string {
+  return derive(key, CERT_CONTEXT, serverNonce, certFingerprint, '');
+}
+
 /** The client's contribution to the exchange. 16 bytes, hex. */
 export function newClientNonce(random: (bytes: number) => Uint8Array = defaultRandom): string {
   return toHex(random(16));
@@ -120,6 +137,8 @@ export interface FleetChallenge {
   serverNonce?: string;
   keyIds?: string[];
   nonceTtlMs?: number;
+  /** One proof per fleet key the daemon holds, keyed by key id. */
+  certProofs?: Record<string, string>;
 }
 
 export interface FleetEnrolment {
@@ -137,12 +156,22 @@ export interface FleetEnrolment {
 export function answerFleetChallenge(
   key: string,
   challenge: FleetChallenge,
+  /** The fingerprint this connection is pinned to, never one the challenge claims. */
+  certFingerprint: string,
   random?: (bytes: number) => Uint8Array,
 ): FleetEnrolment {
   if (!challenge?.enabled) throw new FleetKeyError('that machine has no fleet key yet');
   const serverNonce = String(challenge.serverNonce ?? '');
   const machineId = String(challenge.machineId ?? '');
   if (!serverNonce || !machineId) throw new FleetKeyError('challenge is missing its nonce or machine id');
+  // The proof below is an answer anyone could carry to the real machine and be
+  // approved with, so it goes only to a machine that first proved its certificate
+  // under this key. A missing proof is no proof.
+  const fingerprint = String(certFingerprint ?? '').trim().toLowerCase();
+  const supplied = String(challenge.certProofs?.[fleetKeyId(key)] ?? '').trim().toLowerCase();
+  if (!fingerprint || !supplied || supplied !== fleetCertProof(key, serverNonce, fingerprint)) {
+    throw new FleetIdentityError('that machine did not prove its TLS identity with this fleet key');
+  }
   const clientNonce = newClientNonce(random);
   return {
     clientNonce,

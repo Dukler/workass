@@ -2,7 +2,9 @@ package machinebook
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,7 +101,12 @@ func (b *Book) probe(ctx context.Context, address string) (Card, error) {
 	return probeWithClient(ctx, address, &client)
 }
 
-func probeWithClient(ctx context.Context, address string, client *http.Client) (Card, error) {
+func probeWithClient(ctx context.Context, address string, base *http.Client) (Card, error) {
+	// A redirect would let one address answer with another machine's card, or with a
+	// plaintext one nothing could check. A card speaks only for its own connection.
+	copied := *base
+	copied.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client := &copied
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address+HealthPath, nil)
 	if err != nil {
 		return Card{}, err
@@ -129,6 +136,15 @@ func probeWithClient(ctx context.Context, address string, client *http.Client) (
 	}
 	if !card.Secure || strings.TrimSpace(card.CertFingerprint) == "" {
 		return Card{}, fmt.Errorf("%s: Workass transport is not encrypted", address)
+	}
+	// The card is only a claim, but this much can be checked now: it must name the
+	// certificate this very connection presented.
+	if response.TLS == nil || len(response.TLS.PeerCertificates) == 0 {
+		return Card{}, fmt.Errorf("%s: Workass transport is not encrypted", address)
+	}
+	sum := sha256.Sum256(response.TLS.PeerCertificates[0].Raw)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(card.CertFingerprint)) {
+		return Card{}, fmt.Errorf("%s: its identity card names a different certificate than it presented", address)
 	}
 	return card, nil
 }

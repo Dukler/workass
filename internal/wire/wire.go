@@ -224,6 +224,14 @@ const (
 	// Guessing a 128-bit key is not a threat model, but a socket that keeps
 	// failing is not enrolling either; make it reconnect rather than grind.
 	fleetMaxFailures = 5
+	// Every waiting request shows an approval card, so a stranger must not be able
+	// to fill the screen by reconnecting. A client over either limit is still parked,
+	// with no card, so a key holder can enrol no matter who else is connecting.
+	maxPendingAccess          = 32
+	maxPendingAccessPerSource = 4
+	// maxParkedAccess bounds what parked connections can cost in total. The oldest
+	// quiet one makes way for a new one.
+	maxParkedAccess = 256
 )
 
 // Hub owns the invoke handler registry and connected WebSocket clients.
@@ -362,6 +370,9 @@ type pendingAccess struct {
 	requestedAt time.Time
 	client      *client
 	timer       *time.Timer
+	// quiet means over the limits: parked so a key holder can enrol, but with no
+	// approval card, so it cannot crowd out real requests.
+	quiet bool
 }
 
 type accessState struct {
@@ -1112,6 +1123,14 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		return c
 	}
 
+	// A person can only be asked to approve someone on a network they share. With a
+	// source on the open internet the request is noise at best and a phishing prompt
+	// at worst. A device already paired still connects, above, with its token.
+	if !IsPrivateSource(c.ip) {
+		h.logf("[lan] refused pairing from non-private source %s", c.ip)
+		c.setAccessState(accessState{State: "rejected", Reason: "non-private-source"})
+		return c
+	}
 	requestID, requestedAt := h.addPendingAccess(c)
 	c.setPendingAccess(requestID, requestedAt)
 	return c
@@ -1191,6 +1210,30 @@ func (h *Hub) auxiliaryAuthorized(c *client, deviceID string) bool {
 func (h *Hub) addPendingAccess(c *client) (string, time.Time) {
 	now := time.Now().UTC()
 	h.mu.Lock()
+	visible, fromSource := 0, 0
+	perSource := make(map[string]int)
+	for _, rec := range h.pending {
+		if rec.quiet {
+			continue
+		}
+		visible++
+		perSource[rec.ip]++
+		if rec.ip == c.ip {
+			fromSource++
+		}
+	}
+	evicted := h.evictOldestQuietLocked()
+	quiet := visible >= maxPendingAccess || fromSource >= maxPendingAccessPerSource
+	// A new source gets a card even with the list full, so strangers cannot hide the
+	// owner's real request. It costs the source holding the most cards its oldest.
+	var hidden *pendingAccess
+	if visible >= maxPendingAccess && fromSource == 0 {
+		hidden = h.oldestCardOfLargestSourceLocked(perSource)
+		if hidden != nil {
+			hidden.quiet = true
+			quiet = false
+		}
+	}
 	h.requestSeq++
 	requestID := fmt.Sprintf("lan-%d-%d", now.UnixMilli(), h.requestSeq)
 	rec := &pendingAccess{
@@ -1200,13 +1243,67 @@ func (h *Hub) addPendingAccess(c *client) (string, time.Time) {
 		userAgent:   c.userAgent,
 		requestedAt: now,
 		client:      c,
+		quiet:       quiet,
 	}
 	rec.timer = time.AfterFunc(h.accessTimeout, func() {
 		h.denyPendingAccess(requestID, "timeout")
 	})
 	h.pending[requestID] = rec
 	h.mu.Unlock()
+	if hidden != nil {
+		h.announceAccessRequestClosed(hidden.requestID)
+	}
+	if evicted != nil {
+		go h.dropEvictedAccess(evicted)
+	}
 	return requestID, now
+}
+
+// evictOldestQuietLocked makes room when the parked limit is reached. A new
+// connection is never the one refused, or anyone could lock a key holder out by
+// holding sockets open.
+func (h *Hub) evictOldestQuietLocked() *pendingAccess {
+	if len(h.pending) < maxParkedAccess {
+		return nil
+	}
+	var oldest *pendingAccess
+	for _, rec := range h.pending {
+		if rec.quiet && (oldest == nil || rec.requestedAt.Before(oldest.requestedAt)) {
+			oldest = rec
+		}
+	}
+	if oldest != nil {
+		delete(h.pending, oldest.requestID)
+		if oldest.timer != nil {
+			oldest.timer.Stop()
+		}
+	}
+	return oldest
+}
+
+func (h *Hub) oldestCardOfLargestSourceLocked(perSource map[string]int) *pendingAccess {
+	largest, most := "", 0
+	for ip, count := range perSource {
+		if count > most || (count == most && ip < largest) {
+			largest, most = ip, count
+		}
+	}
+	var oldest *pendingAccess
+	for _, rec := range h.pending {
+		if !rec.quiet && rec.ip == largest && (oldest == nil || rec.requestedAt.Before(oldest.requestedAt)) {
+			oldest = rec
+		}
+	}
+	return oldest
+}
+
+func (h *Hub) dropEvictedAccess(rec *pendingAccess) {
+	if rec.client == nil || rec.client.conn == nil {
+		return
+	}
+	rec.client.setAccessState(accessState{State: "timeout", RequestID: rec.requestID, Reason: "timeout"})
+	_ = rec.client.sendEventAndWait("lan:access-state", h.accessStatePayload(rec.client.accessSnapshot()))
+	h.drop(rec.client)
 }
 
 func (h *Hub) announceClientAccess(c *client) {
@@ -1224,6 +1321,9 @@ func (h *Hub) announceClientAccess(c *client) {
 	switch state.State {
 	case "waiting":
 		_ = c.sendEvent("lan:access-state", h.accessStatePayload(state))
+		if h.pendingIsQuiet(state.RequestID) {
+			return
+		}
 		h.Broadcast("lan:access-request", accessRequestPayload(state.RequestID, c.ip, c.deviceName, c.userAgent, state.RequestedAt))
 	case "rejected":
 		_ = c.sendEventAndWait("lan:access-state", h.accessStatePayload(state))
@@ -1241,10 +1341,20 @@ func accessRequestPayload(requestID, ip, deviceName, userAgent, requestedAt stri
 	}
 }
 
+func (h *Hub) pendingIsQuiet(requestID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	rec := h.pending[requestID]
+	return rec != nil && rec.quiet
+}
+
 func (h *Hub) pendingAccessPayloads() []map[string]any {
 	h.mu.RLock()
 	payloads := make([]map[string]any, 0, len(h.pending))
 	for _, rec := range h.pending {
+		if rec.quiet {
+			continue
+		}
 		payloads = append(payloads, accessRequestPayload(
 			rec.requestID,
 			rec.ip,
@@ -2650,8 +2760,36 @@ func loopbackOrigin(origin string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func isLocalIP(ip string) bool {
-	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == ""
+// IsLocalIP is the one definition of "this connection came from this machine". An
+// empty or unreadable address is not local: every gate behind this check fails
+// closed when it does not know who is asking.
+func IsLocalIP(ip string) bool {
+	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
+}
+
+func isLocalIP(ip string) bool { return IsLocalIP(ip) }
+
+// carrierGradeNAT is 100.64.0.0/10, which is not RFC1918 but is where overlay VPNs
+// such as Tailscale put their machines.
+var carrierGradeNAT = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// IsPrivateSource reports whether an address can be someone on a network this
+// machine's owner chose: loopback, RFC1918, link-local, IPv6 ULA or a VPN's range.
+// Anything else is the open internet as far as this machine can tell.
+func IsPrivateSource(ip string) bool {
+	if IsLocalIP(ip) {
+		return true
+	}
+	host := strings.Trim(ip, "[]")
+	// A link-local IPv6 address names its interface: fe80::1%en0.
+	if zone := strings.IndexByte(host, '%'); zone >= 0 {
+		host = host[:zone]
+	}
+	parsed := net.ParseIP(host)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsLinkLocalUnicast() || carrierGradeNAT.Contains(parsed)
 }
 
 func encodeTextFrame(payload []byte) []byte {

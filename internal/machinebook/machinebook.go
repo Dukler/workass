@@ -43,6 +43,9 @@ const LocalOwner = "local"
 // machine. The peer's advertised Name remains separate and keeps refreshing.
 const MaxNicknameRunes = 64
 
+// maxRowsPerEndpoint bounds how many machines can claim one address.
+const maxRowsPerEndpoint = 8
+
 // Endpoint kinds. Only KindLAN is produced today; the others exist so that
 // adding a transport is a new value here rather than a new field everywhere.
 const (
@@ -56,6 +59,11 @@ const (
 	StatusOK          = "ok"
 	StatusUnreachable = "unreachable"
 	StatusNeedsUpdate = "needs-update"
+	// StatusIdentityChanged is a machine answering at a known address with a
+	// certificate the book does not hold and nothing has proved. It stays
+	// unusable, with the old certificate kept, until a fleet key proves the new
+	// one or a person forgets the machine.
+	StatusIdentityChanged = "identity-changed"
 )
 
 // How an entry got into the book. Shown to the user, because "I typed this one"
@@ -101,6 +109,12 @@ type Entry struct {
 	LastSeenAt string   `json:"lastSeenAt,omitempty"`
 }
 
+// ErrIdentityChanged reports a card naming a known machine with a certificate the
+// book does not hold, when nothing proved it.
+var ErrIdentityChanged = errors.New("that machine answered with a different certificate than before")
+
+const identityChangedReason = "answered with a different certificate than before; not trusted until the fleet key proves it, or you forget this machine"
+
 // ErrSelf reports an attempt to add the machine doing the adding.
 var ErrSelf = errors.New("that address is this machine")
 
@@ -127,6 +141,32 @@ type Book struct {
 
 	mu      sync.Mutex
 	entries map[string]Entry
+	prove   func(ctx context.Context, address, machineID, fingerprint string) bool
+}
+
+// SetIdentityProver names who can vouch for a changed certificate. Without one, a
+// changed certificate waits for a person to forget the machine.
+func (b *Book) SetIdentityProver(prove func(ctx context.Context, address, machineID, fingerprint string) bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.prove = prove
+}
+
+// identityAccepted decides whether a card may change what the book holds. A card
+// is only a claim from whoever answered, so it may introduce a machine, but it may
+// not replace a known machine's certificate unless that change is proved. Called
+// with no lock held, because proving takes a round trip.
+func (b *Book) identityAccepted(ctx context.Context, card Card, address string) bool {
+	b.mu.Lock()
+	entry, known := b.entries[card.MachineID]
+	prove := b.prove
+	b.mu.Unlock()
+	stored := strings.TrimSpace(entry.CertFingerprint)
+	claimed := strings.TrimSpace(card.CertFingerprint)
+	if !known || stored == "" || strings.EqualFold(stored, claimed) {
+		return true
+	}
+	return prove != nil && prove(ctx, address, card.MachineID, claimed)
 }
 
 // Open loads the book for a state dir, creating an empty one on first use.
@@ -229,6 +269,9 @@ func (b *Book) Add(ctx context.Context, address string) (Entry, error) {
 	if b.selfID != "" && card.MachineID == b.selfID {
 		return Entry{}, ErrSelf
 	}
+	if !b.identityAccepted(ctx, card, normalized) {
+		return Entry{}, fmt.Errorf("%s: %w", normalized, ErrIdentityChanged)
+	}
 	return b.record(card, normalized, SourceManual)
 }
 
@@ -253,6 +296,11 @@ func (b *Book) discover(ctx context.Context, address string, probe func(context.
 	if b.selfID != "" && card.MachineID == b.selfID {
 		return Entry{}, false, ErrSelf
 	}
+	// A sweep can reach anyone on the network, so a stranger naming a known machine
+	// changes nothing at all: not its certificate, not its address, not its status.
+	if !b.identityAccepted(ctx, card, normalized) {
+		return Entry{}, false, fmt.Errorf("%s: %w", normalized, ErrIdentityChanged)
+	}
 
 	b.mu.Lock()
 	entry, known := b.entries[card.MachineID]
@@ -260,7 +308,7 @@ func (b *Book) discover(ctx context.Context, address string, probe func(context.
 	unchanged := known && entry.Status == StatusOK && entry.Name == card.DisplayName() &&
 		entry.Version == card.Version && entry.WireVersion == card.WireVersion &&
 		entry.Secure == card.Secure && entry.CertFingerprint == card.CertFingerprint &&
-		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(card.MachineID, endpoint)
+		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(card.MachineID, endpoint, card.CertFingerprint)
 	if unchanged {
 		entry.LastSeenAt = b.now().UTC().Format(time.RFC3339)
 		b.entries[card.MachineID] = entry
@@ -299,7 +347,7 @@ func (b *Book) Sighted(ctx context.Context, machineID, address string) (Entry, b
 	entry, known := b.entries[machineID]
 	endpoint := Endpoint{Kind: KindLAN, Address: normalized}
 	unchanged := known && entry.Status == StatusOK &&
-		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(machineID, endpoint)
+		hasEndpoint(entry.Endpoints, endpoint) && !b.endpointOwnedByAnotherLocked(machineID, endpoint, entry.CertFingerprint)
 	if unchanged {
 		// Liveness only. Not persisted: a disk write per announcement per
 		// machine is a lot of writing to record that nothing happened.
@@ -320,6 +368,9 @@ func (b *Book) Sighted(ctx context.Context, machineID, address string) (Entry, b
 	if b.selfID != "" && card.MachineID == b.selfID {
 		return Entry{}, false, ErrSelf
 	}
+	if !b.identityAccepted(ctx, card, normalized) {
+		return Entry{}, false, fmt.Errorf("%s: %w", normalized, ErrIdentityChanged)
+	}
 	recorded, err := b.record(card, normalized, SourceBeacon)
 	if err != nil {
 		return Entry{}, false, err
@@ -332,7 +383,7 @@ func (b *Book) record(card Card, address, source string) (Entry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	endpoint := Endpoint{Kind: KindLAN, Address: address}
-	b.reconcileEndpointLocked(card.MachineID, endpoint)
+	b.reconcileEndpointLocked(card.MachineID, endpoint, card.CertFingerprint)
 	entry := b.recordLocked(card, endpoint, source)
 	if err := b.save(); err != nil {
 		return Entry{}, err
@@ -345,6 +396,7 @@ func (b *Book) recordLocked(card Card, endpoint Endpoint, source string) Entry {
 	entry, existing := b.entries[card.MachineID]
 	if !existing {
 		entry = Entry{MachineID: card.MachineID, Owner: b.owner, AddedBy: source, AddedAt: stamp}
+		b.limitRowsAtEndpointLocked(endpoint)
 	}
 	entry.Name = card.DisplayName()
 	entry.Version = card.Version
@@ -357,6 +409,29 @@ func (b *Book) recordLocked(card Card, endpoint Endpoint, source string) Entry {
 	entry.Status, entry.Reason = b.assess(card)
 	b.entries[card.MachineID] = entry
 	return entry
+}
+
+// limitRowsAtEndpointLocked keeps room for one more row at this address. Rows pinned
+// elsewhere stay when another machine answers there, so a stranger inventing ids would
+// otherwise grow the book without limit. The newest goes first: an established machine
+// is what this protects.
+func (b *Book) limitRowsAtEndpointLocked(endpoint Endpoint) {
+	for {
+		count, newest := 0, ""
+		for id, entry := range b.entries {
+			if !hasEndpoint(entry.Endpoints, endpoint) {
+				continue
+			}
+			count++
+			if newest == "" || entry.AddedAt >= b.entries[newest].AddedAt {
+				newest = id
+			}
+		}
+		if count < maxRowsPerEndpoint {
+			return
+		}
+		delete(b.entries, newest)
+	}
 }
 
 // Forget drops a machine. Reports whether it was there.
@@ -452,7 +527,8 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 		go func(target Entry) {
 			defer group.Done()
 			slots <- struct{}{}
-			card, address, err := b.probeAny(ctx, target.Endpoints)
+			card, address, err := b.probeAny(ctx, target.Endpoints, target.MachineID, target.CertFingerprint)
+			accepted := err == nil && b.identityAccepted(ctx, card, address)
 			<-slots
 
 			b.mu.Lock()
@@ -466,18 +542,32 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 				entry.Status = StatusUnreachable
 				entry.Reason = err.Error()
 				b.entries[target.MachineID] = entry
+			} else if !accepted && card.MachineID == target.MachineID {
+				entry.Status = StatusIdentityChanged
+				entry.Reason = identityChangedReason
+			} else if !accepted {
+				// This address now names a different known machine with an unproved
+				// certificate. Neither entry takes that claim as fact.
+				entry.Status = StatusUnreachable
+				entry.Reason = address + " no longer answers as this machine"
 			} else if card.MachineID != target.MachineID {
 				// The connected health card, not the stale key that selected the
 				// address, owns the endpoint. Rekey it and retain the old entry only
 				// if that machine still has another distinct way to be reached.
 				endpoint := Endpoint{Kind: KindLAN, Address: address}
-				b.reconcileEndpointLocked(card.MachineID, endpoint)
+				moved := b.reconcileEndpointLocked(card.MachineID, endpoint, card.CertFingerprint)
 				source := target.AddedBy
 				if source == "" {
 					source = SourceProbe
 				}
-				b.recordLocked(card, endpoint, source)
-				changed.Store(true)
+				prior, existed := b.entries[card.MachineID]
+				recorded := b.recordLocked(card, endpoint, source)
+				// A stale row keeps this address, so this runs on every refresh. Only
+				// a real change may write the file or wake the clients.
+				if moved || !existed || !hasEndpoint(prior.Endpoints, endpoint) || prior.Status != recorded.Status ||
+					prior.Reason != recorded.Reason || prior.Name != recorded.Name || prior.CertFingerprint != recorded.CertFingerprint {
+					changed.Store(true)
+				}
 				return
 			} else {
 				entry.Name = card.DisplayName()
@@ -488,6 +578,12 @@ func (b *Book) Refresh(ctx context.Context) ([]Entry, bool) {
 				entry.FleetIDs = card.FleetIDs
 				entry.LastSeenAt = b.now().UTC().Format(time.RFC3339)
 				entry.Status, entry.Reason = b.assess(card)
+				// Clients connect to the first address, so it must be one that answers
+				// as this machine and not a stale one another machine took over.
+				if len(entry.Endpoints) > 1 && entry.Endpoints[0].Address != address {
+					entry.Endpoints = endpointFirst(entry.Endpoints, address)
+					changed.Store(true)
+				}
 			}
 			b.entries[target.MachineID] = entry
 			if entry.Status != before.Status || entry.Reason != before.Reason ||
@@ -539,6 +635,21 @@ func mergeEndpoint(endpoints []Endpoint, add Endpoint) []Endpoint {
 	return append(endpoints, add)
 }
 
+func endpointFirst(endpoints []Endpoint, address string) []Endpoint {
+	out := make([]Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.Address == address {
+			out = append(out, endpoint)
+		}
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.Address != address {
+			out = append(out, endpoint)
+		}
+	}
+	return out
+}
+
 func removeEndpoint(endpoints []Endpoint, remove Endpoint) []Endpoint {
 	// Allocate instead of reusing the backing array: Refresh snapshots entries
 	// before probing them concurrently, so an in-place filter could rewrite a
@@ -553,21 +664,41 @@ func removeEndpoint(endpoints []Endpoint, remove Endpoint) []Endpoint {
 	return out
 }
 
-func (b *Book) endpointOwnedByAnotherLocked(machineID string, endpoint Endpoint) bool {
+// endpointOwnedByAnotherLocked reports whether another entry should give this
+// endpoint up. A machine pinned to a different certificate is not an owner: it stays
+// in the book as a stale row, and an empty fingerprint counts every other entry.
+func (b *Book) endpointOwnedByAnotherLocked(machineID string, endpoint Endpoint, fingerprint string) bool {
 	for id, entry := range b.entries {
-		if id != machineID && hasEndpoint(entry.Endpoints, endpoint) {
+		if id != machineID && hasEndpoint(entry.Endpoints, endpoint) && !pinnedElsewhere(entry, fingerprint) {
 			return true
 		}
 	}
 	return false
 }
 
-// reconcileEndpointLocked applies the one fact a successful health probe
-// proves: one concrete endpoint belongs to the machine id on that response.
-func (b *Book) reconcileEndpointLocked(machineID string, endpoint Endpoint) bool {
+func pinnedElsewhere(entry Entry, fingerprint string) bool {
+	stored := strings.TrimSpace(entry.CertFingerprint)
+	fingerprint = strings.TrimSpace(fingerprint)
+	return stored != "" && fingerprint != "" && !strings.EqualFold(stored, fingerprint)
+}
+
+// reconcileEndpointLocked moves an address to the machine now answering there. The
+// card is only a claim, so it may not delete a machine pinned to another certificate:
+// that row keeps its address and its pin, and only says the address stopped answering.
+// Otherwise a stranger could erase a machine and then introduce its forgery as new.
+func (b *Book) reconcileEndpointLocked(machineID string, endpoint Endpoint, fingerprint string) bool {
 	changed := false
 	for id, entry := range b.entries {
 		if id == machineID || !hasEndpoint(entry.Endpoints, endpoint) {
+			continue
+		}
+		if pinnedElsewhere(entry, fingerprint) {
+			reason := endpoint.Address + " no longer answers as this machine"
+			if entry.Status != StatusUnreachable || entry.Reason != reason {
+				entry.Status, entry.Reason = StatusUnreachable, reason
+				b.entries[id] = entry
+				changed = true
+			}
 			continue
 		}
 		entry.Endpoints = removeEndpoint(entry.Endpoints, endpoint)
@@ -584,16 +715,39 @@ func (b *Book) reconcileEndpointLocked(machineID string, endpoint Endpoint) bool
 // probeAny tries every known way to reach a machine and gives up only when all
 // of them fail. The failure names how many were tried: with several endpoints,
 // quoting one address makes it look like the others might have worked.
-func (b *Book) probeAny(ctx context.Context, endpoints []Endpoint) (Card, string, error) {
+func (b *Book) probeAny(ctx context.Context, endpoints []Endpoint, want, wantFingerprint string) (Card, string, error) {
 	var lastErr error
+	var other, forged Card
+	otherAddress, forgedAddress := "", ""
 	tried := 0
 	for _, endpoint := range endpoints {
 		card, err := b.probe(ctx, endpoint.Address)
 		if err == nil {
+			// An address someone else now answers at must not hide one that still
+			// answers as this machine under its stored certificate. Only when no
+			// address does is what they said worth reporting.
+			if card.MachineID != want {
+				if otherAddress == "" {
+					other, otherAddress = card, endpoint.Address
+				}
+				continue
+			}
+			if pinnedElsewhere(Entry{CertFingerprint: wantFingerprint}, card.CertFingerprint) {
+				if forgedAddress == "" {
+					forged, forgedAddress = card, endpoint.Address
+				}
+				continue
+			}
 			return card, endpoint.Address, nil
 		}
 		tried++
 		lastErr = err
+	}
+	if forgedAddress != "" {
+		return forged, forgedAddress, nil
+	}
+	if otherAddress != "" {
+		return other, otherAddress, nil
 	}
 	switch {
 	case tried == 0:

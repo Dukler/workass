@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net"
@@ -33,9 +35,15 @@ func machineTestHub(t *testing.T, selfID string) *wire.Hub {
 	return hub
 }
 
+func fingerprintOfServer(server *httptest.Server) string {
+	sum := sha256.Sum256(server.Certificate().Raw)
+	return hex.EncodeToString(sum[:])
+}
+
 func fakeDaemonServer(t *testing.T, machineID, name string) string {
 	t.Helper()
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != machinebook.HealthPath {
 			http.NotFound(w, r)
 			return
@@ -49,7 +57,7 @@ func fakeDaemonServer(t *testing.T, machineID, name string) string {
 			"machineId":       machineID,
 			"wireVersion":     daemonWireVersion,
 			"secure":          true,
-			"certFingerprint": "test-certificate-fingerprint",
+			"certFingerprint": fingerprintOfServer(server),
 		})
 	}))
 	t.Cleanup(server.Close)

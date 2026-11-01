@@ -296,6 +296,14 @@ func CertProof(secret, serverNonce, fingerprint string) string {
 	return derive(secret, certContext, serverNonce, fingerprint, "")
 }
 
+// CertProofMatches reports whether claimed proves this certificate under this key
+// for this nonce. An empty proof or fingerprint never matches.
+func CertProofMatches(secret, serverNonce, fingerprint, claimed string) bool {
+	expected := CertProof(secret, serverNonce, fingerprint)
+	claimed = strings.ToLower(strings.TrimSpace(claimed))
+	return expected != "" && claimed != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(claimed)) == 1
+}
+
 // KeyIDOf is the public name of a key: a one-way hash under its own domain
 // separator, so it can be advertised without weakening the secret.
 func KeyIDOf(secret string) string {

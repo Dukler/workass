@@ -10,7 +10,7 @@
 // Where this and lan_bridge.go disagree, that file wins: the renderer must keep
 // working unchanged against both.
 
-import { answerFleetChallenge, type FleetChallenge } from './fleet.ts';
+import { answerFleetChallenge, FleetIdentityError, type FleetChallenge } from './fleet.ts';
 
 export const INVOKE_TIMEOUT_MS = 30_000;
 export const SESSION_INVOKE_TIMEOUT_MS = 120_000;
@@ -89,6 +89,8 @@ export interface MachineSocketOptions {
   open(url: string): MachineSocketLike;
   /** Persist what enrolment produced. Never called with a token we did not verify. */
   saveCredentials?(machineId: string, next: MachineCredentials): void;
+  /** This address did not prove the machine it claims to be. */
+  onUnproved?(machineId: string, reason: string): void;
   /** A rejected pairing drops the token so the next connect re-requests access. */
   clearCredentials?(machineId: string): void;
   onEvent?(channel: string, payload: unknown): void;
@@ -372,10 +374,15 @@ export class MachineSocket {
   private async enrol(gen: number): Promise<void> {
     if (this.enrolling || !this.opts.fleetKey) return;
     this.enrolling = true;
+    let proved = false;
     try {
       const challenge = await this.invoke<FleetChallenge>('fleet:challenge');
       if (gen !== this.gen) return;
-      const answer = answerFleetChallenge(this.opts.fleetKey, challenge);
+      if (String(challenge?.machineId ?? '') !== this.opts.machineId) {
+        throw new FleetIdentityError('that address answers as a different machine');
+      }
+      const answer = answerFleetChallenge(this.opts.fleetKey, challenge, this.opts.certFingerprint ?? '');
+      proved = true;
       await this.invoke('fleet:enroll', {
         clientNonce: answer.clientNonce,
         proof: answer.proof,
@@ -387,7 +394,16 @@ export class MachineSocket {
       // with handleAccessState rather than ordered against it.
       this.commitCredentials({ ...this.credentials, deviceToken: answer.deviceToken });
     } catch (err) {
-      this.setState('rejected', { reason: err instanceof Error ? err.message : String(err) });
+      // Only a machine that proved itself can reject this client. A rejection wipes the
+      // pairing and stops reconnecting, and before the proof anyone on the path can fail
+      // this, as can a timeout or a reset, so those only close the link.
+      const message = err instanceof Error ? err.message : String(err);
+      if (proved && message.includes('fleet:')) {
+        this.setState('rejected', { reason: message });
+      } else {
+        this.setState('closed', { reason: message });
+        this.opts.onUnproved?.(this.opts.machineId, message);
+      }
     } finally {
       this.enrolling = false;
     }

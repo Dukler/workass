@@ -330,9 +330,11 @@ function createWindow(url, browserReporter, isController) {
   win.webContents.on('did-start-navigation', (event, _url, isInPlace, isMainFrame) => {
     const mainFrame = event && typeof event.isMainFrame === 'boolean' ? event.isMainFrame : isMainFrame !== false;
     const sameDocument = event && typeof event.isSameDocument === 'boolean' ? event.isSameDocument : !!isInPlace;
+    if (mainFrame && !sameDocument) certificatePins.releaseAllExcept('local-daemon');
     if (mainFrame && !sameDocument && browserManager) void browserManager.hideAll().catch(() => {});
   });
   win.webContents.on('render-process-gone', () => {
+    certificatePins.releaseAllExcept('local-daemon');
     if (browserManager) void browserManager.hideAll().catch(() => {});
   });
   // The browser page's <webview> (webview host only): no preload, no Node,
@@ -395,7 +397,10 @@ function createWindow(url, browserReporter, isController) {
   });
   ipcMain.handle('workass-artifact:reply', (event, payload) => own(event) && connectedArtifactBridge?.reply(event, payload) === true);
 	ipcMain.on('workass-machines:trust-endpoint', (event, payload) => {
-		event.returnValue = own(event) && certificatePins.trustEndpoint(payload?.address, payload?.certFingerprint);
+		event.returnValue = own(event) && certificatePins.trustEndpoint(payload?.address, payload?.certFingerprint, payload?.machineId);
+	});
+	ipcMain.on('workass-machines:release-endpoint', (event, payload) => {
+		if (own(event)) certificatePins.releaseEndpoint(payload?.address, payload?.machineId);
 	});
 	ipcMain.handle('workass-recovery:restart-daemon', async (event) => {
 		if (!own(event)) return { ok: false, error: 'untrusted renderer' };

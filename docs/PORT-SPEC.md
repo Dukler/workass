@@ -40,6 +40,11 @@ changes. Do not rewrite unchanged provider controls or chat obligations, copy
 committed chat history for periodic obligation checks, or repeatedly resolve
 already-imported assistant images during streaming.
 
+Security law 2026-11-01 (enrolment): a client verifies the daemon's certificate proof
+before sending any enrolment proof, and a missing proof means none is sent. A card
+never replaces a known machine's certificate unless a fleet key proves it. Pairing is
+refused from a source that is not private. See `docs/specs/portable-networking.md` §3.
+
 User law 2026-11-01 (discovery): outside Windows, sweeps also probe the daemon's
 default port 8788, and the daemon sweeps by itself only while a machine from its
 book completes a pinned TLS handshake on an attached network, or while it holds a

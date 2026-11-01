@@ -229,6 +229,8 @@ func machineAddError(err error) string {
 		return "that address is this machine"
 	case errors.Is(err, machinebook.ErrNotWorkass):
 		return "something answered there, but it is not a workass daemon"
+	case errors.Is(err, machinebook.ErrIdentityChanged):
+		return "that machine answered with a different certificate than before; forget it first if this is expected"
 	case errors.Is(err, machinebook.ErrNoIdentity):
 		return "that daemon is too old to be added — update it"
 	default:

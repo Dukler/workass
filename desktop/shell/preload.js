@@ -100,6 +100,7 @@ contextBridge.exposeInMainWorld('workassRecovery', {
 
 contextBridge.exposeInMainWorld('workassMachines', {
 	trustEndpoint: (payload) => ipcRenderer.sendSync('workass-machines:trust-endpoint', payload),
+	releaseEndpoint: (payload) => ipcRenderer.send('workass-machines:release-endpoint', payload),
 });
 
 contextBridge.exposeInMainWorld('workassUpdater', {

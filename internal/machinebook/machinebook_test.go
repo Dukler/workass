@@ -2,6 +2,10 @@ package machinebook
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -14,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"workass/internal/tlscert"
 )
 
 // fakeDaemon serves an identity document the way a real daemon does, and counts
@@ -36,7 +42,7 @@ func newFakeDaemon(t *testing.T, doc map[string]any) *fakeDaemon {
 		}
 		daemon.probes.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(daemon.doc.Load().(map[string]any))
+		_ = json.NewEncoder(w).Encode(realCertificate(daemon.doc.Load().(map[string]any), daemon.server.Certificate()))
 	}))
 	t.Cleanup(daemon.server.Close)
 	return daemon
@@ -70,12 +76,13 @@ func openBook(t *testing.T, selfID string) *Book {
 
 func TestProbeReusesOneConnectionAcrossCalls(t *testing.T) {
 	var accepts atomic.Int64
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != HealthPath {
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(identityDoc("m-reuse", "reuse probe", 1))
+		_ = json.NewEncoder(w).Encode(realCertificate(identityDoc("m-reuse", "reuse probe", 1), server.Certificate()))
 	}))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -839,4 +846,248 @@ func firstLANIPv4(t *testing.T) net.IP {
 		t.Skip("no multicast-capable IPv4 interface here")
 	}
 	return addrs[0].IP
+}
+
+// realCertificate makes a fixture's card name the certificate its server presents,
+// as every probe now checks. A fixture that means to lie sets its own value.
+func realCertificate(doc map[string]any, certificate *x509.Certificate) map[string]any {
+	if doc["certFingerprint"] != "test-certificate-fingerprint" {
+		return doc
+	}
+	out := make(map[string]any, len(doc))
+	for key, value := range doc {
+		out[key] = value
+	}
+	sum := sha256.Sum256(certificate.Raw)
+	out["certFingerprint"] = hex.EncodeToString(sum[:])
+	return out
+}
+
+func knownMachine(t *testing.T, address, fingerprint string) *Book {
+	t.Helper()
+	book := openBook(t, "m-self")
+	book.mu.Lock()
+	book.entries["m-known"] = Entry{
+		MachineID: "m-known", Name: "known", Secure: true, Status: StatusOK, CertFingerprint: fingerprint,
+		Endpoints: []Endpoint{{Kind: KindLAN, Address: address}},
+	}
+	book.mu.Unlock()
+	return book
+}
+
+// The other half of the relay attack: a card is a claim from whoever answered, so
+// it must not be able to change which certificate a known machine is trusted under.
+func TestACardCannotReplaceAKnownMachinesCertificate(t *testing.T) {
+	stored := strings.Repeat("aa", 32)
+	stranger := newFakeDaemon(t, identityDoc("m-known", "forged", 1))
+
+	t.Run("a sweep from a new address changes nothing", func(t *testing.T) {
+		book := knownMachine(t, "192.168.50.10:8788", stored)
+		_, changed, err := book.discover(context.Background(), "192.168.50.66:8788", func(context.Context, string) (Card, error) {
+			return Card{App: "workass", MachineID: "m-known", Secure: true, CertFingerprint: strings.Repeat("bb", 32), Name: "forged"}, nil
+		})
+		if !errors.Is(err, ErrIdentityChanged) || changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		entry := book.List()[0]
+		if entry.CertFingerprint != stored || entry.Status != StatusOK || len(entry.Endpoints) != 1 || entry.Name != "known" {
+			t.Fatalf("a stranger's card altered the entry: %#v", entry)
+		}
+	})
+
+	t.Run("a typed address is refused", func(t *testing.T) {
+		book := knownMachine(t, "192.168.50.10:8788", stored)
+		if _, err := book.Add(context.Background(), stranger.address()); !errors.Is(err, ErrIdentityChanged) {
+			t.Fatalf("add: %v", err)
+		}
+	})
+
+	t.Run("at the known address it is held, with the old certificate kept", func(t *testing.T) {
+		book := knownMachine(t, stranger.address(), stored)
+		book.Refresh(context.Background())
+		entry := book.List()[0]
+		if entry.Status != StatusIdentityChanged || entry.CertFingerprint != stored {
+			t.Fatalf("entry after refresh: %#v", entry)
+		}
+		if entry.Reason == "" {
+			t.Fatal("a held machine must say why")
+		}
+	})
+
+	t.Run("a refused prover changes nothing and an accepting one updates it", func(t *testing.T) {
+		book := knownMachine(t, stranger.address(), stored)
+		asked := 0
+		book.SetIdentityProver(func(_ context.Context, address, machineID, fingerprint string) bool {
+			asked++
+			return false
+		})
+		book.Refresh(context.Background())
+		if entry := book.List()[0]; asked != 1 || entry.Status != StatusIdentityChanged {
+			t.Fatalf("asked=%d entry=%#v", asked, entry)
+		}
+		book.SetIdentityProver(func(_ context.Context, address, machineID, fingerprint string) bool {
+			return machineID == "m-known" && address == stranger.address()
+		})
+		book.Refresh(context.Background())
+		entry := book.List()[0]
+		if entry.Status != StatusOK || entry.CertFingerprint == stored {
+			t.Fatalf("a proved certificate must be accepted: %#v", entry)
+		}
+	})
+
+	t.Run("the same certificate needs no proof", func(t *testing.T) {
+		real := realCertificate(identityDoc("m-known", "known", 1), stranger.server.Certificate())
+		book := knownMachine(t, stranger.address(), real["certFingerprint"].(string))
+		book.SetIdentityProver(func(context.Context, string, string, string) bool {
+			t.Error("nothing changed, so nothing needed proving")
+			return false
+		})
+		book.Refresh(context.Background())
+		if entry := book.List()[0]; entry.Status != StatusOK {
+			t.Fatalf("entry: %#v", entry)
+		}
+	})
+}
+
+func TestACardMustNameTheCertificateItsConnectionPresented(t *testing.T) {
+	liar := newFakeDaemon(t, map[string]any{
+		"app": "workass", "machineId": "m-liar", "name": "liar", "wireVersion": 1, "secure": true,
+		"certFingerprint": strings.Repeat("cc", 32),
+	})
+	book := openBook(t, "m-self")
+	if _, err := book.probe(context.Background(), liar.address()); err == nil || !strings.Contains(err.Error(), "different certificate") {
+		t.Fatalf("probe: %v", err)
+	}
+}
+
+// Found in review: a brand-new id at a machine's address used to delete its row, after
+// which a card naming that machine was accepted as a first sighting.
+func TestAStrangerAtAnAddressCannotEraseAPinnedMachine(t *testing.T) {
+	stored := strings.Repeat("aa", 32)
+	stranger := newFakeDaemon(t, identityDoc("m-stranger", "stranger", 1))
+	book := knownMachine(t, stranger.address(), stored)
+	if _, err := book.Add(context.Background(), stranger.address()); err != nil {
+		t.Fatalf("a new machine must still be listed: %v", err)
+	}
+	entries := map[string]Entry{}
+	for _, entry := range book.List() {
+		entries[entry.MachineID] = entry
+	}
+	known, ok := entries["m-known"]
+	if !ok || known.CertFingerprint != stored || known.Status != StatusUnreachable {
+		t.Fatalf("the pinned machine was erased or rewritten: %#v", entries)
+	}
+	if _, ok := entries["m-stranger"]; !ok {
+		t.Fatalf("the stranger was not listed: %#v", entries)
+	}
+	forged := Card{App: "workass", MachineID: "m-known", Secure: true, CertFingerprint: strings.Repeat("bb", 32)}
+	if _, _, err := book.discover(context.Background(), "192.168.50.20:8788", func(context.Context, string) (Card, error) { return forged, nil }); !errors.Is(err, ErrIdentityChanged) {
+		t.Fatalf("the forgery was accepted after the takeover: %v", err)
+	}
+	// A stale row sits at that address from now on. It must not rewrite the book on
+	// every refresh, and a sweep must read as nothing new.
+	if _, changed := book.Refresh(context.Background()); changed {
+		t.Log("first refresh may settle the row")
+	}
+	if _, changed := book.Refresh(context.Background()); changed {
+		t.Fatal("a stale row made every refresh count as a change")
+	}
+	card, err := book.probe(context.Background(), stranger.address())
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	book.mu.Lock()
+	owned := book.endpointOwnedByAnotherLocked(card.MachineID, Endpoint{Kind: KindLAN, Address: stranger.address()}, card.CertFingerprint)
+	book.mu.Unlock()
+	if owned {
+		t.Fatal("a stale pinned row made a sweep treat a known machine as new every time")
+	}
+}
+
+func TestARedirectedOrPlaintextCardIsNotACard(t *testing.T) {
+	real := newFakeDaemon(t, identityDoc("m-real", "real", 1))
+	redirecting := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+real.address()+HealthPath, http.StatusFound)
+	}))
+	t.Cleanup(redirecting.Close)
+	book := openBook(t, "m-self")
+	if _, err := book.probe(context.Background(), strings.TrimPrefix(redirecting.URL, "https://")); err == nil {
+		t.Fatal("an address was believed about itself from another machine's card")
+	}
+	if real.probes.Load() != 0 {
+		t.Fatal("the probe followed the redirect")
+	}
+}
+
+func TestAMachineThatMovedIsNotHiddenByTheAddressItLeft(t *testing.T) {
+	now := newFakeDaemon(t, identityDoc("m-moved", "moved", 1))
+	other := newFakeDaemon(t, identityDoc("m-other", "other", 1))
+	real := realCertificate(identityDoc("m-moved", "moved", 1), now.server.Certificate())
+	book := openBook(t, "m-self")
+	book.mu.Lock()
+	book.entries["m-moved"] = Entry{
+		MachineID: "m-moved", Secure: true, Status: StatusUnreachable, CertFingerprint: real["certFingerprint"].(string),
+		Endpoints: []Endpoint{{Kind: KindLAN, Address: other.address()}, {Kind: KindLAN, Address: now.address()}},
+	}
+	book.mu.Unlock()
+	book.Refresh(context.Background())
+	for _, entry := range book.List() {
+		if entry.MachineID == "m-moved" {
+			if entry.Status != StatusOK || entry.Endpoints[0].Address != now.address() {
+				t.Fatalf("the moved machine: %#v", entry)
+			}
+			return
+		}
+	}
+	t.Fatal("the moved machine is gone")
+}
+
+// Found in review: a forger at a stale address must not hide a healthy one.
+func TestAForgerAtAStaleAddressDoesNotHideTheHealthyOne(t *testing.T) {
+	healthy := newFakeDaemon(t, identityDoc("m-known", "known", 1))
+	own, err := tlscert.Ensure(t.TempDir())
+	if err != nil {
+		t.Fatalf("forged certificate: %v", err)
+	}
+	forger := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		doc := identityDoc("m-known", "forged", 1)
+		doc["certFingerprint"] = own.Fingerprint
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	forger.TLS = &tls.Config{Certificates: []tls.Certificate{own.TLS}, MinVersion: tls.VersionTLS13}
+	forger.StartTLS()
+	t.Cleanup(forger.Close)
+	real := realCertificate(identityDoc("m-known", "known", 1), healthy.server.Certificate())
+	book := knownMachine(t, strings.TrimPrefix(forger.URL, "https://"), real["certFingerprint"].(string))
+	book.mu.Lock()
+	entry := book.entries["m-known"]
+	entry.Endpoints = append(entry.Endpoints, Endpoint{Kind: KindLAN, Address: healthy.address()})
+	book.entries["m-known"] = entry
+	book.mu.Unlock()
+	book.Refresh(context.Background())
+	got := book.List()[0]
+	if got.Status != StatusOK || got.Name != "known" || got.Endpoints[0].Address != healthy.address() {
+		t.Fatalf("the forger hid the healthy address: %#v", got)
+	}
+}
+
+func TestStrangersCannotGrowTheRowsAtOneAddress(t *testing.T) {
+	address := "192.168.50.20:8788"
+	book := knownMachine(t, address, strings.Repeat("aa", 32))
+	for i := 0; i < 3*maxRowsPerEndpoint; i++ {
+		card := Card{App: "workass", MachineID: "m-" + strconv.Itoa(i), Secure: true, CertFingerprint: strings.Repeat("bb", 32)}
+		if _, err := book.record(card, address, SourceProbe); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+	entries := book.List()
+	if len(entries) > maxRowsPerEndpoint {
+		t.Fatalf("%d rows at one address", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.MachineID == "m-known" {
+			return
+		}
+	}
+	t.Fatal("strangers pushed out the established machine")
 }

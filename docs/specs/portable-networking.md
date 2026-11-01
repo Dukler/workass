@@ -1,6 +1,6 @@
 # Portable networking: one app, any network
 
-Status: DESIGN v4, after two contrarian reviews. Discovery (§6) is built; the rest is not.
+Status: DESIGN v5, after two contrarian reviews and a security review of §3. Trust (§3) and discovery (§6) are built; the rest is not.
 
 ## 1. Goal
 
@@ -46,37 +46,62 @@ The gaps:
 - **F5 Replacing the certificate unpairs every client.** The pin covers the whole
   certificate.
 - **F6 Nothing crosses NAT by itself.** A VPN does that, once F2 is fixed.
-- **F7 Trust is weaker than the design assumed.** See §3.
-- **F8 No listener hardening.** The HTTP server sets no timeouts, pending approvals
-  are uncapped, lockout is per connection, and `0.0.0.0` is dual-stack in Go, so a
-  LAN bind can also be reachable on global IPv6.
+- **F7 Fixed by §3:** trust was weaker than the design assumed, and the listener had no
+  timeouts or caps. Note that `0.0.0.0` is dual-stack in Go, so a LAN bind can also be
+  reachable on global IPv6.
 
-## 3. P0: trust before reach
+## 3. P0: trust before reach. BUILT
 
-Every later layer widens who can reach a daemon, so this comes first and ships on
-its own.
+Every later layer widens who can reach a daemon, so this came first.
 
 - Every client verifies the certificate proof **before** sending any enrolment
-  proof, on the renderer, the Go mesh and the phone. This is the fix. A missing
-  fingerprint or a missing proof for the key in use means no proof is sent. On a
-  daemon holding several keys, a proof missing for one key skips that key and is
-  never treated as a wrong identity, so stripping cannot permanently refuse a route.
-- A client that cannot see the presented certificate (a plain browser) sends no
-  fleet proof and uses human pairing, because a replayed proof would pass there.
-- Enrolment proofs also bind to the certificate fingerprint, as defence in depth
-  only: daemons keep accepting old clients, so old clients stay exposed until they
-  update.
-- The machine book ignores a changed fingerprint until it has been proved. An
-  unproved card cannot change a pin or clear stored credentials.
-- Listener hardening: only `ReadHeaderTimeout` and `IdleTimeout`, because read and
-  write timeouts would cut slow media responses and long tool calls. Caps count only
-  unauthenticated connections and pending approvals. Per-source limits on enrolment
-  never key on a shared relay marker.
-- One locality helper replaces the scattered `isLocalIP` checks. An empty or
-  unparseable address is **not** local, and the connection context records whether
-  a connection came through a relay. Every current gate moves to it.
-- From a non-private source, the identity card shrinks to what a key holder needs,
-  and human-approval pairing is refused.
+  proof. The Go mesh, the desktop renderer and the phone all do. The proof is checked
+  against the fingerprint the connection is pinned to, not one the challenge claims,
+  and the answering machine id must be the expected one. A missing fingerprint or a
+  missing proof for the key in use means no proof is sent.
+- A pin matches the leaf certificate only. The rest of a chain is bytes the peer chose
+  to send, and a forger can place the real certificate there.
+- An unproved machine is not a verdict. It never wipes a pairing, stops reconnecting or
+  permanently refuses a route, because anyone on the path can fail these checks. A wrong
+  identity cools a route down instead of refusing it, since nothing is presented to it.
+- A credential with no pinned certificate is dropped and re-enrolled under proof.
+- A client that cannot see the presented certificate (a plain browser) sends no fleet
+  proof and uses human pairing.
+- In Electron, one host holds one pin, owned by one machine, until that machine
+  releases it or the renderer reloads. Chromium verifies by hostname with no port, so a
+  second machine at the host must not replace the pin and receive the first machine's
+  reconnect token.
+- A probe follows no redirect and requires TLS. A card speaks only for its own
+  connection, and must name the certificate that connection presented.
+- The machine book holds a known machine's certificate. From a new address a card
+  naming it changes nothing. At a known address the machine is held as
+  `identity-changed` with the old certificate kept, until a fleet key proves the new
+  one or a person forgets the machine. A stranger at its address is listed as a new
+  machine but cannot erase the pinned row.
+- `ReadHeaderTimeout` and `IdleTimeout` only, because read and write timeouts would
+  cut slow media responses and long tool calls. A WebSocket leaves them behind when
+  hijacked.
+- Approval cards are capped overall and per source. A client over the cap stays parked
+  with no card, so a key holder can still enrol. A source with no card always gets one,
+  so strangers cannot hide a real request, and the oldest quiet connection makes way when
+  the parked limit is reached. Rows claiming one address are capped too.
+- One definition of "local" (`wire.IsLocalIP`). An empty or unreadable address is not
+  local.
+- From a source that is not private (RFC1918, loopback, link-local, IPv6 ULA or
+  100.64/10 for VPNs), first pairing and first enrolment are refused and the identity
+  card names no person or box. A device that is already paired still connects with its
+  token. This follows from the owner's decision never to expose Workass to the internet.
+
+**Deliberately not built:** binding the enrolment proof to the certificate fingerprint.
+Daemons must keep accepting old clients and the capability would be announced by an
+attacker-controlled challenge, so it could always be downgraded, and the check above
+already closes the attack for every updated client. Also not built: a failed-proof
+lockout per source. Keys have 128 bits, so it stops no real guessing, and it would let
+anyone behind a shared address block valid machines.
+
+**Remaining exposure:** a client older than this fix stays exposed until it updates,
+and a machine that holds the fleet key can still impersonate another, because the key
+is symmetric.
 
 ## 4. Certificate lifecycle (G4)
 
@@ -164,7 +189,7 @@ discovery amendment (§6).
 | Phase | Work | Status or gate |
 |---|---|---|
 | Discovery | §6 | Built. Live: the installed build found 1 of 3 machines on a real LAN, this one found all 3 in 7.4 s; idle with nothing known it knocked 0 times |
-| P0 | §3 trust and hardening | Not built. An on-path rig with a forged card and a stripped proof gets no enrolment, on every client class; locality denial tests on every gate |
+| P0 | §3 trust and hardening | Built. A forged machine relaying to a real daemon got an approved socket before the fix and receives no proof after it |
 | P1 | §5 address trust and renderer ladder | Not built. Client reaches a VPN-range address; browser partition still refuses a forged public certificate |
 | P2 | §4 certificate lifecycle | Not built. Clock-forward rig: reissue at restart, every client class reconnects with no re-approval, including past expiry |
 

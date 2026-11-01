@@ -363,6 +363,13 @@ func (s *Server) serveHealth(w http.ResponseWriter, r *http.Request) {
 	if displayName, ok := doc["name"].(string); !ok || strings.TrimSpace(displayName) == "" {
 		doc["name"] = name
 	}
+	if r != nil && !wire.IsPrivateSource(ClientIP(r.RemoteAddr)) {
+		// A stranger on the open internet learns only what a fleet key holder needs
+		// to check this machine: nothing that names the person or the box.
+		for _, key := range []string{"name", "displayName", "version"} {
+			delete(doc, key)
+		}
+	}
 	if r != nil && !IsLocalIP(ClientIP(r.RemoteAddr)) {
 		for key := range doc {
 			if !publicIdentityKeys[key] {
@@ -461,5 +468,5 @@ func ClientIP(remoteAddr string) string {
 
 // IsLocalIP reports whether an address is the always-allowed localhost class.
 func IsLocalIP(ip string) bool {
-	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == ""
+	return wire.IsLocalIP(ip)
 }

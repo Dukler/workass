@@ -112,8 +112,8 @@ func TestParseRejectsWhatIsNotAJoinCode(t *testing.T) {
 	for _, payload := range []string{
 		"https://example.com/join?h=192.168.50.13&k=" + testKey,
 		"workass://machines?h=192.168.50.13&k=" + testKey,
-		"workass://join?k=" + testKey,                     // a bare key cannot start a join
-		"workass://join?h=127.0.0.1&k=" + testKey,         // the phone would dial itself
+		"workass://join?k=" + testKey,                      // a bare key cannot start a join
+		"workass://join?h=127.0.0.1&k=" + testKey,          // the phone would dial itself
 		"workass://join?h=192.168.50.13&k=not-a-fleet-key", // scans, never enrols
 		"workass://join?h=192.168.50.13:0&k=" + testKey,
 	} {

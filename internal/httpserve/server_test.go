@@ -655,3 +655,42 @@ func getHealthDoc(t *testing.T, baseURL string) map[string]any {
 	}
 	return body
 }
+
+// A fleet key holder across a VPN still reads the whole public card. Someone on the
+// open internet learns nothing that names the person or the box.
+func TestHealthCardShrinksForASourceOnTheOpenInternet(t *testing.T) {
+	handler := New("", nil, nil)
+	handler.Name = "owners-laptop"
+	handler.Version = "1.2.3"
+	handler.Identity = func() map[string]any {
+		return map[string]any{"machineId": "m-1", "displayName": "owners-laptop", "secure": true, "certFingerprint": "abc", "wireVersion": 1, "providers": []string{"claude"}}
+	}
+	read := func(remote string) map[string]any {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "http://example.test/workass/health", nil)
+		request.RemoteAddr = remote
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		var doc map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return doc
+	}
+	for _, remote := range []string{"192.168.1.5:1", "100.64.1.7:1"} {
+		if doc := read(remote); doc["name"] != "owners-laptop" || doc["version"] != "1.2.3" {
+			t.Fatalf("%s: %#v", remote, doc)
+		}
+	}
+	doc := read("203.0.113.9:1")
+	for _, key := range []string{"name", "displayName", "version", "providers"} {
+		if _, present := doc[key]; present {
+			t.Fatalf("a stranger read %s: %#v", key, doc)
+		}
+	}
+	for _, key := range []string{"app", "machineId", "certFingerprint", "secure"} {
+		if _, present := doc[key]; !present {
+			t.Fatalf("a key holder needs %s: %#v", key, doc)
+		}
+	}
+}

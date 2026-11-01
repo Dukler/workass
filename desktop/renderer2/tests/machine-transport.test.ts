@@ -8,7 +8,7 @@ import {
   isTagged, localId, machineOf, splitId, tagId, tagPayload, untagPayload,
 } from '../src/wire/machineIds.ts';
 import { machineWhere, remoteMachineBadge, shortMachineId } from '../src/machine-label.ts';
-import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
+import { fleetCertProof, fleetDeviceToken, fleetKeyId, fleetProof } from '../src/wire/fleet.ts';
 
 // ---- a socket the test drives -------------------------------------------
 
@@ -36,6 +36,7 @@ interface Harness {
   saved: MachineCredentials[];
   opens: { generation: number; instanceId: string; restarted: boolean }[];
   states: string[];
+  unproved: string[];
   timers: { fn: () => void; ms: number }[];
   runTimers(): void;
   last(): FakeSocket;
@@ -46,6 +47,7 @@ function harness(extra: Partial<Parameters<typeof MachineSocket.prototype.constr
   const saved: MachineCredentials[] = [];
   const opens: Harness['opens'] = [];
   const states: string[] = [];
+  const unproved: string[] = [];
   const timers: { fn: () => void; ms: number }[] = [];
   const link = new MachineSocket({
     machineId: 'm-remote', url: 'ws://192.168.1.50:18788', deviceName: 'iPhone',
@@ -53,12 +55,13 @@ function harness(extra: Partial<Parameters<typeof MachineSocket.prototype.constr
     saveCredentials: (_id, next) => saved.push(next),
     onOpen: (info) => opens.push(info),
     onState: (state) => states.push(state),
+    onUnproved: (_id: string, reason: string) => unproved.push(reason),
     setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length - 1; },
     clearTimer: (handle) => { const i = handle as number; if (timers[i]) timers[i] = { fn: () => {}, ms: 0 }; },
     ...(extra as object),
   });
   return {
-    link, sockets, saved, opens, states, timers,
+    link, sockets, saved, opens, states, timers, unproved,
     runTimers() { const due = timers.splice(0, timers.length); for (const t of due) t.fn(); },
     last() { return sockets[sockets.length - 1]; },
   };
@@ -255,7 +258,8 @@ test('a channel error is an ordinary Error so an old daemon cannot flap us offli
 
 test('being parked with a fleet key enrols without a human, and never sends the key or the token', async () => {
   const key = 'wf-byntydr27z7j3zsdpih3uulqhi';
-  const h = harness({ fleetKey: key });
+  const certFingerprint = 'ab'.repeat(32);
+  const h = harness({ fleetKey: key, certFingerprint });
   h.link.connect();
   h.last().onopen?.();
   h.last().access({ state: 'waiting', requestId: 'lan-1', instanceId: 'i-1' });
@@ -263,7 +267,10 @@ test('being parked with a fleet key enrols without a human, and never sends the 
   await Promise.resolve();
   const challenge = h.last().frames().find((f) => f.channel === 'fleet:challenge');
   assert.ok(challenge, 'it asks for a challenge instead of waiting for a person');
-  h.last().reply(challenge.id, { enabled: true, machineId: 'm-remote', serverNonce: 'sn-9', keyIds: ['k1'] });
+  h.last().reply(challenge.id, {
+    enabled: true, machineId: 'm-remote', serverNonce: 'sn-9', keyIds: ['k1'],
+    certProofs: { [fleetKeyId(key)]: fleetCertProof(key, 'sn-9', certFingerprint) },
+  });
   await Promise.resolve(); await Promise.resolve();
 
   const enrol = h.last().frames().find((f) => f.channel === 'fleet:enroll');
@@ -280,6 +287,71 @@ test('being parked with a fleet key enrols without a human, and never sends the 
   h.last().access({ state: 'approved', deviceId: 'd9', name: 'iPhone', deviceToken: null, instanceId: 'i-1' });
   await Promise.resolve(); await Promise.resolve();
   assert.ok(h.saved.some((c) => c.deviceToken === derived), 'the derived token is what gets persisted');
+});
+
+test('a forged machine that strips the certificate proof gets no enrolment proof', async () => {
+  const key = 'wf-byntydr27z7j3zsdpih3uulqhi';
+  const h = harness({ fleetKey: key, certFingerprint: 'ab'.repeat(32) });
+  h.link.connect();
+  h.last().onopen?.();
+  h.last().access({ state: 'waiting', requestId: 'lan-1', instanceId: 'i-1' });
+  await Promise.resolve();
+  const challenge = h.last().frames().find((f) => f.channel === 'fleet:challenge');
+  assert.ok(challenge);
+  h.last().reply(challenge.id, { enabled: true, machineId: 'm-remote', serverNonce: 'sn-9', keyIds: ['k1'] });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.last().frames().some((f) => f.channel === 'fleet:enroll'), false);
+  assert.equal(h.saved.some((c) => !!c.deviceToken), false, 'and it keeps no credential');
+  assert.ok(!h.states.includes('rejected'), 'an unproved machine is not a verdict: it must not wipe the pairing');
+  assert.ok(h.unproved.length === 1 && /did not prove/.test(h.unproved[0]), 'the row says why instead of hanging');
+});
+
+test('only a machine that proved itself can reject this client', async () => {
+  const key = 'wf-byntydr27z7j3zsdpih3uulqhi';
+  const certFingerprint = 'ab'.repeat(32);
+  const certProofs = { [fleetKeyId(key)]: fleetCertProof(key, 'sn-9', certFingerprint) };
+  const run = async (challengeReply: Record<string, unknown>, enrolError?: string) => {
+    const h = harness({ fleetKey: key, certFingerprint });
+    h.link.connect();
+    h.last().onopen?.();
+    h.last().access({ state: 'waiting', requestId: 'lan-1', instanceId: 'i-1' });
+    await Promise.resolve();
+    const challenge = h.last().frames().find((f) => f.channel === 'fleet:challenge');
+    assert.ok(challenge);
+    h.last().reply(challenge.id, challengeReply);
+    await Promise.resolve(); await Promise.resolve();
+    const enrol = h.last().frames().find((f) => f.channel === 'fleet:enroll');
+    if (enrol && enrolError) {
+      h.last().onmessage?.(JSON.stringify({ t: 'reply', id: enrol.id, error: enrolError }));
+      await Promise.resolve(); await Promise.resolve();
+    }
+    return h;
+  };
+  const noKey = await run({ enabled: false, machineId: 'm-remote' });
+  assert.ok(!noKey.states.includes('rejected'), 'an unproved "no key" answer stops nothing permanently');
+  const proved = { enabled: true, machineId: 'm-remote', serverNonce: 'sn-9', certProofs };
+  const reset = await run(proved, 'socket-closed');
+  assert.ok(!reset.states.includes('rejected'), 'a reset is not a verdict');
+  const refused = await run(proved, '{"code":"fleet:rejected","message":"no"}');
+  assert.ok(refused.states.includes('rejected'), 'a proved machine really can refuse');
+});
+
+test('a machine answering the challenge under another id gets no enrolment proof', async () => {
+  const key = 'wf-byntydr27z7j3zsdpih3uulqhi';
+  const certFingerprint = 'ab'.repeat(32);
+  const h = harness({ fleetKey: key, certFingerprint });
+  h.link.connect();
+  h.last().onopen?.();
+  h.last().access({ state: 'waiting', requestId: 'lan-1', instanceId: 'i-1' });
+  await Promise.resolve();
+  const challenge = h.last().frames().find((f) => f.channel === 'fleet:challenge');
+  assert.ok(challenge);
+  h.last().reply(challenge.id, {
+    enabled: true, machineId: 'm-other', serverNonce: 'sn-9',
+    certProofs: { [fleetKeyId(key)]: fleetCertProof(key, 'sn-9', certFingerprint) },
+  });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.last().frames().some((f) => f.channel === 'fleet:enroll'), false);
 });
 
 test('a machine with no fleet key leaves us parked rather than looping', async () => {

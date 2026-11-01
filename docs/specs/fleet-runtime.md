@@ -147,8 +147,10 @@ record says *which peer is actually linked to me right now*.
 - **Identity before credentials.** Before any token is presented, the dialer
   requires the address to prove it is the expected daemon: read the identity
   card at `/workass/health` and match `machineId` (and the pinned certificate),
-  exactly as `internal/machinebook/probe.go` already does. A wrong id is not a
-  retryable error — it is a refusal, logged with the address.
+  exactly as `internal/machinebook/probe.go` already does. A wrong id is logged with
+  the address, and nothing is presented to it. Amended 2026-11-01: the route cools
+  down instead of standing refused, because anyone who answered once could otherwise
+  cut it off after leaving.
 - **Ordered routes, learned.** A peer record holds a *list* of routes in
   preference order — LAN addresses first, then a stable overlay/VPN address,
   with a relay reserved for later (§15) — each with its last success, latency

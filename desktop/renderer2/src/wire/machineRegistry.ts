@@ -97,7 +97,8 @@ export interface MachineRegistryOptions {
 	/** Deterministic scheduler seam used by transport lifecycle tests. */
 	setTimer?(fn: () => void, ms: number): unknown;
 	clearTimer?(handle: unknown): void;
-	trustEndpoint?(address: string, certFingerprint: string): boolean;
+	trustEndpoint?(address: string, certFingerprint: string, machineId: string): boolean;
+	releaseEndpoint?(address: string, machineId: string): void;
 }
 
 /** An event from one machine, with the machine it came from so ids can be tagged. */
@@ -278,7 +279,7 @@ export class MachineRegistry {
       // Seeing a beacon never opens a socket or prompts the other machine.
       // A past approval reconnects automatically; a new request is always an
       // explicit local action, except the separately opted-in fleet mechanism.
-      const automatic = !this.autoConnectDisabled(id) && (this.credentials(id).deviceToken || this.fleetKey);
+      const automatic = !this.autoConnectDisabled(id) && (this.credentials(id).deviceToken || this.usableFleetKey());
       const address = firstAddress(entry);
       if (this.sockets.has(id) && this.socketAddresses.get(id) !== address) {
         this.detachSocket(id, 'la dirección del endpoint cambió; reconectando');
@@ -328,12 +329,21 @@ export class MachineRegistry {
     return true;
   }
 
+  /**
+   * The key, if this client can tie a proof to the certificate it is really talking
+   * to. A plain browser cannot see or pin that certificate, so a machine could
+   * replay another's proof to it. It pairs by human approval instead.
+   */
+  private usableFleetKey(): string {
+    return this.opts.trustEndpoint || canPinCertificates() ? this.fleetKey : '';
+  }
+
   private connect(entry: MachineEntry): void {
     const address = firstAddress(entry);
     if (!address) return;
 	const fingerprint = normalizeFingerprint(entry.certFingerprint);
 	const trust = this.opts.trustEndpoint ?? trustMachineEndpoint;
-	if (!fingerprint || !trust(address, fingerprint)) {
+	if (!fingerprint || !trust(address, fingerprint, entry.machineId)) {
 		this.states.set(entry.machineId, { link: 'idle', reason: 'no se pudo fijar la identidad TLS' });
 		this.opts.onChange?.(this.list());
 		return;
@@ -348,7 +358,7 @@ export class MachineRegistry {
       connectionGroup: newConnectionGroup,
       credentials: this.credentials(entry.machineId),
 		certFingerprint: fingerprint,
-      fleetKey: this.fleetKey || undefined,
+      fleetKey: this.usableFleetKey() || undefined,
       open: this.opts.open ?? browserSocket,
       saveCredentials: (id, next) => {
         this.saveCredentials(id, next);
@@ -358,6 +368,9 @@ export class MachineRegistry {
         if (this.ready.get(id) === socket) this.ensureAuxiliarySockets(entry, socket);
       },
       clearCredentials: (id) => this.clearCredentials(id),
+      // Close the socket and free the pin. The next sync tries again, and meanwhile a
+      // real machine at this host can be pinned.
+      onUnproved: (id, reason) => { if (this.sockets.get(id) === socket) this.detachSocket(id, reason); },
       onState: (state, detail) => {
 		if (this.sockets.get(entry.machineId) !== socket) return;
         // Fence both mutation siblings before publishing any primary state
@@ -526,8 +539,10 @@ export class MachineRegistry {
 	/** Remove one transport before closing it so every synchronous late callback is stale. */
 	private detachSocket(machineId: string, reason = ''): void {
 		const socket = this.sockets.get(machineId);
+		const address = this.socketAddresses.get(machineId);
 		this.sockets.delete(machineId);
 		this.socketAddresses.delete(machineId);
+		if (address) (this.opts.releaseEndpoint ?? releaseMachineEndpoint)(address, machineId);
 		this.socketGroups.delete(machineId);
 		this.ready.delete(machineId);
 		this.detachAuxiliarySockets(machineId);
@@ -575,10 +590,20 @@ function newConnectionGroup(): string {
 	return `cg-${connectionGroupSequence.toString(36)}-${random}`.slice(0, 128);
 }
 
-function trustMachineEndpoint(address: string, certFingerprint: string): boolean {
+function canPinCertificates(): boolean {
+	return typeof window !== 'undefined' && !!window.workassMachines;
+}
+
+function releaseMachineEndpoint(address: string, machineId: string): void {
+	try {
+		if (typeof window !== 'undefined') window.workassMachines?.releaseEndpoint?.({ address, machineId });
+	} catch { /* the pin stays until the app restarts */ }
+}
+
+function trustMachineEndpoint(address: string, certFingerprint: string, machineId: string): boolean {
 	try {
 		const bridge = typeof window !== 'undefined' ? window.workassMachines : undefined;
-		return bridge ? bridge.trustEndpoint({ address, certFingerprint }) : true;
+		return bridge ? bridge.trustEndpoint({ address, certFingerprint, machineId }) : true;
 	} catch {
 		return false;
 	}
@@ -586,7 +611,10 @@ function trustMachineEndpoint(address: string, certFingerprint: string): boolean
 
 declare global {
 	interface Window {
-		workassMachines?: { trustEndpoint(payload: { address: string; certFingerprint: string }): boolean };
+		workassMachines?: {
+			trustEndpoint(payload: { address: string; certFingerprint: string; machineId?: string }): boolean;
+			releaseEndpoint?(payload: { address: string; machineId: string }): void;
+		};
 	}
 }
 

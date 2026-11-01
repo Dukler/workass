@@ -437,6 +437,9 @@ func main() {
 	// closed the fleet (docs/specs/fleet-runtime.md §1). With a mesh, a command
 	// for another home travels over a link this daemon dialled itself.
 	fleetMesh := openFleetMesh(stateDir, identity, fleetKeys, machineBook, hub, logger, *port)
+	if machineBook != nil && fleetMesh != nil && fleetMesh.mesh != nil {
+		machineBook.SetIdentityProver(fleetMesh.mesh.ProveIdentity)
+	}
 	handler.Metrics = func() map[string]any {
 		out := daemonMetrics(providerChats, stateDir, hub, acpManager)
 		out["imageStore"] = imageStore.metrics()
@@ -536,7 +539,10 @@ func main() {
 		logger.Printf("[workass] listen failed: %v", err)
 		os.Exit(1)
 	}
-	server := &http.Server{Handler: mux}
+	// Only the slowloris bounds. Read and write deadlines would cut a slow image or
+	// video response and a long tool call, and a WebSocket leaves this server's
+	// timeouts behind the moment it is hijacked.
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 2 * time.Minute}
 	// E5. TLS is not a port: the daemon keeps listening exactly where the
 	// firewall already allows it, and only the bytes change.
 	if *useTLS {

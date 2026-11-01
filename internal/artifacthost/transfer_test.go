@@ -280,7 +280,7 @@ func TestHostedMediaIsPlayableAndEverythingElseStaysSandboxed(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = transfers.Close(opened.TransferID) })
 		for route, got := range map[string]map[string]string{
-			"http": {"Content-Type": recorder.Header().Get("Content-Type"), "Content-Security-Policy": recorder.Header().Get("Content-Security-Policy"), "Content-Range": recorder.Header().Get("Content-Range"), "Accept-Ranges": recorder.Header().Get("Accept-Ranges"), "X-Content-Type-Options": recorder.Header().Get("X-Content-Type-Options")},
+			"http":     {"Content-Type": recorder.Header().Get("Content-Type"), "Content-Security-Policy": recorder.Header().Get("Content-Security-Policy"), "Content-Range": recorder.Header().Get("Content-Range"), "Accept-Ranges": recorder.Header().Get("Accept-Ranges"), "X-Content-Type-Options": recorder.Header().Get("X-Content-Type-Options")},
 			"transfer": opened.Headers,
 		} {
 			if got["Content-Type"] != want || got["Content-Range"] != "bytes 2-5/10" || got["Accept-Ranges"] != "bytes" || got["X-Content-Type-Options"] != "nosniff" {

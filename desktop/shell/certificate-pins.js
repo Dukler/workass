@@ -29,10 +29,10 @@ function fingerprintCertificateData(value) {
 	}
 }
 
-function trustCertificatePEM(pins, address, certificateData) {
+function trustCertificatePEM(pins, address, certificateData, owner = 'local-daemon') {
 	if (!pins || typeof pins.trustEndpoint !== 'function') return false;
 	const fingerprint = fingerprintCertificateData(certificateData);
-	return !!fingerprint && pins.trustEndpoint(address, fingerprint);
+	return !!fingerprint && pins.trustEndpoint(address, fingerprint, owner);
 }
 
 // Electron certificate verification is scoped to a Session. The renderer uses
@@ -50,24 +50,50 @@ function certificateVerificationSessions(sessionModule, browserPartition) {
 	return targets.filter((target, index) => target && targets.indexOf(target) === index);
 }
 
+function endpointHost(address) {
+	try {
+		return new URL(`https://${String(address || '').trim()}`).hostname.replace(/^\[|\]$/g, '');
+	} catch {
+		return '';
+	}
+}
+
 class CertificatePins {
   constructor() {
     this.byHost = new Map();
   }
 
-  trustEndpoint(address, fingerprint) {
-    let parsed;
-    try { parsed = new URL(`https://${String(address || '').trim()}`); } catch { return false; }
-    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  // Chromium asks about a hostname, with no port and no idea which machine a socket
+  // meant, so one host has one pin. A second machine at that host must not replace
+  // it: the first machine's reconnect would then hand its device token to whoever
+  // holds the new certificate. The owner may change its own pin once it is proved.
+  trustEndpoint(address, fingerprint, owner = '') {
+    const host = endpointHost(address);
     const pin = normalizeCertFingerprint(fingerprint);
-    if (!privateLANHost(host) || !pin) return false;
-    this.byHost.set(host, pin);
+    if (!host || !privateLANHost(host) || !pin) return false;
+    const held = this.byHost.get(host);
+    if (held && held.pin !== pin && held.owner !== String(owner)) return false;
+    this.byHost.set(host, { pin, owner: String(owner) });
     return true;
+  }
+
+  // A reload loses the sockets these pins were for. Without this, a pin taken by a
+  // forger would block the real machine until the app was relaunched.
+  releaseAllExcept(owner) {
+    for (const [host, held] of this.byHost) {
+      if (held.owner !== owner) this.byHost.delete(host);
+    }
+  }
+
+  releaseEndpoint(address, owner = '') {
+    const host = endpointHost(address);
+    const held = host && this.byHost.get(host);
+    if (held && held.owner === String(owner)) this.byHost.delete(host);
   }
 
   decision(request) {
     const host = String(request?.hostname || '').replace(/^\[|\]$/g, '');
-    const expected = this.byHost.get(host);
+    const expected = this.byHost.get(host)?.pin;
 	// Electron exposes both its short certificate fingerprint and the SHA-256
 	// fingerprint on some platforms. The short value is truthy but too small,
 	// so selecting it with `||` discarded the valid fingerprint256 and made every

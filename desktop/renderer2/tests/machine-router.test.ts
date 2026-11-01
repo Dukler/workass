@@ -4,7 +4,7 @@ import { createMachineRouter, machineScopeOf, projectRemoteEvent, RemoteMachineU
 import { MachineRegistry, type MachineEntry } from '../src/wire/machineRegistry.ts';
 import { tagId, tagPayload } from '../src/wire/machineIds.ts';
 import type { MachineSocket, MachineSocketLike } from '../src/wire/machineSocket.ts';
-import { fleetDeviceToken, fleetProof } from '../src/wire/fleet.ts';
+import { fleetCertProof, fleetDeviceToken, fleetKeyId, fleetProof } from '../src/wire/fleet.ts';
 
 // A stand-in for a ready link: it records what it was asked and answers with
 // whatever the test queued.
@@ -453,13 +453,29 @@ test('approval persists the discovered certificate pin before later token reconn
 	assert.equal(saved.certFingerprint, CERT_FINGERPRINT);
 });
 
+test('a plain browser cannot pin a certificate, so it never answers a fleet challenge', () => {
+	const opened: string[] = [];
+	const registry = new MachineRegistry({
+		local: () => ({}) as never, deviceName: 'Phone', storage: memoryStorage(),
+		open: ((url: string) => {
+			opened.push(url);
+			return { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
+		}) as never,
+	});
+	registry.useFleetKey('wf-byntydr27z7j3zsdpih3uulqhi');
+	registry.sync([entry('m-remote', 'builder', '192.168.1.71:80')], 'm-self');
+	assert.equal(opened.length, 0, 'holding a key does not open a socket on its own here');
+	assert.equal(registry.requestAccess('m-remote'), true, 'asking a person still works');
+	assert.equal(opened.length, 1);
+});
+
 test('fleet approval queues the first Start and Stop until exact-group auxiliary handshakes', async () => {
 	const fleetKey = 'wf-byntydr27z7j3zsdpih3uulqhi';
 	const storage = memoryStorage();
 	const opened: Array<{ url: string; socket: MachineSocketLike; sent: string[] }> = [];
 	const remoteEvents: unknown[] = [];
 	const registry = new MachineRegistry({
-		local: () => ({}) as never, deviceName: 'Mac', storage,
+		local: () => ({}) as never, deviceName: 'Mac', storage, trustEndpoint: () => true,
 		open: ((url: string) => {
 			const sent: string[] = [];
 			const socket: MachineSocketLike = {
@@ -483,6 +499,7 @@ test('fleet approval queues the first Start and Stop until exact-group auxiliary
 	assert.ok(challenge);
 	primary.socket.onmessage?.(JSON.stringify({ t: 'reply', id: challenge.id, result: {
 		enabled: true, machineId: 'm-remote', serverNonce: 'server-nonce', keyIds: ['key-1'],
+		certProofs: { [fleetKeyId(fleetKey)]: fleetCertProof(fleetKey, 'server-nonce', entry('m-remote', 'builder', '192.168.1.71:80').certFingerprint as string) },
 	}, error: null }));
 	await Promise.resolve(); await Promise.resolve();
 	const enrol = primary.sent.map((raw) => JSON.parse(raw)).find((frame) => frame.channel === 'fleet:enroll');
@@ -785,6 +802,7 @@ test('rejection remains fenced for the current runtime when browser storage is u
     removeItem: () => { throw new Error('storage unavailable'); },
   };
   const registry = new MachineRegistry({
+  	trustEndpoint: () => true,
     local: () => ({}) as never, deviceName: 'Mac', storage: unavailableStorage,
     open: (() => {
       const socket: MachineSocketLike = { send() {}, close() {}, onopen: null, onclose: null, onmessage: null, onerror: null };
