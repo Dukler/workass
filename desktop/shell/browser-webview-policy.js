@@ -70,7 +70,7 @@ function hardenWebviewAttach(webPreferences, params, { partition }) {
 // click from whatever handler its scheme names, and file:, smb: and search-ms:
 // each launch something, so this is an allowlist. The URL parser removes what a
 // browser would ignore ("fi\tle:"), so the check sees what the OS would.
-const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'slack:', 'vscode:']);
 
 function isSafeExternalURL(url) {
   if (typeof url !== 'string') return false;

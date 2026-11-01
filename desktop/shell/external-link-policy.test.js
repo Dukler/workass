@@ -12,9 +12,10 @@ const REFUSED = [
   'data:text/html,hi', 'blob:http://example.com/a', 'ftp://example.com/a', 'about:blank',
   'workass-unknown://x', 'C:\\Windows\\calc.exe', '/relative', '', null, undefined, 42,
 ];
-const ALLOWED = ['http://example.com/a', 'https://example.com/a', 'HTTPS://example.com', 'mailto:someone@example.com', 'http://127.0.0.1:8799/workass/artifacts/a/index.html'];
+const ALLOWED = ['http://example.com/a', 'https://example.com/a', 'HTTPS://example.com', 'mailto:someone@example.com', 'http://127.0.0.1:8799/workass/artifacts/a/index.html',
+  'tel:+15550100', 'slack://channel?team=T1&id=C1', 'vscode://file/tmp/a.ts:3', 'VSCODE://file/tmp/a.ts'];
 
-test('only http, https and mailto reach the OS', async () => {
+test('only http, https, mailto, tel, slack and vscode reach the OS', async () => {
   for (const url of REFUSED) {
     assert.equal(isSafeExternalURL(url), false, String(url));
     const opened = [];

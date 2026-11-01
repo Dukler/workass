@@ -37,7 +37,7 @@ const TOKEN = /(`[^`]+`)|(!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\))|(\*\*[^*]+\*\
 // before the check. Image targets never come through here, so a local file:
 // image still resolves through the message's media.
 const LINK_SCHEME = /^([a-z][a-z0-9+.-]*):/i;
-const ALLOWED_LINK_SCHEMES = new Set(['http', 'https', 'mailto']);
+const ALLOWED_LINK_SCHEMES = new Set(['http', 'https', 'mailto', 'tel', 'slack', 'vscode']);
 
 export function safeLinkHref(href: string): string {
   const compact = String(href || '').replace(/[\u0000-\u0020]+/g, '');

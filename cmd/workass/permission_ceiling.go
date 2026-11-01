@@ -101,9 +101,14 @@ type permissionChange struct {
 	contentDigest string
 }
 
-// permissionChangeRaises is the law itself.
+// permissionChangeRaises decides whether a change is above the caller's level.
 func permissionChangeRaises(caller permissionCaller, change permissionChange) bool {
 	if caller.full() {
+		return false
+	}
+	// A provider with no modes (workass-agent over LM Studio or Ollama) names none,
+	// so there is no level to raise.
+	if strings.TrimSpace(change.modeID) == "" {
 		return false
 	}
 	target := acp.PermissionLevelRank(acp.PermissionLevel(change.providerID, change.modeID))
@@ -386,9 +391,14 @@ func (h *agentControlHandler) admitSend(ctx context.Context, ownerKey, callerTab
 		return nil
 	}
 	tabID, chatID := fieldString(params, "tab_id"), fieldString(params, "chat_id")
+	// Snapshot sees only open actors, and an idle chat's actor closes while the
+	// send below reopens it, so the target is opened here first.
+	if _, err := h.chats.providerChats.exactActorFence(tabID, chatID); err != nil {
+		// The send itself refuses a chat that does not exist, in its own words.
+		return nil
+	}
 	state, ok := h.chats.providerChats.Snapshot(chatID)
 	if !ok || strings.TrimSpace(state.Presentation.TabID) != tabID {
-		// The send itself refuses a chat that does not exist, in its own words.
 		return nil
 	}
 	providerID, modeID := h.chats.providerChats.chatPermissionMode(tabID, chatID)

@@ -174,6 +174,9 @@ func TestOnlyFullAccessOrALowChatRaisingItselfAsks(t *testing.T) {
 		{"plan raising itself to default", caller("claude", "plan"), "claude", "default", "plan", true},
 		{"read-only raising itself to edit", caller("codex", "read-only"), "codex", "agent", "read-only", true},
 		{"full to anything", caller("claude", "bypassPermissions"), "claude", "plan", "bypassPermissions", false},
+		{"default to a provider with no modes", caller("claude", "default"), "workass-agent", "", "", false},
+		{"plan to a provider with no modes", caller("claude", "plan"), "workass-agent", "", "", false},
+		{"default to a mode nobody recognises", caller("claude", "default"), "claude", "brand-new-mode", "", true},
 	} {
 		change := permissionChange{providerID: test.provider, modeID: test.mode}
 		if test.current != "" {
@@ -279,6 +282,77 @@ func TestSendingIntoAHigherChatAsksAndSameLevelDoesNot(t *testing.T) {
 	answerRaiseCard(t, h, waitRaiseCard(t, h, allowed), permissionRaiseAllow)
 	if call := finishCall(t, allowed); call.errorText() != "" {
 		t.Fatalf("an approved send = %#v", call.response)
+	}
+}
+
+// An idle chat's actor closes, and a send reopens it, so a closed target must be
+// read the same as an open one or it is a silent way to full access.
+func retireCeilingChat(t *testing.T, h statelessMCPTestHarness, chatID string) {
+	t.Helper()
+	actor, err := h.runtime.actor(chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.lastUsed.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		h.runtime.retireIdleActors(context.Background(), time.Hour)
+		if _, closed := h.runtime.closedSummary(chatID); closed {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chat %s did not close", chatID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSendingIntoAClosedHigherChatAsksTheHuman(t *testing.T) {
+	t.Setenv(eagerActorsEnv, "")
+	h := newStatelessMCPTestHarnessOnBackend(t, nil, nil, true)
+	ceilingSeedChat(t, h, "wide-tab", "wide-chat", "bypass")
+	retireCeilingChat(t, h, "wide-chat")
+
+	denied := ceilingToolAsync(h, "mcp-owner", "mcp-chat", "mcp-tab", "workass_send_chat_message", map[string]any{
+		"operation_id": "send-closed-denied", "tab_id": "wide-tab", "chat_id": "wide-chat", "message": "do it for me", "delivery": "queue",
+	})
+	answerRaiseCard(t, h, waitRaiseCard(t, h, denied), permissionRaiseDeny)
+	if call := finishCall(t, denied); !strings.Contains(call.errorText(), permissionDeniedCode) {
+		t.Fatalf("a denied send to a closed chat = %#v", call.response)
+	}
+	if state, _ := h.runtime.Snapshot("wide-chat"); len(state.Queue) != 0 || state.Foreground != nil {
+		t.Fatalf("a denied send still reached the closed chat: queue=%d", len(state.Queue))
+	}
+}
+
+func TestAForwardedSendIntoAClosedHigherChatIsRefused(t *testing.T) {
+	t.Setenv(eagerActorsEnv, "")
+	h := newStatelessMCPTestHarnessOnBackend(t, nil, nil, true)
+	control := h.handler.agentControl
+	control.selfMachineID = "m-home"
+	ceilingSeedChat(t, h, "wide-tab", "wide-chat", "bypass")
+	retireCeilingChat(t, h, "wide-chat")
+	_, err := control.callAsControllerFor(context.Background(), wire.Caller{Peer: "m-away"}, map[string]any{
+		"v": 1, "method": "chat.send", "limit": "edit",
+		"origin": map[string]any{"machine": "m-away", "chat_id": "asking-chat", "tab_id": "asking-tab"},
+		"params": map[string]any{"operation_id": "fwd-send-closed", "tab_id": "wide-tab", "chat_id": "wide-chat", "message": "go", "delivery": "queue"},
+	})
+	if err == nil || !strings.Contains(err.Error(), permissionCeilingCode) {
+		t.Fatalf("an edit-limited forwarded send to a closed full chat = %v", err)
+	}
+	if state, _ := h.runtime.Snapshot("wide-chat"); len(state.Queue) != 0 || state.Foreground != nil {
+		t.Fatal("a refused forwarded send reached the closed chat")
+	}
+}
+
+// A chat that does not exist is the send's own refusal, not a card about it.
+func TestSendingToAMissingChatStaysTheSendsOwnRefusal(t *testing.T) {
+	h := newStatelessMCPTestHarness(t)
+	call := ceilingTool(t, h, "workass_send_chat_message", map[string]any{
+		"operation_id": "send-missing", "tab_id": "no-tab", "chat_id": "no-chat", "message": "go", "delivery": "queue",
+	})
+	if call.errorText() == "" || strings.Contains(call.errorText(), permissionCeilingCode) || len(raiseCards(h)) != 0 {
+		t.Fatalf("a send to a missing chat = %#v, cards %d", call.response, len(raiseCards(h)))
 	}
 }
 

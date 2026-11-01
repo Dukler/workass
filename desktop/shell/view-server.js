@@ -27,13 +27,13 @@ const LOOPBACK_HOSTNAMES = ['127.0.0.1', 'localhost', '::1'];
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD']);
 
 // This server's own origin as the request names it, or '' for any other Host.
-// Comparing the port too refuses a name that only reached us by accident.
-function originFromHost(req, { hostnames, port }) {
+// Only the name is compared: it is what stops rebinding, and a view port forwarded
+// to another local port arrives with that port in its Host and its page's Origin.
+function originFromHost(req, { hostnames }) {
   let parsed;
   try { parsed = new URL(`http://${String(req.headers.host || '').trim().toLowerCase()}`); } catch { return ''; }
   if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return '';
-  if (!hostnames.includes(parsed.hostname.replace(/^\[(.*)\]$/, '$1'))) return '';
-  return Number(parsed.port || 80) === port ? parsed.origin : '';
+  return hostnames.includes(parsed.hostname.replace(/^\[(.*)\]$/, '$1')) ? parsed.origin : '';
 }
 
 // No Origin is a local script: every browser sends one on a state-changing
@@ -256,7 +256,7 @@ function createViewServer({
   let recoveryFn = null;
   let takeControlFn = null;
   let artifactBridge = null;
-  const guard = { hostnames: [...new Set([...LOOPBACK_HOSTNAMES, host])], port };
+  const guard = { hostnames: [...new Set([...LOOPBACK_HOSTNAMES, host])] };
   const server = http.createServer((req, res) => {
     const parsedUrl = new URL(req.url || '/', 'http://shell.local');
     const pathname = parsedUrl.pathname;
@@ -473,7 +473,6 @@ function createViewServer({
       server.off('error', onError);
       const addr = server.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : port;
-      guard.port = actualPort;
       resolve({
         server,
         url: `http://${host}:${actualPort}`,

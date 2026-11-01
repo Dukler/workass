@@ -37,6 +37,13 @@ func newStatelessMCPTestHarnessWithProviders(t *testing.T, providers []acp.Provi
 
 func newStatelessMCPTestHarnessWithOptions(t *testing.T, providers []acp.ProviderConfig, mutate func(*acp.Options)) statelessMCPTestHarness {
 	t.Helper()
+	return newStatelessMCPTestHarnessOnBackend(t, providers, mutate, false)
+}
+
+// sqlite puts the chats in the backend whose idle actors close, which is what a
+// macOS production daemon runs.
+func newStatelessMCPTestHarnessOnBackend(t *testing.T, providers []acp.ProviderConfig, mutate func(*acp.Options), sqlite bool) statelessMCPTestHarness {
+	t.Helper()
 	root := repoRoot(t)
 	if len(providers) > 0 {
 		providers = append(providers, acp.ProviderConfig{ID: "mock", Command: "node", Args: []string{filepath.Join(root, "desktop", "acp", "mock-server.mjs")}, CWD: root, Enabled: true})
@@ -57,7 +64,21 @@ func newStatelessMCPTestHarnessWithOptions(t *testing.T, providers []acp.Provide
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
 	store := newSessionStore(filepath.Join(manager.StateDir(), sessionStateFilename))
-	runtime := newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	var runtime *providerChatRuntime
+	if sqlite {
+		backend, err := openChatActorBackend(manager.StateDir(), true, "test", t.Logf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = backend.close() })
+		runtime = newProviderChatRuntimeWithBackend(manager, store, manager.StateDir(), backend, false)
+		if err := runtime.StartupError(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	} else {
+		runtime = newTestProviderChatRuntime(t, manager, store, manager.StateDir())
+	}
 	if _, err := runtime.actorForNewChatOperation("mcp-chat", chat.PresentationState{
 		TabID: "mcp-tab", Title: "MCP owner", ProviderID: "mock", CWD: stringPointerValueOrNil(root),
 	}, "test:create-mcp-owner", false); err != nil {

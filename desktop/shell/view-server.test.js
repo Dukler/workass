@@ -446,7 +446,7 @@ test('every view route refuses a Host that is not this view server', async (t) =
   const { port, proxied, upgraded, send, upgrade, view } = await guardedViewRig(t);
   const calls = [];
   view.setArtifactBridge({ handle: (_req, res) => { calls.push('bridge'); res.end('x'); }, close() {} });
-  for (const host of [`rebind.attacker.example:${port}`, `127.0.0.1.attacker.example:${port}`, '127.0.0.1:1', `localhost:${port + 1}`, '127.0.0.1']) {
+  for (const host of [`rebind.attacker.example:${port}`, `127.0.0.1.attacker.example:${port}`, 'rebind.attacker.example']) {
     for (const route of ['/', '/index.html', '/workass/fleet-qr.svg', '/workass/connected-artifacts/a/index.html', '/workass/artifacts/@remote/a/index.html', '/__workass-shell/status']) {
       const reply = await send('GET', route, { host });
       assert.equal(reply.status, 403, `${host} ${route}`);
@@ -481,6 +481,28 @@ test('a state-changing request or upgrade from another origin never reaches the 
   }
   assert.deepEqual(proxied, []);
   assert.deepEqual(upgraded, []);
+});
+
+// A tunnel's local port is not the port the server listens on, and the page's
+// origin carries the tunnel's port, so the Host is what names this server.
+test('a view port forwarded to another local port keeps working', async (t) => {
+  const { port, proxied, upgraded, send, upgrade } = await guardedViewRig(t);
+  const forwarded = `127.0.0.1:${port + 1}`;
+  const origin = `http://${forwarded}`;
+  assert.match((await send('GET', '/', { host: forwarded })).body, /local-index/);
+  assert.equal((await send('POST', '/daemon-route', { host: forwarded, origin, 'sec-fetch-site': 'same-origin' })).status, 200);
+  assert.equal(proxied.length, 1);
+  assert.match(await upgrade({ Host: forwarded, Origin: origin }), /101 Switching/);
+  assert.equal(upgraded[0].headers['x-workass-view-origin'], origin);
+  assert.match((await send('GET', '/', { host: `localhost:${port + 1}` })).body, /local-index/);
+
+  // Same-origin still means this origin: another local port is another site.
+  assert.equal((await send('POST', '/daemon-route', { host: forwarded, origin: `http://127.0.0.1:${port}` })).status, 403);
+  assert.match(await upgrade({ Host: forwarded, Origin: `http://127.0.0.1:${port}` }), /^HTTP\/1\.1 403/);
+  // And the name still stops rebinding, whatever the port.
+  assert.equal((await send('GET', '/', { host: `rebind.attacker.example:${port + 1}` })).status, 403);
+  assert.equal(proxied.length, 1);
+  assert.equal(upgraded.length, 1);
 });
 
 test('legitimate view callers keep working', async (t) => {
