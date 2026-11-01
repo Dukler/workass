@@ -17,6 +17,10 @@ Each folder's `results.json` holds the timeline, request log and alerts.
   stays 403.
 - `matrix/`: 640x360 moov-at-end mp4, 320x180 webm, portrait mp4, mp3, and a 120 MB
   moov-at-end mp4 through far seeks and a 40 s pause.
+- `published/`: the published 0.1.259 Mac zip's daemon and renderer. Its shell files are
+  byte-identical to the repo's and run from there, because the bundle's shell needs its sealed
+  layout. Nothing was installed.
+- `control-disguised-markup.json`: HTML served as a hosted .mp4 and .webm runs no script.
 
 Rerun: `node harness/vrig.mjs BIN LABEL [--file F] [--out DIR] [--remote] [--stress] [--shell DIR]`.
 Build the `cgwin` helper first:

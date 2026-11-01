@@ -1,0 +1,16 @@
+{
+  "evil.mp4": {
+    "contentType": "video/mp4",
+    "title": "",
+    "scripts": 0,
+    "h1": 0,
+    "video": true
+  },
+  "evil.webm": {
+    "contentType": "video/webm",
+    "title": "",
+    "scripts": 0,
+    "h1": 0,
+    "video": true
+  }
+}

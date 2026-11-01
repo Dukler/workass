@@ -1,0 +1,972 @@
+{
+  "label": "published",
+  "source": "/Users/dev/Workspace/myproject/tmp/test-set-look1-20261101/worst-clip-accepted.mp4",
+  "controller": true,
+  "controller_after_chat": true,
+  "hosted": {
+    "id": "worst-clip-accepted-deaf6280be38",
+    "urlPath": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+    "markdown": "[Open worst-clip-accepted](/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/)",
+    "raw": "{\"contentType\":\"video/mp4\",\"createdAt\":\"2026-11-01T16:54:05.514906Z\",\"entry\":\"worst-clip-accepted.mp4\",\"id\":\"worst-clip-accepted-deaf6280be38\",\"kind\":\"file\",\"label\":\"worst-clip-accepted\",\"markdown\":\"[Open worst-clip-accepted](/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/)\",\"updatedAt\":\"2026-11-01T16:54:05.514906Z\",\"urlPath\":\"/workass/artifacts/@m-b901e516"
+  },
+  "chat_selected": true,
+  "link": {
+    "text": "ver video",
+    "href": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/"
+  },
+  "after_click": {
+    "toasts": [],
+    "pane": true,
+    "parked": [],
+    "hasKey": false
+  },
+  "guest": {
+    "id": 4,
+    "type": "window",
+    "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+    "audioMuted": true,
+    "audible": false
+  },
+  "panel_frame": {
+    "w": 285,
+    "h": 838
+  },
+  "muted": {
+    "all": [
+      {
+        "id": 5,
+        "audioMuted": true
+      },
+      {
+        "id": 4,
+        "audioMuted": true
+      },
+      {
+        "id": 3,
+        "audioMuted": true
+      },
+      {
+        "id": 2,
+        "audioMuted": true
+      },
+      {
+        "id": 1,
+        "audioMuted": true
+      }
+    ]
+  },
+  "alerts_after_open": {
+    "toasts": [],
+    "paneError": null
+  },
+  "timeline": [
+    {
+      "ms": 2,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 0.58,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 404,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 0.98,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 806,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.38,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1209,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 1.79,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 1611,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.19,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2013,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.59,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2416,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 2.99,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 2819,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.4,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3222,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 3.8,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 3624,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.2,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4027,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 4.61,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4429,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.01,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 4832,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.41,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5234,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 5.81,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 5637,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.22,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6039,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 6.62,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6442,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.02,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 6845,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.42,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7248,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 7.83,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 7650,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.23,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8052,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 8.63,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8455,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.03,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 8857,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.44,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9260,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 9.84,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 9663,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.24,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10066,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 10.64,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10468,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.05,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 10871,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.45,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11274,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 11.85,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    },
+    {
+      "ms": 11677,
+      "pane": true,
+      "w": 285,
+      "float": false,
+      "hidden": false,
+      "focus": false,
+      "t": 12.26,
+      "paused": false,
+      "rs": 4,
+      "iw": 320,
+      "ih": 941
+    }
+  ],
+  "alerts_after_12s": {
+    "toasts": [],
+    "paneError": null
+  },
+  "browser": {
+    "states": [
+      {
+        "at": 1793552041492,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552041534,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552041537,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552041540,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552041543,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047094,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552047130,
+        "url": "about:blank",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552047133,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552047135,
+        "url": "about:blank",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": null,
+        "gen": 0
+      },
+      {
+        "at": 1793552047137,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047138,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047149,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": true,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047153,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047162,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047162,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047163,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 1440,
+          "height": 900,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          1440,
+          900
+        ],
+        "gen": 1
+      },
+      {
+        "at": 1793552047168,
+        "url": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+        "loading": false,
+        "error": null,
+        "viewport": {
+          "width": 320,
+          "height": 941,
+          "deviceScaleFactor": 1
+        },
+        "effective": [
+          320,
+          941
+        ],
+        "gen": 2
+      }
+    ],
+    "calls": [
+      {
+        "at": 1793552047043,
+        "channel": "workass-browser:command",
+        "args": "[{\"chatId\":\"tab-mvy2ktmw-1\",\"command\":\"navigate\",\"value\":\"http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/\"}]",
+        "doneAt": 1793552047162
+      },
+      {
+        "at": 1793552047055,
+        "channel": "workass-browser:activate",
+        "args": "[{\"chatId\":\"tab-mvy2ktmw-1\",\"conversationId\":\"conv-mvy2ktmw-2\",\"bounds\":{\"x\":1102,\"y\":48,\"width\":285,\"height\":838},\"viewport\":{\"width\":320,\"height\":941}}]",
+        "doneAt": 1793552047163
+      }
+    ]
+  },
+  "video_after_6s": {
+    "video": true,
+    "src": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 17.6,
+    "currentTime": 12.657645,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        17.6
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "viewport": {
+    "href": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+    "origin": "http://127.0.0.1:30341",
+    "w": 320,
+    "h": 941,
+    "dpr": 1,
+    "html": "<html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body><video controls=\"\" autoplay=\"\" name=\"media\" crossorigin=\"anonymous\"><source src=\"http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/\" type=\"video/mp4\"></video></body></html>",
+    "csp": "video/mp4"
+  },
+  "play": "playing",
+  "playback": {
+    "t1": 14.161483,
+    "t2": 17.164171,
+    "advanced": true,
+    "paused": false,
+    "readyState": 4,
+    "error": null
+  },
+  "page_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "page_nonblack_share": 0.03976499210057481,
+  "window_capture": "/Users/dev/Workspace/workass/docs/evidence/hosted-video-20261101/published/window.png",
+  "seek": {
+    "seeked": true,
+    "currentTime": 14.00032,
+    "readyState": 4
+  },
+  "after_seek": {
+    "video": true,
+    "src": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+    "readyState": 4,
+    "networkState": 1,
+    "error": null,
+    "muted": true,
+    "videoWidth": 1912,
+    "videoHeight": 720,
+    "duration": 17.666667,
+    "currentTime": 15.501974,
+    "paused": false,
+    "controls": true,
+    "seeking": false,
+    "buffered": [
+      [
+        0,
+        17.666667
+      ]
+    ],
+    "rect": {
+      "w": 320,
+      "h": 941,
+      "x": 0,
+      "y": 0
+    },
+    "inner": {
+      "w": 320,
+      "h": 941
+    },
+    "hidden": false
+  },
+  "paused_capture": {
+    "width": 568,
+    "height": 1676
+  },
+  "muted_at_end": [
+    {
+      "id": 5,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 4,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 3,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 2,
+      "audioMuted": true,
+      "audible": false
+    },
+    {
+      "id": 1,
+      "audioMuted": true,
+      "audible": false
+    }
+  ],
+  "net": [
+    {
+      "at": 1793552047141,
+      "phase": "send",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "capability": true,
+      "frameUrl": "about:blank",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793552047153,
+      "phase": "error",
+      "type": "mainFrame",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": false,
+      "status": 200,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "length": "9980053",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "at": 1793552047155,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "range": "bytes=0-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793552047168,
+      "phase": "error",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 0-9980052/9980053",
+      "length": "9980053",
+      "error": "net::ERR_FAILED"
+    },
+    {
+      "at": 1793552047169,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "range": "bytes=9961472-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793552047173,
+      "phase": "done",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 9961472-9980052/9980053",
+      "length": "18581",
+      "error": "net::OK"
+    },
+    {
+      "at": 1793552047175,
+      "phase": "send",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "range": "bytes=98304-",
+      "capability": true,
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4
+    },
+    {
+      "at": 1793552047627,
+      "phase": "done",
+      "type": "media",
+      "url": "/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "frameUrl": "http://127.0.0.1:30341/workass/artifacts/@m-b901e5161923874a5494847cda5b7f2b/worst-clip-accepted-deaf6280be38/",
+      "hasFrame": true,
+      "wc": 4,
+      "status": 206,
+      "contentType": "video/mp4",
+      "acceptRanges": "bytes",
+      "contentRange": "bytes 98304-9980052/9980053",
+      "length": "9881749",
+      "error": "net::OK"
+    }
+  ],
+  "guest_console": [
+    {
+      "wc": 3,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 2,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 5,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    },
+    {
+      "wc": 4,
+      "level": "warning",
+      "message": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://"
+    }
+  ]
+}
