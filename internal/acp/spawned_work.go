@@ -759,6 +759,9 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 	if tabID == "" || chatID == "" || !m.acceptsProviderSpawnedWork(providerID) {
 		return
 	}
+	if providerAdapterForID(providerID).spawnedWork.ChildSessionOnly(event.Task) && !strings.HasPrefix(chatID, subagentChatIDPrefix) {
+		return
+	}
 	now := time.Now().UTC()
 	if event.Kind == "snapshot" {
 		if !event.TasksKnown {

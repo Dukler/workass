@@ -132,15 +132,22 @@ type Options struct {
 	ProviderUpdateInterval       time.Duration
 	PlanUsageRefreshInterval     time.Duration
 	SpawnedWorkReconcileInterval time.Duration
-	SpawnedWorkPIDProbe          func(paths []string) (map[string][]int, bool)
-	SpawnedWorkListenProbe       func(pids []int) (map[int]bool, bool)
-	SpawnedWorkSignal            func(pid int, force bool) bool
-	ProviderUpdateRetryBackoffs  []time.Duration
-	ProviderUpdateTimeout        time.Duration
-	ProviderUpdateSources        map[string]string
-	ProviderUpdateAssetSources   map[string]string
-	ProviderUpdateRunTimeout     time.Duration
-	ProviderUpdateCommands       map[string]ProviderUpdateCommand
+	// How a subagent whose turn ended waits for its own background work
+	// (subagent_background.go): the most it waits, how long a harness gets to wake
+	// it once the work ends, and how long after such a wake it stays open for
+	// the next one.
+	SubagentBackgroundCeiling   time.Duration
+	SubagentBackgroundWakeGrace time.Duration
+	SubagentBackgroundSettle    time.Duration
+	SpawnedWorkPIDProbe         func(paths []string) (map[string][]int, bool)
+	SpawnedWorkListenProbe      func(pids []int) (map[int]bool, bool)
+	SpawnedWorkSignal           func(pid int, force bool) bool
+	ProviderUpdateRetryBackoffs []time.Duration
+	ProviderUpdateTimeout       time.Duration
+	ProviderUpdateSources       map[string]string
+	ProviderUpdateAssetSources  map[string]string
+	ProviderUpdateRunTimeout    time.Duration
+	ProviderUpdateCommands      map[string]ProviderUpdateCommand
 	// catalogProbeBridge is an unexported test seam for exercising provider
 	// detection's real bridge request budgets without launching a subprocess.
 	catalogProbeBridge      func(key string, opts Options, manager *Manager) *Bridge
@@ -219,6 +226,15 @@ func (o Options) withDefaults() Options {
 	}
 	if o.SpawnedWorkReconcileInterval <= 0 {
 		o.SpawnedWorkReconcileInterval = defaultSpawnedWorkReconcile
+	}
+	if o.SubagentBackgroundCeiling <= 0 {
+		o.SubagentBackgroundCeiling = defaultSubagentBackgroundCeiling
+	}
+	if o.SubagentBackgroundWakeGrace <= 0 {
+		o.SubagentBackgroundWakeGrace = defaultSubagentBackgroundWakeGrace
+	}
+	if o.SubagentBackgroundSettle <= 0 {
+		o.SubagentBackgroundSettle = defaultSubagentBackgroundSettle
 	}
 	if o.SpawnedWorkPIDProbe == nil {
 		o.SpawnedWorkPIDProbe = spawnedWorkPIDsForOutputs

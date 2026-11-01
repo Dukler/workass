@@ -113,6 +113,7 @@
   "schema.browserRead.frame_ref": "Read only this frame: a frame_ref from workass_browser_snapshot (for example f1 in compact format), with its snapshot_id.",
   "schema.browserRead.snapshot_id": "The snapshot_id that element_ref or frame_ref came from.",
   "schema.browserRead.include_frames": "Include the content of frames inside the page. Defaults to true.",
+  "subagent.background_finished": "Background notification, not a message from your coordinator. Background work you started has ended, and nothing else will report it:\n",
   "subagent.followup": "Coordinator follow-up for the same delegated task:\n",
   "subagent.task": "Subagent task:\n",
   "tools.workass_agent_catalog": "List the actual Workass providers, models, effort levels, and permission/mode ids available for tracked subagents. Call this instead of guessing model ids from config files. Pass machine_id to read what ANOTHER fleet machine can run, before you create or configure a chat there.",

@@ -263,6 +263,33 @@ async function runTurn(id, params) {
       return;
     }
   }
+  if (text.includes('[fixture:open-command-then-interrupted]')) {
+    const item = { type: 'commandExecution', id: 'interrupted-command', command: 'sleep 100', commandActions: [], status: 'inProgress' };
+    notify('item/started', { threadId: params.threadId, turnId, item });
+    completeTurn(turnId, 'interrupted');
+    return;
+  }
+  if (text.includes('[fixture:foreground-command]')) {
+    const item = { type: 'commandExecution', id: 'foreground-command', command: 'printf done', commandActions: [] };
+    notify('item/started', { threadId: params.threadId, turnId, item: { ...item, status: 'inProgress' } });
+    notify('item/completed', { threadId: params.threadId, turnId, item: { ...item, status: 'completed', exitCode: 0, aggregatedOutput: 'done' } });
+    completeTurn(turnId, 'completed');
+    return;
+  }
+  if (text.includes('[fixture:background-command]')) {
+    // What real Codex does with a unified-exec command left running: the item
+    // stays in progress past turn/completed, and completes when the process ends.
+    const item = { type: 'commandExecution', id: 'background-command', command: 'sh sweep.sh', commandActions: [] };
+    notify('item/started', { threadId: params.threadId, turnId, item: { ...item, status: 'inProgress' } });
+    completeTurn(turnId, 'completed');
+    if (!text.includes('[fixture:background-command-held]')) {
+      setTimeout(() => notify('item/completed', { threadId: params.threadId, turnId, item: {
+        ...item, status: text.includes('[fixture:background-command-fails]') ? 'failed' : 'completed',
+        exitCode: text.includes('[fixture:background-command-fails]') ? 2 : 0, aggregatedOutput: 'sweep output token=hunter2',
+      } }), 20);
+    }
+    return;
+  }
   if (text.includes('[fixture:native-background]')) {
     pendingNativeChild = 'background-child';
     notify('item/completed', { threadId: params.threadId, turnId,
