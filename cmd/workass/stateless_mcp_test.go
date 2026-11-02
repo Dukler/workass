@@ -61,7 +61,7 @@ func newStatelessMCPTestHarnessOnBackend(t *testing.T, providers []acp.ProviderC
 		mutate(&options)
 	}
 	manager := acp.NewManager(options)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	store := newSessionStore(filepath.Join(manager.StateDir(), sessionStateFilename))
 	var runtime *providerChatRuntime

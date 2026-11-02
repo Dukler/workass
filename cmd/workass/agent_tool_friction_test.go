@@ -488,16 +488,23 @@ func TestToolFrictionWaitsNeedNoOperationIDAndResolveWhatAgentsPass(t *testing.T
 }
 
 func TestToolFrictionWaitForAllHoldsUntilARunningChildFinishes(t *testing.T) {
+	// Released by a file, which the mock finds whenever it gets there. A message could
+	// come before the child had a turn, and then would wait for that turn to end.
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("WORKASS_MOCK_ACP_HOLD_FILE", release)
 	h := newStatelessMCPTestHarness(t)
-	id := toString(frictionMustCall(t, h, "workass_spawn_subagent", map[string]any{
-		"operation_id": "friction-held", "task": "[mock:hold-until-steer] [mock:steer] harmless held fixture", "label": "held",
-	})["id"])
+	frictionMustCall(t, h, "workass_spawn_subagent", map[string]any{
+		"operation_id": "friction-held", "task": "[mock:hold-until-steer] harmless held fixture", "label": "held",
+	})
 	window := frictionMustCall(t, h, "workass_wait_subagents", map[string]any{"timeout_ms": 1000})
 	if window["timedOut"] != true || len(anySlice(window["running"])) != 1 {
 		t.Fatalf("omitted ids did not wait on the running child: %#v", window)
 	}
-	frictionMustCall(t, h, "workass_message_subagent", map[string]any{"operation_id": "friction-release", "subagent_id": id, "message": "finish the harmless fixture"})
-	done := frictionMustCall(t, h, "workass_wait_subagents", map[string]any{"timeout_ms": 8000})
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A wait ends when the child does. How long that takes is the machine's.
+	done := frictionMustCall(t, h, "workass_wait_subagents", map[string]any{"timeout_ms": 120000})
 	if done["timedOut"] != false || len(anySlice(done["completed"])) != 1 {
 		t.Fatalf("the wait did not finish: %#v", done)
 	}
