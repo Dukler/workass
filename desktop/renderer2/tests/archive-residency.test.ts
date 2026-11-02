@@ -471,7 +471,10 @@ test('opening a metadata-only chat paints its last exchange, then pages in the r
   }
 });
 
-test('the rest of an opened chat\'s slice is laid out after its first screen has painted', async () => {
+test('the rest of an opened chat\'s slice is laid out after its first screen has painted', async (t) => {
+  // A virtual clock: a hidden window lays the rest out after 100 ms with or without a
+  // frame, and on a busy machine that passed between these real frames (2 of 90).
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const targetRows = messages(92);
   const previousWindow = (globalThis as any).window;
   const previousFrame = (globalThis as any).requestAnimationFrame;
@@ -487,7 +490,7 @@ test('the rest of an opened chat\'s slice is laid out after its first screen has
       },
     },
   };
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
   try {
     const subject = ownStore(new StoreCtor());
     const first = chat('tab-first', messages(4));
@@ -510,8 +513,54 @@ test('the rest of an opened chat\'s slice is laid out after its first screen has
     await tick();
     assert.equal(target.messages.length, 2);
     runFrame(); // the next one
+    t.mock.timers.tick(1); // the task after that frame
     await subject.recentHistoryLoads.get(target.id);
     assert.deepEqual(target.messages.map((message: Msg) => message.id), targetRows.slice(-10).map((message) => message.id));
+    assert.equal(subject.showsFirstScreenOnly(target.id), false);
+  } finally {
+    if (previousFrame === undefined) delete (globalThis as any).requestAnimationFrame;
+    else (globalThis as any).requestAnimationFrame = previousFrame;
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
+});
+
+test('a hidden window paints no frames, and the rest of the slice still comes after 100 ms', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const targetRows = messages(92);
+  const previousWindow = (globalThis as any).window;
+  const previousFrame = (globalThis as any).requestAnimationFrame;
+  (globalThis as any).requestAnimationFrame = () => 1;
+  (globalThis as any).window = {
+    api: {
+      archiveLoad: async (_tabId: string, options: { lastExchange?: boolean; beforeMessageId?: string; limit?: number }) => {
+        if (options.lastExchange) return targetRows.slice(-2);
+        const end = targetRows.findIndex((message) => message.id === options.beforeMessageId);
+        return targetRows.slice(Math.max(0, end - (options.limit ?? 0)), end);
+      },
+    },
+  };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    const subject = ownStore(new StoreCtor());
+    const first = chat('tab-first', messages(4));
+    const target = chat('tab-target', []);
+    target.messageCount = targetRows.length;
+    target.historyComplete = false;
+    subject.state.chats = [first, target];
+    subject.state.activeId = first.id;
+    subject.state.meta = { daemon: true, sessionSaveMode: 'lean-payload-v2' };
+
+    subject.switchChat(target.id);
+    await tick();
+    await tick();
+    assert.equal(target.messages.length, 2);
+    t.mock.timers.tick(99);
+    await tick();
+    assert.equal(target.messages.length, 2);
+    t.mock.timers.tick(1);
+    await subject.recentHistoryLoads.get(target.id);
+    assert.equal(target.messages.length, 10);
     assert.equal(subject.showsFirstScreenOnly(target.id), false);
   } finally {
     if (previousFrame === undefined) delete (globalThis as any).requestAnimationFrame;
