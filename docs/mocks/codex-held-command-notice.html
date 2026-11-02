@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Mock: a held Codex command ended</title>
+<style>
+  :root {
+    --bg: #151413; --panel: #1d1c1a; --card: #1a1918;
+    --ink: #f2efe9; --ink2: #cfcbc4; --muted: #9c978f; --faint: #6f6b63;
+    --line: rgba(255,255,255,.075); --line2: rgba(255,255,255,.14);
+    --acc: #4fa583; --del: #d96b5f; --shell: #0b0a09;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--shell); color: var(--ink); font: 13.5px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 28px; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  h1 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+  .lede { color: var(--muted); font-size: 12.5px; margin-bottom: 22px; max-width: 86ch; }
+  .lede b { color: var(--ink2); font-weight: 600; }
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; align-items: start; max-width: 1240px; }
+  .opt-h { font-size: 12.5px; font-weight: 600; color: var(--ink2); margin: 0 0 3px 2px; }
+  .opt-note { font-size: 11.5px; color: var(--muted); margin: 0 0 10px 2px; min-height: 36px; }
+  .chat { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; }
+  .user { align-self: flex-end; background: var(--panel); border-radius: 12px; padding: 7px 12px; max-width: 86%; }
+  .reply { color: var(--ink); }
+  .worked { color: var(--faint); font-size: 12px; }
+  .stamp { color: var(--faint); font-size: 11px; }
+  /* The one new thing: one line, and it has nothing to press. */
+  .ended { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 12px; padding: 1px 0; }
+  .ended .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); flex: none; transform: translateY(-1px); }
+  .ended.failed .dot { background: var(--del); }
+  .ended code { color: var(--ink2); }
+  .gap { align-self: center; color: var(--faint); font-size: 11px; }
+  .mark { color: var(--acc); }
+</style>
+</head>
+<body>
+<h1>Codex: a command that outlives its turn ends</h1>
+<p class="lede">Today Workass holds the engine for such a command, at most 24 h, shows no row and tells nobody, so the agent never reads the result. <b>Static mock, nothing is implemented.</b> Either way the agent gets the same notice a Claude background task gets, and it starts a turn, so what it says next appears as usual. <b>The choice is what a person sees before that.</b> No rail row in any option: a row is the larger change.</p>
+
+<div class="options">
+  <section>
+    <p class="opt-h">A. One line in the chat <span class="mark">(smallest visible; my pick)</span></p>
+    <p class="opt-note">It says why the agent spoke without being asked. It goes where the turn's text goes, and it reads like the end of something already there.</p>
+    <div class="chat">
+      <div class="user">Lanzá el barrido en segundo plano y avisame.</div>
+      <div class="worked">Trabajó 8 s</div>
+      <div class="reply">El barrido quedó corriendo; cuando termine reviso el resultado.</div>
+      <div class="gap">3 min después</div>
+      <div class="ended"><span class="dot"></span><span>Terminó <code>sh sweep.sh</code>, salida 0, 3 min 12 s</span></div>
+      <div class="reply">Terminó bien: 41 archivos revisados, 2 con avisos. Los dos están en <code>report.txt</code>.</div>
+    </div>
+  </section>
+
+  <section>
+    <p class="opt-h">B. Nothing new on screen</p>
+    <p class="opt-note">No new UI at all. The agent is told and it speaks. A person who wasn't watching sees a reply nobody asked for, and has to read it to know why.</p>
+    <div class="chat">
+      <div class="user">Lanzá el barrido en segundo plano y avisame.</div>
+      <div class="worked">Trabajó 8 s</div>
+      <div class="reply">El barrido quedó corriendo; cuando termine reviso el resultado.</div>
+      <div class="gap">3 min después</div>
+      <div class="reply">Terminó bien: 41 archivos revisados, 2 con avisos. Los dos están en <code>report.txt</code>.</div>
+    </div>
+  </section>
+
+  <section>
+    <p class="opt-h">A, when it fails</p>
+    <p class="opt-note">Same line, with the failure's color. The reason is the agent's to give, so the line never holds output.</p>
+    <div class="chat">
+      <div class="user">Lanzá el barrido en segundo plano y avisame.</div>
+      <div class="worked">Trabajó 8 s</div>
+      <div class="reply">El barrido quedó corriendo; cuando termine reviso el resultado.</div>
+      <div class="gap">40 s después</div>
+      <div class="ended failed"><span class="dot"></span><span>Falló <code>sh sweep.sh</code>, salida 2, 40 s</span></div>
+      <div class="reply">Falló al abrir <code>config.toml</code>: el archivo no existe. ¿Lo creo con los valores por defecto?</div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
