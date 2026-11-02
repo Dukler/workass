@@ -170,9 +170,20 @@ func main() {
 	if staticDir != "" && !filepath.IsAbs(staticDir) {
 		staticDir = filepath.Join(cwd, staticDir)
 	}
-	stateDir := *stateDirFlag
-	if !filepath.IsAbs(stateDir) {
-		stateDir = filepath.Join(cwd, stateDir)
+	stateDir, err := resolveDaemonStateDir(daemonStateDirRequestFromEnv(*stateDirFlag, flagOverrides["state-dir"], cwd))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workass: %v\n", err)
+		os.Exit(2)
+	}
+	if _, testRoot := testProfileStateDir(); testRoot != "" {
+		if *installService {
+			fmt.Fprintln(os.Stderr, "workass: --install-service registers a real service; it cannot run under a test root")
+			os.Exit(2)
+		}
+		if err := applyTestRootEnv(testRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "workass: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if *installService {
 		if err := installHeadlessService(headlessServiceOptions{

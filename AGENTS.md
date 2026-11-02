@@ -18,7 +18,7 @@ An agentic chat command center. A Go daemon owns all state and hosts provider ch
 
 ## Dev daemon
 
-`WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass --port 18791 --beacon=false` runs the mock provider on loopback. Call it: `node scripts/wire-call.mjs --url wss://127.0.0.1:18791 --insecure CHANNEL '[]'`. `desktop/scripts/dev-launch-macos.sh` starts the dev app.
+`WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass --port 18791 --beacon=false` runs the mock provider on loopback. The test root holds its state, config and `HOME`, so provider CLIs are not logged in there; for logged-in providers use `WORKASS_PROFILE=dev` with a scratch `--state-dir`. In a source checkout, with neither a test root nor `--state-dir`, the daemon refuses to start. Call it: `node scripts/wire-call.mjs --url wss://127.0.0.1:18791 --insecure CHANNEL '[]'`. `desktop/scripts/dev-launch-macos.sh` starts the dev app.
 
 ## Known traps
 

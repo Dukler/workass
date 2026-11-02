@@ -38,8 +38,11 @@ every Workass identity; see `docs/MACOS-SIGNING.md`.
 ## Run
 
 ```sh
-go run ./cmd/workass
+WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass --port 18791 --beacon=false
 ```
+
+With neither a test root nor `--state-dir`, a start from a source checkout is refused; see
+"Test root" in `docs/ENVIRONMENTS.md`.
 
 Defaults:
 
@@ -48,7 +51,7 @@ Defaults:
 - `--renderer-dir ""` (serve embedded `renderer2`; pass a directory to override from disk)
 - `--acp-command node`
 - `--acp-args '["desktop/acp/mock-server.mjs"]'`
-- `--state-dir state`
+- `--state-dir state`, outside a source checkout; under a test root, `<root>/state`
 - `--trust-localhost true`
 - `--hibernate-ttl 20m`
 - `--rss-sample-interval 30s`
@@ -106,7 +109,7 @@ or discarded by this command; malformed state remains a startup error.
 To run explicitly against the mock:
 
 ```sh
-go run ./cmd/workass \
+WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass \
   --acp-command node \
   --acp-args '["desktop/acp/mock-server.mjs"]'
 ```
@@ -114,7 +117,7 @@ go run ./cmd/workass \
 To serve a renderer directory from disk during development:
 
 ```sh
-go run ./cmd/workass --renderer-dir desktop/renderer
+WORKASS_PROFILE=test WORKASS_TEST_ROOT=$(mktemp -d) go run ./cmd/workass --renderer-dir desktop/renderer
 ```
 
 Check the mock oracle directly before debugging daemon behavior:
