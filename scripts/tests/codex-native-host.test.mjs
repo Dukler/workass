@@ -330,6 +330,20 @@ test('native Codex host preserves external MCP stdio configuration', async (t) =
   assert.equal(opened.result.sessionId, 'fixture-codex-thread');
 });
 
+test('native Codex host reads the catalog again when ready lands right behind an older list', async (t) => {
+  const peer = startHost({ WORKASS_CODEX_FIXTURE_MCP_READY_BEHIND_LIST: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: {
+    cwd: repoRoot,
+    mcpServers: [{ name: 'fixture-browser', command: '/fixture/external-tool-server', args: ['serve-external-mcp'], env: [] }],
+  } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  assert.equal(opened.error, undefined, JSON.stringify(opened));
+  assert.equal(opened.result.sessionId, 'fixture-codex-thread');
+});
+
 test('native Codex host waits for delayed official MCP readiness and proves every configured catalog', async (t) => {
   const peer = startHost({
     WORKASS_CODEX_FIXTURE_REQUIRE_STDIO_MCP: '1',

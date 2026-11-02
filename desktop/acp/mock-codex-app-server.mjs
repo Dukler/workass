@@ -118,6 +118,11 @@ function startMCPFixtures(threadId, configured) {
       });
       continue;
     }
+    if (process.env.WORKASS_CODEX_FIXTURE_MCP_READY_BEHIND_LIST === '1') {
+      startup.set(name, 'starting');
+      notify('mcpServer/startupStatus/updated', { threadId, name, status: 'starting' });
+      continue;
+    }
     if (Number.isFinite(delayed) && delayed > 0) {
       startup.set(name, 'starting');
       notify('mcpServer/startupStatus/updated', { threadId, name, status: 'starting' });
@@ -546,7 +551,7 @@ async function handle(message) {
     const configured = threadMCPConfigs.get(params.threadId) || {};
     const startup = threadMCPStartup.get(params.threadId) || new Map();
     const empty = process.env.WORKASS_CODEX_FIXTURE_MCP_EMPTY_CATALOG === '1';
-    return respond(id, {
+    respond(id, {
       data: Object.keys(configured).map((name) => ({
         name,
         authStatus: 'unsupported',
@@ -558,6 +563,16 @@ async function handle(message) {
       })),
       nextCursor: null,
     });
+    // The server finishes starting just as the list leaves, so the status lands right
+    // behind an answer that was already out of date.
+    if (process.env.WORKASS_CODEX_FIXTURE_MCP_READY_BEHIND_LIST === '1') {
+      for (const name of Object.keys(configured)) {
+        if (startup.get(name) === 'ready') continue;
+        startup.set(name, 'ready');
+        notify('mcpServer/startupStatus/updated', { threadId: params.threadId, name, status: 'ready' });
+      }
+    }
+    return;
   }
   if (method === 'turn/start') return void runTurn(id, params).catch((error) => write({ id, error: { code: -32603, message: error.message } }));
   if (method === 'turn/steer') {

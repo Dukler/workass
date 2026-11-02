@@ -1023,6 +1023,7 @@ async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
     const found = new Set();
     const cursors = new Set();
     let cursor = null;
+    const askedAtRevision = app.mcpStartupRevision;
     do {
       const response = await app.request('mcpServerStatus/list', {
         threadId,
@@ -1047,6 +1048,7 @@ async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
 
     const missing = [...required].filter((name) => !found.has(name));
     if (!missing.length) return;
+    let readyBehindTheList = false;
     for (const name of missing) {
       const startup = app.mcpStartupStatus(threadId, name, afterStartupRevision);
       if (startup?.status === 'failed' || startup?.status === 'cancelled') {
@@ -1054,9 +1056,13 @@ async function requireMCPToolCatalogs(threadId, config, afterStartupRevision) {
         throw workassMCPStartupError(`Codex MCP server ${name} startup ${startup.status}${reason}`);
       }
       if (startup?.status === 'ready') {
-        throw workassMCPStartupError(`Codex MCP tool catalog is unavailable for: ${name}`);
+        // A list asked before the server was ready says nothing about its tools, and
+        // the two can reach this host together: read it again before calling it missing.
+        if (startup.revision > askedAtRevision) readyBehindTheList = true;
+        else throw workassMCPStartupError(`Codex MCP tool catalog is unavailable for: ${name}`);
       }
     }
+    if (readyBehindTheList) continue;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       throw workassMCPStartupError(`Codex MCP tool catalog is unavailable for: ${missing.join(', ')}`);
