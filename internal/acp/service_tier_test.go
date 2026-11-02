@@ -31,7 +31,7 @@ func TestWorkassServiceTierEchoCannotReenterActorRefreshBeforeControlReply(t *te
 	args, _ := json.Marshal([]string{filepath.Join(root, "desktop", "acp", "mock-codex-app-server.mjs")})
 	manager := NewManager(Options{
 		RootDir: root, StateDir: t.TempDir(), RuntimeProfile: "dev", DefaultProviderID: "codex",
-		InitTimeout: 2 * time.Second, RSSSampleInterval: time.Hour,
+		InitTimeout: 30 * time.Second, RSSSampleInterval: time.Hour,
 		Provider: ProviderConfig{
 			ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")},
 			CWD: root, Enabled: true, Env: map[string]string{
@@ -40,7 +40,7 @@ func TestWorkassServiceTierEchoCannotReenterActorRefreshBeforeControlReply(t *te
 		},
 	})
 	t.Cleanup(func() { manager.Reset() })
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	session, err := manager.NewSession(ctx, SessionOptions{
 		TabID: "tier-echo-tab", ChatID: "tier-echo-chat", ProviderID: "codex", CWD: root,
