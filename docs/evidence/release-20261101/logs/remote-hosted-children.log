@@ -1,0 +1,58 @@
++   1s [rig] machine added true 
++  23s [rig] parent ready, host machine m-1593
++  24s [rig] host catalog read over the mesh after 0 tries: 
++  24s [rig] links no peer daemon has linked to this machine pair m-<id> name="build-mac" UP (silent 23s) in this peer has not linked in out paired lastUse=2026-11-02T01:43:46Z (recorded at most every 5m0s) lan 192.
++  25s [rig] rail window true
++  27s [codex] spawned on host wa-subagent-1793583850958-1 codex gpt-5.6-luna background=40s
++  27s [hold] holder xw1GbSf9q6W3NE
++  27s [codex] status=running phase=working activity="Running delegated task" process=gone marker=absent
++  30s [codex] status=running phase=thinking activity="Reasoning" process=gone marker=absent
++  32s [codex] status=running phase=tool activity="/bin/zsh -lc 'sh /private/var/folders/rf/s7wt0m9x54951n3tfvfpgjk80000g" process=alive marker=absent
++  33s [killed] spawned on host wa-subagent-1793583852492-2 claude haiku background=240s
++  33s [killed] status=running phase=working activity="Running delegated task" process=gone marker=absent
++  33s [codex] status=running phase=working activity="Writing response" process=alive marker=absent
++  34s [codex] status=running phase=waiting_background activity="Waiting for background work: /bin/zsh -lc 'sh /private/var/folders/rf/" process=alive marker=absent
++  36s [claude] spawned on host wa-subagent-1793583858015-3 claude haiku background=40s
++  36s [hold] waiter queued behind it with max_hold 15s, waits about 35s, holds 8s
++  36s [claude] status=running phase=working activity="Running delegated task" process=gone marker=absent
++  36s [hold] waiter:queued/q2/stalled=- over:queued/q3/stalled=-
++  39s [killed] status=running phase=tool activity="Run sweep script in background" process=alive marker=absent
++  40s [killed] status=running phase=waiting_background activity="Waiting for background work: Run sweep script in background" process=alive marker=absent
++  41s [claude] status=running phase=tool activity="Run sweep script in background" process=alive marker=absent
++  41s [killed] SIGKILL host engine found
++  42s [killed] status=running phase=waiting_background activity="Waiting for background work: Run sweep script in background" process=gone marker=absent
++  43s [claude] status=running phase=working activity="Writing response" process=alive marker=absent
++  45s [claude] status=running phase=waiting_background activity="Waiting for background work: Run sweep script in background" process=alive marker=absent
++  46s [killed] status=failed phase=failed activity="Failed" process=gone marker=absent
++  48s [claude] rail row [{"label":"rig overholder","status":"running","host":true},{"label":"rig waiter","status":"running","host":true},{"label":"rig claude","status":"running","phase":"waiting_background","host":true},{"label":"rig holder","status":"running","host":true},{"label":"rig codex","status":"running","phase":"waiting_background","host":true},{"label":"rig killed","status":"failed","phase":"failed","host":true}]
++  48s [claude] rail dom {"rows":[],"oldLabel":false,"waitText":false}
++  58s [killed] RESULT {"sawWaiting":true,"settled":"failed","workAliveAtSettle":false,"markerAtSettle":false,"message":null,"receipt":{"status":"failed","elapsedMs":18188,"result":"","error":"the provider engine exited while this subagent was waiting for its background work. Background work was still running when this subagent's session closed, and it was stopped: \"Run sweep script in background\". Treat anything it was producing as incomplete."},"finished":false,"childRead":false,"heartbeat":"started 22:44:23 | signal TERM at 22:44:27","notices":1,"noticeStatus":["failed"],"backgroundStoppedInNotice":true}
++  69s [hold] waiter:running/q1/stalled=- over:queued/q2/stalled=-
++  73s [codex] status=running phase=tool activity="/bin/zsh -lc 'sh /private/var/folders/rf/s7wt0m9x54951n3tfvfpgjk80000g" process=gone marker=written
++  77s [hold] waiter:undefined/q-/stalled=- over:running/q1/stalled=-
++  83s [claude] status=running phase=waiting_background activity="Waiting for background work: Run sweep script in background" process=gone marker=written
++  84s [codex] status=running phase=working activity="Reading finished background work" process=gone marker=written
++  85s [claude] status=running phase=tool activity="Read" process=gone marker=written
++  85s [codex] status=running phase=tool activity="/bin/zsh -lc \"sed -n '1,200p' /private/var/folders/rf/s7wt0m9x54951n3t" process=gone marker=written
++  86s [claude] status=running phase=tool activity="<tmp>/wa-rrig-mvyli" process=gone marker=written
++  86s [hold] waiter:undefined/q-/stalled=- over:running/q1/stalled=true
++  86s [codex] status=done phase=done activity="Completed" process=gone marker=written
++  87s [claude] status=running phase=working activity="Writing response" process=gone marker=written
++  90s [claude] status=done phase=done activity="Completed" process=gone marker=written
++  99s [hold] waiter:undefined/q-/stalled=- over:undefined/q-/stalled=-
++  99s [hold] RESULT {"waiterStalledFlag":false,"waiterNotices":["done"],"waiterFalseStall":false,"overStalledFlag":true,"overNotices":[],"overStallNotice":false}
++  99s [hold] waiter notice <task-notification> <task-id>xwbK7zrq233uPg</task-id> <status>done</status> <summary>Job "rig waiter" finished</summary> <exit-code>0</exit-code> <run-time>8s</run-time> <queued>32s</queued> <output-file><repo>/.dev/rrig/mvyli0za1pnp/h/state/external-work/xwbK7zrq233uPg.output</output-file> <result>Finished with exit 0 after 8s</result> </task-notification>
++ 100s [codex] RESULT {"sawWaiting":true,"settled":"done","workAliveAtSettle":false,"markerAtSettle":true,"message":null,"receipt":{"status":"done","elapsedMs":60528,"result":"The sweep is running and the notification will report when it finishes.\n\nRESULT:SWEEP-DONE-codexmvyli0za1pnp"},"finished":true,"childRead":true,"heartbeat":"started 22:44:16","notices":0,"noticeStatus":[],"backgroundStoppedInNotice":false}
++ 103s [claude] RESULT {"sawWaiting":true,"settled":"done","workAliveAtSettle":false,"markerAtSettle":true,"message":null,"receipt":{"status":"done","elapsedMs":56733,"result":"The sweep is running and the notification will report when it finishes.\n\nRESULT:\nSWEEP-DONE-claudemvyli0za1pnp"},"finished":true,"childRead":true,"heartbeat":"started 22:44:26","notices":0,"noticeStatus":[],"backgroundStoppedInNotice":false}
++ 106s [ownerdown] spawned on host wa-subagent-1793583928318-4 claude haiku background=30s
++ 106s [ownerdown] status=running phase=working activity="Running delegated task" process=gone marker=absent
++ 110s [ownerdown] status=running phase=tool activity="Start owner-down sweep script in background" process=gone marker=absent
++ 112s [ownerdown] status=running phase=tool activity="Start owner-down sweep script in background" process=alive marker=absent
++ 113s [ownerdown] status=running phase=waiting_background activity="Waiting for background work: Start owner-down sweep script in backgrou" process=alive marker=absent
++ 113s [ownerdown] owner daemon stopping while the child waits on the host
++ 167s [ownerdown] work finished while the owner was down: true
++ 167s [ownerdown] owner back
++ 172s [ownerdown] status=done phase=done activity="Completed" process=gone marker=written
++ 185s [ownerdown] RESULT {"sawWaiting":true,"settled":"done","workAliveAtSettle":false,"markerAtSettle":true,"message":null,"down":true,"receipt":{"status":"done","elapsedMs":64179,"result":"The sweep is running and the notification will report when it finishes.\n\nRESULT:\nSWEEP-DONE-ownerdownmvyli0za1pnp"},"finished":true,"childRead":true,"heartbeat":"started 22:45:36","notices":0,"noticeStatus":[],"backgroundStoppedInNotice":false}
++ 229s [rig] NOTICES {"killed":["Agent \"rig killed\" failed"],"codex":["Agent \"rig codex\" finished"],"claude":["Agent \"rig claude\" finished"],"ownerdown":["Agent \"rig ownerdown\" finished"]} after 42s
++ 229s [rig] DONE /.dev/rrig/mvyli0za1pnp

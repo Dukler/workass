@@ -1,0 +1,7 @@
+01:48:34.444 alerts_after_12s {"toasts":[],"paneError":null}
+01:48:34.447 video_after_6s {"video":true,"src":"/workass/artifacts/@m-<id>/rig-clip-a46b9d38d448/","readyState":4,"networkState":1,"error":null,"muted":true,"videoWidth":640,"videoHeight":360,"duration":12,"currentTime":12,"paused":true,"controls":true,"seeking":false,"buffered":[[0,12]],"rect":{"w":320,"h":941,"x":0,"y":0},"inner":{"w":320,"h":941},"hidden":false}
+01:48:34.456 play "playing"
+01:48:38.962 playback {"t1":1.461819,"t2":4.465171,"advanced":true,"paused":false,"readyState":4,"error":null}
+01:48:39.507 page_nonblack_share 0.16712410501193317
+01:48:43.995 after_seek {"video":true,"src":"/workass/artifacts/@m-<id>/rig-clip-a46b9d38d448/","readyState":4,"networkState":1,"error":null,"muted":true,"videoWidth":640,"videoHeight":360,"duration":12,"currentTime":12,"paused":true,"controls":true,"seeking":false,"buffered":[[0,12]],"rect":{"w":320,"h":941,"x":0,"y":0},"inner":{"w":320,"h":941},"hidden":false}
+01:48:44.853 muted_at_end [{"id":5,"audioMuted":true,"audible":false},{"id":4,"audioMuted":false,"audible":false},{"id":3,"audioMuted":true,"audible":false},{"id":2,"audioMuted":true,"audible":false},{"id":1,"audioMuted":true,"audible":false}]

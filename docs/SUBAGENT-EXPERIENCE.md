@@ -52,7 +52,8 @@ also bounded.
 
 A child that starts a background shell, Monitor or native agent and ends its turn
 is waiting, not done (`internal/acp/subagent_background.go`). Its row reads
-`waiting_background` with the work named, and a parent's wait keeps waiting. Claude
+`waiting_background` with the work named, and a parent's wait keeps waiting. The rail
+shows it as Trabajando, since no label of its own has an approved mock. Claude
 Code wakes it when the work ends; real Codex never starts a turn by itself, so the
 daemon sends one prompt after a 10-second grace. Codex reports a command left
 running only by its item staying in progress past `turn/completed`, which the host

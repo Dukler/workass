@@ -1,0 +1,9 @@
++  25s [hold] holder xw-k8uA47DR2sf
++  29s [hold] waiter queued behind it with max_hold 15s, waits about 35s, holds 8s
++  29s [hold] waiter:queued/q2/stalled=- over:queued/q3/stalled=-
++  66s [hold] waiter:running/q1/stalled=- over:queued/q2/stalled=-
++  74s [hold] waiter:undefined/q-/stalled=- over:running/q1/stalled=-
++  81s [hold] waiter:undefined/q-/stalled=- over:running/q1/stalled=true
++  96s [hold] waiter:undefined/q-/stalled=- over:undefined/q-/stalled=-
++  96s [hold] RESULT {"waiterStalledFlag":false,"waiterNotices":["done"],"waiterFalseStall":false,"overStalledFlag":true,"overNotices":["stalled"],"overStallNotice":true}
++  96s [hold] waiter notice <task-notification> <task-id>xwOsQoqPvmWKuu</task-id> <status>done</status> <summary>Job "rig waiter" finished</summary> <exit-code>0</exit-code> <run-time>8s</run-time> <queued>36s</queued> <output-file><repo>/.dev/rrig/mvyledzl1ke9/h/state/external-work/xwOsQoqPvmWKuu.output</output-file> <result>Finished with exit 0 after 8s</result> </task-notification>

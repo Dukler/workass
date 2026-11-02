@@ -1,0 +1,36 @@
+[merged] nonLoopbackSockets []
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] start: ACP provider disabled: claude
+[merged] turns seen ["app-chat","harness-turn"]
+[merged] rows [{"label":"human-child","status":"running","turn":"app-chat","model":"Haiku5.5-low"},{"label":"wake-child","status":"running","turn":"harness-turn","model":"Haiku5.5-low"}]
+[merged] spawn human-child no cwd: ok effort=low cwd=chat cwd
+[merged] spawn wake-child  no cwd: ok effort=low cwd=chat cwd
+[merged] spawn wake-child  explicit cwd: not run
+[merged] NO TURN   message human-child: {"delivery":"live","ok":true,"strategy":"claude-live","subagentId":"wa-subagent-1793584115665-1"}
+[merged] NO TURN   message wake-child:  {"delivery":"live","ok":true,"strategy":"claude-live","subagentId":"wa-subagent-1793584136373-2"}
+[merged] NO TURN   wait    wake-child:  exit 1: {"error":"timed out waiting for subagent; it is still running"}
+[merged] IN TURN   message human-child: {"delivery":"live","ok":true,"strategy":"claude-live","subagentId":"wa-subagent-1793584115665-1"}
+[merged] IN TURN   message wake-child:  {"delivery":"live","ok":true,"strategy":"claude-live","subagentId":"wa-subagent-1793584136373-2"}
+[merged] IN TURN   wait    wake-child:  exit 1: {"error":"timed out waiting for subagent; it is still running"}
+[merged] IN TURN   cancel  wake-child:  {"ok":true}
+[merged] IN TURN   cancel  human-child: {"ok":true}
+[merged] final list [{"label":"human-child","status":"cancelled"},{"label":"wake-child","status":"cancelled"}]
