@@ -6,6 +6,15 @@ const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const { createConnectedArtifactBridge, parseArtifactURL, allowedHeaders, safeResponseHeaders, shouldInjectArtifactHeader } = require('./connected-artifacts');
 
+// Waits for what the bridge will do rather than for a guess at how long it takes.
+async function until(ready, what) {
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 2))) {
+    const value = ready();
+    if (value) return value;
+  }
+  assert.fail(`never saw ${what}`);
+}
+
 function fixture(viewURL = 'http://127.0.0.1:32123') {
   const sent = [];
   const wc = new EventEmitter(); wc.id = 1; wc.mainFrame = {};
@@ -86,12 +95,12 @@ test('oversized or malformed chunks fail safely', async () => {
   const { bridge, sent, wc } = fixture();
   const req = new EventEmitter(); req.method = 'GET'; req.url = '/workass/connected-artifacts/m/a/x'; req.headers = { host: '127.0.0.1:32123', 'x-workass-artifact-access': bridge.capability }; req.socket = { remoteAddress: '127.0.0.1' };
   const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; }; res.destroy = () => { res.destroyed = true; };
-  const running = bridge.handle(req, res); await new Promise((r) => setTimeout(r, 20));
-  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, headers: {}, transferId: 't' });
-  await new Promise((r) => setTimeout(r, 20));
-  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[1].requestId, ok: true, bodyBase64: Buffer.alloc(128 * 1024 + 1).toString('base64'), eof: false });
-  await new Promise((r) => setTimeout(r, 20));
-  const close = sent.find((item) => item.op === 'close'); assert.ok(close);
+  const running = bridge.handle(req, res);
+  const open = await until(() => sent[0], 'the open');
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: open.requestId, ok: true, status: 200, headers: {}, transferId: 't' });
+  const read = await until(() => sent[1], 'the read');
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: read.requestId, ok: true, bodyBase64: Buffer.alloc(128 * 1024 + 1).toString('base64'), eof: false });
+  const close = await until(() => sent.find((item) => item.op === 'close'), 'the close');
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
   await running; assert.equal(res.destroyed, true); bridge.close();
 });
@@ -100,10 +109,10 @@ test('HEAD never requests a body and closes its transfer', async () => {
   const { bridge, sent, wc } = fixture();
   const req = new EventEmitter(); req.method = 'HEAD'; req.url = '/workass/connected-artifacts/m/a/x'; req.headers = { host: '127.0.0.1:32123', 'x-workass-artifact-access': bridge.capability }; req.socket = { remoteAddress: '127.0.0.1' };
   const res = new EventEmitter(); res.headersSent = false; res.writableEnded = false; res.writeHead = (s) => { res.status = s; res.headersSent = true; }; res.end = () => { res.writableEnded = true; }; res.destroy = () => { res.destroyed = true; };
-  const running = bridge.handle(req, res); await new Promise((r) => setTimeout(r, 20));
-  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: sent[0].requestId, ok: true, status: 200, headers: {}, transferId: 't' });
-  await new Promise((r) => setTimeout(r, 20));
-  const close = sent.find((x) => x.op === 'close'); assert.ok(close);
+  const running = bridge.handle(req, res);
+  const open = await until(() => sent[0], 'the open');
+  bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: open.requestId, ok: true, status: 200, headers: {}, transferId: 't' });
+  const close = await until(() => sent.find((x) => x.op === 'close'), 'the close');
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
   await running; assert.equal(res.status, 200); assert.equal(sent.some((x) => x.op === 'read'), false); bridge.close();
 });
@@ -118,18 +127,15 @@ test('redirects preserve canonical or legacy family, owner, query, and fragment'
     res.writeHead = (status, headers) => { res.status = status; res.headers = headers; res.headersSent = true; };
     res.write = () => true; res.end = () => { res.writableEnded = true; };
     const running = bridge.handle(req, res);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const open = sent.find((item) => item.op === 'open'); assert.ok(open);
+    const open = await until(() => sent.find((item) => item.op === 'open'), 'the open');
     assert.equal(open.machineId, 'm1'); assert.equal(open.path, expectedPath);
     bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, {
       requestId: open.requestId, ok: true, status: 302, transferId: 'redirect',
       headers: { Location: '/workass/artifacts/a1/index.html?next=1#fragment' },
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const read = sent.find((item) => item.op === 'read'); assert.ok(read);
+    const read = await until(() => sent.find((item) => item.op === 'read'), 'the read');
     bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: read.requestId, ok: true, bodyBase64: '', eof: true });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const close = sent.find((item) => item.op === 'close'); assert.ok(close);
+    const close = await until(() => sent.find((item) => item.op === 'close'), 'the close');
     bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: close.requestId, ok: true });
     await running;
     assert.equal(res.status, 302);
@@ -151,7 +157,7 @@ test('aborting one request does not cancel another transfer', async () => {
   };
   const first = make(); const second = make();
   const one = bridge.handle(first.req, first.res); const two = bridge.handle(second.req, second.res);
-  await new Promise((r) => setTimeout(r, 20));
+  await until(() => sent.filter((x) => x.op === 'open').length >= 2, 'both opens');
   const opens = sent.filter((x) => x.op === 'open'); assert.equal(opens.length, 2);
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: opens[0].requestId, ok: true, status: 200, transferId: 'one' });
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: opens[1].requestId, ok: true, status: 200, transferId: 'two' });
@@ -161,22 +167,21 @@ test('aborting one request does not cancel another transfer', async () => {
   bridge.close(); await Promise.allSettled([one, two]);
 });
 
-test('owned renderer can stream bounded artifact chunks', async () => {
+test('owned renderer can stream bounded artifact chunks', async (t) => {
   let bridge; const sent = []; const wc = new EventEmitter(); wc.id = 1; wc.mainFrame = {}; wc.send = (_channel, payload) => sent.push(payload);
   const win = { webContents: wc };
   const server = http.createServer((req, res) => { void bridge.handle(req, res); });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // A failed assertion below must not leave the server up: the file would never exit.
+  t.after(() => { server.closeAllConnections(); server.close(); });
   const port = server.address().port;
   bridge = createConnectedArtifactBridge({ win, viewServer: { url: `http://127.0.0.1:${port}` }, getOwnedWebContents: () => [] });
   const response = new Promise((resolve) => { http.get({ host: '127.0.0.1', port, path: '/workass/connected-artifacts/m/a/file.txt', headers: { 'X-Workass-Artifact-Access': bridge.capability } }, resolve); });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  const open = sent.find((item) => item.op === 'open'); assert.ok(open);
+  const open = await until(() => sent.find((item) => item.op === 'open'), 'the open');
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: open.requestId, ok: true, status: 200, headers: { 'Content-Type': 'text/plain' }, transferId: 't1' });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  const read = sent.find((item) => item.op === 'read'); assert.ok(read);
+  const read = await until(() => sent.find((item) => item.op === 'read'), 'the read');
   bridge.reply({ sender: wc, senderFrame: wc.mainFrame }, { requestId: read.requestId, ok: true, bodyBase64: Buffer.from('ok').toString('base64'), eof: true });
   const res = await response; let body = ''; res.setEncoding('utf8'); res.on('data', (x) => { body += x; }); await new Promise((resolve) => res.on('end', resolve));
   assert.equal(body, 'ok');
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  server.close(); bridge.close();
+  bridge.close();
 });
