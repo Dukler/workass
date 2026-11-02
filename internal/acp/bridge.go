@@ -116,9 +116,11 @@ type Bridge struct {
 	lastWorkassModelWrite map[string]string
 	durableModelSelection map[string]string
 
-	sessions       map[string]struct{}
-	seededSessions map[string]struct{}
-	jobsBySession  map[string]*Job
+	sessions map[string]struct{}
+	// Commands still running past their turn, and since when (lifecycle.go).
+	outlivingCommands map[string]time.Time
+	seededSessions    map[string]struct{}
+	jobsBySession     map[string]*Job
 	// endingJobs holds a job released from its session whose end event is not
 	// yet published, so a provider-started turn waits for it (harness_turn.go).
 	endingJobs      map[string]*Job

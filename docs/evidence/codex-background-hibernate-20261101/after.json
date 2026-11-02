@@ -1,0 +1,249 @@
+{
+  "label": "after",
+  "ttlSeconds": 20,
+  "timeline": [
+    {
+      "s": 0,
+      "lines": 0,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 3,
+      "lines": 0,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 6,
+      "lines": 3,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 9,
+      "lines": 6,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 12,
+      "lines": 9,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 15,
+      "lines": 12,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 18,
+      "lines": 15,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 21,
+      "lines": 18,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 24,
+      "lines": 21,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 27,
+      "lines": 24,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 30,
+      "lines": 27,
+      "hib": 1,
+      "aborted": 1
+    },
+    {
+      "s": 33,
+      "lines": 30,
+      "hib": 1,
+      "aborted": 1
+    },
+    {
+      "s": 36,
+      "lines": 33,
+      "hib": 2,
+      "aborted": 2
+    },
+    {
+      "s": 39,
+      "lines": 36,
+      "hib": 2,
+      "aborted": 2
+    },
+    {
+      "s": 42,
+      "lines": 38,
+      "hib": 3,
+      "aborted": 3
+    },
+    {
+      "s": 45,
+      "lines": 41,
+      "hib": 4,
+      "aborted": 4
+    },
+    {
+      "s": 48,
+      "lines": 44,
+      "hib": 4,
+      "aborted": 4
+    },
+    {
+      "s": 51,
+      "lines": 47,
+      "hib": 5,
+      "aborted": 5
+    },
+    {
+      "s": 54,
+      "lines": 50,
+      "hib": 5,
+      "aborted": 5
+    },
+    {
+      "s": 57,
+      "lines": 53,
+      "hib": 6,
+      "aborted": 6
+    },
+    {
+      "s": 60,
+      "lines": 56,
+      "hib": 7,
+      "aborted": 7
+    },
+    {
+      "s": 63,
+      "lines": 59,
+      "hib": 7,
+      "aborted": 7
+    },
+    {
+      "s": 66,
+      "lines": 62,
+      "hib": 8,
+      "aborted": 8
+    },
+    {
+      "s": 69,
+      "lines": 65,
+      "hib": 8,
+      "aborted": 8
+    },
+    {
+      "s": 72,
+      "lines": 68,
+      "hib": 9,
+      "aborted": 9
+    },
+    {
+      "s": 75,
+      "lines": 71,
+      "hib": 10,
+      "aborted": 10
+    },
+    {
+      "s": 78,
+      "lines": 74,
+      "hib": 10,
+      "aborted": 10
+    },
+    {
+      "s": 81,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 84,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 87,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 90,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 93,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 96,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 99,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 102,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 105,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 108,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    },
+    {
+      "s": 111,
+      "lines": 75,
+      "hib": 11,
+      "aborted": 11
+    }
+  ],
+  "heartbeats": {
+    "wanted": 75,
+    "got": 75,
+    "stoppedAtSecond": 84
+  },
+  "survived": true,
+  "hibernate_log": [
+    "2026/11/01 22:03:08 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}",
+    "2026/11/01 22:03:13 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}",
+    "2026/11/01 22:03:18 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}",
+    "2026/11/01 22:03:23 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}",
+    "2026/11/01 22:03:28 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}",
+    "2026/11/01 22:03:33 [acp] acp hibernate aborted {\"key\":\"codex:tab-mvyk15f1-1\",\"pinned\":false,\"reason\":\"idle-ttl\",\"spawnedWork\":true,\"state\":\"idle\"}"
+  ],
+  "hibernate_held": 11
+}

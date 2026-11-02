@@ -760,6 +760,12 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 		return
 	}
 	if providerAdapterForID(providerID).spawnedWork.ChildSessionOnly(event.Task) && !strings.HasPrefix(chatID, subagentChatIDPrefix) {
+		m.mu.Lock()
+		bridge := m.sessionBridge[sessionID]
+		m.mu.Unlock()
+		if bridge != nil {
+			bridge.noteOutlivingCommand(event.Task.TaskID, event.Task.Status == "running", time.Now())
+		}
 		return
 	}
 	now := time.Now().UTC()
