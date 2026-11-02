@@ -829,6 +829,8 @@ class FixtureQuery {
       if (fixtureMarker(text, 'harness-turn') !== null) await this.harnessTurn();
       if (fixtureMarker(text, 'harness-turn-dies') !== null) await this.harnessTurn({ dies: true });
       if (fixtureMarker(text, 'harness-open') !== null) await this.harnessTurn({ open: true });
+      const harnessHold = fixtureMarker(text, 'harness-hold');
+      if (harnessHold !== null) await this.harnessTurn({ holdMs: Number(harnessHold) });
       if (text.includes('[fixture:transport-closes-after-result]')) {
         this.transportReady = false;
       }
@@ -897,10 +899,10 @@ class FixtureQuery {
 
   // A turn nobody asked for: the harness wakes the session when background work
   // settles. This is the shape that produced the 76-minute false park.
-  async harnessTurn({ dies = false, open = false, settles = null } = {}) {
+  async harnessTurn({ dies = false, open = false, settles = null, holdMs = 0 } = {}) {
     // A real wake arrives while the session is idle, after the host has
     // settled the previous result.
-    if (dies || open || settles) await new Promise((resolve) => setTimeout(resolve, 50));
+    if (dies || open || settles || holdMs) await new Promise((resolve) => setTimeout(resolve, 50));
     // `settles` replays a real background task finishing while idle, in the
     // order the real CLI emits it (captured 2026-10-13): task_updated, then
     // task_notification with its status, output file and summary.
@@ -938,6 +940,8 @@ class FixtureQuery {
       this.close();
       return;
     }
+    // Stays running long enough for a tool to act inside the turn.
+    if (holdMs) await new Promise((resolve) => setTimeout(resolve, holdMs));
     await this.fireHook('Stop', {
       stop_hook_active: false,
       last_assistant_message: 'Fixture harness-born answer',

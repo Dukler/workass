@@ -478,13 +478,25 @@ func (m *Manager) endAdoptedHarnessTurn(bridge *Bridge, sessionID string, eviden
 		return
 	}
 	job.Status, job.StopReason, job.Error = harnessTerminalOutcome(terminalReason, stopReason, job.cancelled)
-	m.rememberFinishedJobLocked(job.ID)
-	delete(m.jobs, job.ID)
 	m.mu.Unlock()
+	m.retireHarnessTurn(job)
 	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 	bridge.clearJobForSession(sessionID, job)
 	m.notifyJobEnd(job.TabID, job.ChatID)
+}
+
+// retireHarnessTurn removes a turn from the running jobs once its terminal status
+// is set. A Workass question it asked has no other owner and no clock of its own,
+// so it settles here, before the end is published: its terminal event still has to
+// reach the chat that owns the card. That status already refuses a new question, so
+// none can be admitted in between.
+func (m *Manager) retireHarnessTurn(job *Job) {
+	m.cancelWorkassQuestionsForJob(job.ID)
+	m.mu.Lock()
+	m.rememberFinishedJobLocked(job.ID)
+	delete(m.jobs, job.ID)
+	m.mu.Unlock()
 }
 
 // harnessTerminalOutcome maps the harness's own terminal reason onto the job
@@ -524,9 +536,8 @@ func (m *Manager) abandonAdoptedHarnessTurn(bridge *Bridge, sessionID string) {
 	}
 	job.Status = "failed"
 	job.StopReason = "engine-crash"
-	m.rememberFinishedJobLocked(job.ID)
-	delete(m.jobs, job.ID)
 	m.mu.Unlock()
+	m.retireHarnessTurn(job)
 	m.classifyDispositionForJob(job)
 	m.emit("job:event", map[string]any{"type": "end", "job": job.Public()})
 	bridge.clearJobForSession(sessionID, job)
