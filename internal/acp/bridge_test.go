@@ -1280,7 +1280,6 @@ func TestProviderRegistryCatalogToggleFailureAndConcurrentIsolation(t *testing.T
 		},
 		DefaultProviderID:    "mock",
 		Broadcast:            events.Broadcast,
-		InitTimeout:          400 * time.Millisecond,
 		StdoutFlushInterval:  10 * time.Millisecond,
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
