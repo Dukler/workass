@@ -591,40 +591,52 @@ func TestWaitingForAResourceIsNeitherAStallNorRunTime(t *testing.T) {
 	}
 	spec, reporter := fastSpec(t, state, "/bin/sh", "-c", "echo ran")
 	spec.Resource = "gpu0"
-	// Well inside the wait, so a stall clock running in the queue would fire, and
-	// wide enough that the command itself cannot trip it on a busy machine.
+	// Well inside the wait, so a stall clock running in the queue would fire. On a
+	// machine busy enough the command itself can take this long, and that stall is the
+	// command's own: the clock starts at exec, so it can't come sooner than this long
+	// after the resource was freed.
 	spec.StaleAfter = 250 * time.Millisecond
 	const wait = 700 * time.Millisecond
+	freed := make(chan time.Time, 1)
 	go func() {
 		time.Sleep(wait)
+		freed <- time.Now()
 		holder.Release()
 	}()
 	result, err := Run(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ended := time.Now()
 	if result.Outcome != OutcomeSettled {
 		t.Fatalf("outcome = %q", result.Outcome)
 	}
-	if result.Elapsed >= wait {
-		t.Fatalf("the run time %s includes the %s wait", result.Elapsed, wait)
-	}
+	freedAt := <-freed
 	var created, started time.Time
+	var settledMs int64
 	for _, event := range spoolOf(t, reporter) {
 		switch event.Kind {
 		case KindStalled:
-			t.Fatalf("waiting in a queue was reported as a stall: %#v", event)
+			if event.At.Sub(freedAt) < spec.StaleAfter-time.Millisecond {
+				t.Fatalf("waiting in a queue was reported as a stall: %#v", event)
+			}
 		case KindCreated:
 			created = event.At
 		case KindStarted:
 			started = event.At
 		case KindSettled:
-			if ms, _ := event.Payload["elapsedMs"].(int64); time.Duration(ms)*time.Millisecond >= wait {
-				t.Fatalf("the settled report states %dms", ms)
-			}
+			settledMs, _ = event.Payload["elapsedMs"].(int64)
 		}
 	}
 	if started.Sub(created) < wait/2 {
 		t.Fatalf("created %s and started %s do not carry the wait", created, started)
+	}
+	// The command runs entirely after the resource was freed, however long it takes.
+	sinceFreed := ended.Sub(freedAt)
+	if result.Elapsed > sinceFreed {
+		t.Fatalf("the run time %s includes the wait: only %s passed after the resource was freed", result.Elapsed, sinceFreed)
+	}
+	if time.Duration(settledMs)*time.Millisecond > sinceFreed {
+		t.Fatalf("the settled report states %dms: only %s passed after the resource was freed", settledMs, sinceFreed)
 	}
 }
