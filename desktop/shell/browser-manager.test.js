@@ -1547,13 +1547,13 @@ test('owned iframe setup that never answers times out, releases its session and 
   hangs.add('Accessibility.enable@child-timeout');
   attach('child-timeout', 'target-timeout');
   assert.equal(entry.pendingTargetTasks.size, 1);
-  await settleTurns();
-  assert.equal(entry.targetSessions.get('child-timeout')?.targetId, 'target-timeout', 'the session was accepted before enable stalled');
   await sleep(80);
   assert.equal(entry.pendingTargetTasks.size, 0, 'a stuck attach task settles at its deadline');
   assert.equal(entry.targetSessions.has('child-timeout'), false);
   assert.equal(abandoned('setup_timeout').length, 1);
-  assert.equal(abandoned('setup_timeout')[0].accepted, true);
+  // Read from the abandonment: on a loaded machine the 40 ms deadline can pass before
+  // any fixed number of event-loop turns, so a look in between is a race.
+  assert.equal(abandoned('setup_timeout')[0].accepted, true, 'the session was accepted before enable stalled');
   assert.equal(sentTo('Target.detachFromTarget', 'child-timeout').length, 1, 'a still-attached session is detached');
   const frame = entry.frames.get('frame-child');
   assert.equal(frame.unavailableReason, 'setup_timeout');
