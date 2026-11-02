@@ -538,9 +538,7 @@ func (c *canary) startDaemon(ctx context.Context) error {
 	cmd.Env = withCanaryRuntimeProfile(withToolPath(os.Environ()))
 	cmd.Stdout = logf
 	cmd.Stderr = logf
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	cmd.SysProcAttr = daemonProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logf.Close()
 		cancel()
@@ -910,8 +908,8 @@ func (c *canary) cleanup() {
 	if c.daemonCancel != nil {
 		c.daemonCancel()
 	}
-	if c.daemon != nil && c.daemon.Process != nil && runtime.GOOS != "windows" {
-		_ = syscall.Kill(-c.daemon.Process.Pid, syscall.SIGKILL)
+	if c.daemon != nil && c.daemon.Process != nil {
+		killDaemonGroup(c.daemon.Process.Pid)
 	}
 	c.daemonWG.Wait()
 	if !c.keepState && c.tempRoot != "" {

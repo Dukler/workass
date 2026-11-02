@@ -410,3 +410,10 @@ func TestAClosedJobCredentialAnswersOnlyForItsOwnReportAndExpires(t *testing.T) 
 		t.Fatal("a closed credential outlived its grace")
 	}
 }
+
+func liveOutputPath(t *testing.T, stateDir, childID string) string {
+	t.Helper()
+	// The supervisor chose this path itself; the daemon validates it rather
+	// than inventing one.
+	return stateDir + "/external-work/" + childID + ".output"
+}
