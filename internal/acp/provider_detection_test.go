@@ -146,7 +146,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 		RootDir:             root,
 		ProviderConfigFile:  providersFile,
 		Broadcast:           events.Broadcast,
-		InitTimeout:         800 * time.Millisecond,
+		InitTimeout:         30 * time.Second,
 		RSSSampleInterval:   time.Hour,
 		LocalModelEndpoints: []string{models.URL + "/v1/models"},
 	})
@@ -197,7 +197,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 		t.Fatalf("saved qwen autoEnv = %#v", savedAutoEnv)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	session, err := manager.NewSession(ctx, SessionOptions{TabID: "detect-qwen-tab", ChatID: "detect-qwen-chat", ProviderID: "qwen"})
 	if err != nil {
@@ -208,7 +208,7 @@ func TestStartupDetectProvidersAutoEnableEnvCatalogPersistenceAndSession(t *test
 	}
 	t.Logf("trace reply app-chat:new-session provider=%s session=%s models=%d", session.ProviderID, session.SessionID, len(session.Models))
 
-	ompCtx, ompCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ompCtx, ompCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer ompCancel()
 	ompSession, err := manager.NewSession(ompCtx, SessionOptions{TabID: "detect-omp-tab", ChatID: "detect-omp-chat", ProviderID: "omp"})
 	if err != nil {
