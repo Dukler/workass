@@ -8,6 +8,9 @@ type providerSpawnedWorkStrategy interface {
 	DecodeTool(providerRawToolObservation) (providerSpawnToolSignal, bool)
 	DecodeLifecycle(any) (providerSpawnedWorkUpdate, bool)
 	ValidateOutputPath(taskID, raw string) (string, bool)
+	// ChildSessionOnly marks work that only a tracked subagent tracks, because
+	// only its session closes when it settles (subagent_background.go).
+	ChildSessionOnly(providerSpawnedWorkTask) bool
 }
 
 type providerRawToolObservation struct {
@@ -71,4 +74,8 @@ func (unsupportedProviderSpawnedWorkStrategy) DecodeLifecycle(any) (providerSpaw
 
 func (unsupportedProviderSpawnedWorkStrategy) ValidateOutputPath(string, string) (string, bool) {
 	return "", false
+}
+
+func (unsupportedProviderSpawnedWorkStrategy) ChildSessionOnly(providerSpawnedWorkTask) bool {
+	return false
 }

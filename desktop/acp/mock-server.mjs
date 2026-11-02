@@ -448,6 +448,32 @@ async function runPrompt(id, params) {
       });
       notify(session.id, { sessionUpdate: '_workass_claude_spawned_work', event: { type: 'snapshot', tasks: [] } });
     }
+    // The running variant can end later, out of any turn, once a test releases it
+    // with this file. The harness may then start a turn by itself, as Claude Code
+    // does in an open session.
+    const endsWhen = /\[mock:background-ends-when=([^\]]+)\]/.exec(text);
+    if (endsWhen && text.includes('[mock:spawned-work-running]')) {
+      const watch = setInterval(() => {
+        if (!sessions.has(session.id) || !backgroundFDs.has(taskId)) { clearInterval(watch); return; }
+        if (!fs.existsSync(endsWhen[1])) return;
+        clearInterval(watch);
+        fs.closeSync(backgroundFDs.get(taskId));
+        backgroundFDs.delete(taskId);
+        notify(session.id, {
+          sessionUpdate: '_workass_claude_spawned_work',
+          event: { type: 'notification', taskId, toolCallId, status: 'completed', outputFile, summary: 'Mock background helper completed' },
+        });
+        notify(session.id, { sessionUpdate: '_workass_claude_spawned_work', event: { type: 'snapshot', tasks: [] } });
+        if (!text.includes('[mock:self-wake]')) return;
+        notify(session.id, { sessionUpdate: '_workass_claude_turn', phase: 'started', promptId: `mock-wake-${taskId}`, humanAuthored: false });
+        notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Woken by the harness: read the finished work.' } });
+        notify(session.id, {
+          sessionUpdate: '_workass_claude_turn', phase: 'ended', promptId: `mock-wake-${taskId}`,
+          backgroundTasks: [], sessionCrons: [], terminalReason: 'completed', stopReason: 'end_turn',
+        });
+      }, 5);
+      watch.unref?.();
+    }
     await pause();
   }
 

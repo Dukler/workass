@@ -69,6 +69,30 @@ func TestTrackedSubagentCompletionUsesExactActorAndReceiptIdempotency(t *testing
 	if got := formatSubagentCompletion(failed); !strings.Contains(got, "<status>failed</status>") || !strings.Contains(got, "<error>boom</error>") {
 		t.Fatalf("failed completion = %q", got)
 	}
+	if strings.Contains(formatSubagentCompletion(failed), "<result>") || strings.Contains(formatSubagentCompletion(failed), "<background-stopped>") {
+		t.Fatalf("a failure with nothing lost changed shape, and an admitted notice would no longer replay: %q", formatSubagentCompletion(failed))
+	}
+	// Work lost at close: the notice says failed, says what was lost and keeps the
+	// child's own last word, which is the only account of what it was doing.
+	lost := receipt
+	lost.Status, lost.Error = "failed", "Background work was still running"
+	lost.BackgroundStopped = []acp.SubagentBackgroundWork{{Label: "foot sweep", Kind: "bash"}}
+	got := formatSubagentCompletion(lost)
+	for _, want := range []string{"<status>failed</status>", "<error>Background work was still running</error>", "<result>finished review</result>", `<background-stopped>"foot sweep"</background-stopped>`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("notice has no %s: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "<status>completed</status>") {
+		t.Fatalf("a parent read completed over lost work: %q", got)
+	}
+	// A dev server stopped at close owes nothing, so it stays completed, and is named.
+	service := receipt
+	service.BackgroundStopped = []acp.SubagentBackgroundWork{{Label: "dev server", Kind: "bash", Service: true}}
+	got = formatSubagentCompletion(service)
+	if !strings.Contains(got, "<status>completed</status>") || !strings.Contains(got, `<background-stopped>"dev server"</background-stopped>`) {
+		t.Fatalf("service stopped at close = %q", got)
+	}
 }
 
 // A completion admitted by an earlier build (legacy text) still replays

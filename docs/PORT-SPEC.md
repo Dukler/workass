@@ -518,7 +518,15 @@ that are Electron-shell-local (dialogs, clipboard, window state) stay in the she
       chat, keep their Turnos visibility and event routing unchanged, and
       settle into the same bounded durable receipts). Explicit cancellation
       (subagent cancel, forced chat delete, daemon reset) remains immediate;
-      a settling subagent still reaps its own children. The daemon enforces
+      a settling subagent still reaps its own children. A subagent's engine owns
+      its background shells, Monitors and native agents, and they die with its
+      session, so a turn ending while it owes such work does not settle it: the
+      run stays `running` in phase `waiting_background`, cancellable and
+      messageable, until the harness wakes it or, for a harness that cannot, the
+      daemon sends one prompt when the work ends. Whatever a closing session
+      stops is named on the receipt, and work it owed makes the receipt `failed`
+      (user law 2026-11-01: a parent never reads `completed` over work that was
+      lost). The wait is bounded at 24 hours. The daemon enforces
       per-turn/global fan-out, ownership, cancellation, and bounded durable
       receipts; what stays forbidden is accidental double-driving, never
       designed concurrency.

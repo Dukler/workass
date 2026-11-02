@@ -51,6 +51,9 @@ type SubagentReceipt struct {
 	OriginTabID     string `json:"originTabId,omitempty"`
 	DeliveryPending bool   `json:"deliveryPending,omitempty"`
 	DeliveryError   string `json:"deliveryError,omitempty"`
+	// BackgroundStopped names work this subagent's closing session stopped. A run
+	// that owed any of it has status "failed"; a service alone leaves it "done".
+	BackgroundStopped []SubagentBackgroundWork `json:"backgroundStopped,omitempty"`
 }
 
 func receiptFromRun(run SubagentRun) SubagentReceipt {
@@ -66,6 +69,7 @@ func receiptFromRun(run SubagentRun) SubagentReceipt {
 		OriginMachine:     run.originMachine,
 		OriginChatID:      run.originChatID,
 		OriginTabID:       run.originTabID,
+		BackgroundStopped: run.BackgroundStopped,
 	}
 }
 

@@ -422,6 +422,7 @@ class CodexSession {
     this.attachmentMetrics = { resumed: false, historyMode: 'unknown' };
     this.agentPhases = new Map();
     this.nativeAgents = new Map();
+    this.openCommands = new Map();
     this.nativeAgentEpoch = 0;
     this.agentMessageItemsWithText = new Set();
     this.lastAgentMessageItem = null;
@@ -778,6 +779,8 @@ class CodexSession {
   }
 
   complete(turn) {
+    if (turn.status === 'completed') this.noteCommandsOutlivingTurn();
+    else this.forgetCommandsOfEndedTurn();
     if (this.goalRun && this.activePrompt && (!this.activeTurnId || turn.id === this.activeTurnId)) {
       this.goalLastCompleted = turn;
       this.activeTurnId = '';
@@ -805,6 +808,47 @@ class CodexSession {
       stopReason: turn.status === 'interrupted' ? 'cancelled' : 'end_turn',
       ...(this.lastUsage ? { usage: this.lastUsage } : {}),
     });
+  }
+
+  // A unified-exec command left running keeps its item in progress past the end
+  // of its turn, and finishes only when the process does (verified against real
+  // Codex 0.166, 2026-11-01). That is the only sign of it: no event says so, and no
+  // turn starts when it ends. It dies with the thread, so Workass has to know.
+  // Published before the prompt settles, ahead of its reply on this same stream.
+  noteCommandsOutlivingTurn() {
+    for (const [itemId, command] of this.openCommands) {
+      if (command.outlived) continue;
+      command.outlived = true;
+      notify(this.threadId, { sessionUpdate: '_workass_codex_spawned_work', event: {
+        type: 'started', taskId: `codex-exec-${itemId}`, toolCallId: itemId,
+        description: command.label, status: 'running',
+      } });
+    }
+  }
+
+  // A turn that was stopped or failed may never complete its open items. Keeping
+  // them would report them as outliving the next turn, and a subagent would then
+  // wait on a command that no longer exists.
+  forgetCommandsOfEndedTurn() {
+    for (const [itemId, command] of this.openCommands) {
+      if (!command.outlived) this.openCommands.delete(itemId);
+    }
+  }
+
+  observeCommand(item, completed) {
+    if (!completed) {
+      if (item.status === 'inProgress' && !this.openCommands.has(item.id)) {
+        this.openCommands.set(item.id, { label: String(item.command || 'Background command').slice(0, 240), outlived: false });
+      }
+      return;
+    }
+    const command = this.openCommands.get(item.id);
+    this.openCommands.delete(item.id);
+    if (!command?.outlived) return;
+    notify(this.threadId, { sessionUpdate: '_workass_codex_spawned_work', event: {
+      type: 'progress', taskId: `codex-exec-${item.id}`, toolCallId: item.id, status: commandWorkStatus(item),
+      summary: item.aggregatedOutput ? safeErrorText(String(item.aggregatedOutput).slice(-1000)) : '',
+    } });
   }
 
   failPrompt(error) {
@@ -1275,8 +1319,14 @@ async function handleAppNotification(method, params) {
   }
 }
 
+function commandWorkStatus(item) {
+  if (item.status === 'declined') return 'stopped';
+  return item.status === 'completed' && (item.exitCode === 0 || item.exitCode == null) ? 'completed' : 'failed';
+}
+
 function emitItem(session, item, completed) {
   if (!item || typeof item !== 'object') return;
+  if (item.type === 'commandExecution' && item.id) session.observeCommand(item, completed);
   if (item.type === 'subAgentActivity') { observeNativeAgentActivity(session, item); return; }
   if (item.type === 'collabAgentToolCall') observeNativeAgents(session, item);
   if (item.type === 'agentMessage') { session.agentPhases.set(item.id, item.phase); return; }

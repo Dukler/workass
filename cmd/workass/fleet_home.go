@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -503,7 +504,7 @@ func subagentReceiptPayload(receipt acp.SubagentReceipt) map[string]any {
 		"resultTruncated": receipt.ResultTruncated, "errorTruncated": receipt.ErrorTruncated,
 		"originLaneId": receipt.OriginLaneID, "originOperationId": receipt.OriginOperationID,
 		"originMachine": receipt.OriginMachine, "originChatId": receipt.OriginChatID,
-		"originTabId": receipt.OriginTabID,
+		"originTabId": receipt.OriginTabID, "backgroundStopped": receipt.BackgroundStopped,
 	}
 }
 
@@ -520,6 +521,24 @@ func subagentReceiptFromPayload(payload map[string]any) acp.SubagentReceipt {
 		ResultTruncated: boolFieldValue(payload, "resultTruncated"), ErrorTruncated: boolFieldValue(payload, "errorTruncated"),
 		OriginLaneID: fieldString(payload, "originLaneId"), OriginOperationID: fieldString(payload, "originOperationId"),
 		OriginMachine: fieldString(payload, "originMachine"), OriginChatID: fieldString(payload, "originChatId"),
-		OriginTabID: fieldString(payload, "originTabId"),
+		OriginTabID: fieldString(payload, "originTabId"), BackgroundStopped: subagentBackgroundStoppedField(payload),
 	}
+}
+
+// subagentBackgroundStoppedField reads the list back whichever shape it took: the
+// typed slice in-process, or plain JSON once it has crossed a fleet link.
+func subagentBackgroundStoppedField(payload map[string]any) []acp.SubagentBackgroundWork {
+	raw, present := payload["backgroundStopped"]
+	if !present || raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var list []acp.SubagentBackgroundWork
+	if json.Unmarshal(data, &list) != nil {
+		return nil
+	}
+	return list
 }
