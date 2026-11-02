@@ -45,7 +45,7 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
 	resource := flags.String("resource", "", "named resource to hold exclusively, queued FIFO behind other holders")
 	maxRuntime := flags.Duration("max-runtime", 0, "stop the job after this long and settle it timed_out; the clock starts at exec, not in the queue")
 	staleAfter := flags.Duration("stale-after", 0, "raise ONE stalled notice if the output stops growing for this long; the job keeps running")
-	maxHold := flags.Duration("max-hold", 0, "how long this job expects to hold its resource; exceeding it is reported, never killed")
+	maxHold := flags.Duration("max-hold", 0, "how long this job expects to hold its resource; the clock starts when it gets the resource, not in the queue; exceeding it is reported, never killed")
 	inputs := flags.String("inputs", "", "comma-separated paths that must exist and be non-empty before anything starts")
 	minFreeDisk := flags.String("min-free-disk", "", "refuse to start unless this much space is free where the output is written, e.g. 50G")
 	owner := flags.String("owner", "", "global fleet id of the chat or turn owed this job's outcome; defaults to the calling chat")

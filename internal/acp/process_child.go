@@ -918,7 +918,18 @@ func (m *Manager) reportProcessChildHoldLocked(rec *spawnedWorkRecord, now time.
 		if entry.ChildID != rec.Item.ID || !entry.Holding {
 			continue
 		}
-		if entry.HeldForMs <= rec.Item.MaxHoldMs {
+		start, known := processChildHoldStart(entry, rec.Item)
+		if !known && rec.Item.PID != nil {
+			m.backfillProcessChildStart(rec)
+			start, known = processChildHoldStart(entry, rec.Item)
+		}
+		if !known {
+			// At the head of the queue, with no sign yet that its supervisor has
+			// noticed. It has not been holding for any time worth reporting.
+			return
+		}
+		held := now.Sub(start)
+		if held.Milliseconds() <= rec.Item.MaxHoldMs {
 			return
 		}
 		// The stall flag is reused as the one-shot latch: a row raises one
@@ -928,11 +939,26 @@ func (m *Manager) reportProcessChildHoldLocked(rec *spawnedWorkRecord, now time.
 		*events = append(*events, m.processLifecycleLocked(rec, ProcessLifecycleEvent{
 			Kind: ProcessLifecycleAttention, AttentionKind: "max_hold",
 			AttentionText: fmt.Sprintf("still holding %s after %s, past the %s it declared",
-				rec.Item.Resource, time.Duration(entry.HeldForMs)*time.Millisecond,
+				rec.Item.Resource, held.Truncate(time.Millisecond),
 				time.Duration(rec.Item.MaxHoldMs)*time.Millisecond),
 		}))
 		return
 	}
+}
+
+// processChildHoldStart is when a holder acquired its resource: what its supervisor
+// stamped on the claim, or else when its command started, which follows the grant
+// at once. The second is for a supervisor from before the stamp, which outlives an
+// update of this daemon. Time in the queue never counts, so a claim's own Since is
+// no substitute: it is how a job that had held a GPU for seconds was reported as
+// past its hold after two hours of waiting for it.
+func processChildHoldStart(entry procchild.QueueEntry, item SpawnedWorkItem) (time.Time, bool) {
+	for _, stamp := range []string{entry.HeldSince, item.ExecStartedAt} {
+		if start, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(stamp)); err == nil {
+			return start, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func spoolString(payload map[string]any, key string) string {

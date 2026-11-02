@@ -41,7 +41,12 @@ type claim struct {
 	ChildID string `json:"childId"`
 	Label   string `json:"label"`
 	Owner   string `json:"owner,omitempty"`
-	Since   string `json:"since"`
+	// Since is when the claim joined the queue.
+	Since string `json:"since"`
+	// HeldSince is when this waiter was granted the hold, which is what `max_hold`
+	// is measured from. Absent while it waits, and on a claim written by a
+	// supervisor from before this field, which keeps running across an update.
+	HeldSince string `json:"heldSince,omitempty"`
 	// MaxHoldMs is the hold the caller declared. Report-only.
 	MaxHoldMs int64 `json:"maxHoldMs,omitempty"`
 }
@@ -54,12 +59,28 @@ type QueueEntry struct {
 	Label    string `json:"label,omitempty"`
 	Owner    string `json:"owner,omitempty"`
 	PID      int    `json:"pid"`
-	Since    string `json:"since"`
-	Holding  bool   `json:"holding"`
-	// HeldForMs is set for the holder, so `max_hold` can be reported without
-	// the reporter needing the holder's declaration.
-	HeldForMs int64 `json:"heldForMs,omitempty"`
-	MaxHoldMs int64 `json:"maxHoldMs,omitempty"`
+	// Since is when this waiter joined the queue, whatever it has done since.
+	Since string `json:"since"`
+	// Holding is the head of the queue. The head has the hold from the moment
+	// the claim ahead of it goes, a poll before its own supervisor notices.
+	Holding bool `json:"holding"`
+	// HeldSince is when the holder's supervisor took the hold, and HeldForMs how
+	// long ago that was, so `max_hold` can be reported without the reporter
+	// needing the holder's declaration. Both are absent until the supervisor has
+	// stated it: time in the queue is never hold time.
+	HeldSince string `json:"heldSince,omitempty"`
+	HeldForMs int64  `json:"heldForMs,omitempty"`
+	MaxHoldMs int64  `json:"maxHoldMs,omitempty"`
+}
+
+// MeasureHold sets how long a holder has held at a stated time, from a stated
+// start. It is the one calculation of hold time, for a reader that knows the
+// start some other way than the claim.
+func (e *QueueEntry) MeasureHold(start, now time.Time) {
+	e.HeldForMs = 0
+	if held := now.Sub(start); held > 0 {
+		e.HeldForMs = held.Milliseconds()
+	}
 }
 
 // Lease is one acquired hold.
@@ -150,7 +171,7 @@ func Acquire(req AcquireRequest) (*Lease, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, "q-"+ticket+"-"+entry.ChildID+".claim")
-	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+	if err := writeClaim(path, encoded); err != nil {
 		return nil, err
 	}
 	lease := &Lease{resource: resource, path: path}
@@ -169,6 +190,8 @@ func Acquire(req AcquireRequest) (*Lease, error) {
 			}
 		}
 		if position == 1 {
+			entry.HeldSince = now().UTC().Format(time.RFC3339Nano)
+			stampHold(path, entry, poll)
 			return lease, nil
 		}
 		if position == 0 {
@@ -183,6 +206,42 @@ func Acquire(req AcquireRequest) (*Lease, error) {
 			req.OnQueued(position, total)
 		}
 		time.Sleep(poll)
+	}
+}
+
+// writeClaim replaces a claim file in one step. A reader removes any claim it
+// cannot parse, so a half-written claim would lose its place in the queue, and a
+// holder's would hand its resource to the next waiter while it still runs. A
+// temporary file a crash leaves behind has no .claim suffix, so no reader counts it.
+func writeClaim(path string, encoded []byte) error {
+	temp := path + ".tmp"
+	if err := os.WriteFile(temp, append(encoded, '\n'), 0o600); err != nil {
+		_ = os.Remove(temp)
+		return err
+	}
+	if err := os.Rename(temp, path); err != nil {
+		_ = os.Remove(temp)
+		return err
+	}
+	return nil
+}
+
+// stampHold records the grant on the claim. Failing to is not a reason to give up
+// a hold the job has already waited for, and the daemon falls back on the job's
+// start, a moment later. The retries are for Windows, which refuses to replace a
+// file while another waiter's poll has it open.
+func stampHold(path string, entry claim, wait time.Duration) {
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(wait)
+		}
+		if writeClaim(path, encoded) == nil {
+			return
+		}
 	}
 }
 
@@ -273,8 +332,9 @@ func readQueue(dir, resource string, alive func(int) bool, now time.Time) []Queu
 			Since: entry.Since, Holding: len(out) == 0, MaxHoldMs: entry.MaxHoldMs,
 		}
 		if row.Holding {
-			if since, err := time.Parse(time.RFC3339Nano, entry.Since); err == nil {
-				row.HeldForMs = now.Sub(since).Milliseconds()
+			if start, err := time.Parse(time.RFC3339Nano, entry.HeldSince); err == nil {
+				row.HeldSince = entry.HeldSince
+				row.MeasureHold(start, now)
 			}
 		}
 		out = append(out, row)
