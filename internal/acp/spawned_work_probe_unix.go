@@ -87,12 +87,9 @@ func spawnedWorkListeningPIDs(pids []int) (map[int]bool, bool) {
 	return result, true
 }
 
-func spawnedWorkProbeAvailable() bool {
-	_, err := exec.LookPath("lsof")
-	return err == nil
-}
-
-func spawnedWorkPIDsForOutputs(paths []string) (map[string][]int, bool) {
+// spawnedWorkPIDsForOutputsLsof asks lsof who holds the given files. lsof reads the
+// whole machine: about a second on a Mac with 900 processes.
+func spawnedWorkPIDsForOutputsLsof(paths []string) (map[string][]int, bool) {
 	result := make(map[string][]int, len(paths))
 	if len(paths) == 0 {
 		return result, true
