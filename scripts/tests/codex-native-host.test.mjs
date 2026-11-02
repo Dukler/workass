@@ -100,7 +100,9 @@ function startHost(env = {}) {
       accept(line);
     }
   });
-  const waitFor = (match, timeout = 3000) => new Promise((resolve, reject) => {
+  // What a test expects to come comes: how long is the machine's, and only a test that
+  // proves a message doesn't come names its own, shorter wait.
+  const waitFor = (match, timeout = 30_000) => new Promise((resolve, reject) => {
     const existing = messages.find(match);
     if (existing) return resolve(existing);
     const waiter = { match, resolve: null };
@@ -757,8 +759,10 @@ test('a command outliving its turn is reported before the reply and again when i
     sessionId, prompt: [{ type: 'text', text: '[fixture:background-command] start it and stop' }],
   } });
   const isWork = (message) => message.params?.update?.sessionUpdate === '_workass_codex_spawned_work';
-  await peer.waitFor((message) => message.id === 3);
-  const atReply = peer.messages.filter(isWork);
+  const reply = await peer.waitFor((message) => message.id === 3);
+  // Before it on the stream: on a busy machine what came after has often arrived too.
+  const atReply = peer.messages.slice(0, peer.messages.indexOf(reply))
+    .filter((message) => isWork(message) && message.params.update.event.type === 'started');
   assert.equal(atReply.length, 1, 'the daemon must know before the reply that decides whether to close');
   assert.deepEqual(atReply[0].params.update.event, {
     type: 'started', taskId: 'codex-exec-background-command', toolCallId: 'background-command', description: 'sh sweep.sh', status: 'running',
@@ -1208,7 +1212,7 @@ test('native Codex Stop before turn/start replies interrupts the late native tur
   peer.send({ method: 'session/cancel', params: { sessionId } });
   assert.equal((await peer.waitFor((m) => m.id === 3)).result.stopReason, 'cancelled');
 
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 30_000;
   let calls = [];
   while (Date.now() < deadline) {
     calls = (await readFile(trace, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
@@ -1222,7 +1226,7 @@ test('native Codex Stop before turn/start replies interrupts the late native tur
   peer.send({ id: 4, method: 'session/prompt', params: {
     sessionId, clientUserMessageId: 'after-cancel', prompt: [{ type: 'text', text: 'A fresh request.' }],
   } });
-  assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
+  assert.equal((await peer.waitFor((m) => m.id === 4)).result.stopReason, 'end_turn');
 });
 
 // A stopped turn can end while the next prompt is still waiting for its turn id, and
@@ -1314,7 +1318,7 @@ test('native Codex host attributes a Workass notice and leaves other prompts alo
     sessionId, prompt: [{ type: 'text', text: 'hola' }], clientUserMessageId: 'human-1',
     _meta: { workassCommandInput: { text: 'hola', humanAuthored: true } },
   } });
-  assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
+  assert.equal((await peer.waitFor((m) => m.id === 4)).result.stopReason, 'end_turn');
   const starts = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse).filter((c) => c.method === 'turn/start');
   assert.equal(starts.length, 2);
   const attributed = JSON.stringify([
