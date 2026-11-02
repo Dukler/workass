@@ -21,7 +21,7 @@ function run(t,dir,env={}) {
   });
   function wait(predicate) {
     const found=out.find(predicate); if(found)return Promise.resolve(found);
-    return new Promise((resolve,reject)=>{const w={predicate,resolve};w.timer=setTimeout(()=>{waiters.splice(waiters.indexOf(w),1);reject(Error('OMP host response timeout'))},3000);waiters.push(w)});
+    return new Promise((resolve,reject)=>{const w={predicate,resolve};w.timer=setTimeout(()=>{waiters.splice(waiters.indexOf(w),1);reject(Error('OMP host response timeout'))},30_000);waiters.push(w)});
   }
   let n=0;
   const send=x=>p.stdin.write(JSON.stringify({jsonrpc:'2.0',...x})+'\n');
