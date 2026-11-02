@@ -7,6 +7,8 @@ package acp
 // reconciler deliberately does not guess an exit from an unchanged file.
 func spawnedWorkPIDsForOutputs([]string) (map[string][]int, bool) { return nil, false }
 
+func spawnedWorkProbeAvailable() bool { return false }
+
 // Without an available socket probe there is no second signal, so nothing is
 // ever classified as a service by inference here. Declaring the role at
 // registration remains the whole story on these platforms.

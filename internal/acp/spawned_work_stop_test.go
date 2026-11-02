@@ -2,6 +2,7 @@ package acp
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -209,5 +210,43 @@ func TestNativeAgentStopIsReadOnlyEvenWithProcessMetadata(t *testing.T) {
 	}
 	if got := stopTestItem(t, manager); got.Status != "running" || got.FinishedAt != "" {
 		t.Fatalf("read-only refusal changed native lifetime: %#v", got)
+	}
+}
+
+// lsof running out of time on a busy machine says nothing about the job. The stop
+// must not read that as "no process remained": it would report a stopped job and
+// leave its process running, with nothing left that knows about it.
+func TestAStopThatCannotLookLeavesTheJobRunningAndSaysSo(t *testing.T) {
+	if !spawnedWorkProbeAvailable() {
+		t.Skip("no process probe on this machine")
+	}
+	output := filepath.Join(t.TempDir(), "lane.log")
+	if err := os.WriteFile(output, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probes := 0
+	manager := NewManager(Options{
+		StateDir: t.TempDir(), RuntimeProfile: "dev", SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { probes++; return nil, false },
+		SpawnedWorkSignal:   func(int, bool) bool { t.Error("nothing should be signalled"); return false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	bindExternalWorkOwnerForTest(manager, "owner-blind", "chat-blind", "tab-blind", "mock")
+	if _, err := manager.RegisterExternalWork(ExternalWorkRegistrationOptions{
+		OwnerKey: "owner-blind", ParentChatID: "chat-blind", ParentTabID: "tab-blind",
+		Label: "busy machine", OutputFile: output,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items := manager.ListSpawnedWork("tab-blind", "chat-blind")
+	if len(items) != 1 {
+		t.Fatalf("registered rows = %#v", items)
+	}
+	reply := manager.StopSpawnedWork("tab-blind", "chat-blind", items[0].ID)
+	if reply["ok"] != false || probes != spawnedWorkStopProbeAttempts {
+		t.Fatalf("stop reply = %#v after %d probes", reply, probes)
+	}
+	if got := manager.ListSpawnedWork("tab-blind", "chat-blind"); len(got) != 1 || got[0].Status != "running" {
+		t.Fatalf("a job nobody could look at was settled: %#v", got)
 	}
 }

@@ -87,6 +87,11 @@ func spawnedWorkListeningPIDs(pids []int) (map[int]bool, bool) {
 	return result, true
 }
 
+func spawnedWorkProbeAvailable() bool {
+	_, err := exec.LookPath("lsof")
+	return err == nil
+}
+
 func spawnedWorkPIDsForOutputs(paths []string) (map[string][]int, bool) {
 	result := make(map[string][]int, len(paths))
 	if len(paths) == 0 {
