@@ -179,7 +179,7 @@ test('over-budget suites finish before reporting the performance miss', async t 
 test('interrupt is forwarded to running children and waits for cleanup', async t => {
   const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const harness = `import {runSuiteMatrix} from ${JSON.stringify(new URL('../test-suite.mjs', import.meta.url).href)};\n` +
-    `const r=await runSuiteMatrix([{name:'child',command:process.execPath,args:['-e',"console.log('ready');process.on('SIGINT',()=>{console.log('cleaned');process.exit(0)});setInterval(()=>{},1000)"]}],{logDir:${JSON.stringify(dir)}});\n` +
+    `const r=await runSuiteMatrix([{name:'child',command:process.execPath,args:['-e',"process.on('SIGINT',()=>{console.log('cleaned');process.exit(0)});console.log('ready');setInterval(()=>{},1000)"]}],{logDir:${JSON.stringify(dir)}});\n` +
     `console.log(JSON.stringify({interrupted:r.interrupted,code:r.results[0].code}));`;
   const child = spawn(node, ['--input-type=module', '-e', harness], { stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', chunk => output += chunk.toString());
