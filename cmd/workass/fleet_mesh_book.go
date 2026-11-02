@@ -249,6 +249,10 @@ func openFleetMesh(stateDir string, identity machineid.Identity, keys *fleet.Sto
 		},
 	})
 	hub.SetPeerLinks(service.Observe)
+	if book != nil {
+		// A machine a person just added links now, not at the next boot or scan.
+		book.SetOnChange(func() { service.SyncFromBook() })
+	}
 	if linked := len(service.mesh.PeerIDs()); linked > 0 {
 		logger.Printf("[workass] fleet mesh loaded %d peer link(s) from %s", linked, filepath.Join(stateDir, fleetclient.FileName))
 	}

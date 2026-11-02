@@ -139,9 +139,27 @@ type Book struct {
 	probeTransport *http.Transport
 	now            func() time.Time
 
-	mu      sync.Mutex
-	entries map[string]Entry
-	prove   func(ctx context.Context, address, machineID, fingerprint string) bool
+	mu       sync.Mutex
+	entries  map[string]Entry
+	prove    func(ctx context.Context, address, machineID, fingerprint string) bool
+	onChange func()
+}
+
+// SetOnChange names who hears that a person typed an address into the book. A scan
+// tells its own listener.
+func (b *Book) SetOnChange(onChange func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onChange = onChange
+}
+
+func (b *Book) changed() {
+	b.mu.Lock()
+	onChange := b.onChange
+	b.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
 }
 
 // SetIdentityProver names who can vouch for a changed certificate. Without one, a
@@ -272,7 +290,12 @@ func (b *Book) Add(ctx context.Context, address string) (Entry, error) {
 	if !b.identityAccepted(ctx, card, normalized) {
 		return Entry{}, fmt.Errorf("%s: %w", normalized, ErrIdentityChanged)
 	}
-	return b.record(card, normalized, SourceManual)
+	entry, err := b.record(card, normalized, SourceManual)
+	if err != nil {
+		return Entry{}, err
+	}
+	b.changed()
+	return entry, nil
 }
 
 // Discover records a daemon found by automatic TCP port-80 probing. It avoids

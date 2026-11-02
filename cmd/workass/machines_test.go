@@ -6,16 +6,19 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/fleet"
 	"workass/internal/machinebook"
 	"workass/internal/machineid"
 	"workass/internal/wire"
@@ -320,4 +323,62 @@ func TestDiscoverMachinesToolAnswersItsOwnerAndNobodyElse(t *testing.T) {
 	if _, err := call("discovery-owner"); err == nil || !strings.Contains(err.Error(), "machine book") {
 		t.Fatalf("no book must say so, got %v", err)
 	}
+}
+
+// A machine of this fleet that a person types in links at once. Until this, only the
+// next boot or network scan read the book into the mesh.
+func TestMachinesAddLinksAMachineOfThisFleetWithoutARestart(t *testing.T) {
+	state := t.TempDir()
+	book, err := machinebook.Open(machinebook.Options{StateDir: state, SelfID: "m-self", WireVersion: daemonWireVersion})
+	if err != nil {
+		t.Fatalf("open book: %v", err)
+	}
+	keys, err := fleet.Open(state)
+	if err != nil {
+		t.Fatalf("open fleet keys: %v", err)
+	}
+	key, _, err := keys.EnsureKey()
+	if err != nil {
+		t.Fatalf("mint a fleet key: %v", err)
+	}
+	hub := wire.NewHub()
+	identity := machineid.Identity{MachineID: "m-self", DisplayName: "this mac"}
+	registerMachineHandlers(hub, book, identity)
+	service := openFleetMesh(state, identity, keys, book, hub, log.New(io.Discard, "", 0), 0)
+	defer service.Close()
+
+	stranger := fleetDaemonServer(t, "m-stranger", "another fleet", []string{"not-this-fleet"})
+	if added := invokeMap(t, hub, "machines:add", []any{map[string]any{"address": stranger}}); added["ok"] != true {
+		t.Fatalf("add failed: %+v", added)
+	}
+	if peers := service.mesh.PeerIDs(); len(peers) != 0 {
+		t.Fatalf("a machine of another fleet got a link: %v", peers)
+	}
+
+	mine := fleetDaemonServer(t, "m-mine", "builder", []string{key.KeyID})
+	if added := invokeMap(t, hub, "machines:add", []any{map[string]any{"address": mine}}); added["ok"] != true {
+		t.Fatalf("add failed: %+v", added)
+	}
+	if peers := service.mesh.PeerIDs(); !slices.Contains(peers, "m-mine") {
+		t.Fatalf("the added machine has no link until a restart: %v", peers)
+	}
+}
+
+func fleetDaemonServer(t *testing.T, machineID, name string, fleetIDs []string) string {
+	t.Helper()
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != machinebook.HealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "workass", "version": daemonVersion, "name": name, "displayName": name,
+			"machineId": machineID, "wireVersion": daemonWireVersion, "secure": true,
+			"certFingerprint": fingerprintOfServer(server), "fleetIds": fleetIDs,
+		})
+	}))
+	t.Cleanup(server.Close)
+	return strings.TrimPrefix(server.URL, "https://")
 }
