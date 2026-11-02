@@ -300,13 +300,23 @@ func TestNodeProbeAgainstGoRun(t *testing.T) {
 			t.Fatalf("build workass-agent for ACP probe: %v\n%s", err, output)
 		}
 	}
-	cmd := exec.Command("node", "desktop/scripts/probe-acp.mjs", agentPath)
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"OPENAI_BASE_URL="+fake.URL()+"/v1",
 		"OPENAI_MODEL=fake-model",
 		"OPENAI_API_KEY=test-secret",
 	)
+	// Keep the first launch out of it too. macOS checks a new executable before it runs
+	// a line of it, about 0.6 s, one at a time across the whole machine: 30 first
+	// launches at once take 16 s, every one of them before main. That wait has nothing
+	// to do with ACP, and a binary the suite built for this run has it just the same.
+	firstLaunch := exec.Command(agentPath, "--probe")
+	firstLaunch.Env = env
+	if output, err := firstLaunch.CombinedOutput(); err != nil {
+		t.Fatalf("first launch of workass-agent: %v\n%s", err, output)
+	}
+	cmd := exec.Command("node", "desktop/scripts/probe-acp.mjs", agentPath)
+	cmd.Dir = root
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	t.Logf("node desktop/scripts/probe-acp.mjs %s\n%s", agentPath, out)
 	if err != nil {
