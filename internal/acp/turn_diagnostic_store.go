@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"os"
@@ -156,23 +157,21 @@ func (m *Manager) persistTurnDiagnostics(force bool) {
 	if !force && time.Since(m.diagnosticLastCheckpoint) < time.Second {
 		return
 	}
+	// The store could not be read at load, so what is on disk is not what is in
+	// memory. A write would destroy it; the bytes stay for whoever recovers them.
+	if m.diagnosticStoreKept {
+		return
+	}
 	m.diagnosticLastCheckpoint = time.Now()
-	m.diagnosticsMu.Lock()
-	diagnostics := append([]turnDiagnostic(nil), m.turnDiagnostics...)
-	m.diagnosticsMu.Unlock()
-	disk := turnDiagnosticDisk{Version: 1, Turns: make([]storedTurnDiagnostic, 0, len(diagnostics))}
-	for _, d := range diagnostics {
-		if d.timing != nil {
-			disk.Turns = append(disk.Turns, d.stored())
-		}
-	}
-	data, err := json.Marshal(disk)
-	for err == nil && len(data) > maxTurnDiagnosticStoreBytes && len(disk.Turns) > 0 {
-		disk.Turns = disk.Turns[1:]
-		data, err = json.Marshal(disk)
-	}
+	data, err := m.encodeTurnDiagnostics()
 	if err != nil {
 		m.setDiagnosticPersistenceError("encode_failed")
+		return
+	}
+	// Nothing new since the store was read or last written. A daemon that ran no
+	// turn, or was refused, leaves the store alone instead of rewriting it.
+	sum := sha256.Sum256(data)
+	if m.diagnosticWrittenKnown && sum == m.diagnosticWritten {
 		return
 	}
 	if err = os.MkdirAll(m.opts.StateDir, 0o700); err != nil {
@@ -214,7 +213,28 @@ func (m *Manager) persistTurnDiagnostics(force bool) {
 		m.setDiagnosticPersistenceError("write_failed")
 		return
 	}
+	m.diagnosticWritten, m.diagnosticWrittenKnown = sum, true
 	m.setDiagnosticPersistenceError("")
+}
+
+// encodeTurnDiagnostics is the store's exact bytes for what is retained now,
+// dropping the oldest turns until they fit.
+func (m *Manager) encodeTurnDiagnostics() ([]byte, error) {
+	m.diagnosticsMu.Lock()
+	diagnostics := append([]turnDiagnostic(nil), m.turnDiagnostics...)
+	m.diagnosticsMu.Unlock()
+	disk := turnDiagnosticDisk{Version: 1, Turns: make([]storedTurnDiagnostic, 0, len(diagnostics))}
+	for _, d := range diagnostics {
+		if d.timing != nil {
+			disk.Turns = append(disk.Turns, d.stored())
+		}
+	}
+	data, err := json.Marshal(disk)
+	for err == nil && len(data) > maxTurnDiagnosticStoreBytes && len(disk.Turns) > 0 {
+		disk.Turns = disk.Turns[1:]
+		data, err = json.Marshal(disk)
+	}
+	return data, err
 }
 
 func restoreDiagnosticEvent(raw map[string]any) map[string]any {
@@ -281,36 +301,50 @@ func (m *Manager) loadTurnDiagnostics() {
 		return
 	}
 	name := filepath.Join(m.opts.StateDir, turnDiagnosticFilename)
-	stat, err := os.Lstat(name)
-	if os.IsNotExist(err) {
+	if problem := m.readTurnDiagnosticStore(name); problem != "" {
+		m.setDiagnosticPersistenceError(problem)
+		m.diagnosticStoreKept = true
+		if m.opts.Logf != nil {
+			m.opts.Logf("turn diagnostics store kept unchanged; this run does not persist diagnostics", map[string]any{"path": name, "reason": problem})
+		}
 		return
 	}
+	if data, err := m.encodeTurnDiagnostics(); err == nil {
+		m.diagnosticWritten, m.diagnosticWrittenKnown = sha256.Sum256(data), true
+	}
+}
+
+// readTurnDiagnosticStore restores what it can and names what stopped it from
+// reading the whole store; a missing store is not a problem.
+func (m *Manager) readTurnDiagnosticStore(name string) string {
+	stat, err := os.Lstat(name)
+	if os.IsNotExist(err) {
+		return ""
+	}
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() > maxTurnDiagnosticStoreBytes {
-		m.setDiagnosticPersistenceError("unreadable_store")
-		return
+		return "unreadable_store"
 	}
 	f, err := os.Open(name)
 	if err != nil {
-		m.setDiagnosticPersistenceError("unreadable_store")
-		return
+		return "unreadable_store"
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxTurnDiagnosticStoreBytes+1))
 	if err != nil || len(data) > maxTurnDiagnosticStoreBytes {
-		m.setDiagnosticPersistenceError("unreadable_store")
-		return
+		return "unreadable_store"
 	}
 	var disk turnDiagnosticDisk
 	if json.Unmarshal(data, &disk) != nil || disk.Version != 1 || len(disk.Turns) > maxTurnDiagnostics {
-		m.setDiagnosticPersistenceError("invalid_store")
-		return
+		return "invalid_store"
 	}
+	problem := ""
 	for _, record := range disk.Turns {
 		d, ok := record.restore()
 		if !ok {
-			m.setDiagnosticPersistenceError("invalid_store")
+			problem = "invalid_store"
 			continue
 		}
 		m.turnDiagnostics = append(m.turnDiagnostics, d)
 	}
+	return problem
 }

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -22,6 +23,9 @@ type Manager struct {
 	diagnosticsMu              sync.Mutex
 	diagnosticWriteMu          sync.Mutex
 	diagnosticLastCheckpoint   time.Time
+	diagnosticWritten          [sha256.Size]byte // Under diagnosticWriteMu, with the two below.
+	diagnosticWrittenKnown     bool
+	diagnosticStoreKept        bool
 	diagnosticPersistenceError string
 	diagnosticStatusMu         sync.Mutex
 	diagnosticWake             chan struct{}
