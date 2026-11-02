@@ -1,0 +1,4 @@
+before add: no peer daemon has linked to this machine this machine has dialled no peer
+machines:add ok= true 
+LINKED 0.0s after machines:add, no restart
+links: no peer daemon has linked to this machine pair m-f876a4483279641cdae4f58947f20842 name=HOST UP (silent 0s) in this peer has not linked in out paired lastUse=2026-11-02T02:48:46Z (recorded at most every 5m0s) lan LAN:28892 manual lastSuccess

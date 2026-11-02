@@ -1,0 +1,4 @@
+before add: no peer daemon has linked to this machine this machine has dialled no peer
+machines:add ok= true 
+NOT LINKED after 45s without a restart
+links: no peer daemon has linked to this machine this machine has dialled no peer

@@ -1,0 +1,23 @@
++   0s [rig] machine added true 
++  20s [rig] parent ready, host machine m-XXXX
++  20s [rig] host catalog read over the mesh after 0 tries: 
++  25s [live] spawned wa-subagent-1793588203508-1
++  28s [parked] spawned on host wa-subagent-1793588207672-2 claude haiku background=25s
++  29s [parked] status=running phase=working activity="Running delegated task" process=gone marker=absent
++  34s [live] MESSAGE REFUSED workass_message_subagent: {"error":"background action failed: subagent not found for this owner: workass_list_subagents lists this chat's subagents, and workass_list_subagent_receipts its finished ones"}
+
++  35s [parked] status=running phase=tool activity="Bash" process=gone marker=absent
++  36s [parked] status=running phase=tool activity="Run the parked sweep script in background" process=alive marker=absent
++  38s [parked] status=running phase=working activity="Writing response" process=alive marker=absent
++  39s [parked] status=running phase=waiting_background activity="Waiting for background work: Run the parked sweep script in background" process=alive marker=absent
++  40s [live] RESULT {"answer":"workass_message_subagent: {\"error\":\"background action failed: subagent not found for this owner: workass_list_subagents ","status":"done","tokenInResult":false,"result":"The `sleep 25` was blocked by the harness, which only allows standalone sleeps as part of a condition-based wait, so I did not run it or try a workaround."
++  41s [parked] MESSAGE REFUSED workass_message_subagent: {"error":"background action failed: subagent not found for this owner: workass_list_subagents lists this chat's subagents, and workass_list_subagent_receipts its finished ones"}
+
++  62s [parked] status=running phase=waiting_background activity="Waiting for background work: Run the parked sweep script in background" process=gone marker=written
++  64s [parked] status=running phase=tool activity="/private/var/folders/rf/s7wt0m9x54951n3tfvfpgjk80000gn/T/wa-rrig-mvyo3" process=gone marker=written
++  66s [parked] status=running phase=working activity="Writing response" process=gone marker=written
++  69s [parked] status=done phase=done activity="Completed" process=gone marker=written
++  82s [parked] RESULT {"sawWaiting":true,"settled":"done","workAliveAtSettle":false,"markerAtSettle":true,"message":null,"receipt":{"status":"done","elapsedMs":43892,"result":"The sweep is running and the notification will report when it finishes.\n\nRESULT: SWEEP-DONE-parkedmvyo3fc2bi2"},"finished":true,"childRead":true,"heartbeat":"started 23:56:58","noti
++  82s [parked] MESSAGE RESULT {"answer":"workass_message_subagent: {\"error\":\"background action failed: subagent not found for this owner: workass_list_subagents ","status":"done","tokenInResult":false,"result":"The sweep is running and the notification will report when it finishes.\n\nRESULT: SWEEP-DONE-parkedmvyo3fc2bi2"}
++ 263s [rig] NOTICES {"live":["Agent \"rig live\" finished"],"parked":["Agent \"rig parked\" finished"],"parked-message":[]} after 178s
++ 263s [rig] DONE /.dev/rrig/mvyo3fc2bi2
