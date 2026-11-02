@@ -699,7 +699,7 @@ test('background browser enters the visible pane at its final bounds and viewpor
     return addChildView.call(this, view);
   };
   await manager.activate({ chatId: 'pane-attach', bounds: { x: 900, y: 48, width: 285, height: 700 }, viewport: { width: 320, height: 786 } });
-  assert.deepEqual(attachedBounds, [{ x: 900, y: 48, width: 284, height: 700, viewport: { width: 320, height: 786, deviceScaleFactor: 1 } }]);
+  assert.deepEqual(attachedBounds, [{ x: 900, y: 48, width: 285, height: 700, viewport: { width: 320, height: 786, deviceScaleFactor: 1 } }]);
   assert.equal(entry.viewportGeneration, 2);
 });
 

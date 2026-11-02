@@ -41,3 +41,18 @@ test('full-page raster steps align CSS pixels to native view scale', () => {
   assert.equal(captureRasterStep(1.75), 7);
   assert.equal(captureRasterStep(Number.NaN), 1);
 });
+
+test('a page within a pixel of its frame fills it, on either side', () => {
+  // The pane's own viewports below 320 wide, as browserViewportForBounds makes them.
+  for (const [frame, viewport] of [
+    [{ x: 1102, y: 96, width: 285, height: 790 }, { width: 320, height: 887 }], // fell short at the bottom
+    [{ x: 1102, y: 96, width: 285, height: 789 }, { width: 320, height: 886 }], // fell short at the right
+  ]) {
+    const fit = presentationFor(viewport, frame);
+    assert.deepEqual(fit.bounds, frame);
+    assert.ok(viewport.width * fit.scale >= frame.width - 1e-6 && viewport.height * fit.scale >= frame.height - 1e-6, 'the page covers the frame');
+  }
+  // A real difference of shape keeps its bars.
+  const bars = presentationFor({ width: 1440, height: 900 }, { x: 0, y: 0, width: 312, height: 500 });
+  assert.equal(bars.bounds.height, 195);
+});
