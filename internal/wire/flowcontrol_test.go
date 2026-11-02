@@ -156,7 +156,9 @@ func exactBody(n int) EncodedResult {
 // and the whole-frame deadline gave it 8. A peer that keeps draining, however
 // slowly, must receive the whole reply and the events behind it.
 func TestSlowButHealthyReaderIsNeverDropped(t *testing.T) {
-	const stall = 500 * time.Millisecond
+	// Long enough that a reader the scheduler holds back on a busy machine is still a
+	// reader that keeps draining: at 500 ms, 14 runs in 300 were dropped for that.
+	const stall = 2 * time.Second
 	setFlowTimers(t, stall, 0, 0)
 	hub := NewHub()
 	body := exactBody(3 << 20)
@@ -178,7 +180,8 @@ func TestSlowButHealthyReaderIsNeverDropped(t *testing.T) {
 		}
 	}()
 
-	// About 1 MiB/s at most: the reply alone takes several stall windows.
+	// About 1 MiB/s at most: the reply alone outlasts a stall window, so one deadline over
+	// the whole frame would drop this reader.
 	src := &throttledReader{r: peer.reader, chunk: 8 << 10, pause: 8 * time.Millisecond}
 	_ = peer.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	wantReply := `{"t":"reply","id":1,"result":` + string(body) + `,"error":null}`
@@ -207,8 +210,8 @@ func TestSlowButHealthyReaderIsNeverDropped(t *testing.T) {
 			t.Fatalf("unexpected frame %.80s", payload)
 		}
 	}
-	if elapsed := time.Since(started); elapsed < 4*stall {
-		t.Fatalf("transfer took %s; the throttle should have stretched it past %s", elapsed, 4*stall)
+	if elapsed := time.Since(started); elapsed < stall+stall/2 {
+		t.Fatalf("transfer took %s; the throttle should have stretched it past %s", elapsed, stall+stall/2)
 	}
 	assertConnected(t, hub, c, "after the slow transfer")
 }
