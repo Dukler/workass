@@ -278,7 +278,8 @@ const PHASE_LABEL: Record<string, [string, ActionIcon]> = {
   thinking: ['Pensando', 'think'],
   planning: ['Actualizando el plan', 'plan'],
   waiting_permission: ['Esperando permiso', 'shield'],
-  waiting_background: ['Esperando su trabajo en segundo plano', 'proc'],
+  // A child waiting on its own background work is still at work: no word of its own yet.
+  waiting_background: ['Trabajando', 'run'],
   orphaned: ['Sin proceso', 'agent'],
 };
 

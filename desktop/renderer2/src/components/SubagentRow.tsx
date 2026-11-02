@@ -22,6 +22,9 @@ export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNod
   // 2026-07-25). A settled subagent reads the same whatever its exit was.
   const activity = running ? (n.calls.some((call) => ['in_progress', 'pending', 'running'].includes(call.status ?? ''))
     ? subagentActivity(n) : (n.work ? spawnedWorkActivity(n.work) : null) ?? subagentActivity(n)) : null;
+  // The daemon's text for a child waiting on its background work is for its parent
+  // agent, not this row.
+  const tail = n.header?.output || (n.work?.lastToolName === 'waiting_background' ? '' : n.work?.summary);
   const [stopping, setStopping] = useState(false);
   const canStop = running && n.work?.kind === 'subagent' && !!chat && store.canStopSpawnedWork();
   const stop = async () => {
@@ -85,10 +88,10 @@ export function SubagentRow({ n, nowMs, chat, kids, doneKids }: { n: SubagentNod
           </button>}
         </span>}
       </summary>
-      {(n.calls.length > 0 || n.header?.output || n.work?.summary) && (
+      {(n.calls.length > 0 || tail) && (
         <div className="r-sa-b">
           {n.calls.map((t) => <ToolDetail key={t.key} t={t} />)}
-          {(n.header?.output || n.work?.summary) && <pre className="bgr-tail">{n.header?.output || n.work?.summary}</pre>}
+          {tail && <pre className="bgr-tail">{tail}</pre>}
         </div>
       )}
       {doneKids}

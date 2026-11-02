@@ -189,6 +189,15 @@ func (f hostedJobFleet) hostsRow(workID string) (acp.ProcessChildView, bool) {
 	return acp.ProcessChildView{}, false
 }
 
+// holdUntilReleased is the body of a job that runs until release appears. These
+// jobs are real detached processes and outlive the test that started it. A failed
+// test deletes the directory release would appear in, and a go test timeout runs no
+// cleanup at all, so the job also ends when that directory goes, and after five
+// minutes (15000 sleeps) regardless. Without this one failure left it running for good.
+func holdUntilReleased(release string) string {
+	return fmt.Sprintf("i=0; while [ ! -e %[1]s ] && [ -d %[2]s ] && [ $i -lt 15000 ]; do sleep 0.02; i=$((i+1)); done", release, filepath.Dir(release))
+}
+
 func awaitHostedJob(t *testing.T, what string, ready func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -210,7 +219,7 @@ func TestARemoteJobNeedsNoChatOnItsHostAndEveryOutcomeReachesItsOwner(t *testing
 	t.Run("ok", func(t *testing.T) {
 		started := fleet.start(t, map[string]any{
 			"label": "hosted ok", "cwd": cwd, "operation_id": "hosted-ok",
-			"command": []any{"/bin/sh", "-c", "while [ ! -e " + release + " ]; do sleep 0.02; done; echo finished"},
+			"command": []any{"/bin/sh", "-c", holdUntilReleased(release) + "; echo finished"},
 		})
 		workID := fieldString(started, "workId")
 		if started["ok"] != true || workID == "" || fieldString(started, "owner") != hostedJobOwner {
@@ -343,7 +352,7 @@ func TestAQueuedRemoteJobIsQueuedUntilExecAndItsNoticeSeparatesTheWait(t *testin
 
 	holder := fleet.start(t, map[string]any{
 		"label": "gpu holder", "cwd": cwd, "operation_id": "gpu-holder", "resource": "gpu0",
-		"command": []any{"/bin/sh", "-c", "while [ ! -e " + release + " ]; do sleep 0.02; done"},
+		"command": []any{"/bin/sh", "-c", holdUntilReleased(release)},
 	})
 	holderID := fieldString(holder, "workId")
 	awaitHostedJob(t, "the holder to start", func() bool {

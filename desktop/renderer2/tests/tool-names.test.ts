@@ -126,6 +126,7 @@ test('daemon lifecycle phases get their own word and mark, never English', () =>
     ['thinking', 'Pensando', 'think'],
     ['planning', 'Actualizando el plan', 'plan'],
     ['waiting_permission', 'Esperando permiso', 'shield'],
+    ['waiting_background', 'Trabajando', 'run'],
     ['orphaned', 'Sin proceso', 'agent'],
   ];
   for (const [phase, label, icon] of cases) {
