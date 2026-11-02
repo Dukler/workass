@@ -107,9 +107,17 @@ func TestARefusedLocalNoticeRetriesByItselfAndArrivesOnce(t *testing.T) {
 		processExitPayload(fleetlog.OutcomeSettled, "local job", 0, "Finished")); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(pair.notices()) == 0 && time.Now().Before(deadline) {
+	// The retry's goroutine tells the home after the chat, so the notice can be seen
+	// before the home knows. The acknowledgement is the end of the retry's work.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if held, _ := pair.home.monitors.Get(row.Ref); held.AckedSeq == 1 {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	if held, _ := pair.home.monitors.Get(row.Ref); held.AckedSeq != 1 {
+		t.Fatalf("the home was not told: %+v, notices %+v", held, pair.notices())
 	}
 	if notices := pair.notices(); len(notices) != 1 {
 		t.Fatalf("want one notice with no link and no beat to prompt it, got %+v", notices)
@@ -118,8 +126,10 @@ func TestARefusedLocalNoticeRetriesByItselfAndArrivesOnce(t *testing.T) {
 	if notices := pair.notices(); len(notices) != 1 {
 		t.Fatalf("delivered twice: %+v", notices)
 	}
-	if held, _ := pair.home.monitors.Get(row.Ref); held.AckedSeq != 1 {
-		t.Fatalf("the home was not told: %+v", held)
+	// Asking again by hand, however late, finds nothing owed.
+	pair.watcher.redeliver(testHomeMachine)
+	if notices := pair.notices(); len(notices) != 1 {
+		t.Fatalf("delivered again after it was acknowledged: %+v", notices)
 	}
 }
 
