@@ -423,6 +423,8 @@ class CodexSession {
     this.agentPhases = new Map();
     this.nativeAgents = new Map();
     this.openCommands = new Map();
+    this.abandonedTurns = new Set();
+    this.promptAwaitingTurnId = null;
     this.nativeAgentEpoch = 0;
     this.agentMessageItemsWithText = new Set();
     this.lastAgentMessageItem = null;
@@ -555,6 +557,7 @@ class CodexSession {
     const input = codexInput(blocks);
     const promise = this.beginPrompt(clientUserMessageId);
     const owner = this.activePrompt;
+    this.promptAwaitingTurnId = owner;
     this.emitInputDiagnostic(input, serviceTier);
     const diagnosticOwner = this.diagnosticPrompt;
     void app.request('turn/start', {
@@ -570,6 +573,7 @@ class CodexSession {
     }, (response) => {
       if (this.diagnosticPrompt === diagnosticOwner) this.admitDiagnosticTurn(response?.turn?.id);
     }).then((response) => {
+      if (this.promptAwaitingTurnId === owner) this.promptAwaitingTurnId = null;
       const turnId = String(response?.turn?.id || '');
       if (this.cancelledBeforeStart === owner) {
         // Stop arrived before turn/start answered and already settled this
@@ -577,10 +581,12 @@ class CodexSession {
         // and never let it become the session's turn — a later prompt may own
         // the wrapper by now.
         this.cancelledBeforeStart = null;
-        if (turnId) {
-          void app.request('turn/interrupt', { threadId: this.threadId, turnId })
-            .catch((error) => diagnostic('Codex late-start interrupt failed', error));
-        }
+        if (!turnId) return;
+        if (this.activeTurnId === turnId) this.activeTurnId = '';
+        // If it hasn't ended yet, its end is nobody else's.
+        if (!this.completedTurns.delete(turnId)) this.abandonedTurns.add(turnId);
+        void app.request('turn/interrupt', { threadId: this.threadId, turnId })
+          .catch((error) => diagnostic('Codex late-start interrupt failed', error));
         return;
       }
       if (!turnId) throw new Error('Codex turn/start returned no turn id');
@@ -589,6 +595,7 @@ class CodexSession {
       const early = this.completedTurns.get(turnId);
       if (early) { this.completedTurns.delete(turnId); this.complete(early); }
     }).catch((error) => {
+      if (this.promptAwaitingTurnId === owner) this.promptAwaitingTurnId = null;
       if (this.cancelledBeforeStart === owner) {
         this.cancelledBeforeStart = null;
         return;
@@ -779,6 +786,23 @@ class CodexSession {
   }
 
   complete(turn) {
+    // The end of a turn Stop already settled, however late, ends nothing else. It belongs
+    // to no prompt, and the next one may be waiting for its own turn id right now.
+    if (turn.id && this.abandonedTurns.delete(turn.id)) {
+      this.forgetCommandsOfEndedTurn(turn.id);
+      return;
+    }
+    if (turn.id && this.cancelledBeforeStart) {
+      this.completedTurns.set(turn.id, turn);
+      this.forgetCommandsOfEndedTurn(turn.id);
+      return;
+    }
+    // A prompt whose turn id hasn't come yet can't tell this end is its own. Its reply
+    // collects it from here if it is.
+    if (turn.id && !this.activeTurnId && this.activePrompt && this.promptAwaitingTurnId === this.activePrompt) {
+      this.completedTurns.set(turn.id, turn);
+      return;
+    }
     if (turn.status === 'completed') this.noteCommandsOutlivingTurn();
     else this.forgetCommandsOfEndedTurn();
     if (this.goalRun && this.activePrompt && (!this.activeTurnId || turn.id === this.activeTurnId)) {
@@ -829,16 +853,17 @@ class CodexSession {
   // A turn that was stopped or failed may never complete its open items. Keeping
   // them would report them as outliving the next turn, and a subagent would then
   // wait on a command that no longer exists.
-  forgetCommandsOfEndedTurn() {
+  forgetCommandsOfEndedTurn(turnId) {
     for (const [itemId, command] of this.openCommands) {
-      if (!command.outlived) this.openCommands.delete(itemId);
+      if (command.outlived) continue;
+      if (!turnId || command.turnId === turnId) this.openCommands.delete(itemId);
     }
   }
 
-  observeCommand(item, completed) {
+  observeCommand(item, completed, turnId) {
     if (!completed) {
       if (item.status === 'inProgress' && !this.openCommands.has(item.id)) {
-        this.openCommands.set(item.id, { label: String(item.command || 'Background command').slice(0, 240), outlived: false });
+        this.openCommands.set(item.id, { label: String(item.command || 'Background command').slice(0, 240), outlived: false, turnId });
       }
       return;
     }
@@ -1262,6 +1287,9 @@ async function handleAppNotification(method, params) {
   }
   session.observeDiagnostic(method, params);
   if (method === 'turn/started') {
+    // A turn Stop already settled never becomes the session's turn, whichever of this
+    // and the turn/start reply comes first. The reply names the next prompt's own.
+    if (session.cancelledBeforeStart || session.abandonedTurns.has(params.turn?.id)) return;
     if (params.turn?.id) session.setActiveTurn(params.turn.id);
     session.turnStatus = params.turn?.status || 'inProgress';
     return;
@@ -1285,8 +1313,8 @@ async function handleAppNotification(method, params) {
     notify(session.threadId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '\n\n' } });
     return;
   }
-  if (method === 'item/started') { emitItem(session, params.item, false); return; }
-  if (method === 'item/completed') { emitItem(session, params.item, true); return; }
+  if (method === 'item/started') { emitItem(session, params.item, false, String(params.turnId || '')); return; }
+  if (method === 'item/completed') { emitItem(session, params.item, true, String(params.turnId || '')); return; }
   if (method === 'item/commandExecution/outputDelta') {
     notify(session.threadId, { sessionUpdate: 'tool_call_update', toolCallId: params.itemId, content: { type: 'text', text: params.delta || '' } });
     return;
@@ -1330,9 +1358,9 @@ function commandWorkStatus(item) {
   return item.status === 'completed' && (item.exitCode === 0 || item.exitCode == null) ? 'completed' : 'failed';
 }
 
-function emitItem(session, item, completed) {
+function emitItem(session, item, completed, turnId = '') {
   if (!item || typeof item !== 'object') return;
-  if (item.type === 'commandExecution' && item.id) session.observeCommand(item, completed);
+  if (item.type === 'commandExecution' && item.id) session.observeCommand(item, completed, turnId);
   if (item.type === 'subAgentActivity') { observeNativeAgentActivity(session, item); return; }
   if (item.type === 'collabAgentToolCall') observeNativeAgents(session, item);
   if (item.type === 'agentMessage') { session.agentPhases.set(item.id, item.phase); return; }

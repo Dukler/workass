@@ -648,7 +648,13 @@ async function handle(message) {
     else deliverSteer();
     return;
   }
-  if (method === 'turn/interrupt') { respond(id, {}); completeTurn(params.turnId, 'interrupted'); return; }
+  if (method === 'turn/interrupt') {
+    respond(id, {});
+    const lateMs = Number(process.env.WORKASS_CODEX_FIXTURE_INTERRUPT_COMPLETE_DELAY_MS || 0);
+    if (lateMs > 0) setTimeout(() => notify('turn/completed', { threadId: fixtureThreadId, turn: { id: params.turnId, status: 'interrupted', items: [] } }), lateMs);
+    else completeTurn(params.turnId, 'interrupted');
+    return;
+  }
 	if (method === 'thread/read') return respond(id, { thread: { id: params.threadId, turns: turnRecords } });
 	if (method === 'thread/items/list') {
 	  if (process.env.WORKASS_CODEX_FIXTURE_ITEMS_LIST_UNSUPPORTED === '1') {

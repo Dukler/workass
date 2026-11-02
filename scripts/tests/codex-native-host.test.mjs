@@ -1225,6 +1225,48 @@ test('native Codex Stop before turn/start replies interrupts the late native tur
   assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
 });
 
+// A stopped turn can end while the next prompt is still waiting for its turn id, and
+// nothing then told that end apart from the end of the new prompt's turn.
+test('the late end of a stopped Codex turn does not settle the next prompt', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'workass-codex-late-end-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const trace = path.join(temp, 'rpc.jsonl');
+  // Each turn/start takes 300 ms and an interrupted turn ends 100 ms after the interrupt,
+  // so that end always lands inside the next prompt's own wait for its turn id.
+  const peer = startHost({
+    WORKASS_CODEX_FIXTURE_RPC_TRACE: trace,
+    WORKASS_CODEX_FIXTURE_START_DELAY_MS: '300',
+    WORKASS_CODEX_FIXTURE_INTERRUPT_COMPLETE_DELAY_MS: '100',
+  });
+  t.after(() => peer.child.kill('SIGKILL'));
+  peer.send({ id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((m) => m.id === 1);
+  peer.send({ id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const sessionId = (await peer.waitFor((m) => m.id === 2)).result.sessionId;
+  const traced = async (method) => {
+    for (const deadline = Date.now() + 30_000; Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 5))) {
+      if ((await readFile(trace, 'utf8').catch(() => '')).includes(`"${method}"`)) return;
+    }
+    assert.fail(`the fixture never saw ${method}`);
+  };
+  peer.send({ id: 3, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'stopped', prompt: [{ type: 'text', text: 'keep running' }],
+  } });
+  await traced('turn/start');
+  peer.send({ method: 'session/cancel', params: { sessionId } });
+  assert.equal((await peer.waitFor((m) => m.id === 3)).result.stopReason, 'cancelled');
+  await traced('turn/interrupt');
+  peer.send({ id: 4, method: 'session/prompt', params: {
+    sessionId, clientUserMessageId: 'next', prompt: [{ type: 'text', text: 'A fresh request.' }],
+  } });
+  const next = await peer.waitFor((m) => m.id === 4);
+  assert.equal(next.result.stopReason, 'end_turn');
+  assert.ok(
+    peer.messages.some((m) => m.params?.update?.sessionUpdate === 'agent_message_chunk' && m.params.update.content?.text === 'Fixture answer'),
+    'the next prompt ran its own turn to its end',
+  );
+});
+
 // 2026-10-11 review: image items await a file read. Handled concurrently, their
 // tool events were published after the turn's terminal, in reverse order.
 test('native Codex image tool events precede the turn terminal in wire order', async (t) => {
@@ -1272,7 +1314,7 @@ test('native Codex host attributes a Workass notice and leaves other prompts alo
     sessionId, prompt: [{ type: 'text', text: 'hola' }], clientUserMessageId: 'human-1',
     _meta: { workassCommandInput: { text: 'hola', humanAuthored: true } },
   } });
-  assert.equal((await peer.waitFor((m) => m.id === 4)).result.stopReason, 'end_turn');
+  assert.equal((await peer.waitFor((m) => m.id === 4, 5000)).result.stopReason, 'end_turn');
   const starts = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse).filter((c) => c.method === 'turn/start');
   assert.equal(starts.length, 2);
   const attributed = JSON.stringify([
