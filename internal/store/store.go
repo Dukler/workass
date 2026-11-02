@@ -26,6 +26,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +118,10 @@ type DB struct {
 	// what makes the exclusive lock and the closing TRUNCATE checkpoint wrong
 	// rather than merely unnecessary.
 	shared bool
+	// inspecting: opened by Inspect, so closing it must not checkpoint.
+	// inspectCopy is the private copy it read, if it needed one.
+	inspecting  bool
+	inspectCopy string
 	// prunedBackups: older migration backups this open removed.
 	prunedBackups []string
 
@@ -246,6 +252,89 @@ func Open(opts Options) (*DB, error) {
 	}
 	db.version = version
 	return db, nil
+}
+
+// Inspect opens an existing database only to read it, for a caller deciding whether
+// this start may go ahead at all. Nothing is migrated or locked, and the file and
+// anything beside it stay byte for byte. A file from a newer build is refused as Open
+// refuses it.
+//
+// SQLite can't read a WAL database read-only without adding to its directory, so a file
+// with no WAL is opened immutable, and one with a WAL, from a crash or a live daemon,
+// is read through a private copy, which is free to recover it. Close removes the copy.
+func Inspect(path string) (*DB, error) {
+	absolute, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		return nil, err
+	}
+	target, query := absolute, "?immutable=1&_txlock=deferred"
+	copyDir := ""
+	if info, err := os.Stat(absolute + "-wal"); err == nil && info.Size() > 0 {
+		if copyDir, err = os.MkdirTemp("", "workass-inspect-"); err != nil {
+			return nil, err
+		}
+		target = filepath.Join(copyDir, filepath.Base(absolute))
+		query = "?_txlock=deferred"
+		for _, suffix := range []string{"", "-wal"} {
+			if err := copyFile(absolute+suffix, target+suffix); err != nil {
+				_ = os.RemoveAll(copyDir)
+				return nil, err
+			}
+		}
+	}
+	db, err := openInspection(target, query)
+	if err != nil {
+		_ = os.RemoveAll(copyDir)
+		return nil, err
+	}
+	db.path, db.inspectCopy = absolute, copyDir
+	return db, nil
+}
+
+func openInspection(target, query string) (*DB, error) {
+	location := filepath.ToSlash(target)
+	if !strings.HasPrefix(location, "/") {
+		location = "/" + location // a Windows drive letter
+	}
+	// A URI carries the query, and a deferred BEGIN takes no write lock.
+	base, err := sqlite.NewConnector((&url.URL{Scheme: "file", Path: location}).String() + query)
+	if err != nil {
+		return nil, err
+	}
+	pool := sql.OpenDB(base)
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	pool.SetConnMaxLifetime(0)
+	pool.SetConnMaxIdleTime(0)
+	migrations, err := EmbeddedMigrations()
+	if err != nil {
+		_ = pool.Close()
+		return nil, err
+	}
+	if err := refuseNewerSchema(pool, len(migrations)); err != nil {
+		_ = pool.Close()
+		return nil, err
+	}
+	db := &DB{sql: pool, inspecting: true}
+	if err := pool.QueryRow("PRAGMA user_version").Scan(&db.version); err != nil {
+		_ = pool.Close()
+		return nil, classify(err)
+	}
+	return db, nil
+}
+
+func copyFile(from, to string) error {
+	source, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	target, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(target, source)
+	return errors.Join(err, target.Close())
 }
 
 func connectionPragmas(busy time.Duration, syncMode Synchronous, shared bool) []string {
@@ -580,13 +669,16 @@ func (db *DB) Close() error {
 		defer db.mu.Unlock()
 		db.closed = true
 		var checkpointErr error
-		if !db.shared {
+		if !db.shared && !db.inspecting {
 			// Truncating a WAL another process is reading would be a courtesy
 			// paid with its correctness, so a shared file is simply closed and
 			// the next opener checkpoints what it finds.
 			_, checkpointErr = db.sql.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 		}
 		db.closeErr = errors.Join(classify(checkpointErr), db.sql.Close())
+		if db.inspectCopy != "" {
+			db.closeErr = errors.Join(db.closeErr, os.RemoveAll(db.inspectCopy))
+		}
 	})
 	return db.closeErr
 }

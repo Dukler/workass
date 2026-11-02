@@ -1,0 +1,296 @@
+{
+  "label": "before",
+  "ttlSeconds": 20,
+  "timeline": [
+    {
+      "s": 0,
+      "lines": 0,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 3,
+      "lines": 0,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 6,
+      "lines": 2,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 9,
+      "lines": 5,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 12,
+      "lines": 8,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 15,
+      "lines": 11,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 18,
+      "lines": 14,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 21,
+      "lines": 17,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 24,
+      "lines": 20,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 27,
+      "lines": 23,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 30,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 33,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 36,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 39,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 42,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 45,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 48,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 51,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 54,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 57,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 60,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 63,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 66,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 69,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 72,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 75,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 78,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 81,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 84,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 87,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 90,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 93,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 96,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 99,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 102,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 105,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 108,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 111,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 114,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 117,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 120,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 123,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 126,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 129,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 132,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 135,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    },
+    {
+      "s": 138,
+      "lines": 25,
+      "hib": 0,
+      "aborted": 0
+    }
+  ],
+  "heartbeats": {
+    "wanted": 75,
+    "got": 25,
+    "stoppedAtSecond": 33
+  },
+  "survived": false,
+  "hibernate_log": [],
+  "hibernate_held": 0
+}

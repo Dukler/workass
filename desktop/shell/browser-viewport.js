@@ -31,6 +31,16 @@ function presentationFor(viewport, bounds) {
   // which left a one-pixel line of the frame showing under the page.
   const presentedWidth = Math.floor(viewport.width * scale + 1e-6);
   const presentedHeight = Math.floor(viewport.height * scale + 1e-6);
+  // A pane narrower than the smallest viewport gets a scaled one whose whole-pixel
+  // height can't match the pane's shape exactly, so the page falls short by a pixel on
+  // one side and the frame's white shows there. A page that close to filling the frame
+  // fills it, losing under a pixel of itself to the edge instead.
+  if (scale > 0 && width - presentedWidth <= 1 && height - presentedHeight <= 1) {
+    return {
+      scale: Math.max(width / viewport.width, height / viewport.height),
+      bounds: { x: Math.floor(Number(bounds.x) || 0), y: Math.floor(Number(bounds.y) || 0), width, height },
+    };
+  }
   return {
     scale,
     bounds: {

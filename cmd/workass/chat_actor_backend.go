@@ -157,7 +157,7 @@ func openChatActorBackend(stateDir string, enabled bool, binaryVersion string, l
 		} else if err != nil {
 			return nil, err
 		}
-		db, err := store.Open(store.Options{Path: dbPath, BinaryVersion: binaryVersion})
+		db, err := store.Inspect(dbPath)
 		if err != nil {
 			return nil, fmt.Errorf("inspect %s for migrated chat actors: %w", dbPath, err)
 		}
@@ -207,6 +207,9 @@ func openChatActorBackend(stateDir string, enabled bool, binaryVersion string, l
 func chatStoreStatus(db *store.DB) (store.MigratedStore, bool, error) {
 	var status store.MigratedStore
 	var ok bool
+	if db.SchemaVersion() == 0 {
+		return status, false, nil // no tables yet, so nothing has moved here
+	}
 	err := db.Read(context.Background(), func(tx *store.Tx) error {
 		var err error
 		status, ok, err = tx.MigratedStoreStatus(chat.ActorStoreName)

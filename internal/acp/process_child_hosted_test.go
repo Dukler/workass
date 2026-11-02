@@ -63,6 +63,28 @@ func TestAHostedJobNeedsNoChatAndNoProvider(t *testing.T) {
 	}
 }
 
+// A supervisor that took a while to start, on a machine under load, stood in no
+// queue: the notice and the row must not report one.
+func TestAJobThatNeverWaitedReportsNoQueueHoweverLongItsSupervisorTookToStart(t *testing.T) {
+	manager := newHostedTestManager(t, t.TempDir())
+	pid := os.Getpid()
+	askedAt := time.Now().UTC().Add(-time.Hour)
+	startedAt := askedAt.Add(3 * time.Second)
+	if _, err := manager.RegisterProcessChild(hostedRegistrationForTest(t, manager, "hosted-slow-start", func(opts *ProcessChildRegistrationOptions) {
+		opts.SupervisorPID, opts.Resource = &pid, "gpu0"
+		opts.Events = []procchild.Event{
+			{Seq: 1, At: askedAt, Kind: procchild.KindCreated},
+			{Seq: 2, At: startedAt, Kind: procchild.KindStarted, Payload: map[string]any{"pid": pid}},
+		}
+	})); err != nil {
+		t.Fatal(err)
+	}
+	row := manager.ListProcessChildren()[0]
+	if row.QueuedMs != 0 || row.StartedAt != startedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("a job that never waited reads %#v", row)
+	}
+}
+
 // A restart loses nothing a job depends on: the row, its cursor, and the verdict
 // when its supervisor did not survive either.
 func TestAHostedJobSurvivesARestartAndAMissingSupervisorIsStillLost(t *testing.T) {
@@ -74,7 +96,8 @@ func TestAHostedJobSurvivesARestartAndAMissingSupervisorIsStillLost(t *testing.T
 		opts.SupervisorPID = &pid
 		opts.Events = []procchild.Event{
 			{Seq: 1, At: now.Add(-time.Hour), Kind: procchild.KindCreated},
-			{Seq: 2, At: now.Add(-time.Minute), Kind: procchild.KindStarted, Payload: map[string]any{"pid": pid}},
+			{Seq: 2, At: now.Add(-time.Hour), Kind: procchild.KindQueued, Payload: map[string]any{"position": 2}},
+			{Seq: 3, At: now.Add(-time.Minute), Kind: procchild.KindStarted, Payload: map[string]any{"pid": pid}},
 		}
 	})
 	if _, err := first.RegisterProcessChild(opts); err != nil {
@@ -90,7 +113,7 @@ func TestAHostedJobSurvivesARestartAndAMissingSupervisorIsStillLost(t *testing.T
 	// The cursor came back: the same batch, re-sent, is acknowledged and changes
 	// nothing, and the row is the same row.
 	again, err := second.RegisterProcessChild(opts)
-	if err != nil || again["created"] != false || again["ackThrough"] != uint64(2) {
+	if err != nil || again["created"] != false || again["ackThrough"] != uint64(3) {
 		t.Fatalf("replay after a restart = %#v, %v", again, err)
 	}
 	var lifecycle []ProcessLifecycleEvent
@@ -386,4 +409,11 @@ func TestAClosedJobCredentialAnswersOnlyForItsOwnReportAndExpires(t *testing.T) 
 	if _, ok := expired.RunTokenFor(token); ok {
 		t.Fatal("a closed credential outlived its grace")
 	}
+}
+
+func liveOutputPath(t *testing.T, stateDir, childID string) string {
+	t.Helper()
+	// The supervisor chose this path itself; the daemon validates it rather
+	// than inventing one.
+	return stateDir + "/external-work/" + childID + ".output"
 }

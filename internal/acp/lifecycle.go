@@ -112,14 +112,14 @@ func (m *Manager) hibernateCandidate(b *Bridge, now time.Time) (hibernateCandida
 	}
 	if recycleAtIdle {
 		reason := firstNonEmpty(recycleReason, "recycle")
-		if m.engineHoldsLiveWork(tabID, chatID) {
+		if m.engineHoldsLiveWork(b, tabID, chatID) {
 			m.opts.Logf("acp hibernate aborted", map[string]any{"key": key, "reason": reason, "state": string(state), "pinned": false, "spawnedWork": true})
 			return hibernateCandidate{}, false
 		}
 		return hibernateCandidate{bridge: b, reason: reason, lastActivity: lastActivity, now: now}, true
 	}
 	if m.opts.HibernateTTL > 0 && now.Sub(lastActivity) >= m.opts.HibernateTTL {
-		if m.engineHoldsLiveWork(tabID, chatID) {
+		if m.engineHoldsLiveWork(b, tabID, chatID) {
 			m.opts.Logf("acp hibernate aborted", map[string]any{"key": key, "reason": hibernateReasonIdleTTL, "state": string(state), "pinned": false, "spawnedWork": true})
 			return hibernateCandidate{}, false
 		}
@@ -143,7 +143,7 @@ func (m *Manager) hibernateBridgeIfEligible(b *Bridge, reason string, ttl time.D
 		tabID := b.tabID
 		chatID := b.chatID
 		b.mu.Unlock()
-		spawnedWork = m.engineHoldsLiveWork(tabID, chatID)
+		spawnedWork = m.engineHoldsLiveWork(b, tabID, chatID)
 	}
 
 	b.mu.Lock()
@@ -714,8 +714,12 @@ func durationSinceMillis(start, end time.Time) any {
 // Claude Code never stops that process while its terminal is open, so they
 // fire; idle sleep here killed them silently, and the agent learned only from
 // a later "lost to the restart" notice — or never (myproject, 2026-10-16).
-func (m *Manager) engineHoldsLiveWork(tabID, chatID string) bool {
-	if m.hasRunningSpawnedWorkForChat(tabID, chatID) {
+//
+// A command the provider left running past its turn dies with its engine too. It
+// holds the engine for a bounded time, since nothing can tell a build from a dev
+// server that never ends.
+func (m *Manager) engineHoldsLiveWork(b *Bridge, tabID, chatID string) bool {
+	if m.hasRunningSpawnedWorkForChat(tabID, chatID) || b.holdsOutlivingCommand(time.Now(), m.opts.SubagentBackgroundCeiling) {
 		return true
 	}
 	if m.harnessTurns == nil {
@@ -723,4 +727,34 @@ func (m *Manager) engineHoldsLiveWork(tabID, chatID string) bool {
 	}
 	evidence := m.harnessTurns.getByChat(tabID, chatID)
 	return evidence != nil && evidence.CronsKnown && len(evidence.Crons) > 0
+}
+
+// noteOutlivingCommand records a command that is still running after its turn ended,
+// or that it has finished. The record lives on the bridge because the command lives
+// in this engine: when the engine goes, so do both.
+func (b *Bridge) noteOutlivingCommand(taskID string, running bool, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !running {
+		delete(b.outlivingCommands, taskID)
+		return
+	}
+	if _, known := b.outlivingCommands[taskID]; known {
+		return
+	}
+	if b.outlivingCommands == nil {
+		b.outlivingCommands = make(map[string]time.Time)
+	}
+	b.outlivingCommands[taskID] = now
+}
+
+func (b *Bridge) holdsOutlivingCommand(now time.Time, ceiling time.Duration) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, since := range b.outlivingCommands {
+		if now.Sub(since) < ceiling {
+			return true
+		}
+	}
+	return false
 }

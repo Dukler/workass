@@ -38,7 +38,9 @@ const (
 	// synchronous: a dev server that traps SIGTERM to close its sockets gets its
 	// moment, and anything still standing after that never intended to leave.
 	spawnedWorkStopGrace = 1500 * time.Millisecond
-	spawnedWorkStopPoll  = 50 * time.Millisecond
+	// A stop is one click, so it can give a slow probe more than the periodic pass does.
+	spawnedWorkStopProbeAttempts = 3
+	spawnedWorkStopPoll          = 50 * time.Millisecond
 )
 
 const trackedSubagentSpawnedWorkKind = "subagent"
@@ -760,6 +762,12 @@ func (m *Manager) observeProviderSpawnedWork(tabID, chatID, sessionID, providerI
 		return
 	}
 	if providerAdapterForID(providerID).spawnedWork.ChildSessionOnly(event.Task) && !strings.HasPrefix(chatID, subagentChatIDPrefix) {
+		m.mu.Lock()
+		bridge := m.sessionBridge[sessionID]
+		m.mu.Unlock()
+		if bridge != nil {
+			bridge.noteOutlivingCommand(event.Task.TaskID, event.Task.Status == "running", time.Now())
+		}
 		return
 	}
 	now := time.Now().UTC()
@@ -2110,7 +2118,13 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 	if spawnedWorkLivenessClassFor(item) == spawnedWorkLivenessInProcess && item.PID == nil && item.OutputFile == "" {
 		return map[string]any{"ok": false, "id": item.ID, "error": "provider-owned work has no supported stop operation"}
 	}
-	signalled, forced := m.terminateSpawnedWorkPIDs(m.spawnedWorkStopPIDs(item))
+	pids, answered := m.spawnedWorkStopPIDs(item)
+	if !answered {
+		// Settling here would report a stopped job and leave its process running with
+		// nothing left that knows about it.
+		return map[string]any{"ok": false, "id": item.ID, "error": "could not tell which processes hold this job's output, so nothing was stopped; try again"}
+	}
+	signalled, forced := m.terminateSpawnedWorkPIDs(pids)
 	summary := "Stopped on request: no live process remained"
 	if len(signalled) > 0 {
 		summary = fmt.Sprintf("Stopped on request (SIGTERM ×%d)", len(signalled))
@@ -2145,7 +2159,11 @@ func (m *Manager) StopSpawnedWork(tabID, chatID, id string) map[string]any {
 // session, so negating a pid could reach the daemon itself. Self and parent are
 // excluded for the same reason, since a probe that catches the daemon mid-read
 // of that file would otherwise hand this function its own pid.
-func (m *Manager) spawnedWorkStopPIDs(item SpawnedWorkItem) []int {
+//
+// answered is false when a platform that can look found out nothing, which on a busy
+// machine is lsof running out of time. A platform with no probe at all answers with
+// the record's own pid, and its stop settles the row and says no process remained.
+func (m *Manager) spawnedWorkStopPIDs(item SpawnedWorkItem) (pids []int, answered bool) {
 	seen := map[int]struct{}{}
 	out := []int{}
 	add := func(pid int) {
@@ -2158,17 +2176,25 @@ func (m *Manager) spawnedWorkStopPIDs(item SpawnedWorkItem) []int {
 		seen[pid] = struct{}{}
 		out = append(out, pid)
 	}
+	answered = true
 	if item.OutputFile != "" && m.opts.SpawnedWorkPIDProbe != nil {
-		if byPath, supported := m.opts.SpawnedWorkPIDProbe([]string{item.OutputFile}); supported {
+		answered = false
+		for attempt := 0; attempt < spawnedWorkStopProbeAttempts && !answered; attempt++ {
+			byPath, ok := m.opts.SpawnedWorkPIDProbe([]string{item.OutputFile})
+			answered = ok
 			for _, pid := range byPath[item.OutputFile] {
 				add(pid)
+			}
+			if !spawnedWorkProbeAvailable() {
+				answered = true
+				break
 			}
 		}
 	}
 	if item.PID != nil {
 		add(*item.PID)
 	}
-	return out
+	return out, answered
 }
 
 func (m *Manager) terminateSpawnedWorkPIDs(pids []int) (signalled []int, forced []int) {

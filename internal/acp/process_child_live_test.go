@@ -125,13 +125,6 @@ func registerLiveChild(t *testing.T, manager *Manager, childID string, superviso
 	}
 }
 
-func liveOutputPath(t *testing.T, stateDir, childID string) string {
-	t.Helper()
-	// The supervisor chose this path itself; the daemon validates it rather
-	// than inventing one.
-	return stateDir + "/external-work/" + childID + ".output"
-}
-
 func TestAJobKilledExternallyIsLostAndItsOwnerIsNotified(t *testing.T) {
 	lifecycle := &recordedLifecycle{}
 	manager := processChildManager(t, lifecycle)

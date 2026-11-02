@@ -550,6 +550,16 @@ class BrowserManager {
     return wc || null;
   }
 
+  // A page makes sound only while it is on screen, here or in its pop-out window.
+  // Out of sight is where an agent's pages live, and one that opens a video must
+  // not reach the speakers of someone who cannot see it or stop it. A page is muted
+  // from before its first load, so autoplay never sounds.
+  syncPageAudio(entry) {
+    const wc = this.liveContents(entry);
+    if (!wc || typeof wc.setAudioMuted !== 'function' || wc.isDestroyed?.()) return;
+    wc.setAudioMuted(!(entry.visible === true || !!entry.pipWindow));
+  }
+
   // A tab keeps one id for its whole life. In the webview host the page's
   // webContents is replaced when the app renderer reloads, so the id is the
   // first guest's (webContents ids are never reused in a process).
@@ -603,6 +613,7 @@ class BrowserManager {
 
   bind(entry) {
     const wc = entry.view.webContents;
+    this.syncPageAudio(entry);
     // A webview host replaces the page's webContents when the app renderer
     // reloads; a late event from the replaced one must not touch the tab.
     const current = () => entry.view.webContents === wc;
@@ -1904,10 +1915,10 @@ class BrowserManager {
   }
 
   newEntry(chatId, view) {
-    return {
+    const entry = {
       chatId, view, url: DEFAULT_URL, title: '', loading: false, error: null,
       viewport: { ...DEFAULT_VIEWPORT }, effectiveViewport: null, viewportGeneration: 0,
-      documentGeneration: 0, visible: false, presentationBounds: null, presentationScale: 1,
+      documentGeneration: 0, presentationBounds: null, presentationScale: 1,
       captureHost: null, captureHostAttached: false, initialDocumentReady: false,
       operationChain: Promise.resolve(), observationSequence: 0, observations: new Map(),
       screenshots: new Map(), diagnostics: [], diagnosticBytes: 0, diagnosticSequence: 0,
@@ -1917,6 +1928,15 @@ class BrowserManager {
       pendingTargetTasks: new Set(), mainNavigationPending: false,
       autoAttachAvailable: false, waits: new Set(), executionContexts: new Map(),
     };
+    // Every path that shows or hides a page writes this field, so the page's sound
+    // follows it from here.
+    let visible = false;
+    Object.defineProperty(entry, 'visible', {
+      enumerable: true,
+      get: () => visible,
+      set: (value) => { visible = value; this.syncPageAudio(entry); },
+    });
+    return entry;
   }
 
   recordDiagnostic(entry, kind, text) {
@@ -2966,6 +2986,7 @@ class BrowserManager {
         if (entry.pip !== pip) return;
         entry.pip = null;
         entry.pipWindow = null;
+        this.syncPageAudio(entry);
         // A press held when the window went is let go, and drags are no
         // longer intercepted.
         if (entry.pipDrag) { void this.endPipDrag(entry); void this.releaseStuckInput(entry); }
@@ -3054,6 +3075,7 @@ class BrowserManager {
       const pip = entry.pip;
       entry.pip = null;
       entry.pipWindow = null;
+      this.syncPageAudio(entry);
       pip.close();
       this.publishHosts();
       return;
@@ -3061,6 +3083,7 @@ class BrowserManager {
     const win = entry.pipWindow;
     if (!win) return;
     entry.pipWindow = null;
+    this.syncPageAudio(entry);
     try { win.contentView.removeChildView(entry.view); } catch { /* already detached */ }
     try { if (!win.isDestroyed()) win.destroy(); } catch { /* already gone */ }
   }

@@ -76,6 +76,7 @@ func decodeCodexBackgroundExec(event map[string]any, kind, taskID, toolID string
 
 // In a chat, a command that outlived its turn would be a new rail row, and one
 // nothing classifies as a service: a dev server would pin the engine awake for good.
+// There it only holds the engine, for a bounded time (engineHoldsLiveWork).
 func (codexProviderSpawnedWorkStrategy) ChildSessionOnly(task providerSpawnedWorkTask) bool {
 	return codexBackgroundExecID.MatchString(task.TaskID)
 }
