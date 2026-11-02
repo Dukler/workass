@@ -38,6 +38,9 @@ type Options struct {
 }
 
 type Server struct {
+	// heldPrompts are admitted and not started yet. Only the reading goroutine
+	// touches it (Serve).
+	heldPrompts      []func()
 	client           *lmstudio.Client
 	stdout           io.Writer
 	logger           *log.Logger
@@ -111,7 +114,14 @@ func New(opts Options) (*Server, error) {
 }
 
 func (s *Server) Serve(ctx context.Context, r io.Reader) error {
-	scanner := bufio.NewScanner(r)
+	// The scanner reads again only when it has run out of whole lines, so a prompt
+	// starts once every line that arrived with it has been seen. A Stop written right
+	// behind its prompt is then always seen first: otherwise the model could be asked
+	// in the moment between the two, whenever this goroutine lost the CPU.
+	scanner := bufio.NewScanner(readerFunc(func(p []byte) (int, error) {
+		s.releasePrompts()
+		return r.Read(p)
+	}))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -121,6 +131,7 @@ func (s *Server) Serve(ctx context.Context, r io.Reader) error {
 		copied := append([]byte(nil), line...)
 		s.acceptLine(ctx, copied)
 	}
+	s.releasePrompts()
 	if err := scanner.Err(); err != nil {
 		s.logger.Printf("stdin read failed: %s", RedactSensitiveText(err.Error()))
 		return err
@@ -158,11 +169,24 @@ func (s *Server) acceptLine(ctx context.Context, line []byte) {
 		requestCtx := ctx
 		if method == "session/prompt" {
 			requestCtx = s.admitPrompt(ctx, params)
+			s.heldPrompts = append(s.heldPrompts, func() { s.handleRequest(requestCtx, id, method, params) })
+			return
 		}
 		go s.handleRequest(requestCtx, id, method, params)
 		return
 	}
 	s.handleNotification(method, params)
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+func (s *Server) releasePrompts() {
+	for _, start := range s.heldPrompts {
+		go start()
+	}
+	s.heldPrompts = nil
 }
 
 func (s *Server) admitPrompt(ctx context.Context, rawParams json.RawMessage) context.Context {
