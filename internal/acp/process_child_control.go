@@ -222,6 +222,26 @@ func (m *Manager) ResourceQueues() []procchild.QueueEntry {
 	for _, resource := range procchild.Resources(m.opts.StateDir) {
 		out = append(out, procchild.Queue(m.opts.StateDir, resource)...)
 	}
+	now := time.Now()
+	m.spawnedWorkMu.Lock()
+	defer m.spawnedWorkMu.Unlock()
+	for i := range out {
+		if !out[i].Holding || out[i].HeldSince != "" {
+			continue
+		}
+		// A supervisor that has not stamped its claim: say what the daemon knows
+		// rather than show a holder with no hold time.
+		for _, rec := range m.spawnedWork {
+			if rec == nil || rec.Item.ID != out[i].ChildID {
+				continue
+			}
+			if start, known := processChildHoldStart(out[i], rec.Item); known {
+				out[i].HeldSince = start.UTC().Format(time.RFC3339Nano)
+				out[i].MeasureHold(start, now)
+			}
+			break
+		}
+	}
 	return out
 }
 
