@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,6 +83,7 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 		t.Fatalf("inflate burst actor: %v", err)
 	}
 
+	diskSync := watchDiskSync(t, stateDir)
 	started := time.Now()
 	client.invoke(t, 2, "job:start", map[string]any{
 		"kind": "app-chat", "chatId": "burst-wire-chat", "tabId": "burst-wire-tab",
@@ -134,8 +136,16 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 	if output.Len() != wantBytes {
 		t.Fatalf("wire bytes = %d, want %d", output.Len(), wantBytes)
 	}
-	if len(samples) < 20 || len(samples) >= 256 {
-		t.Fatalf("wire updates = %d, want sustained frame batches rather than per-token events", len(samples))
+	// Each frame waits for its journal record to reach the disk, one sync in this store.
+	// What that sync costs right now belongs to the machine: measured, 4 ms alone and
+	// 36 ms with 30 copies on one disk, while gaps stay at 17-25 ms at the same load on
+	// an uncontended RAM volume. So the budgets carry one slow sync, read off the same
+	// disk at the same time. Rewriting the actor per frame, the stall this test exists
+	// for, still fails it at 1, 8 and 30 copies.
+	syncP90 := diskSync()
+	minUpdates := int(20 * 35 * time.Millisecond / (35*time.Millisecond + syncP90))
+	if len(samples) < minUpdates || len(samples) >= 256 {
+		t.Fatalf("wire updates = %d, want at least %d with a slow disk sync at %s: sustained frame batches rather than per-token events", len(samples), minUpdates, syncP90)
 	}
 
 	var sumGap, maxGap time.Duration
@@ -154,9 +164,9 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 	sort.Slice(gaps, func(i, j int) bool { return gaps[i] < gaps[j] })
 	p90Gap := gaps[len(gaps)*9/10]
 	elapsed := time.Since(started)
-	t.Logf("wire burst bytes=%d websocketUpdates=%d elapsed=%s throughput=%.1fKiB/s meanClientGap=%s p90ClientGap=%s maxClientGap=%s", output.Len(), len(samples), elapsed.Round(time.Millisecond), float64(output.Len())/elapsed.Seconds()/1024, meanGap.Round(time.Microsecond), p90Gap.Round(time.Microsecond), maxGap.Round(time.Microsecond))
-	if meanGap > 35*time.Millisecond || p90Gap > 75*time.Millisecond {
-		t.Fatalf("wire delivery cadence mean=%s p90=%s max=%s", meanGap, p90Gap, maxGap)
+	t.Logf("wire burst bytes=%d websocketUpdates=%d elapsed=%s throughput=%.1fKiB/s meanClientGap=%s p90ClientGap=%s maxClientGap=%s p90DiskSync=%s", output.Len(), len(samples), elapsed.Round(time.Millisecond), float64(output.Len())/elapsed.Seconds()/1024, meanGap.Round(time.Microsecond), p90Gap.Round(time.Microsecond), maxGap.Round(time.Microsecond), syncP90.Round(time.Microsecond))
+	if meanGap > 35*time.Millisecond+syncP90 || p90Gap > 75*time.Millisecond+2*syncP90 {
+		t.Fatalf("wire delivery cadence mean=%s p90=%s max=%s, with a slow disk sync at %s", meanGap, p90Gap, maxGap, syncP90)
 	}
 
 	wantPersisted := strings.TrimSpace(output.String())
@@ -179,6 +189,54 @@ func TestWireMockBurstReachesClientAtDisplayCadence(t *testing.T) {
 	if _, err := json.Marshal(snapshot); err != nil {
 		t.Fatalf("marshal authoritative burst snapshot: %v", err)
 	}
+}
+
+// watchDiskSync measures, until its result is read, what one small durable write
+// costs in dir: the same write-and-sync as one journal record, beside the store. It
+// answers with the 90th percentile.
+func watchDiskSync(t *testing.T, dir string) func() time.Duration {
+	t.Helper()
+	file, err := os.CreateTemp(dir, "disk-sync-probe-")
+	if err != nil {
+		t.Fatalf("disk sync probe: %v", err)
+	}
+	stop := make(chan struct{})
+	finished := make(chan []time.Duration, 1)
+	go func() {
+		var samples []time.Duration
+		record := make([]byte, 512)
+		for {
+			select {
+			case <-stop:
+				finished <- samples
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			began := time.Now()
+			_, writeErr := file.Write(record)
+			syncErr := file.Sync()
+			if writeErr == nil && syncErr == nil {
+				samples = append(samples, time.Since(began))
+			}
+		}
+	}()
+	var stopped sync.Once
+	var p90 time.Duration
+	read := func() time.Duration {
+		stopped.Do(func() {
+			close(stop)
+			samples := <-finished
+			_ = file.Close()
+			_ = os.Remove(file.Name())
+			if len(samples) > 0 {
+				sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+				p90 = samples[len(samples)*9/10]
+			}
+		})
+		return p90
+	}
+	t.Cleanup(func() { read() })
+	return read
 }
 
 func TestDaemonEventBroadcasterPreservesPublicationOrder(t *testing.T) {
