@@ -1,6 +1,6 @@
 'use strict';
 
-// Run with node --test. The child is a real, disposable Electron app; it never
+// Run with node --test; the suite's shell tests include it. The child is a real, disposable Electron app; it never
 // opens either Workass profile or loads credentials from those profiles.
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -9,9 +9,10 @@ const os = require('node:os');
 
 if (!process.argv.includes('--child')) {
   const { spawn } = require('node:child_process');
-  require('node:test')('private bridge in real Electron: frames, relative assets and external denial', async (t) => {
-    const executable = path.resolve(__dirname, '../../.dev/runtime/electron/darwin-arm64/Electron.app/Contents/MacOS/Electron');
-    assert.ok(fs.existsSync(executable), 'canonical dev Electron runtime is required');
+  // Only a Mac with the dev runtime has this Electron: not Linux, Windows or a clean worktree.
+  const executable = path.resolve(__dirname, '../../.dev/runtime/electron/darwin-arm64/Electron.app/Contents/MacOS/Electron');
+  const skip = fs.existsSync(executable) ? false : 'no dev Electron runtime on this machine';
+  require('node:test')('private bridge in real Electron: frames, relative assets and external denial', { skip }, async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-artifact-electron-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const env = { ...process.env, WORKASS_ARTIFACT_TEST_ROOT: root };
@@ -20,19 +21,30 @@ if (!process.argv.includes('--child')) {
     let output = '';
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
-    const code = await new Promise((resolve, reject) => {
+    const passed = () => output.includes('ARTIFACT_ELECTRON_PASS');
+    await new Promise((resolve, reject) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`Electron timeout\n${output}`)); }, 25000);
       child.once('error', reject);
-      child.once('exit', (value) => { clearTimeout(timer); resolve(value); });
+      child.once('exit', (value) => {
+        clearTimeout(timer);
+        if (value === 0 || passed()) resolve();
+        else reject(new Error(`Electron exited ${value}\n${output}`));
+      });
+      // Every assertion has run by now. On a loaded machine Electron can take longer to
+      // shut down than the page took to test, and that says nothing about the bridge.
+      child.stdout.on('data', () => { if (passed()) { clearTimeout(timer); child.kill('SIGKILL'); resolve(); } });
     });
-    assert.equal(code, 0, output);
-    assert.match(output, /ARTIFACT_ELECTRON_PASS/);
+    assert.ok(passed(), output);
   });
 } else {
   const { app, BrowserWindow, ipcMain, session } = require('electron');
   const http = require('node:http');
   const { createConnectedArtifactBridge, shouldInjectArtifactHeader } = require('./connected-artifacts');
   app.setPath('userData', process.env.WORKASS_ARTIFACT_TEST_ROOT);
+  app.setActivationPolicy?.('accessory');
+  // The real preload asks this synchronously as it loads. A sendSync nobody answers
+  // blocks the renderer for good, so main.js's answer has to exist here too.
+  ipcMain.on('workass-render-frames:guard', (event) => { event.returnValue = false; });
   void app.whenReady().then(async () => {
     const artifactHTML = `<!doctype html><link rel="stylesheet" href="style.css"><img id="icon" src="icon.svg"><button id="test" onclick="this.textContent='passed'">test</button><script>window.onload=()=>parent.postMessage({fixture:true,color:getComputedStyle(document.body).backgroundColor,image:document.querySelector('img').naturalWidth},'*')</script>`;
     const files = {
@@ -43,8 +55,7 @@ if (!process.argv.includes('--child')) {
     const csp = "sandbox allow-scripts allow-forms allow-downloads; connect-src https:; frame-ancestors 'self'";
     const bootstrap = `<script>
       const files=${JSON.stringify(files).replaceAll('<', '\\u003c')};
-      let serial=0; const transfers=new Map(); window.fixtureResult=null;
-      addEventListener('message',event=>{if(event.data?.fixture)window.fixtureResult=event.data;});
+      let serial=0; const transfers=new Map();
       window.workassArtifacts.onRequest(r=>{
         let reply={requestId:r.requestId,ok:true};
         if(r.op==='open'){
@@ -87,8 +98,9 @@ if (!process.argv.includes('--child')) {
     assert.equal(loaded.color,'rgb(230, 245, 235)',JSON.stringify(loaded));
     assert.equal(loaded.image,16);
     assert.equal(await guest.webContents.executeJavaScript(`document.getElementById('test').click();document.getElementById('test').textContent`),'passed');
-    await main.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const frame=document.createElement('iframe');frame.sandbox='allow-scripts';frame.src=${JSON.stringify(target)};frame.onload=resolve;frame.onerror=reject;document.body.append(frame);})`);
-    const iframe=await main.webContents.executeJavaScript('window.fixtureResult');
+    // The frame reports by postMessage from its own load, which reaches this window after
+    // the frame element's load event, so the report itself is what to wait for.
+    const iframe=await main.webContents.executeJavaScript(`new Promise((resolve,reject)=>{addEventListener('message',event=>{if(event.data?.fixture)resolve(event.data);});const frame=document.createElement('iframe');frame.sandbox='allow-scripts';frame.src=${JSON.stringify(target)};frame.onerror=reject;document.body.append(frame);})`);
     assert.equal(iframe?.color,'rgb(230, 245, 235)',JSON.stringify(iframe));
     assert.equal(iframe?.image,16);
     await guest.loadURL(`http://127.0.0.1:${external.address().port}`);
