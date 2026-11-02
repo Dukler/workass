@@ -43,6 +43,9 @@ func (r *providerChatRuntime) executeBackgroundAction(ctx context.Context, actio
 				OriginMachine: value.OriginMachine, OriginChatID: value.OriginChatID, OriginTabID: value.OriginTabID,
 			})
 		case chat.BackgroundMessageAgent:
+			if result, hosted, err := r.manager.MessageHostedWork(action.TabID, action.ChatID, action.Message.WorkID, string(action.OperationID), action.Message.Message); hosted {
+				return result, err
+			}
 			return r.manager.MessageSubagent(ownerKey, action.ChatID, action.TabID, action.Message.WorkID, action.Message.Message)
 		case chat.BackgroundRetryAgent:
 			return r.manager.RetrySubagent(ctx, ownerKey, action.ChatID, action.TabID, action.Retry.WorkID, action.Retry.Message)

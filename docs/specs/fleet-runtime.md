@@ -886,6 +886,12 @@ notifies nobody. A stop that cannot reach the host answers with the reason and
 can be retried. It deliberately bypasses the chat actor's stable operation id,
 which would otherwise replay the first failure forever.
 
+**A message goes to the host too.** `workass_message_subagent` to a hosted child
+reaches the host's `agent.message_hosted`, which only the machine the child runs
+for may call, and answers what a local child answers. The asker's limit crosses
+the link, and only the host knows what the child runs at, so the host applies the
+permission ceiling. The operation id keeps a retried message to one.
+
 **A push reaches a peer over either direction of the pair.** A home used to push
 only to a peer that had dialled it, so for a pair linked from the host's side
 every push was dropped and an outcome waited for the next sync. It now falls back

@@ -467,6 +467,16 @@ func (h *agentControlHandler) hostedWorkRouter() acp.HostedWorkRouter {
 			_, err := h.forwardRemoteAgentCall(ctx, method, item.HostMachine, params)
 			return err
 		},
+		Message: func(ctx context.Context, item acp.SpawnedWorkItem, operationID, message string) (map[string]any, error) {
+			answer, err := h.forwardRemoteAgentCall(ctx, "agent.message_hosted", item.HostMachine, map[string]any{
+				"parent_tab_id": item.TabID, "parent_chat_id": item.ChatID,
+				"id": item.ID, "operation_id": operationID, "message": message,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return mapFromAnyMain(answer), nil
+		},
 		Read: func(ctx context.Context, item acp.SpawnedWorkItem, tailBytes int) (string, bool, error) {
 			answer, err := h.forwardRemoteAgentCall(ctx, "process.read", item.HostMachine, map[string]any{
 				"parent_tab_id": item.TabID, "parent_chat_id": item.ChatID,

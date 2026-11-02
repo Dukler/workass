@@ -144,6 +144,26 @@ func (h *agentControlHandler) callAsControllerFor(ctx context.Context, caller wi
 			// chat here to fence: the manager checks the asker is the machine the
 			// child runs for, from the socket rather than from the payload.
 			return h.manager.CancelHostedSubagent(fieldString(params, "id"), forwarded.Peer)
+		case "agent.message_hosted":
+			// The coordinator's message to a child this machine runs for it, checked the
+			// same way as the stop above.
+			id := fieldString(params, "id")
+			// As with a local child, more work for it may not go above the asker's own
+			// level. The asker's limit crossed the link, and only this machine knows
+			// what the child runs at.
+			if providerID, modeID, known := h.manager.SubagentPermissionMode(id); known {
+				caller := h.permissionCallerFor(ctx, "", "", "")
+				message := fieldString(params, "message")
+				if err := h.admitPermission(ctx, caller, permissionChange{
+					method: method, operationID: fieldString(params, "operation_id"),
+					summary: "give its subagent more work" + permissionMessageWords(message),
+					target:  "that subagent", providerID: providerID, modeID: modeID,
+					contentDigest: permissionContentDigest(id + "\x00" + message),
+				}); err != nil {
+					return nil, err
+				}
+			}
+			return h.manager.MessageHostedSubagent(id, forwarded.Peer, fieldString(params, "operation_id"), fieldString(params, "message"))
 		case "process.list", "process.read", "process.cancel":
 			// The reads and the stop for a job whose HOME is this machine.
 			//

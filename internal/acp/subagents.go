@@ -250,6 +250,7 @@ type SubagentRun struct {
 	followups                  []subagentFollowup
 	followupSeq                int64
 	acceptingMessages          bool
+	hostedMessageOperations    map[string]struct{}
 	receiptCommitted           bool
 	attentionDeliveredSequence int64
 	completionWaiters          int
@@ -1919,6 +1920,12 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 		m.mu.Unlock()
 		return nil, errors.New("subagent has finished and no longer takes messages: read its result with workass_wait_subagent, or call workass_retry_subagent with this message to continue its work")
 	}
+	return m.deliverSubagentMessageLocked(run, id, message), nil
+}
+
+// deliverSubagentMessageLocked takes m.mu, whoever the message came through, and
+// releases it. The run is running and takes messages.
+func (m *Manager) deliverSubagentMessageLocked(run *SubagentRun, id, message string) map[string]any {
 	run.followupSeq++
 	followup := subagentFollowup{ID: run.followupSeq, Text: message}
 	run.followups = append(run.followups, followup)
@@ -1930,26 +1937,26 @@ func (m *Manager) MessageSubagent(ownerKey, parentChatID, parentTabID, id, messa
 	m.mu.Unlock()
 
 	if sessionID == "" {
-		return map[string]any{"ok": true, "delivery": "queued", "subagentId": id}, nil
+		return map[string]any{"ok": true, "delivery": "queued", "subagentId": id}
 	}
 	// No turn is running to steer: the wait sends this as the next prompt. Asking
 	// the provider anyway could only lose it to one that accepts a steer with
 	// nothing to fold it into.
 	if parked {
-		return map[string]any{"ok": true, "delivery": "followup", "strategy": "waiting_background", "subagentId": id}, nil
+		return map[string]any{"ok": true, "delivery": "followup", "strategy": "waiting_background", "subagentId": id}
 	}
 	steer := m.Steer(sessionID, message, nil, "")
 	strategy := asString(steer["strategy"])
 	if steer["ok"] == true && steer["live"] == true {
 		m.removeQueuedSubagentFollowup(id, followup.ID)
 		m.updateSubagentActivity(id, "working", "Coordinator message delivered live")
-		return map[string]any{"ok": true, "delivery": "live", "strategy": strategy, "subagentId": id}, nil
+		return map[string]any{"ok": true, "delivery": "live", "strategy": strategy, "subagentId": id}
 	}
 	if strategy == "uncertain" {
 		m.removeQueuedSubagentFollowup(id, followup.ID)
-		return map[string]any{"ok": false, "delivery": "uncertain", "strategy": strategy, "subagentId": id, "error": steer["error"]}, nil
+		return map[string]any{"ok": false, "delivery": "uncertain", "strategy": strategy, "subagentId": id, "error": steer["error"]}
 	}
-	return map[string]any{"ok": true, "delivery": "followup", "strategy": strategy, "subagentId": id}, nil
+	return map[string]any{"ok": true, "delivery": "followup", "strategy": strategy, "subagentId": id}
 }
 
 func (m *Manager) RetrySubagent(ctx context.Context, ownerKey, parentChatID, parentTabID, id, message string) (SubagentRun, error) {

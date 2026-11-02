@@ -64,6 +64,8 @@ type HostedWorkState struct {
 type HostedWorkRouter struct {
 	Stop func(ctx context.Context, item SpawnedWorkItem) error
 	Read func(ctx context.Context, item SpawnedWorkItem, tailBytes int) (string, bool, error)
+	// Message reaches a child running elsewhere and answers as a local message would.
+	Message func(ctx context.Context, item SpawnedWorkItem, operationID, message string) (map[string]any, error)
 }
 
 // hostedWorkCallTimeout bounds one stop or output read against a far machine, so
@@ -308,6 +310,55 @@ func (m *Manager) StopHostedWork(tabID, chatID, id string) (map[string]any, bool
 	return map[string]any{"ok": true, "id": item.ID, "status": "cancelling", "cancelled": true}, true
 }
 
+// A finished local child can be retried. One that ran on another machine can't be, yet.
+const hostedSubagentFinishedMessage = "subagent has finished and no longer takes messages: read its result with workass_wait_subagent or workass_list_subagent_receipts"
+
+// MessageHostedWork answers a message for a subagent running elsewhere, with what
+// the machine running it answered. The second result is false for every other row.
+func (m *Manager) MessageHostedWork(tabID, chatID, id, operationID, message string) (map[string]any, bool, error) {
+	tabID, chatID = strings.TrimSpace(tabID), strings.TrimSpace(chatID)
+	id = normalizeSpawnedWorkTaskID(id)
+	var item SpawnedWorkItem
+	found := false
+	m.spawnedWorkMu.Lock()
+	for _, rec := range m.spawnedWork {
+		if rec != nil && rec.Item.Kind == trackedSubagentSpawnedWorkKind && rec.Item.TabID == tabID && rec.Item.ChatID == chatID && rec.Item.ID == id && hostedWorkItem(rec.Item) {
+			item, found = rec.Item, true
+			break
+		}
+	}
+	m.spawnedWorkMu.Unlock()
+	if !found {
+		// A finished hosted child leaves its row and keeps its receipt. A local one
+		// keeps its run, and its own answer.
+		m.mu.Lock()
+		_, local := m.subagents[id]
+		m.mu.Unlock()
+		if receipt, kept := m.findSpawnedWorkReceipt(tabID, chatID, id); !local && kept && receipt.Kind == trackedSubagentSpawnedWorkKind {
+			return nil, true, errors.New(hostedSubagentFinishedMessage)
+		}
+		return nil, false, nil
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return nil, true, errors.New("subagent message is required")
+	}
+	if item.Status != "running" {
+		return nil, true, errors.New(hostedSubagentFinishedMessage)
+	}
+	router := m.hostedWorkRouter.Load()
+	if router == nil || router.Message == nil {
+		return nil, true, errors.New("this daemon has no route to the machine running that subagent")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hostedWorkCallTimeout)
+	defer cancel()
+	result, err := router.Message(ctx, item, operationID, message)
+	if err != nil {
+		return nil, true, errors.New(redactSensitiveText(err.Error()))
+	}
+	return result, true, nil
+}
+
 // readHostedWorkTail is a hosted row's output, read where the file is.
 func (m *Manager) readHostedWorkTail(item SpawnedWorkItem, tailBytes int) (string, bool, error) {
 	router := m.hostedWorkRouter.Load()
@@ -429,6 +480,48 @@ func (m *Manager) CancelHostedSubagent(id, peer string) (map[string]any, error) 
 		return map[string]any{"ok": true, "already": true}, nil
 	}
 	return map[string]any{"ok": true, "cancelled": true}, nil
+}
+
+// MessageHostedSubagent gives a child this machine runs for another machine a message
+// from its coordinator, on the word of the machine it runs for and of no other. It
+// then goes the way a local message goes. An operation already taken is not taken
+// again, so a reply lost on the way back can't become a second message.
+func (m *Manager) MessageHostedSubagent(id, peer, operationID, message string) (map[string]any, error) {
+	id = normalizeSpawnedWorkTaskID(id)
+	peer, operationID = strings.TrimSpace(peer), strings.TrimSpace(operationID)
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return nil, errors.New("subagent message is required")
+	}
+	m.mu.Lock()
+	run := m.subagents[id]
+	origin := ""
+	if run != nil {
+		origin = strings.TrimSpace(run.originMachine)
+	}
+	if origin == "" {
+		m.mu.Unlock()
+		return nil, errors.New("no subagent with that id runs on this machine for another machine")
+	}
+	if peer == "" || origin != peer {
+		m.mu.Unlock()
+		return nil, errors.New("that subagent runs for another machine, so this one may not message it")
+	}
+	if run.Status != "running" || !run.acceptingMessages {
+		m.mu.Unlock()
+		return nil, errors.New(hostedSubagentFinishedMessage)
+	}
+	if operationID != "" {
+		if _, taken := run.hostedMessageOperations[operationID]; taken {
+			m.mu.Unlock()
+			return map[string]any{"ok": true, "delivery": "queued", "subagentId": id, "replayed": true}, nil
+		}
+		if run.hostedMessageOperations == nil {
+			run.hostedMessageOperations = map[string]struct{}{}
+		}
+		run.hostedMessageOperations[operationID] = struct{}{}
+	}
+	return m.deliverSubagentMessageLocked(run, id, message), nil
 }
 
 // RunningHostedRows is what this daemon shows as running on one other machine.

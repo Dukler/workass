@@ -377,6 +377,9 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		// idempotent — one row per child — and neither starts a turn.
 		"cmd/workass/fleet_hosted_subagent.go:recordHostedSubagent:RegisterHostedSubagent":            {1, "the asking chat's own row for a child running on another machine"},
 		"cmd/workass/agent_control_remote.go:callAsControllerFor:CancelHostedSubagent":                {1, "the stop on a row in the chat this child runs for; checked against the asking peer"},
+		"cmd/workass/agent_control_remote.go:callAsControllerFor:SubagentPermissionMode":              {1, "read-only: what a child hosted here runs at, for the limit a message to it crossed the link with"},
+		"cmd/workass/provider_chat_background.go:executeBackgroundAction:MessageHostedWork":           {1, "a message for a child on another machine goes there, as the chat's own durable action; this machine holds no run for it"},
+		"cmd/workass/agent_control_remote.go:callAsControllerFor:MessageHostedSubagent":               {1, "the coordinator's message to a child this machine runs for its chat elsewhere: no chat here to go through, on the word of that machine and of no other"},
 		"cmd/workass/agent_update_wire.go:withRunningJobs:RunningJobSurvival":                         {1, "read-only: which jobs an update would kill"},
 		"cmd/workass/main.go:main:RunningJobSurvival":                                                 {1, "read-only: which jobs an update would kill"},
 		"cmd/workass/fleet_hosted_work.go:settleHostedExit:ApplyHostedWorkState":                      {1, "the row for a job first heard of as finished"},

@@ -14,6 +14,7 @@ import (
 	"workass/internal/fleetid"
 	"workass/internal/fleetlog"
 	"workass/internal/procchild"
+	"workass/internal/wire"
 )
 
 // The rail reads spawned-work:list, which is ListBackground, and nothing else. So
@@ -136,6 +137,98 @@ func TestStoppingARemoteRowGoesToItsHost(t *testing.T) {
 	}
 	if result, hosted := manager.StopHostedWork("mcp-tab", "mcp-chat", "not-hosted"); hosted {
 		t.Fatalf("a row that is not hosted was taken for one: %#v", result)
+	}
+}
+
+// A message to a child on another machine goes to that machine, and the coordinator
+// reads what it answered, as from a local child.
+func TestAHostedSubagentMessageGoesToItsMachine(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	manager := harness.handler.agentControl.manager
+	lane, operation, _ := hostedRowOwnerOrigin(harness)
+	manager.RegisterHostedSubagent("mcp-tab", "mcp-chat", acp.HostedSubagentRow{
+		SubagentID: "wa-subagent-9-3", Label: "remote test", HostMachine: "m-host",
+		OriginLaneID: lane, OriginOperationID: operation,
+	})
+	var asked acp.SpawnedWorkItem
+	var askedOperation, askedMessage string
+	failure := errors.New("the link is down")
+	manager.SetHostedWorkRouter(acp.HostedWorkRouter{Message: func(_ context.Context, item acp.SpawnedWorkItem, operationID, message string) (map[string]any, error) {
+		asked, askedOperation, askedMessage = item, operationID, message
+		if failure != nil {
+			return nil, failure
+		}
+		return map[string]any{"ok": true, "delivery": "live", "subagentId": item.ID}, nil
+	}})
+	if result, hosted, _ := manager.MessageHostedWork("mcp-tab", "mcp-chat", "not-hosted", "op-0", "hi"); hosted || result != nil {
+		t.Fatalf("a row that is not hosted was taken for one: %#v", result)
+	}
+	if _, hosted, err := manager.MessageHostedWork("mcp-tab", "mcp-chat", "wa-subagent-9-3", "op-1", "hi"); !hosted || err == nil || !strings.Contains(err.Error(), "the link is down") {
+		t.Fatalf("a message that could not reach the host answered hosted=%v err=%v", hosted, err)
+	}
+	if _, _, err := manager.MessageHostedWork("mcp-tab", "mcp-chat", "wa-subagent-9-3", "op-1", "  "); err == nil {
+		t.Fatal("an empty message was sent")
+	}
+	failure = nil
+	result, hosted, err := manager.MessageHostedWork("mcp-tab", "mcp-chat", "wa-subagent-9-3", "op-2", "look at the logs too")
+	if !hosted || err != nil || result["delivery"] != "live" {
+		t.Fatalf("message answered %#v hosted=%v err=%v", result, hosted, err)
+	}
+	if asked.HostMachine != "m-host" || asked.Kind != "subagent" || askedOperation != "op-2" || askedMessage != "look at the logs too" {
+		t.Fatalf("the message went as %#v op=%q message=%q", asked, askedOperation, askedMessage)
+	}
+	manager.SettleHostedSubagent("mcp-tab", "mcp-chat", acp.SubagentReceipt{SubagentID: "wa-subagent-9-3", ReceiptID: "wa-subagent-9-3", Status: "done"})
+	asked = acp.SpawnedWorkItem{}
+	if _, hosted, err := manager.MessageHostedWork("mcp-tab", "mcp-chat", "wa-subagent-9-3", "op-3", "too late"); !hosted || err == nil || !strings.Contains(err.Error(), "no longer takes messages") {
+		t.Fatalf("a finished child answered hosted=%v err=%v", hosted, err)
+	}
+	if asked.ID != "" {
+		t.Fatalf("a message for a finished child still went to %#v", asked)
+	}
+}
+
+// Only the machine a child runs for may message it. A local caller never reaches this.
+func TestAHostedSubagentMessageRefusesAWrongOrLocalCaller(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	if _, err := harness.handler.agentControl.manager.MessageHostedSubagent("wa-subagent-missing-1", "m-away", "op", "hi"); err == nil {
+		t.Fatal("a message for a child this machine does not host was accepted")
+	}
+}
+
+// The wire end of that, with a child really running here for another machine: the
+// machine it runs for reaches it, another doesn't, and a link's limit below what the
+// child runs at may not give it more work, as a chat below its child may not locally.
+func TestAHostedSubagentMessageOverTheLinkKeepsItsMachineAndItsLimit(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	control := harness.handler.agentControl
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	run, err := control.manager.SpawnSubagent(ctx, acp.SubagentSpawnOptions{
+		HostedForOrigin: true, OriginMachine: "m-away", OriginChatID: "asking-chat", OriginTabID: "asking-tab",
+		LimitIntent: "full", Prompt: "[mock:slow] keep going", ProviderID: "mock", ModeID: "bypass", CWD: repoRoot(t),
+	})
+	if err != nil {
+		t.Fatalf("hosted spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = control.manager.CancelHostedSubagent(run.ID, "m-away") })
+	send := func(peer, limit, operationID string) (any, error) {
+		return control.callAsControllerFor(ctx, wire.Caller{Peer: peer}, map[string]any{
+			"method": "agent.message_hosted", "machine_id": "m-host", "limit": limit,
+			"params": map[string]any{"id": run.ID, "operation_id": operationID, "message": "look at the logs too"},
+		})
+	}
+	if _, err := send("m-other", "full", "op-other"); err == nil || !strings.Contains(err.Error(), "may not message it") {
+		t.Fatalf("another machine: %v", err)
+	}
+	if _, err := send("m-away", "read", "op-read"); err == nil || !strings.Contains(err.Error(), "read") {
+		t.Fatalf("a read link messaging a child at bypass: %v", err)
+	}
+	answer, err := send("m-away", "full", "op-full")
+	if err != nil {
+		t.Fatalf("the machine it runs for: %v", err)
+	}
+	if fields := mapFromAnyMain(answer); fields["ok"] != true || fieldString(fields, "subagentId") != run.ID {
+		t.Fatalf("answer = %#v", answer)
 	}
 }
 

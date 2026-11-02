@@ -451,6 +451,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	case "agent.cancel_hosted":
 		// Only ever addressed by another machine, to the machine running the child.
 		return nil, errors.New("a hosted subagent is stopped by the machine it runs for, through its row")
+	case "agent.message_hosted":
+		return nil, errors.New("a hosted subagent is messaged by the machine it runs for, through workass_message_subagent")
 	case "process.list":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "no running Workass turn owns this process child request"); err != nil {
 			return nil, err
