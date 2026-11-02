@@ -178,3 +178,126 @@ func TestResourceNamesThatCouldEscapeTheQueueAreRefused(t *testing.T) {
 	}
 	_ = filepath.Separator
 }
+
+// settableClock is the time a claim sees, moved by the test.
+type settableClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *settableClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *settableClock) set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = at
+}
+
+// The live failure: a job queued for 2h26m and then reported as having held the
+// GPU for all of it, under a minute after getting it.
+func TestHoldTimeStartsWhenTheResourceIsAcquiredNotWhenItQueued(t *testing.T) {
+	state := t.TempDir()
+	queuedAt := time.Date(2026, 11, 1, 21, 29, 31, 0, time.UTC)
+	acquiredAt := queuedAt.Add(2*time.Hour + 26*time.Minute)
+	clock := &settableClock{at: queuedAt}
+	alive := func(int) bool { return true }
+	first, err := Acquire(AcquireRequest{
+		StateDir: state, Resource: "gpu0", ChildID: "xwfirstjob01", PID: 100,
+		Alive: alive, Poll: time.Millisecond, Now: clock.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan struct{})
+	granted := make(chan *Lease, 1)
+	go func() {
+		lease, err := Acquire(AcquireRequest{
+			StateDir: state, Resource: "gpu0", ChildID: "xwsecondjob1", PID: 200, MaxHold: 15 * time.Minute,
+			Alive: alive, Poll: time.Millisecond, Now: clock.now,
+			OnQueued: func(int, int) { close(queued) },
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		granted <- lease
+	}()
+	<-queued
+
+	dir := ResourceQueueDir(state, "gpu0")
+	waiting := readQueue(dir, "gpu0", alive, acquiredAt)[1]
+	if waiting.Holding || waiting.HeldSince != "" || waiting.HeldForMs != 0 {
+		t.Fatalf("a waiter holds nothing, got %+v", waiting)
+	}
+
+	clock.set(acquiredAt)
+	first.Release()
+	lease := <-granted
+	defer lease.Release()
+
+	row := readQueue(dir, "gpu0", alive, acquiredAt.Add(40*time.Second))[0]
+	if !row.Holding || row.HeldForMs != (40*time.Second).Milliseconds() {
+		t.Fatalf("hold time must count from the grant, got %+v", row)
+	}
+	if row.HeldSince != acquiredAt.Format(time.RFC3339Nano) || row.Since != queuedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("the row must keep the queue time and the grant time apart, got %+v", row)
+	}
+}
+
+// A supervisor from before the grant stamp keeps running across an update, and its
+// claim says only when it queued. That is not a hold time, whatever the reader does
+// about having none.
+func TestAClaimWithNoGrantStampClaimsNoHoldTime(t *testing.T) {
+	state := t.TempDir()
+	dir := ResourceQueueDir(state, "gpu0")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	queuedAt := time.Date(2026, 11, 1, 21, 29, 31, 0, time.UTC)
+	old := `{"ticket":"01","pid":100,"childId":"xwolderjob01","label":"old","since":"` + queuedAt.Format(time.RFC3339Nano) + `","maxHoldMs":900000}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "q-01-xwolderjob01.claim"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := readQueue(dir, "gpu0", func(int) bool { return true }, queuedAt.Add(3*time.Hour))
+	if len(rows) != 1 || !rows[0].Holding || rows[0].HeldForMs != 0 || rows[0].HeldSince != "" {
+		t.Fatalf("got %+v", rows)
+	}
+}
+
+// A reader removes any claim it cannot parse, so the rewrite that stamps a grant
+// must never show a reader a partial file: it would free a resource in use.
+func TestStampingAGrantNeverLosesTheClaimToAReader(t *testing.T) {
+	state := t.TempDir()
+	dir := ResourceQueueDir(state, "gpu0")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alive := func(int) bool { return true }
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				readQueue(dir, "gpu0", alive, time.Now())
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		lease, err := Acquire(AcquireRequest{
+			StateDir: state, Resource: "gpu0", ChildID: "xwstampedjob", PID: 100, Alive: alive, Poll: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		if _, err := os.Stat(lease.path); err != nil {
+			t.Fatalf("attempt %d: a reader took the claim while it was being stamped: %v", i, err)
+		}
+		lease.Release()
+	}
+}

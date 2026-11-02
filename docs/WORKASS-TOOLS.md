@@ -436,7 +436,8 @@ Nothing about that call polls, and nothing about it needs a watcher:
   job that vanished.
 - **`--resource` is a FIFO queue, visible to anyone.** Waiters report their
   position; the hold is tied to the supervisor process, so however the holder
-  dies the resource frees. `--max-hold` is reported, never enforced by a kill.
+  dies the resource frees. `--max-hold` is reported, never enforced by a kill,
+  and its clock starts when the job gets the resource, not while it queues.
 - **The job runs in its own process group** (a `systemd --user` scope on Linux,
   a Job object on Windows), so it is not a child of the daemon.
 - **Every transition is REPORTED to this machine's daemon and acknowledged**,

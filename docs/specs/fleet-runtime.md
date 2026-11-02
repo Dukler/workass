@@ -817,7 +817,9 @@ queue and calling it a run time would be false. A job that straddles the update
 still gets both numbers right, since its supervisor always measured from exec.
 
 `stale_after` cannot call a wait a stall: the stall clock starts at exec, and
-`max_hold` is read only from a holder. Nothing in the daemon infers a stall on
+`max_hold` is read only from a holder and measured from the grant its supervisor
+stamps on the claim, with the job's start standing in for a claim from before that
+stamp. A claim's `since` stays the queue time. Nothing in the daemon infers a stall on
 its own. A supervisor keeps heartbeating while it waits, so a queued job is not
 `not reporting` either.
 
