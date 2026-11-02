@@ -1,0 +1,52 @@
+{
+  "label": "after",
+  "controller": true,
+  "hosted": "http://127.0.0.1:PORT/workass/artifacts/@m-019e794f59ee7fdd091b8647401dbea1/tone-7c6057598296/",
+  "opened": {
+    "visible": false
+  },
+  "hidden_after_2_5s": {
+    "askedMute": [
+      true,
+      true
+    ],
+    "lastAsked": true,
+    "audibleOutput": false,
+    "t": 2.57,
+    "paused": false,
+    "pageMuted": false,
+    "volume": 1,
+    "hidden": false
+  },
+  "hidden_after_4s": {
+    "askedMute": [
+      true,
+      true
+    ],
+    "lastAsked": true,
+    "audibleOutput": false,
+    "t": 4.07,
+    "paused": false,
+    "pageMuted": false,
+    "volume": 1,
+    "hidden": false
+  },
+  "shown_call": {
+    "ok": true
+  },
+  "chat_selected": true,
+  "on_screen": {
+    "askedMute": [
+      true,
+      true,
+      false
+    ],
+    "lastAsked": false,
+    "audibleOutput": false,
+    "t": 7.11,
+    "paused": false,
+    "pageMuted": false,
+    "volume": 1,
+    "hidden": false
+  }
+}

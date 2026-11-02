@@ -10,6 +10,8 @@ app.setActivationPolicy?.('accessory');
 // The rig window never takes focus and is usually covered. A covered window makes its pages
 // document.hidden and stops painting, which pauses a video-only clip and yields stale captures.
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// The shell gives a page on screen its sound, so muting a page at creation no longer holds.
+app.commandLine.appendSwitch('mute-audio');
 let first = true;
 let mainWindow = null;
 const browserStates = [];

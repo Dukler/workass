@@ -111,6 +111,7 @@ class FakeWebContents extends EventEmitter {
   }
   sendInputEvent(event) { this.inputEvents = [...(this.inputEvents || []), event]; }
   setZoomFactor(value) { this.zoomFactor = value; }
+  setAudioMuted(value) { this.startupSequence.push(`muted:${value}`); this.audioMuted = value; }
 }
 FakeWebContents.seq = 100;
 
@@ -2442,4 +2443,52 @@ test('an explicit snapshot always reads the page as it is now', async () => {
   const second = await manager.browserControl('browser.snapshot', { chatId: 'fresh-read', format: 'outline' });
   assert.match(second.outline, /text: second/, 'not the earlier outline');
   manager.destroy();
+});
+
+test('a page sounds only while it is on screen, so an agent page out of sight is silent', async () => {
+  const { manager } = fixture();
+  const hidden = manager.create('chat-sound');
+  await hidden.ready;
+  const contents = hidden.view.webContents;
+  const startup = contents.startupSequence;
+  assert.equal(contents.audioMuted, true);
+  assert.ok(startup.indexOf('muted:true') < startup.indexOf('load:about:blank'), 'autoplay must never get a moment of sound');
+
+  await manager.command('chat-sound', 'navigate', 'https://video.example/clip.mp4');
+  assert.equal(contents.audioMuted, true, 'an agent navigating a hidden page stays silent');
+
+  await manager.activate({ chatId: 'chat-sound', bounds: { x: 900, y: 80, width: 280, height: 640 } });
+  assert.equal(contents.audioMuted, false, 'the page a person opened has its sound');
+
+  await manager.hide('chat-sound');
+  assert.equal(contents.audioMuted, true, 'taking the page off screen takes its sound');
+});
+
+test('switching panes moves the sound with the page on screen', async () => {
+  const { manager } = fixture();
+  const bounds = { x: 900, y: 80, width: 280, height: 640 };
+  await manager.activate({ chatId: 'chat-one', bounds });
+  const one = manager.entries.get('chat-one').view.webContents;
+  await manager.activate({ chatId: 'chat-two', bounds });
+  const two = manager.entries.get('chat-two').view.webContents;
+  assert.equal(one.audioMuted, true);
+  assert.equal(two.audioMuted, false);
+});
+
+test('a page in its pop-out window keeps its sound until that window goes', async () => {
+  const { manager } = fixture();
+  await manager.activate({ chatId: 'chat-out', bounds: { x: 900, y: 80, width: 280, height: 640 } });
+  const entry = manager.entries.get('chat-out');
+  await manager.popOut('chat-out');
+  assert.equal(entry.view.webContents.audioMuted, false);
+  entry.pipWindow.destroy();
+  assert.equal(entry.view.webContents.audioMuted, true);
+});
+
+test('a tab an agent page opens starts silent', async () => {
+  const { manager } = fixture();
+  const opener = manager.create('chat-popup');
+  await opener.ready;
+  const contents = manager.adoptPopup(opener, 'https://video.example/clip.mp4', 'new-window', {});
+  assert.equal(contents.audioMuted, true);
 });
