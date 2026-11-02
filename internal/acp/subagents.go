@@ -1427,15 +1427,21 @@ func (m *Manager) subagentParentDefaults(chatID, tabID string) *Job {
 		defaults.SessionID = live.Info.SessionID
 		defaults.ProviderID = live.Info.ProviderID
 		defaults.CWD = live.Info.CWD
-		defaults.startOpts = JobStartOptions{
-			ProviderID: live.Info.ProviderID,
-			ModelID:    stringPointerValue(live.Info.CurrentModelID),
-			ModeID:     stringPointerValue(live.Info.CurrentModeID),
-			CWD:        live.Info.CWD,
-		}
+		defaults.startOpts = liveSessionStartDefaults(live.Info)
 		break
 	}
 	return defaults
+}
+
+// liveSessionStartDefaults is the selection a job has when no human turn named
+// one: what the chat's live session is running now.
+func liveSessionStartDefaults(info SessionInfo) JobStartOptions {
+	return JobStartOptions{
+		ProviderID: info.ProviderID,
+		ModelID:    stringPointerValue(info.CurrentModelID),
+		ModeID:     stringPointerValue(info.CurrentModeID),
+		CWD:        info.CWD,
+	}
 }
 
 func stringPointerValue(value *string) string {
@@ -2026,13 +2032,20 @@ func (m *Manager) cancelSubagentByID(id, ownerJobID string) bool {
 }
 
 func (m *Manager) adoptSubagentsForParent(parentJobID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.adoptSubagentsForParentLocked(parentJobID)
+}
+
+// adoptSubagentsForParentLocked hands a turn's running children to its chat. Every
+// path that ends a turn must do this: until then a child answers only to a job
+// that no longer exists, so its parent can list it and never reach it.
+func (m *Manager) adoptSubagentsForParentLocked(parentJobID string) {
 	parentJobID = strings.TrimSpace(parentJobID)
 	if parentJobID == "" {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, run := range m.subagents {
 		if run == nil || run.RootJobID != parentJobID || run.Status != "running" {
 			continue
