@@ -472,6 +472,12 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 		if isolation := strings.TrimSpace(spoolString(payload, "group")); isolation != "" {
 			rec.Item.Isolation = isolation
 		}
+		// Only a position report says this job waited behind another. Without one,
+		// the time since it was asked for is its supervisor starting, and a machine
+		// under load must not report that as a queue nobody stood in.
+		if rec.Item.QueuePosition == 0 {
+			rec.Item.QueuedAt = event.At.UTC().Format(time.RFC3339Nano)
+		}
 		rec.Item.QueuePosition = 0
 		rec.Item.ExecStartedAt = event.At.UTC().Format(time.RFC3339Nano)
 		rec.MissingSince = time.Time{}

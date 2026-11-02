@@ -78,7 +78,8 @@ func seedHoldingChild(t *testing.T, manager *Manager, operation string, queuedAt
 		opts.Resource, opts.MaxHoldMs = "gpu0", holdTestMaxHold.Milliseconds()
 		opts.Events = []procchild.Event{
 			{Seq: 1, At: queuedAt, Kind: procchild.KindCreated},
-			{Seq: 2, At: startedAt, Kind: procchild.KindStarted, Payload: map[string]any{"pid": 4242}},
+			{Seq: 2, At: queuedAt, Kind: procchild.KindQueued, Payload: map[string]any{"position": 2}},
+			{Seq: 3, At: startedAt, Kind: procchild.KindStarted, Payload: map[string]any{"pid": 4242}},
 		}
 	})
 	return childID

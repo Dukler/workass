@@ -805,8 +805,10 @@ result saying "Finished with exit 0 after 2h47m22s", and the list showed a job
 at queue position 2 as `running` with a `started_at` from when it was queued.
 Three facts now stay apart: `queued_at`, when it was asked for; `started_at`,
 when its command started, absent until then; and its run time, which the
-supervisor measures from exec and states when it settles. The list reads
-`status: "queued"` until exec. That word is for readers: the row's own status
+supervisor measures from exec and states when it settles. Only a position report
+says a job waited: one that started without any stood in no queue, however long
+its supervisor took to start, so its `queued_at` becomes its `started_at`. The
+list reads `status: "queued"` until exec. That word is for readers: the row's own status
 stays the closed lifecycle in which anything but `running` has ended, which is
 what a supervisor's report is answered with and what spends its credential.
 

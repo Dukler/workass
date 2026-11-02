@@ -79,7 +79,7 @@ const hostedJobOwner = "wa:m-away/chat/mcp-chat"
 
 // newHostedJobFleet is H, whose tool endpoint a supervisor can really reach, and
 // P, whose chat asks.
-func newHostedJobFleet(t *testing.T) hostedJobFleet {
+func newHostedJobFleet(t *testing.T, mutate ...func(*acp.Options)) hostedJobFleet {
 	t.Helper()
 	secret := newFleetTestSecret(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -102,6 +102,9 @@ func newHostedJobFleet(t *testing.T) hostedJobFleet {
 			t.Fatal(err)
 		}
 		options.WorkassToolsCommand = executable
+		for _, apply := range mutate {
+			apply(options)
+		}
 	})
 	leaf, err := tlscert.IssueLoopbackServerCertificate(certificate, "tools.localhost")
 	if err != nil {
@@ -331,7 +334,10 @@ func TestARemoteJobNeedsNoChatOnItsHostAndEveryOutcomeReachesItsOwner(t *testing
 
 // The real examples behind bugs 2 and 3: a job waiting behind another for gpu0.
 func TestAQueuedRemoteJobIsQueuedUntilExecAndItsNoticeSeparatesTheWait(t *testing.T) {
-	fleet := newHostedJobFleet(t)
+	// This test's own pass below is the only one. The waiter then really does hold
+	// past the 50ms it declares, so a periodic pass landing in that moment would be
+	// right to report it.
+	fleet := newHostedJobFleet(t, func(options *acp.Options) { options.SpawnedWorkReconcileInterval = time.Hour })
 	cwd := t.TempDir()
 	release := filepath.Join(cwd, "release-holder")
 
