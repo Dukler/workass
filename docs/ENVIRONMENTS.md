@@ -31,6 +31,34 @@ runtime/     installed production daemon and native provider hosts
 logs/        development/test logs (prod logs: ~/Library/Logs/Workass/prod)
 ```
 
+## Test root
+
+`WORKASS_TEST_ROOT` is the test profile's data root, and the daemon holds to it
+without being told anything else:
+
+- State is `<root>/state`; `app-config.json` and `providers.json` sit in `<root>`.
+- `--state-dir` must be strictly inside the root, or the daemon refuses to start.
+- `HOME` and the `XDG_*` directories move to `<root>/home`, because provider
+  detection launches the real CLIs and they write under `HOME`. Those CLIs are not
+  logged in there. A rig that needs logged-in providers uses the dev profile with
+  a scratch `--state-dir`.
+- `WORKASS_DATA_ROOT` and `WORKASS_LOG_ROOT` are overwritten, and inherited tool
+  credentials outside the root are dropped, so a daemon started from an agent's
+  shell does not hand its children the installed daemon's paths.
+- A root that is a source checkout, holds the home directory, or overlaps the
+  installed data is refused.
+- `--install-service` is refused.
+
+`workass fleet` and `workass run` under the test profile default to `<root>/state`.
+`workass run` refuses a credential from outside the root unless it is `--unreported`.
+
+The daemon also refuses a start that would adopt a `state/` it was not told about:
+the dev profile with no `--state-dir`, a test root without the test profile, the
+test profile with neither a root nor `--state-dir`, and any start with no
+`--state-dir` in a source checkout. Only an unpacked release outside a checkout
+keeps the `state` default. The test profile with an explicit `--state-dir` and no
+root is not confined; `scripts/canary` runs that way to reach real providers.
+
 ## Development
 
 `desktop/scripts/dev-launch-macos.sh` loads only the `dev` profile. It starts

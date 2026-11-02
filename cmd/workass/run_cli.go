@@ -232,6 +232,17 @@ func resolveRunContext(tokenFile, stateDirOverride string, unreported bool, stde
 		// predates the stated field.
 		stateDir = procchild.StateDirForCredential(credentialPath)
 	}
+	if testState, testRoot := testProfileStateDir(); testState != "" && strings.TrimSpace(stateDirOverride) == "" {
+		// A credential from outside the test root belongs to the daemon whose shell
+		// this was. Its events would be written to, and reported into, real state.
+		outside := stateDir != "" && !pathStrictlyInside(testRoot, stateDir)
+		if outside && reporter != nil {
+			return "", nil, fmt.Errorf("this run's Workass credential belongs to the state at %s, outside %s=%s; unset WORKASS_TOOL_CONTEXT or use a credential from the test daemon", stateDir, testRootEnvVar, testRoot)
+		}
+		if stateDir == "" || outside {
+			stateDir = testState
+		}
+	}
 	if stateDir == "" {
 		if root := strings.TrimSpace(os.Getenv(procchild.DataRootEnvVar)); root != "" {
 			stateDir = filepath.Join(root, "state")

@@ -33,6 +33,9 @@ const dataRootEnvVar = "WORKASS_DATA_ROOT"
 // in ~/code produced a code for ~/code/state — a fleet of one that no daemon has
 // ever heard of. It scanned perfectly and enrolled nowhere.
 func defaultFleetStateDir() string {
+	if stateDir, _ := testProfileStateDir(); stateDir != "" {
+		return stateDir
+	}
 	if root := strings.TrimSpace(os.Getenv(dataRootEnvVar)); root != "" {
 		return filepath.Join(root, "state")
 	}
