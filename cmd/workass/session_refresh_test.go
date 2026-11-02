@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"workass/internal/acp"
@@ -49,28 +50,28 @@ func TestSessionRefreshCoordinatorCoalescesTargetsAtHighestGeneration(t *testing
 	}
 }
 
+// On a virtual clock: the window is exact, so "moved" means any later than it, on a
+// machine however busy.
 func TestSessionRefreshCoordinatorDeadlineDoesNotReset(t *testing.T) {
-	emissions := make(chan refreshEmission, 4)
-	coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
-		emissions <- refreshEmission{at: time.Now(), channel: channel, payload: mapFromAnyMain(payload)}
-	})
-	coordinator.window = 80 * time.Millisecond
-	t.Cleanup(coordinator.stop)
+	synctest.Test(t, func(t *testing.T) {
+		emissions := make(chan refreshEmission, 4)
+		coordinator := newSessionRefreshCoordinator(func(channel string, payload any) {
+			emissions <- refreshEmission{at: time.Now(), channel: channel, payload: mapFromAnyMain(payload)}
+		})
+		coordinator.window = 80 * time.Millisecond
+		defer coordinator.stop()
 
-	started := time.Now()
-	coordinator.Request("tab-first", "chat-first", 1, refreshBackground)
-	for index := 0; index < 5; index++ {
-		time.Sleep(15 * time.Millisecond)
-		coordinator.Request("tab-later", "chat-later", uint64(index+2), refreshBackground)
-	}
-	emission := waitRefreshEmission(t, emissions, time.Second)
-	elapsed := emission.at.Sub(started)
-	if elapsed > 125*time.Millisecond {
-		t.Fatalf("fixed refresh deadline moved with later intents: elapsed=%s", elapsed)
-	}
-	if elapsed < 60*time.Millisecond {
-		t.Fatalf("background refresh fired before its window: elapsed=%s", elapsed)
-	}
+		started := time.Now()
+		coordinator.Request("tab-first", "chat-first", 1, refreshBackground)
+		for index := 0; index < 5; index++ {
+			time.Sleep(15 * time.Millisecond)
+			coordinator.Request("tab-later", "chat-later", uint64(index+2), refreshBackground)
+		}
+		emission := waitRefreshEmission(t, emissions, time.Second)
+		if elapsed := emission.at.Sub(started); elapsed != coordinator.window {
+			t.Fatalf("fixed refresh deadline moved with later intents: elapsed=%s, window=%s", elapsed, coordinator.window)
+		}
+	})
 }
 
 func TestSessionRefreshCoordinatorMutationDuringFlushUsesNextDeadline(t *testing.T) {
