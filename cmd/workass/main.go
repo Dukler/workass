@@ -231,9 +231,23 @@ func main() {
 		CompactionThresholdPct:  *compactionThresholdPct,
 		CompactionKeepLastTurns: *compactionKeepLastTurns,
 	}
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+	// The one start this state directory can refuse outright, so it comes before
+	// anything that writes: config, identity, certificates and above all the
+	// manager, which starts loops and prunes state as soon as it exists. A second
+	// daemon on a live directory is refused here too, and must not touch it.
+	chatActors, err := openChatActorBackend(stateDir, sqliteStores[sqliteStoreChats], daemonVersion, logger.Printf)
+	if err != nil {
+		logger.Printf("[workass] open chat actor store: %v", err)
+		os.Exit(1)
+	}
+	if len(sqliteStores) > 0 {
+		logger.Printf("[workass] SQLite stores enabled: %s (%s); chat actors in %s", sortedSQLiteStores(sqliteStores), sqliteStoresSource, chatActors.description())
+	}
 	appConfigPath := filepath.Join(filepath.Dir(stateDir), "app-config.json")
 	appConfigStore := newAppConfigStore(appConfigPath, flagEngine, flagOverrides)
 	if err := appConfigStore.ensureFile(); err != nil {
+		_ = chatActors.close()
 		fmt.Fprintf(os.Stderr, "workass: initialize config: %v\n", err)
 		os.Exit(1)
 	}
@@ -241,6 +255,7 @@ func main() {
 	providersFile := filepath.Join(filepath.Dir(stateDir), "providers.json")
 	providers, err := acp.LoadProviderConfigs(providersFile, cwd)
 	if err != nil {
+		_ = chatActors.close()
 		fmt.Fprintf(os.Stderr, "workass: load providers: %v\n", err)
 		os.Exit(1)
 	}
@@ -248,6 +263,7 @@ func main() {
 	if acpOverride {
 		acpArgs, err := parseStringArrayFlag(*acpArgsJSON)
 		if err != nil {
+			_ = chatActors.close()
 			fmt.Fprintf(os.Stderr, "invalid --acp-args: %v\n", err)
 			os.Exit(2)
 		}
@@ -264,7 +280,6 @@ func main() {
 		defaultProviderID = "custom"
 	}
 
-	logger := log.New(os.Stderr, "", log.LstdFlags)
 	identity, identityErr := machineid.Load(stateDir)
 	if identityErr != nil {
 		// A daemon with no provable identity still serves its own client; it
@@ -287,6 +302,7 @@ func main() {
 		Logf:     logger.Printf,
 	})
 	if err != nil {
+		_ = chatActors.close()
 		fmt.Fprintf(os.Stderr, "workass: load device state: %v\n", err)
 		os.Exit(1)
 	}
@@ -301,6 +317,7 @@ func main() {
 	}
 	certificate, certErr := tlscert.Ensure(stateDir)
 	if certErr != nil {
+		_ = chatActors.close()
 		logger.Printf("[workass] tls: %v", certErr)
 		os.Exit(1)
 	}
@@ -308,6 +325,7 @@ func main() {
 	// its complete bundle is present; older layouts retain the daemon entrypoint.
 	toolsCommand, err := resolveWorkassToolsCommand(currentExecutablePath(), *toolsCommandFlag, *prod, runtime.GOOS)
 	if err != nil {
+		_ = chatActors.close()
 		fmt.Fprintf(os.Stderr, "workass: resolve tools executable: %v\n", err)
 		os.Exit(1)
 	}
@@ -340,15 +358,6 @@ func main() {
 			logger.Printf("[acp] %s %s", message, data)
 		},
 	})
-	chatActors, err := openChatActorBackend(stateDir, sqliteStores[sqliteStoreChats], daemonVersion, logger.Printf)
-	if err != nil {
-		acpManager.Reset()
-		logger.Printf("[workass] open chat actor store: %v", err)
-		os.Exit(1)
-	}
-	if len(sqliteStores) > 0 {
-		logger.Printf("[workass] SQLite stores enabled: %s (%s); chat actors in %s", sortedSQLiteStores(sqliteStores), sqliteStoresSource, chatActors.description())
-	}
 	providerChats := newProviderChatRuntimeBeforeProviderStartupWithBackend(acpManager, sessionState, stateDir, chatActors, hub.Broadcast)
 	if err := providerChats.StartupError(); err != nil {
 		acpManager.Reset()

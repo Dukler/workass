@@ -697,6 +697,13 @@ each limited to 4 MiB. A manager-owned writer coalesces failure checkpoints with
 a trailing flush, at most once per second; turn completion and shutdown force
 a flush. Provider reads and diagnostic reads never wait for disk I/O. Storage
 failure is reported in diagnostic persistence status without failing the turn.
+A flush with nothing new since the store was read or written writes nothing, so
+a daemon that ran no turn or was refused at startup leaves the file as it found
+it. A store that cannot be read whole (corrupt, oversized, a newer version, not a
+regular file, or one invalid record) is never replaced: it stays byte for byte,
+the run keeps its diagnostics in memory, the status reports `unreadable_store` or
+`invalid_store`, and persistence resumes on the next start once the file is
+moved away.
 After restart, retained observations are historical and inactive; an unfinished
 checkpoint does not become a fabricated completion or a resumed live job.
 These measurements cannot expose the full upstream request or WebSocket close

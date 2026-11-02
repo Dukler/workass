@@ -914,3 +914,28 @@ func TestTheStartToolNoLongerHasAHostChat(t *testing.T) {
 	}
 	t.Fatal("workass_start_process_child is gone")
 }
+
+// The whole road, over a real daemon link: the level a chat holds is the limit
+// the other machine holds it to, and the owner's click is what changes that.
+func TestAJobOnAnotherMachineTakesAChatAtFullAccessOverARealLink(t *testing.T) {
+	fleet := newHostedJobFleet(t)
+	setChatModeAsHuman(t, fleet.asking, "mcp-tab", "mcp-chat", "ask", "owner-lowers-to-ask")
+	arguments := map[string]any{
+		"machine_id": "m-home", "operation_id": "job-from-ask", "label": "from ask",
+		"cwd": repoRoot(t), "command": []any{"true"},
+	}
+	status, response := fleet.asking.request(t, http.MethodPost, map[string]any{"name": "workass_start_process_child", "arguments": arguments})
+	if status == http.StatusOK && response["error"] == nil {
+		t.Fatalf("an ask chat started a job on another machine: %#v", response)
+	}
+	if text := fieldString(response, "error"); !strings.Contains(text, "process.start") || !strings.Contains(text, "workass_configure_chat") {
+		t.Fatalf("the refusal does not say what to do: %q", text)
+	}
+
+	setChatModeAsHuman(t, fleet.asking, "mcp-tab", "mcp-chat", "bypass", "owner-raises-to-full")
+	if started := fleet.start(t, map[string]any{
+		"operation_id": "job-from-full", "label": "from full", "cwd": repoRoot(t), "command": []any{"true"},
+	}); started["ok"] != true {
+		t.Fatalf("a full-access chat's job = %#v", started)
+	}
+}
