@@ -3,6 +3,16 @@
 const net = require('node:net');
 const crypto = require('node:crypto');
 
+// Two rules, one per kind of Electron session (portable-networking §5).
+//
+// The app's own window reaches the owner's machines over whatever network they
+// chose, a VPN included, so a pin there holds at any address class. The agent
+// browser holds an agent's site sign-ins: a book entry naming a public host must
+// never relax TLS for that site, so a pin there holds only at a private address.
+const APP_CERTIFICATE_POLICY = 'app';
+const BROWSER_CERTIFICATE_POLICY = 'browser';
+
+// The agent browser's rule, exactly as it was before the app window had its own.
 function privateLANHost(hostname) {
   const host = String(hostname || '').replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host === '::1') return true;
@@ -39,15 +49,31 @@ function trustCertificatePEM(pins, address, certificateData, owner = 'local-daem
 // defaultSession, while every in-app browser view uses its own persistent
 // partition. Installing a verifier on only the former leaves browser.open
 // unable to load the same pinned Workass HTTPS endpoint the renderer can use.
+// Each session comes back with the rule its verifier applies; a session the
+// agent browser shares takes the browser's.
 function certificateVerificationSessions(sessionModule, browserPartition) {
 	if (!sessionModule || !sessionModule.defaultSession || typeof sessionModule.fromPartition !== 'function') {
 		return [];
 	}
-	const targets = [
-		sessionModule.defaultSession,
-		sessionModule.fromPartition(browserPartition, { cache: true }),
-	];
-	return targets.filter((target, index) => target && targets.indexOf(target) === index);
+	const app = sessionModule.defaultSession;
+	const browser = sessionModule.fromPartition(browserPartition, { cache: true });
+	if (browser === app) return [{ target: app, policy: BROWSER_CERTIFICATE_POLICY }];
+	const targets = [{ target: app, policy: APP_CERTIFICATE_POLICY }];
+	if (browser) targets.push({ target: browser, policy: BROWSER_CERTIFICATE_POLICY });
+	return targets;
+}
+
+// One spelling per host, the one Chromium hands the verifier: lower case, and an
+// IPv6 address compressed and without brackets.
+function canonicalHost(hostname) {
+	let host = String(hostname || '').trim();
+	if (!host) return '';
+	if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`;
+	try {
+		return new URL(`https://${host}`).hostname.replace(/^\[|\]$/g, '');
+	} catch {
+		return '';
+	}
 }
 
 function endpointHost(address) {
@@ -67,10 +93,11 @@ class CertificatePins {
   // meant, so one host has one pin. A second machine at that host must not replace
   // it: the first machine's reconnect would then hand its device token to whoever
   // holds the new certificate. The owner may change its own pin once it is proved.
+  // Any address class can hold a pin; which sessions honour it is the verifier's rule.
   trustEndpoint(address, fingerprint, owner = '') {
     const host = endpointHost(address);
     const pin = normalizeCertFingerprint(fingerprint);
-    if (!host || !privateLANHost(host) || !pin) return false;
+    if (!host || !pin) return false;
     const held = this.byHost.get(host);
     if (held && held.pin !== pin && held.owner !== String(owner)) return false;
     this.byHost.set(host, { pin, owner: String(owner) });
@@ -91,9 +118,11 @@ class CertificatePins {
     if (held && held.owner === String(owner)) this.byHost.delete(host);
   }
 
-  decision(request) {
-    const host = String(request?.hostname || '').replace(/^\[|\]$/g, '');
-    const expected = this.byHost.get(host)?.pin;
+  // A caller that names no rule gets the agent browser's, the stricter one.
+  decision(request, policy = BROWSER_CERTIFICATE_POLICY) {
+    const rule = policy === APP_CERTIFICATE_POLICY ? APP_CERTIFICATE_POLICY : BROWSER_CERTIFICATE_POLICY;
+    const host = canonicalHost(request?.hostname);
+    const expected = host ? this.byHost.get(host)?.pin : undefined;
 	// Electron exposes both its short certificate fingerprint and the SHA-256
 	// fingerprint on some platforms. The short value is truthy but too small,
 	// so selecting it with `||` discarded the valid fingerprint256 and made every
@@ -110,11 +139,14 @@ class CertificatePins {
 	const expectedSelfSignedFailure = result.endsWith('ERR_CERT_AUTHORITY_INVALID')
 		|| result.endsWith('ERR_CERT_COMMON_NAME_INVALID');
 	const isPrivate = privateLANHost(host);
+	const addressAllowed = rule === APP_CERTIFICATE_POLICY || isPrivate;
 	return {
-		accepted: isPrivate && expectedSelfSignedFailure && !!expected && actual === expected,
+		accepted: addressAllowed && expectedSelfSignedFailure && !!expected && actual === expected,
+		policy: rule,
 		host,
 		verificationResult: result,
 		privateLAN: isPrivate,
+		addressAllowed,
 		pinKnown: !!expected,
 		fingerprint256Valid: !!fingerprint256,
 		fingerprintValid: !!fingerprint,
@@ -123,12 +155,14 @@ class CertificatePins {
 	};
   }
 
-  verify(request) {
-	return this.decision(request).accepted;
+  verify(request, policy) {
+	return this.decision(request, policy).accepted;
   }
 }
 
 module.exports = {
+	APP_CERTIFICATE_POLICY,
+	BROWSER_CERTIFICATE_POLICY,
 	CertificatePins,
 	certificateVerificationSessions,
 	fingerprintCertificateData,

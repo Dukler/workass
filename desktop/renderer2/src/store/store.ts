@@ -3263,10 +3263,15 @@ export class Store {
     if (!typed) return { ok: false, error: 'Escribí una dirección, como 192.168.1.50:8788' };
     if (!has('machinesAdd')) return { ok: false, error: 'Este daemon todavía no tiene libreta de máquinas' };
     try {
-      const reply = await callThrow('machinesAdd', typed) as { ok?: boolean; error?: string } | undefined;
+      const reply = await callThrow('machinesAdd', typed) as { ok?: boolean; error?: string; machine?: { machineId?: string } } | undefined;
       if (reply && reply.ok === false) return { ok: false, error: reply.error || 'No se pudo agregar' };
       await this.reloadMachines();
-      const added = this.state.machines.find((machine) => machine.address === typed || machine.address.endsWith(typed));
+      // The daemon names the machine it added. A VPN address joins a row already
+      // known by its LAN one, and what was typed may lack the port the book adds.
+      const addedId = String(reply?.machine?.machineId ?? '').trim();
+      const added = addedId
+        ? this.state.machines.find((machine) => machine.machineId === addedId)
+        : this.state.machines.find((machine) => machine.address === typed || machine.address.endsWith(typed));
       if (added) this.requestMachineAccess(added.machineId);
       return { ok: true };
     } catch (err) {

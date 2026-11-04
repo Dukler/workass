@@ -820,7 +820,9 @@ func (b *Book) save() error {
 }
 
 // NormalizeAddress accepts what a human types — a host, a host:port, or a URL —
-// and returns host:port.
+// and returns host:port. An IP address comes back in one spelling, an IPv6 one
+// compressed, lower case and in brackets: the form a browser dials and pins, so
+// a VPN address typed twice in two spellings is one endpoint.
 func NormalizeAddress(address string) (string, error) {
 	address = strings.TrimSpace(address)
 	if address == "" {
@@ -847,6 +849,9 @@ func NormalizeAddress(address string) (string, error) {
 	}
 	if strings.TrimSpace(host) == "" {
 		return "", errors.New("address has no host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
 	}
 	return net.JoinHostPort(host, port), nil
 }

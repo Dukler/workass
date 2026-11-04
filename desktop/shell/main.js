@@ -172,14 +172,15 @@ async function recoverLocalDaemon() {
 // CA. Chromium may reject the current DHCP address even though the certificate
 // is the same machine. Accept only an exact SHA-256 identity learned from the
 // local daemon certificate or authenticated discovery; an arbitrary
-// self-signed private endpoint stays rejected and never receives a stored
-// device token.
-function allowPrivateWorkassCertificates() {
-  for (const target of certificateVerificationSessions(session, BROWSER_PARTITION)) {
+// self-signed endpoint stays rejected and never receives a stored device token.
+// The app window honours a pin at any address, a VPN's included; the agent
+// browser only at a private one, so no book entry relaxes TLS for a website.
+function allowPinnedWorkassCertificates() {
+  for (const { target, policy } of certificateVerificationSessions(session, BROWSER_PARTITION)) {
     try {
       target.setCertificateVerifyProc((request, callback) => {
-		const decision = certificatePins.decision(request);
-		if (!decision.accepted && decision.privateLAN && decision.pinKnown) {
+		const decision = certificatePins.decision(request, policy);
+		if (!decision.accepted && decision.addressAllowed && decision.pinKnown) {
 			const receipt = JSON.stringify(decision);
 			if (!loggedCertificateDecisions.has(receipt)) {
 				loggedCertificateDecisions.add(receipt);
@@ -687,7 +688,7 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
       }),
     });
   }
-  allowPrivateWorkassCertificates();
+  allowPinnedWorkassCertificates();
   grantMicrophoneOnly();
   if (app.isPackaged) {
     try {

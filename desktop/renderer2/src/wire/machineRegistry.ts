@@ -16,6 +16,18 @@ import { createMachineRouter, projectRemoteEvent, REMOTE_EVENT_CHANNELS } from '
 const CREDENTIAL_PREFIX = 'workass.machine.';
 const AUTO_CONNECT_DISABLED_SUFFIX = '.auto-connect-disabled';
 
+/**
+ * How long a route that failed is passed over while another is worth trying. It
+ * expires rather than bans: RFC1918 addresses collide across networks, so "dead
+ * here a minute ago" says nothing about the next network (portable-networking §5).
+ */
+export const ROUTE_COOLDOWN_MS = 30_000;
+/**
+ * How long a socket may take to open before the next route is tried. Only armed
+ * while another route exists: a slow link with nowhere else to go keeps waiting.
+ */
+export const ROUTE_OPEN_DEADLINE_MS = 10_000;
+
 export interface MachineEndpoint {
   kind?: string;
   address: string;
@@ -97,6 +109,8 @@ export interface MachineRegistryOptions {
 	/** Deterministic scheduler seam used by transport lifecycle tests. */
 	setTimer?(fn: () => void, ms: number): unknown;
 	clearTimer?(handle: unknown): void;
+	/** Clock for route cooldowns; Date.now by default. */
+	now?(): number;
 	trustEndpoint?(address: string, certFingerprint: string, machineId: string): boolean;
 	releaseEndpoint?(address: string, machineId: string): void;
 }
@@ -126,6 +140,11 @@ export class MachineRegistry {
   private readonly mounted = new Set<string>();
   /** Current-runtime authority even when browser storage is unavailable. */
   private readonly autoConnectDisabledMachines = new Set<string>();
+  /** Routes that failed lately, per machine: address to when it failed. */
+  private readonly routeFailures = new Map<string, Map<string, number>>();
+  /** Machines whose current primary attempt opened, so its close is a drop and not a failed route. */
+  private readonly routeOpened = new Set<string>();
+  private readonly openDeadlines = new Map<string, unknown>();
   private fleetKey = '';
 
   constructor(opts: MachineRegistryOptions) {
@@ -179,7 +198,7 @@ export class MachineRegistry {
         name: nickname || reportedName,
         reportedName,
         nickname,
-        address: firstAddress(entry),
+        address: this.socketAddresses.get(entry.machineId) || firstAddress(entry),
         link: state?.link ?? 'idle',
         reason: state?.reason || entry.reason || '',
         secure: !!entry.secure,
@@ -280,8 +299,10 @@ export class MachineRegistry {
       // A past approval reconnects automatically; a new request is always an
       // explicit local action, except the separately opted-in fleet mechanism.
       const automatic = !this.autoConnectDisabled(id) && (this.credentials(id).deviceToken || this.usableFleetKey());
-      const address = firstAddress(entry);
-      if (this.sockets.has(id) && this.socketAddresses.get(id) !== address) {
+      // A socket stays on the route it took while the book still lists it: a
+      // reorder, or a preferred address coming back, never moves a working link.
+      const current = this.socketAddresses.get(id);
+      if (this.sockets.has(id) && !endpointAddresses(entry).includes(current ?? '')) {
         this.detachSocket(id, 'la dirección del endpoint cambió; reconectando');
       }
       if (!this.sockets.has(id) && (this.requested.has(id) || automatic)) this.connect(entry);
@@ -292,6 +313,7 @@ export class MachineRegistry {
       this.entries.delete(id);
       this.states.delete(id);
 		this.requested.delete(id);
+		this.routeFailures.delete(id);
 		this.unmount(id);
     }
     this.opts.onChange?.(this.list());
@@ -304,6 +326,7 @@ export class MachineRegistry {
     this.entries.delete(machineId);
     this.states.delete(machineId);
     this.requested.delete(machineId);
+    this.routeFailures.delete(machineId);
     this.clearCredentials(machineId);
 		this.unmount(machineId);
     this.opts.onChange?.(this.list());
@@ -339,12 +362,20 @@ export class MachineRegistry {
   }
 
   private connect(entry: MachineEntry): void {
-    const address = firstAddress(entry);
-    if (!address) return;
+    const machineId = entry.machineId;
+    const routes = this.routeOrder(entry);
+    if (!routes.length) return;
 	const fingerprint = normalizeFingerprint(entry.certFingerprint);
 	const trust = this.opts.trustEndpoint ?? trustMachineEndpoint;
-	if (!fingerprint || !trust(address, fingerprint, entry.machineId)) {
-		this.states.set(entry.machineId, { link: 'idle', reason: 'no se pudo fijar la identidad TLS' });
+	// A host whose pin another machine holds is a failed route like any other:
+	// the next address may still reach this machine under its own pin.
+	const address = fingerprint ? routes.find((candidate) => {
+		if (trust(candidate, fingerprint, machineId)) return true;
+		this.noteRouteFailure(machineId, candidate);
+		return false;
+	}) : undefined;
+	if (!address) {
+		this.states.set(machineId, { link: 'idle', reason: 'no se pudo fijar la identidad TLS' });
 		this.opts.onChange?.(this.list());
 		return;
 	}
@@ -368,11 +399,27 @@ export class MachineRegistry {
         if (this.ready.get(id) === socket) this.ensureAuxiliarySockets(entry, socket);
       },
       clearCredentials: (id) => this.clearCredentials(id),
-      // Close the socket and free the pin. The next sync tries again, and meanwhile a
-      // real machine at this host can be pinned.
-      onUnproved: (id, reason) => { if (this.sockets.get(id) === socket) this.detachSocket(id, reason); },
+      // Close the socket and free the pin, then try the next route if one is not
+      // cooling. Otherwise the next sync tries again, and meanwhile a real machine
+      // at this host can be pinned.
+      onUnproved: (id, reason) => {
+        if (this.sockets.get(id) === socket && !this.nextRoute(id, address)) this.detachSocket(id, reason);
+      },
       onState: (state, detail) => {
 		if (this.sockets.get(entry.machineId) !== socket) return;
+		if (state === 'connecting') {
+			this.routeOpened.delete(machineId);
+			this.armOpenDeadline(machineId, socket, address);
+		} else if (state === 'open' || state === 'ready') {
+			this.routeOpened.add(machineId);
+			this.clearOpenDeadline(machineId);
+			this.routeFailures.get(machineId)?.delete(address);
+		} else {
+			this.clearOpenDeadline(machineId);
+			// It never opened: refused, unreachable, or a certificate its pin refused.
+			// A socket that worked and dropped retries its own address instead.
+			if (state === 'closed' && !this.routeOpened.has(machineId) && this.nextRoute(machineId, address)) return;
+		}
         // Fence both mutation siblings before publishing any primary state
         // transition. An auxiliary is never usable without the projection
         // socket whose events and hydration establish renderer authority.
@@ -418,9 +465,10 @@ export class MachineRegistry {
   private ensureAuxiliarySockets(entry: MachineEntry, primary: MachineSocket): void {
     const machineId = entry.machineId;
     if (this.sockets.get(machineId) !== primary || this.ready.get(machineId) !== primary) return;
-    const address = firstAddress(entry);
+    // Auxiliaries ride the route the primary proved, under the pin it holds.
+    const address = this.socketAddresses.get(machineId);
     const fingerprint = normalizeFingerprint(entry.certFingerprint);
-    if (!address || !fingerprint || !this.socketGroups.get(machineId) || this.socketAddresses.get(machineId) !== address) return;
+    if (!address || !fingerprint || !this.socketGroups.get(machineId)) return;
     this.ensureAuxiliarySocket(entry, primary, 'control', this.controlSockets, this.controlReady);
     this.ensureAuxiliarySocket(entry, primary, 'urgent', this.urgentSockets, this.urgentReady);
   }
@@ -433,7 +481,7 @@ export class MachineRegistry {
     ready: Map<string, MachineSocket>,
   ): void {
     const machineId = entry.machineId;
-    const address = firstAddress(entry);
+    const address = this.socketAddresses.get(machineId);
     const fingerprint = normalizeFingerprint(entry.certFingerprint);
     const credentials = this.credentials(machineId);
     const connectionGroup = this.socketGroups.get(machineId);
@@ -542,6 +590,8 @@ export class MachineRegistry {
 		const address = this.socketAddresses.get(machineId);
 		this.sockets.delete(machineId);
 		this.socketAddresses.delete(machineId);
+		this.routeOpened.delete(machineId);
+		this.clearOpenDeadline(machineId);
 		if (address) (this.opts.releaseEndpoint ?? releaseMachineEndpoint)(address, machineId);
 		this.socketGroups.delete(machineId);
 		this.ready.delete(machineId);
@@ -573,6 +623,73 @@ export class MachineRegistry {
 	private unmount(machineId: string): void {
 		if (!this.mounted.delete(machineId)) return;
 		this.opts.onUnmount?.(machineId);
+	}
+
+	// ---- routes (portable-networking §5) ----------------------------------
+
+	/** Every address in book order, those not cooling first, as the Go mesh orders them. */
+	private routeOrder(entry: MachineEntry): string[] {
+		const addresses = endpointAddresses(entry);
+		const hot = addresses.filter((address) => !this.routeCooling(entry.machineId, address));
+		return [...hot, ...addresses.filter((address) => !hot.includes(address))];
+	}
+
+	private routeCooling(machineId: string, address: string): boolean {
+		const failedAt = this.routeFailures.get(machineId)?.get(address);
+		return failedAt !== undefined && this.now() - failedAt < ROUTE_COOLDOWN_MS;
+	}
+
+	private noteRouteFailure(machineId: string, address: string): void {
+		let failures = this.routeFailures.get(machineId);
+		if (!failures) this.routeFailures.set(machineId, (failures = new Map()));
+		failures.set(address, this.now());
+	}
+
+	/**
+	 * Note a failed route and move to the next one that is not cooling. False when
+	 * there is none: the socket's own reconnect then retries the same address, so
+	 * two dead routes are paced by its delay and the cooldown, never a loop.
+	 */
+	private nextRoute(machineId: string, failed: string): boolean {
+		this.noteRouteFailure(machineId, failed);
+		const entry = this.entries.get(machineId);
+		if (!entry || !endpointAddresses(entry).some((address) => address !== failed && !this.routeCooling(machineId, address))) {
+			return false;
+		}
+		this.detachSocket(machineId);
+		this.connect(entry);
+		return true;
+	}
+
+	private armOpenDeadline(machineId: string, socket: MachineSocket, address: string): void {
+		this.clearOpenDeadline(machineId);
+		const entry = this.entries.get(machineId);
+		if (!entry || endpointAddresses(entry).length < 2) return;
+		const handle = this.later(() => {
+			if (this.openDeadlines.get(machineId) !== handle) return;
+			this.openDeadlines.delete(machineId);
+			if (this.sockets.get(machineId) !== socket || this.routeOpened.has(machineId)) return;
+			// Still hanging and every other route is cooling: look again later rather
+			// than cut the only attempt worth making.
+			if (!this.nextRoute(machineId, address)) this.armOpenDeadline(machineId, socket, address);
+		}, ROUTE_OPEN_DEADLINE_MS);
+		this.openDeadlines.set(machineId, handle);
+	}
+
+	private clearOpenDeadline(machineId: string): void {
+		if (!this.openDeadlines.has(machineId)) return;
+		const handle = this.openDeadlines.get(machineId);
+		this.openDeadlines.delete(machineId);
+		if (this.opts.clearTimer) this.opts.clearTimer(handle);
+		else clearTimeout(handle as ReturnType<typeof setTimeout>);
+	}
+
+	private later(fn: () => void, ms: number): unknown {
+		return this.opts.setTimer ? this.opts.setTimer(fn, ms) : setTimeout(fn, ms);
+	}
+
+	private now(): number {
+		return this.opts.now ? this.opts.now() : Date.now();
 	}
 }
 
@@ -618,13 +735,18 @@ declare global {
 	}
 }
 
-function firstAddress(entry: MachineEntry): string {
+// D7: a machine has endpoints, not an address. The first that answers wins; a VPN
+// endpoint arriving later is another entry here, not a new mechanism.
+function endpointAddresses(entry: MachineEntry): string[] {
   const endpoints = Array.isArray(entry?.endpoints) ? entry.endpoints : [];
-  // D7: a machine has endpoints, not an address. The first that answers wins;
-  // a VPN endpoint arriving later is another entry here, not a new mechanism.
+  const addresses: string[] = [];
   for (const endpoint of endpoints) {
     const address = String(endpoint?.address ?? '').trim();
-    if (address) return address;
+    if (address && !addresses.includes(address)) addresses.push(address);
   }
-  return '';
+  return addresses;
+}
+
+function firstAddress(entry: MachineEntry): string {
+  return endpointAddresses(entry)[0] ?? '';
 }

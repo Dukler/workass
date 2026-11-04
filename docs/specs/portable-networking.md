@@ -121,7 +121,10 @@ whole certificate to its public key.
 - Key replacement after a compromise stays a deliberate, visible ceremony. Key
   reuse follows the SSH host-key model, and rotation without revocation adds little.
 
-## 5. Address trust (F2, F3)
+## 5. Address trust (F2, F3). BUILT
+
+Built 2026-11-04: both policies in `desktop/shell/certificate-pins.js`, and the renderer
+ladder in `machineRegistry.ts` (book order, 30 s cooldown per failed route, 10 s open deadline).
 
 Two verifier policies replace one:
 
@@ -190,7 +193,7 @@ discovery amendment (§6).
 |---|---|---|
 | Discovery | §6 | Built. Live: the installed build found 1 of 3 machines on a real LAN, this one found all 3 in 7.4 s; idle with nothing known it knocked 0 times |
 | P0 | §3 trust and hardening | Built. A forged machine relaying to a real daemon got an approved socket before the fix and receives no proof after it |
-| P1 | §5 address trust and renderer ladder | Not built. Client reaches a VPN-range address; browser partition still refuses a forged public certificate |
+| P1 | §5 address trust and renderer ladder | Built. Live: the app reached a 100.64/10 address and a VPN hostname with fleet enrolment and fell through dead routes in 1.5 s; the browser partition refused both pinned hosts |
 | P2 | §4 certificate lifecycle | Not built. Clock-forward rig: reissue at restart, every client class reconnects with no re-approval, including past expiry |
 
 Separate specs: phone transport, and install (signing, `workass install --user`,

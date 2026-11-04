@@ -132,6 +132,17 @@ func TestNormalizeAddress(t *testing.T) {
 		{"  builder  ", "builder:8788"},
 		{"[fe80::1]:8788", "[fe80::1]:8788"},
 		{"fe80::1", "[fe80::1]:8788"},
+		// What a VPN hands out: an overlay IPv4, an IPv6 ULA, or a name.
+		{"100.64.0.7", "100.64.0.7:8788"},
+		{"100.64.0.7:18788", "100.64.0.7:18788"},
+		{"[fd7a:115c:a1e0::7]:8788", "[fd7a:115c:a1e0::7]:8788"},
+		{"[fd7a:115c:a1e0::7]", "[fd7a:115c:a1e0::7]:8788"},
+		{"fd7a:115c:a1e0::7", "[fd7a:115c:a1e0::7]:8788"},
+		{"https://[fd7a:115c:a1e0::7]:8788/", "[fd7a:115c:a1e0::7]:8788"},
+		// One address, one spelling: the one a browser and its certificate pin use.
+		{"[FD7A:115C:A1E0:0:0:0:0:7]:8788", "[fd7a:115c:a1e0::7]:8788"},
+		{"builder.tailnet.example", "builder.tailnet.example:8788"},
+		{"builder.tailnet.example:8788", "builder.tailnet.example:8788"},
 	}
 	for _, tc := range cases {
 		got, err := NormalizeAddress(tc.in)
@@ -206,6 +217,41 @@ func TestAddSecondAddressJoinsOneEntry(t *testing.T) {
 	}
 	if len(list[0].Endpoints) != 2 {
 		t.Fatalf("endpoints = %+v, want 2", list[0].Endpoints)
+	}
+}
+
+// A VPN address is typed by a person, in whatever spelling they copied. An IPv6
+// one is probed in brackets, recorded in the spelling a browser uses, and the
+// same address typed another way is the same endpoint.
+func TestAddIPv6AddressRecordsOneBracketedEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	}
+	daemon := &fakeDaemon{}
+	daemon.doc.Store(identityDoc("m-remote", "builder", 1))
+	daemon.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(realCertificate(daemon.doc.Load().(map[string]any), daemon.server.Certificate()))
+	}))
+	daemon.server.Listener.Close()
+	daemon.server.Listener = listener
+	daemon.server.StartTLS()
+	t.Cleanup(daemon.server.Close)
+	_, port, _ := net.SplitHostPort(daemon.address())
+	book := openBook(t, "m-self")
+
+	for _, typed := range []string{"[::1]:" + port, "[0:0:0:0:0:0:0:1]:" + port, "https://[::1]:" + port + "/"} {
+		entry, err := book.Add(context.Background(), typed)
+		if err != nil {
+			t.Fatalf("add %q: %v", typed, err)
+		}
+		if len(entry.Endpoints) != 1 || entry.Endpoints[0].Address != "[::1]:"+port {
+			t.Fatalf("add %q: endpoints = %+v, want one at [::1]:%s", typed, entry.Endpoints, port)
+		}
+	}
+	if list := book.List(); len(list) != 1 {
+		t.Fatalf("book has %d entries, want 1: %+v", len(list), list)
 	}
 }
 
