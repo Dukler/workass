@@ -320,7 +320,9 @@ export interface HtmlRenderReference {
   urlPath: string;
 }
 
-const TOOL_CALL = /\btools\s+call\s+workass_render_html\b/;
+// Any call that names the tool: agents run the CLI from scripts, wrappers and
+// pipes, not only as a literal `tools call` line (2026-11-04).
+const TOOL_CALL = /\bworkass_render_html\b/;
 const ARTIFACT_URL_PATH = /^\/workass\/artifacts\/(?:@[A-Za-z0-9._~-]{1,200}\/)?[a-z0-9-]{1,200}\/$/;
 
 // The JSON object that starts at `start`, or '' when it is cut short (the

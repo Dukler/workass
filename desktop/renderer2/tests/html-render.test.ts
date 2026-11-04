@@ -181,6 +181,12 @@ test('a completed workass_render_html call yields its page reference', () => {
   assert.ok(htmlRenderFromToolCall({ status: 'completed', title: `/bin/zsh -lc '${CALL}'`, output: `exit 0\n${RESULT.slice(0, RESULT.indexOf('Shown') + 3)}…` }));
 });
 
+test('a call made from a script or wrapper still shows its page', () => {
+  const scripted = "python3 - <<'EOF'\nsubprocess.run([T,'tools','call','workass_render_html'],input=json.dumps(args))\nprint(p.returncode, p.stdout[:400])\nEOF";
+  assert.ok(htmlRenderFromToolCall({ status: 'completed', command: scripted, output: `0 ${RESULT}` }), 'subprocess list form');
+  assert.ok(htmlRenderFromToolCall({ status: 'completed', command: 'echo "$ARGS" | "$WORKASS_TOOLS_COMMAND" tools call workass_render_html | head -c 600', output: RESULT }), 'piped');
+});
+
 test('anything else stays an ordinary tool row', () => {
   assert.equal(htmlRenderFromToolCall({ status: 'in_progress', command: CALL, output: RESULT }), null);
   assert.equal(htmlRenderFromToolCall({ status: 'failed', command: CALL, output: RESULT }), null);
