@@ -10,7 +10,8 @@ import { appendAssistantChunk, fullAssistantText } from '../src/assistant-output
 let vite: ViteDevServer;
 let Transcript: React.ComponentType<{ chat: Chat | null }>;
 let QueueList: React.ComponentType<{ chat: Chat }>;
-let appStore: { state: Record<string, unknown>; clearToastTimers(): void };
+let QueuedSteerButton: (props: { chatId: string; queuedId: string; title: string }) => React.ReactElement;
+let appStore: { state: Record<string, unknown>; clearToastTimers(): void; steerQueued(chatId: string, queuedId: string): Promise<boolean> };
 
 before(async () => {
   vite = await createServer({
@@ -22,11 +23,12 @@ before(async () => {
   ({ Transcript } = await vite.ssrLoadModule('/src/components/Transcript.tsx') as {
     Transcript: React.ComponentType<{ chat: Chat | null }>;
   });
-  ({ QueueList } = await vite.ssrLoadModule('/src/components/QueueList.tsx') as {
+  ({ QueueList, QueuedSteerButton } = await vite.ssrLoadModule('/src/components/QueueList.tsx') as {
     QueueList: React.ComponentType<{ chat: Chat }>;
+    QueuedSteerButton: (props: { chatId: string; queuedId: string; title: string }) => React.ReactElement;
   });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as {
-    store: { state: Record<string, unknown>; clearToastTimers(): void };
+    store: typeof appStore;
   }).store;
 });
 
@@ -122,13 +124,111 @@ test('actual transcript and composer tray transfer one steer owner at acknowledg
   assert.deepEqual(reloaded.messages.map((message) => message.id), canonicalOrder);
 });
 
-test('queued rows retain their existing controls without a new Steer button', () => {
+const liveCapabilities = { stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true, consumptionReceipt: true, turnReadback: false };
+const stopAndSendCapabilities = { ...liveCapabilities, liveSteer: false, steerConsumptionReceipt: false, stopAndSend: true };
+const noSteerCapabilities = { ...liveCapabilities, liveSteer: false, steerConsumptionReceipt: false };
+const fullBridge = { appChatSteer: async () => ({}), chatQueueReplace: async () => ({}), cancelJob: async () => ({}) };
+
+// `has()` reads the bridge from window.api, as the composer's checks do.
+function renderQueueWithBridge(chat: Chat, api: Record<string, unknown> = fullBridge): string {
+  const g = globalThis as { window?: unknown };
+  const previous = g.window;
+  g.window = { api };
+  try { return renderQueue(chat); } finally { if (previous === undefined) delete g.window; else g.window = previous; }
+}
+
+function steerButtons(markup: string): string[] {
+  return [...markup.matchAll(/<button class="qsteer" title="([^"]*)" aria-label="([^"]*)"/g)].map((match) => {
+    assert.equal(match[1], match[2], 'tooltip and accessible name are the same words');
+    return match[1];
+  });
+}
+
+test('every queued row of a running turn offers the composer steer its lane supports, left of the remove button', () => {
   const chat = chatWithLiveSteer();
-  chat.deliveryCapabilities = { stableInputIdentity: true, liveSteer: true, steerConsumptionReceipt: true, consumptionReceipt: true, turnReadback: false };
-  chat.queue = [{ id: 'queued-direction', text: 'QUEUED-DIRECTION' }];
-  const markup = renderQueue(chat);
-  assert.doesNotMatch(markup, /title="Steer"|class="qsteer"/);
-  assert.match(markup, /QUEUED-DIRECTION/);
+  chat.queue = [{ id: 'q-1', text: 'QUEUED-ONE' }, { id: 'q-2', text: 'QUEUED-TWO' }];
+
+  chat.deliveryCapabilities = liveCapabilities;
+  const live = renderQueueWithBridge(chat);
+  assert.deepEqual(steerButtons(live), ['Dirigir ahora', 'Dirigir ahora']);
+  assert.equal(occurrences(live, '<span class="qacts"><button class="qsteer"'), 2, 'the steer button opens the action group');
+  assert.ok(live.indexOf('class="qsteer"') < live.indexOf('class="qx"'), 'steer sits immediately left of remove');
+  assert.match(live, /<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5v3.2a3 3 0 0 0 3 3h5"><\/path><path d="M8.6 6.3 11 8.7 8.6 11.1"><\/path><\/svg>/);
+  assert.doesNotMatch(live, /⌘|Enter/, 'the composer shortcut steers the draft, not a queued row');
+
+  chat.deliveryCapabilities = stopAndSendCapabilities;
+  assert.deepEqual(steerButtons(renderQueueWithBridge(chat)), ['Detener y enviar', 'Detener y enviar']);
+
+  // A lane that supports both is a live lane: real live steering always wins.
+  chat.deliveryCapabilities = { ...liveCapabilities, stopAndSend: true };
+  assert.deepEqual(steerButtons(renderQueueWithBridge(chat)), ['Dirigir ahora', 'Dirigir ahora']);
+});
+
+test('no steer button renders when the turn is idle, stopping, or the lane cannot steer', () => {
+  const chat = chatWithLiveSteer();
+  chat.queue = [{ id: 'q-1', text: 'QUEUED-ONE' }];
+  const cases: Array<[string, () => string]> = [
+    ['no capability', () => { chat.deliveryCapabilities = noSteerCapabilities; return renderQueueWithBridge(chat); }],
+    ['no capabilities reported', () => { chat.deliveryCapabilities = undefined; return renderQueueWithBridge(chat); }],
+    ['live lane without the steer channel', () => {
+      chat.deliveryCapabilities = liveCapabilities;
+      return renderQueueWithBridge(chat, { chatQueueReplace: fullBridge.chatQueueReplace, cancelJob: fullBridge.cancelJob });
+    }],
+    ['stop-and-send lane without the stop channel', () => {
+      chat.deliveryCapabilities = stopAndSendCapabilities;
+      return renderQueueWithBridge(chat, { appChatSteer: fullBridge.appChatSteer, chatQueueReplace: fullBridge.chatQueueReplace });
+    }],
+    ['stop already requested', () => {
+      chat.deliveryCapabilities = liveCapabilities;
+      chat.messages.at(-1)!.stopState = 'requesting';
+      try { return renderQueueWithBridge(chat); } finally { delete chat.messages.at(-1)!.stopState; }
+    }],
+    ['idle chat', () => {
+      chat.deliveryCapabilities = liveCapabilities;
+      chat.messages.at(-1)!.status = 'done';
+      try { return renderQueueWithBridge(chat); } finally { chat.messages.at(-1)!.status = 'running'; }
+    }],
+  ];
+  for (const [name, render] of cases) {
+    const markup = render();
+    assert.match(markup, /QUEUED-ONE/, name);
+    assert.match(markup, /class="qx"/, name);
+    assert.doesNotMatch(markup, /qsteer|disabled/, `${name}: nothing rendered, not a disabled button`);
+  }
+});
+
+test('subagent notices and rows whose attachments are not ready get no steer button', () => {
+  const chat = chatWithLiveSteer();
+  chat.deliveryCapabilities = liveCapabilities;
+  const draft = { id: 'draft-1', name: 'shot.png', url: 'blob:shot', mimeType: 'image/png' } as never;
+  chat.queue = [
+    { id: 'notice', text: 'NOTICE', notice: { title: 'Revisor', status: 'done' } } as never,
+    { id: 'preparing', text: 'PREPARING', draftImages: [draft], attachmentState: 'preparing' } as never,
+    { id: 'failed', text: 'FAILED', draftImages: [draft], attachmentState: 'failed', attachmentError: 'unreadable' } as never,
+    { id: 'ready', text: 'READY-ROW', images: [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' }] },
+  ];
+  const markup = renderQueueWithBridge(chat);
+  assert.deepEqual(steerButtons(markup), ['Dirigir ahora']);
+  assert.ok(markup.indexOf('READY-ROW') < markup.indexOf('class="qsteer"'), 'only the ready row carries the button');
+  assert.equal(occurrences(markup, 'class="qx"'), 4, 'every row keeps its remove button');
+});
+
+test('pressing the steer button hands that exact row to the store without dragging or editing the row', async () => {
+  const calls: Array<[string, string]> = [];
+  const original = appStore.steerQueued;
+  appStore.steerQueued = async (chatId: string, queuedId: string) => { calls.push([chatId, queuedId]); return true; };
+  try {
+    const button = QueuedSteerButton({ chatId: 'tab-steering-render', queuedId: 'q-2', title: 'Dirigir ahora' });
+    const stopped: string[] = [];
+    button.props.onMouseDown({ stopPropagation: () => stopped.push('mousedown') });
+    button.props.onDoubleClick({ stopPropagation: () => stopped.push('dblclick') });
+    assert.deepEqual(stopped, ['mousedown', 'dblclick']);
+    assert.deepEqual(calls, []);
+    button.props.onClick({});
+    assert.deepEqual(calls, [['tab-steering-render', 'q-2']]);
+  } finally {
+    appStore.steerQueued = original;
+  }
 });
 
 test('a goal checkpoint final stays before subsequent tools and commentary through terminal and hydration', () => {

@@ -1272,7 +1272,7 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 /* Message queue (minimalist redesign 2026-07-12): each follow-up is its own
    box sized to its text (never full-width). Double-click a box to edit in place
    (saves as you type), drag a box to reorder (the box IS the grip — no handle),
-   ✕ appears only on hover and is the only button. */
+   ✕ appears only on hover; while a turn runs the steer arrow joins it. */
 .qlist { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; width: 100%; max-width: var(--read); margin: 0 auto 9px; max-height: 40vh; overflow-y: auto; }
 .qlabel { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--faint); margin: 0 2px 1px; letter-spacing: .02em; }
 .qrow { display: inline-flex; align-items: flex-start; gap: 8px; width: fit-content; max-width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px 6px 11px; cursor: grab; }
@@ -1291,10 +1291,14 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 .qrow .qattachstate { color: var(--faint); font-size: 10.5px; }
 .qrow .qattachretry { align-self: flex-start; border: 0; background: transparent; color: var(--acc); padding: 0; font: inherit; font-size: 10.5px; cursor: pointer; }
 .qrow .qattachretry:hover { text-decoration: underline; }
-.qrow .qx { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity .12s ease; margin-top: -1px; }
-.qrow:hover .qx { opacity: 1; }
+/* The steer arrow sits left of the ✕ while a turn runs: same box, same fade,
+   green only on its own hover. */
+.qrow .qacts { flex: none; display: flex; gap: 2px; }
+.qrow .qx, .qrow .qsteer { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity .12s ease; margin-top: -1px; }
+.qrow:hover .qx, .qrow:hover .qsteer, .qrow .qsteer:focus-visible { opacity: 1; }
 .qrow .qx:hover { background: var(--line); color: var(--del); }
-.qrow .qx svg { width: 12px; height: 12px; }
+.qrow .qsteer:hover { background: color-mix(in srgb, var(--acc) 14%, transparent); color: var(--acc); }
+.qrow .qx svg, .qrow .qsteer svg { width: 12px; height: 12px; }
 /* Editing: seamless in-place field, no buttons. Grows to full width for comfort. */
 .qrow.editing { cursor: default; width: 100%; background: color-mix(in srgb, var(--acc) 5%, var(--card)); border-color: color-mix(in srgb, var(--acc) 40%, var(--line)); }
 /* Double-click is how a clamped row is read in full: like t3code's queue, it

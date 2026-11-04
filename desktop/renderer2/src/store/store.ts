@@ -511,7 +511,7 @@ export class Store {
   // Stop closes that ownership gap: it aborts before dispatch, or follows the
   // exact accepted job across the reply boundary and cancels it once.
   private pendingTurnStarts = new Map<string, PendingTurnStart>(); // tabId -> exact optimistic assistant
-  private cancelRequests = new Map<string, Promise<void>>(); // provider job id -> one in-flight Stop
+  private cancelRequests = new Map<string, Promise<boolean>>(); // provider job id -> one in-flight Stop
   private drainingQueues = new Set<string>();
   // Preserve submission order for rapid explicit steers. Persistence and native
   // acknowledgement are part of the same lane, so a slower first RPC cannot let
@@ -5659,6 +5659,9 @@ export class Store {
       return false;
     }
     if (stopAndSendSupported(chat.deliveryCapabilities)) {
+      // steerQueued already holds one dispatch per queued row, and that row is
+      // not the composer's draft: never key it on, or consume, the draft.
+      if (queuedSource) return this.stopAndSendRunning(chat, prompt, images, submission, queuedSource);
       const activeAssistant = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
       const actionKey = activeAssistant?.id ?? '';
       const submissionEdit = this.draftSubmissionEdit(submission);
@@ -5872,7 +5875,8 @@ export class Store {
     if (existing) return existing;
     const durableChatId = chat.chatId;
     const dispatch = (async () => {
-      if (!this.isConnected() || !this.isChatRunning(chatId) || !liveSteeringSupported(chat.deliveryCapabilities)) return false;
+      if (!this.isConnected() || !this.isChatRunning(chatId)
+        || !(liveSteeringSupported(chat.deliveryCapabilities) || stopAndSendSupported(chat.deliveryCapabilities))) return false;
       // Flush this FIFO's pending edit first. Claiming a renderer-only row would
       // leave the daemon unable to transfer its durable owner atomically.
       const version = this.pendingQueueMutationVersions.get(chatId);
@@ -5891,7 +5895,10 @@ export class Store {
     void dispatch.finally(() => { if (this.queuedSteers.get(key) === dispatch) this.queuedSteers.delete(key); }).catch(() => {});
     return dispatch;
   }
-  private async stopAndSendRunning(chat: Chat, prompt: string, images: StartJobOpts['images'] | undefined, submission: ReturnType<Store['captureDraftSubmission']>): Promise<boolean> {
+  // A queued row already owns its text and attachments in the FIFO. Stop-and-send
+  // moves that same row to the head instead of adding a copy, so the stopped
+  // turn's drain sends it next; a definite failure puts it back where it was.
+  private async stopAndSendRunning(chat: Chat, prompt: string, images: StartJobOpts['images'] | undefined, submission: ReturnType<Store['captureDraftSubmission']>, queuedSource?: { item: QueuedMsg; index: number }): Promise<boolean> {
     const running = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
     if (!chat.chatId || !running || !has('chatQueueReplace') || !has('cancelJob')) {
       this.addToast('No se pudo detener y enviar', 'El canal de cola y detención no está disponible; no se envió el mensaje.');
@@ -5901,9 +5908,18 @@ export class Store {
     const chatId = chat.chatId;
     const assistantId = running.id;
     const jobId = running.jobId;
-    const item = queuedMessage(ownedEntityId(chat, rid('q')), redactSensitiveText(prompt), messageImages(images));
-    chat.queue = [...(chat.queue ?? []), item];
-    this.consumeSubmittedDraft(submission);
+    let item: QueuedMsg;
+    if (queuedSource) {
+      const queue = [...(chat.queue ?? [])];
+      const from = queue.findIndex((queued) => queued.id === queuedSource.item.id);
+      if (from < 0) return false;
+      [item] = queue.splice(from, 1);
+      chat.queue = [item, ...queue];
+    } else {
+      item = queuedMessage(ownedEntityId(chat, rid('q')), redactSensitiveText(prompt), messageImages(images));
+      chat.queue = [...(chat.queue ?? []), item];
+      this.consumeSubmittedDraft(submission);
+    }
     this.markQueueMutation(chat);
     const version = this.pendingQueueMutationVersions.get(tabId)!;
     const operationId = this.pendingQueueOperationIds.get(tabId)!;
@@ -5913,20 +5929,39 @@ export class Store {
     // same queue row visible; it is never permission to stop or replay input.
     if (!(await this.persistQueueMutation(tabId, chatId, version, operationId))) {
       this.addToast('No se pudo detener y enviar', 'No se confirmó el mensaje en la cola; no se detuvo el turno.');
-      return true;
+      if (!queuedSource) return true;
+      this.returnQueuedToPosition(tabId, chatId, item.id, queuedSource.index);
+      return false;
     }
     const live = this.chat(tabId);
     if (!sameChatPair(live, tabId, chatId) || !live.queue?.some((queued) => queued.id === item.id)
       || this.pendingQueueMutationVersions.has(tabId)) return true;
     const current = [...live.messages].reverse().find((message) => message.role === 'assistant' && message.status === 'running');
     if (current?.id === assistantId && (!jobId || current.jobId === jobId)) {
-      await this.cancelChatTurn(tabId);
+      const stopped = await this.cancelChatTurn(tabId);
+      if (!stopped && queuedSource) {
+        this.returnQueuedToPosition(tabId, chatId, item.id, queuedSource.index);
+        return false;
+      }
     } else if (!current) {
       // A terminal boundary may have won while the queue receipt was in flight.
       // Let the ordinary FIFO drainer handle it; never cancel the next turn.
       void this.flushNextQueued(live);
     }
     return true;
+  }
+  // Undo stop-and-send's move to the head, only while the row is still there:
+  // a later drag by the user is theirs to keep.
+  private returnQueuedToPosition(tabId: string, chatId: string, itemId: string, index: number) {
+    const live = this.chat(tabId);
+    if (!sameChatPair(live, tabId, chatId) || index <= 0 || live.queue?.[0]?.id !== itemId) return;
+    const queue = [...live.queue];
+    const [item] = queue.splice(0, 1);
+    queue.splice(Math.min(index, queue.length), 0, item);
+    live.queue = queue;
+    this.markQueueMutation(live);
+    this.bumpChat(live);
+    this.scheduleQueuePersist();
   }
 
   queueDraftMessage(chatId: string, prompt: string, drafts: DraftImage[], submission = this.captureDraftSubmission(chatId, prompt)): boolean {
@@ -6382,10 +6417,13 @@ export class Store {
     const chat = this.active(); if (!chat) return;
     void this.cancelChatTurn(chat.id);
   }
-  async cancelChatTurn(chatId: string) {
-    const chat = this.chat(chatId); if (!chat) return;
+  // Resolves false only when the stop definitely did not reach the turn (the
+  // toast has already said so); stop-and-send of a queued row then puts the
+  // row back where it was.
+  async cancelChatTurn(chatId: string): Promise<boolean> {
+    const chat = this.chat(chatId); if (!chat) return false;
     const running = [...chat.messages].reverse().find((m) => m.status === 'running');
-    if (!running) return;
+    if (!running) return true;
     this.setTurnStopState(chat, running, 'requesting');
     const candidatePendingStart = this.pendingTurnStarts.get(chat.id);
     const pendingStart = candidatePendingStart && candidatePendingStart.chatId === chat.chatId && candidatePendingStart.assistantId === running.id
@@ -6398,9 +6436,9 @@ export class Store {
       // the outstanding creation/control save eventually returns.
       if (pendingStart?.startInvoked === false) this.finalizeCancelledLocally(chat, running);
       // Once the request has escaped, bind Stop to its exact admission receipt.
-      return;
+      return true;
     }
-    await this.cancelAdmittedTurn(chat, running, running.jobId, pendingStart);
+    return this.cancelAdmittedTurn(chat, running, running.jobId, pendingStart);
   }
 
   private setTurnStopState(chat: Chat, running: Msg, state?: Msg['stopState']) {
@@ -6415,8 +6453,8 @@ export class Store {
     this.bumpChat(chat, false);
   }
 
-  private cancelAdmittedTurn(chat: Chat, running: Msg, jobId: string, pendingStart?: PendingTurnStart): Promise<void> {
-    if (pendingStart?.cancelJobId === jobId) return this.cancelRequests.get(jobId) ?? Promise.resolve();
+  private cancelAdmittedTurn(chat: Chat, running: Msg, jobId: string, pendingStart?: PendingTurnStart): Promise<boolean> {
+    if (pendingStart?.cancelJobId === jobId) return this.cancelRequests.get(jobId) ?? Promise.resolve(true);
     if (pendingStart) pendingStart.cancelJobId = jobId;
     const existing = this.cancelRequests.get(jobId);
     if (existing) return existing;
@@ -6438,7 +6476,7 @@ export class Store {
     this.scheduleScopedSync(includePermissions ? ['session', 'permissions'] : ['session']);
   }
 
-  private async performAdmittedTurnCancel(chat: Chat, running: Msg, jobId: string): Promise<void> {
+  private async performAdmittedTurnCancel(chat: Chat, running: Msg, jobId: string): Promise<boolean> {
     let result: unknown;
     try {
       // Stop needs the transport outcome. The ordinary `call` helper converts
@@ -6451,19 +6489,19 @@ export class Store {
       if (failed && failedRunning) this.setTurnStopState(failed, failedRunning);
       this.addToast('No se pudo detener', 'No se pudo entregar la detención. El turno conserva el estado del proveedor.');
       this.requestChatReadback(failed ?? chat, true);
-      return;
+      return false;
     }
     const live = this.chat(chat.id);
     if (!live || live.chatId !== chat.chatId) {
       this.requestChatReadback(chat);
-      return;
+      return true;
     }
     const liveRunning = live.messages.find((message) => message.id === running.id && message.role === 'assistant') ?? running;
     if (result === undefined) {
       this.setTurnStopState(live, liveRunning);
       this.addToast('No se pudo detener', 'El canal de detención no está disponible. El turno conserva el estado del proveedor.');
       this.requestChatReadback(live, true);
-      return;
+      return false;
     }
     const cancelled = result === true
       || (!!result && typeof result === 'object' && (result as { cancelled?: unknown }).cancelled === true);
@@ -6478,7 +6516,7 @@ export class Store {
       } else {
         this.setTurnStopState(live, liveRunning, 'acknowledged');
       }
-      return;
+      return true;
     }
     const reason = result && typeof result === 'object'
       ? String((result as { reason?: unknown }).reason ?? '')
@@ -6495,10 +6533,11 @@ export class Store {
       this.setTurnStopState(live, liveRunning);
       this.addToast('No se pudo detener', 'El daemon no confirmó la cancelación; el turno sigue activo hasta que su estado se reconcilie.');
       this.requestChatReadback(live, true);
-      return;
+      return false;
     }
     this.setTurnStopState(live, liveRunning);
     this.requestChatReadback(live);
+    return true;
   }
 
   private finalizeCancelledLocally(chat: Chat, running: Msg, jobId?: string) {

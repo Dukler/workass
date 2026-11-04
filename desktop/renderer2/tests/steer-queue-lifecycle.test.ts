@@ -195,6 +195,110 @@ test('stale hydration cannot resurrect a queued row during the steer acknowledge
   assert.deepEqual(afterReply.queue.map(q => q.id), ['keep']);
 });
 
+test('a queued row steer uses the composer path its lane supports, and nothing on a lane without either', async () => {
+  const tray = (await vite.ssrLoadModule('/src/chat/steering-presentation.ts')).projectSteeringPresentation as (messages: Msg[]) => { steeringTrayMessages: Msg[] };
+  const images = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }];
+  for (const lane of ['live', 'stop-and-send', 'none'] as const) {
+    const calls: string[] = [];
+    let acknowledge!: (value: unknown) => void;
+    let steerArgs: any[] = [];
+    const { store, owner } = subject({
+      appChatSteer: (...args: any[]) => { calls.push('steer'); steerArgs = args; return new Promise(resolve => { acknowledge = resolve; }); },
+      chatQueueReplace: async (request: any) => { calls.push('queue'); return { ok: true, operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 }; },
+      cancelJob: async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true }; },
+    }, 'capability-fixture', lane === 'live' ? genericLiveDelivery : lane === 'stop-and-send' ? { ...queuedDelivery, stopAndSend: true } : queuedDelivery);
+    running(owner);
+    owner.queue = [{ id: 'before', text: 'before' }, { id: 'selected', text: 'queued direction', images }, { id: 'after', text: 'after' }];
+    const pending = store.steerQueued(owner.id, 'selected');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (lane === 'live') {
+      assert.deepEqual(calls, ['steer']);
+      assert.equal(steerArgs[1], 'queued direction');
+      assert.deepEqual(steerArgs[2], images);
+      assert.equal(steerArgs[5].queuedMessageId, 'selected');
+      assert.deepEqual(owner.queue.map(q => q.id), ['before', 'after'], 'the row leaves the queue, the others keep their order');
+      assert.deepEqual(tray(owner.messages).steeringTrayMessages.map(m => m.content), ['queued direction'], 'it waits in the Steering section');
+      acknowledge({ ok: true, strategy: 'generic-live' });
+      assert.equal(await pending, true);
+    } else if (lane === 'stop-and-send') {
+      assert.equal(await pending, true);
+      assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+    } else {
+      assert.equal(await pending, false);
+      assert.deepEqual(calls, []);
+      assert.deepEqual(owner.queue.map(q => q.id), ['before', 'selected', 'after']);
+    }
+  }
+});
+
+test('a queued row stop-and-send moves that same row to the head, stops its exact turn, then is the next message sent', async () => {
+  const calls: string[] = [];
+  const started: any[] = [];
+  let queueRequest: any;
+  let acceptQueue!: (value: unknown) => void;
+  const { store, owner } = subject({
+    appChatSteer: async () => { assert.fail('stop-and-send is not live steering'); },
+    chatQueueReplace: (request: any) => {
+      calls.push('queue'); queueRequest = request;
+      return new Promise((resolve) => { acceptQueue = resolve; });
+    },
+    cancelJob: async (jobId: string) => { calls.push(`cancel:${jobId}`); return { cancelled: true }; },
+    startJob: async (opts: any) => { started.push(opts); return { id: 'job-2' }; },
+  }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+  running(owner);
+  const images = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }];
+  const selected = { id: 'selected', text: 'queued direction', images };
+  owner.queue = [{ id: 'before', text: 'before' }, selected, { id: 'after', text: 'after' }];
+  // A composer draft with the same words is not the row and must survive.
+  store.setDraft(owner.id, 'queued direction');
+  const pending = store.steerQueued(owner.id, 'selected');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ['queue'], 'the queue order is durable before the turn stops');
+  assert.deepEqual(queueRequest.queue.map((q: any) => q.id), ['selected', 'before', 'after']);
+  assert.deepEqual(queueRequest.queue[0].images, images);
+  assert.equal(owner.queue.length, 3, 'one row moved, none copied');
+  acceptQueue({ ok: true, operationId: queueRequest.operationId, agentQueueRevision: 1, actorRevision: 2 });
+  assert.equal(await pending, true);
+  assert.deepEqual(calls, ['queue', 'cancel:job-1']);
+  assert.equal(owner.draft, 'queued direction');
+  assert.equal(owner.queue[0], selected);
+
+  // The stopped turn's terminal drains the FIFO head: this row, with its files.
+  owner.messages[1].status = 'cancelled';
+  await store.flushNextQueued(owner);
+  assert.equal(started.length, 1);
+  assert.equal(started[0].prompt, 'queued direction');
+  assert.deepEqual(started[0].images, images);
+  assert.deepEqual(owner.queue.map(q => q.id), ['before', 'after']);
+});
+
+test('a queued row stop-and-send that cannot queue or stop puts the row back where it was', async () => {
+  for (const failure of ['queue-rejected', 'stop-unreachable', 'stop-refused']) {
+    let cancels = 0;
+    const { store, owner } = subject({
+      appChatSteer: async () => { assert.fail('stop-and-send is not live steering'); },
+      chatQueueReplace: async (request: any) => ({ ok: failure !== 'queue-rejected', operationId: request.operationId, agentQueueRevision: 1, actorRevision: 2 }),
+      cancelJob: async () => {
+        cancels++;
+        if (failure === 'stop-unreachable') throw new Error('offline');
+        return { cancelled: false, reason: 'idle' };
+      },
+    }, 'capability-fixture', { ...queuedDelivery, stopAndSend: true });
+    store.requestChatReadback = () => {};
+    running(owner);
+    const images = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'fixture.png' }];
+    const selected = { id: 'selected', text: 'queued direction', images };
+    owner.queue = [{ id: 'before', text: 'before' }, selected, { id: 'after', text: 'after' }];
+    assert.equal(await store.steerQueued(owner.id, 'selected'), false, failure);
+    assert.equal(cancels, failure === 'queue-rejected' ? 0 : 1, failure);
+    assert.deepEqual(owner.queue.map(q => q.id), ['before', 'selected', 'after'], failure);
+    assert.equal(owner.queue[1], selected, `${failure}: the same row with its files`);
+    assert.deepEqual(store.pendingQueueSnapshots.get(owner.id)?.value.map((q: any) => q.id), ['before', 'selected', 'after'], `${failure}: the restored order is what gets saved`);
+    assert.equal(owner.messages[1].status, 'running', failure);
+    assert.ok(store.state.toasts.some((toast: any) => /No se pudo detener/.test(toast.title)), failure);
+  }
+});
+
 test('stop-and-send is a separate typed action; a real live-steer capability always wins', () => {
   assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: false })), true);
   assert.equal(stopAndSendSupported(normalizeDeliveryCapabilities({ stopAndSend: true, liveSteer: true })), false);

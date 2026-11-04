@@ -2,7 +2,8 @@ import { useRef, useState } from 'react';
 import type { Chat } from '../store/types';
 import { store } from '../store/store';
 import { messageImageSrc, queuedAttachmentsReady } from '../image-drafts';
-import { liveSteeringSupported, steerStatusLabel } from '../steering';
+import { liveSteeringSupported, steerStatusLabel, stopAndSendSupported } from '../steering';
+import { has } from '../wire/api';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { noticeWord } from '../notice-word.ts';
 
@@ -10,6 +11,8 @@ import { noticeWord } from '../notice-word.ts';
 // own box sized to its text. Double-click to edit in place (saves as you type,
 // no button), drag a box to reorder (no handle — the box itself is the grip),
 // and the ✕ (hover-only) removes it. They send one per turn end in this order.
+// While a turn runs, the arrow beside the ✕ hands that row to the running turn
+// the way the composer's steer does: live steering, or stop-and-send.
 export function QueueList({ chat }: { chat: Chat }) {
   const queue = chat.queue ?? [];
   const waitingSteers = projectSteeringPresentation(chat.messages).steeringTrayMessages;
@@ -17,6 +20,7 @@ export function QueueList({ chat }: { chat: Chat }) {
   const dragId = useRef<string | null>(null);
   const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
   if (!queue.length && !waitingSteers.length) return null;
+  const steerTitle = queue.length ? queuedSteerTitle(chat) : null;
 
   const drop = (targetId: string) => {
     const id = dragId.current;
@@ -125,14 +129,19 @@ export function QueueList({ chat }: { chat: Chat }) {
                     <span className="qattachstate" title={q.attachmentError}>Volvé a adjuntar: {q.attachmentNames?.join(', ') || 'preparación interrumpida'}</span>
                   )}
                 </span>
-                <button
-                  className="qx"
-                  title="Quitar"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => store.removeQueued(chat.id, q.id)}
-                >
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 4l8 8M12 4l-8 8" /></svg>
-                </button>
+                <span className="qacts">
+                  {!!steerTitle && !q.notice && queuedAttachmentsReady(q) && (
+                    <QueuedSteerButton chatId={chat.id} queuedId={q.id} title={steerTitle} />
+                  )}
+                  <button
+                    className="qx"
+                    title="Quitar"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => store.removeQueued(chat.id, q.id)}
+                  >
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+                  </button>
+                </span>
               </>
             )}
           </div>
@@ -140,4 +149,32 @@ export function QueueList({ chat }: { chat: Chat }) {
       })}
     </div>
   );
+}
+
+// Delivery is the composer's steer for this chat (store.steerQueued). Like the
+// ✕, a press never grabs the row for a drag, and a double press never opens
+// the row for editing.
+export function QueuedSteerButton({ chatId, queuedId, title }: { chatId: string; queuedId: string; title: string }) {
+  return (
+    <button
+      className="qsteer"
+      title={title}
+      aria-label={title}
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onClick={() => { void store.steerQueued(chatId, queuedId); }}
+    >
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 2.5v3.2a3 3 0 0 0 3 3h5" /><path d="M8.6 6.3 11 8.7 8.6 11.1" /></svg>
+    </button>
+  );
+}
+
+// The composer's own capability checks decide the row action. Nothing renders
+// while the chat is idle, a stop is in flight, or the lane can do neither.
+function queuedSteerTitle(chat: Chat): string | null {
+  const active = [...chat.messages].reverse().find((message) => message.status === 'running');
+  if (!active || active.stopState) return null;
+  if (has('appChatSteer') && liveSteeringSupported(chat.deliveryCapabilities)) return 'Dirigir ahora';
+  if (has('chatQueueReplace') && has('cancelJob') && stopAndSendSupported(chat.deliveryCapabilities)) return 'Detener y enviar';
+  return null;
 }
