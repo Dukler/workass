@@ -138,9 +138,14 @@ the installed official SDK against a loopback fixture model. It asserts the
 actual outgoing provider requests contain the central Workass bootstrap,
 project instructions, built-in and extension tool schemas, and current tool
 additions/removals through fresh input and exact resume after a host restart.
-The resumed fixture also checks Pi's configured PowerShell selection without
-a Workass tool allowlist. Responses are fixed protocol fixtures; no vendor
-model, credentials or user Pi profile are used. This check skips explicitly
+A new session in the restarted host checks Pi's configured PowerShell
+selection without a Workass tool allowlist. One expectation depends on the
+installed SDK, whose version the test prints: from Pi `1.3.0` (#10785) exact
+resume keeps the tool loadout the session recorded, as `pi --resume` does, so
+a tool an extension removed stays inactive while still registered; older SDKs
+rebuilt the loadout from `defaultTools` and every extension tool. Responses
+are fixed protocol fixtures; no vendor model, credentials or user Pi profile
+are used. This check skips explicitly
 when Pi is not installed; run it on the release host with Pi installed before
 publication. Windows trust settings are covered by
 `TestPiNativeWindowsTrustEnvironment` and the native launch test.

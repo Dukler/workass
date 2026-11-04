@@ -10,6 +10,31 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import readline from 'node:readline';
+import {readFileSync} from 'node:fs';
+import {resolvePiSDK} from '../pi-native-host.mjs';
+
+// The result depends on the Pi SDK installed on this machine, so the version
+// under test is named in the output and decides one documented expectation.
+function installedPiVersion(executable) {
+  for (let dir = path.dirname(resolvePiSDK(executable)); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir,'package.json'),'utf8'));
+      if (pkg.name === '@earendil-works/pi-coding-agent') return pkg.version;
+    } catch { /* keep walking up to the package root */ }
+  }
+  throw new Error('installed Pi SDK has no package version');
+}
+const versionAtLeast = (version, minimum) => {
+  const parts = value => String(value).split(/[.-]/).slice(0,3).map(Number);
+  const [have,want] = [parts(version),parts(minimum)];
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+  return true;
+};
+// Pi 1.3.0 (#10785): exact resume restores the active tool loadout the session
+// recorded instead of re-activating every registered tool, so a tool an
+// extension removed stays removed and built-in defaults do not return. Older
+// SDKs rebuilt the loadout from defaultTools plus every extension tool.
+const RESUME_KEEPS_RECORDED_TOOLS = '1.3.0';
 
 function hostClient(env, cwd) {
   const child = spawn(process.execPath, [path.resolve('scripts/pi-native-host.mjs')], {env,cwd,stdio:['pipe','pipe','pipe']});
@@ -62,6 +87,9 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   skip: !process.env.WORKASS_TEST_PI_EXECUTABLE && 'Run through TestPiNativeSDKProviderContext with an installed official Pi SDK',
   timeout: 40000,
 }, async t => {
+  const sdkVersion = installedPiVersion(process.env.WORKASS_TEST_PI_EXECUTABLE);
+  const resumeKeepsRecordedTools = versionAtLeast(sdkVersion,RESUME_KEEPS_RECORDED_TOOLS);
+  t.diagnostic(`installed Pi SDK ${sdkVersion}: exact resume ${resumeKeepsRecordedTools ? 'keeps the recorded tool loadout' : 'rebuilds the loadout from defaultTools and extension discovery'}`);
   const root = await mkdtemp(path.join(tmpdir(),'workass-pi-context-'));
   let host, server;
   t.after(async () => {
@@ -181,6 +209,16 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
   assert.equal(host.updates.filter(update => update.clientUserMessageId === 'resumed-input').length,1);
   await host.call('session/close',{sessionId:fresh.sessionId});
 
+  // A new session in the replacement host starts from the configured tools.
+  const configured = await host.call('session/new',{cwd});
+  await host.call('session/prompt',{sessionId:configured.sessionId,prompt:'fixture configured',clientUserMessageId:'configured-input'});
+  assert.ifError(serverError);
+  const configuredIndex = freshRequestCount+2;
+  assert.equal(requests.length,configuredIndex+1,'a new session under the configured tools must reach the provider once');
+  await host.call('session/close',{sessionId:configured.sessionId});
+
+  const text = content => typeof content === 'string' ? content : JSON.stringify(content);
+  const swapResults = request => request.messages.filter(message => message.role === 'tool' && text(message.content).includes('fixture tool state changed'));
   for (const [index,request] of requests.entries()) {
     const system = request.messages.filter(message => ['system','developer'].includes(message.role)).map(message => message.content).join('\n');
     assert.ok(system.includes(bootstrap),`request ${index}: central Workass bootstrap was dropped`);
@@ -191,15 +229,32 @@ test('official Pi SDK preserves provider instructions and tool deltas across fre
     for (const name of ['read','edit','write','fixture_swap']) {
       assert.ok(tools.get(name)?.description && tools.get(name)?.parameters?.type === 'object',`request ${index}: ${name} schema missing`);
     }
-    if (index === 0) assert.ok(tools.has('bash'),'fresh session must retain Pi defaults');
-    else assert.ok(tools.has('powershell'),'added/configured PowerShell schema must reach the provider');
-    if (index !== 0 && index !== freshRequestCount) {
+    const names = [...tools.keys()].join(',');
+    if (index === 0) {
+      assert.ok(tools.has('bash'),'fresh session must retain Pi defaults');
+      assert.ok(tools.has('fixture_removed'),'fresh extension discovery lost a tool');
+    } else if (index === configuredIndex) {
+      assert.ok(tools.has('powershell') && !tools.has('bash'),`a new session must use the configured defaultTools, not a Workass allowlist: ${names}`);
+      assert.ok(tools.has('fixture_removed'),`new-session extension discovery lost a tool: ${names}`);
+      assert.equal(swapResults(request).length,0,'a new session must not inherit another session\'s tool results');
+    } else if (index === freshRequestCount) {
+      assert.ok(tools.has('powershell'),`exact resume dropped the PowerShell selection: ${names}`);
+      if (resumeKeepsRecordedTools) {
+        assert.equal(tools.has('bash'),false,`Pi ${sdkVersion}: exact resume re-added a built-in the session removed: ${names}`);
+        assert.equal(tools.has('fixture_removed'),false,`Pi ${sdkVersion}: exact resume re-activated an extension tool the session removed: ${names}`);
+      } else assert.ok(tools.has('fixture_removed'),`Pi ${sdkVersion}: resumed extension discovery lost a tool: ${names}`);
+    } else {
+      assert.ok(tools.has('powershell'),'added PowerShell schema must reach the provider');
       assert.equal(tools.has('bash'),false,'removed built-in tool survived transcript delta');
       assert.equal(tools.has('fixture_removed'),false,'removed extension tool survived transcript delta');
-      assert.ok(request.messages.some(message => message.role === 'tool' && message.content.includes('fixture tool state changed')));
-    } else assert.ok(tools.has('fixture_removed'),'fresh/resumed extension discovery lost a tool');
+      assert.ok(swapResults(request).length,`request ${index}: fixture tool result missing`);
+    }
     assert.equal(request.messages.filter(message => message.role === 'user').some(message => JSON.stringify(message.content).includes('WORKASS_TOOLS_COMMAND')),false,'bootstrap leaked into user transcript guidance');
   }
+  // The resumed host ran the fixture tool once; its result reports what that
+  // host's extension discovery registered, active or not.
+  const resumedResult = swapResults(requests[freshRequestCount+1]).at(-1);
+  assert.match(text(resumedResult?.content),/registered: [^\n]*\bfixture_removed\b/,'resumed host extension discovery lost a registered tool');
   const resumedUsers = requests[freshRequestCount].messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content));
   assert.ok(resumedUsers.some(text => text.includes('fixture fresh')),'exact resume lost prior user input');
   assert.ok(resumedUsers.some(text => text.includes('fixture resumed')),'resumed input did not reach provider');

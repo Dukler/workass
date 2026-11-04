@@ -1,5 +1,7 @@
 // Deterministic Pi extension fixture. The optional loopback pause holds a tool
-// open so a steer can enter the real SDK before its next model request.
+// open so a steer can enter the real SDK before its next model request. The
+// tool result names every tool Pi registered, so a provider request shows
+// whether extension discovery kept a tool even while it is inactive.
 export default function (pi) {
   const parameters = {type:'object',properties:{},additionalProperties:false};
   pi.registerTool({
@@ -14,7 +16,8 @@ export default function (pi) {
         ...pi.getActiveTools().filter(name => name !== 'bash' && name !== 'fixture_removed'),
         'powershell',
       ])]);
-      return {content:[{type:'text',text:'fixture tool state changed'}],details:{}};
+      const registered = pi.getAllTools().map(tool => tool.name).sort().join(',');
+      return {content:[{type:'text',text:`fixture tool state changed; registered: ${registered}`}],details:{}};
     },
   });
 }
