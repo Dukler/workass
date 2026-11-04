@@ -177,6 +177,8 @@ const GUEST_ATTACH_TIMEOUT_MS = 20000;
 const PRESENTATION_READY_SLACK_MS = 2000;
 // A popup is the person's only right after their own press in that page.
 const PERSON_POPUP_MS = 3000;
+// Popups and tabs the agent opens count against one limit per chat.
+const EXTRA_TABS_FULL = `this chat has ${POPUP_TAB_LIMIT} extra tabs open, its limit; workass_browser_close on one of them frees a place`;
 const EDITOR_PAGE_CALL_TIMEOUT_MS = 3000;
 // A page an agent drove stays painting this long after its last call.
 const PAINT_IDLE_MS = 4000;
@@ -3483,6 +3485,17 @@ class BrowserManager {
     const askPerson = (entry) => {
       if (params.visible === true && conversationId) this.requestOpen(conversationId, { reason, ...(entry && entry.extraTab ? { pageKey: entry.chatId } : {}) });
     };
+    if (params.newTab === true) {
+      if (params.tabId != null) throw new Error('new_tab opens a tab that has no id yet; leave out tab_id');
+      if (!conversationId) throw new Error('new_tab needs the chat the tab belongs to');
+      // The chat's own page owns its tabs (they close with it), so a chat that
+      // has none yet gets it too.
+      const owner = this.primaryEntryFor(conversationId) || this.create(conversationId);
+      owner.conversationId = conversationId;
+      const tab = this.openAgentTab(owner);
+      askPerson(tab);
+      return tab;
+    }
     if (params.tabId != null) {
       const entry = this.ownedEntryForTab(params.tabId, conversationId);
       askPerson(entry);
@@ -3526,12 +3539,60 @@ class BrowserManager {
     return { partition: this.partition, nodeIntegration: false, nodeIntegrationInSubFrames: false, contextIsolation: true, sandbox: true, navigateOnDragDrop: false, focusOnNavigation: false, backgroundThrottling: false };
   }
 
+  // The tabs a chat has besides its own page: those its pages opened and those
+  // its agent opened, under one limit.
+  extraTabRoom(owner) {
+    const tabs = this.browserEntries().filter((entry) => entry.extraTab && entry.ownerChatId === owner.chatId);
+    return tabs.length < POPUP_TAB_LIMIT;
+  }
+
   popupTabAllowed(opener, url) {
     const owner = opener.extraTab ? (this.entries.get(opener.ownerChatId) || opener) : opener;
-    const siblings = this.browserEntries().filter((entry) => entry.extraTab && entry.ownerChatId === owner.chatId);
-    if (siblings.length < POPUP_TAB_LIMIT) return true;
-    pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: `this chat already has ${POPUP_TAB_LIMIT} extra tabs; close one with workass_browser_close` });
+    if (this.extraTabRoom(owner)) return true;
+    pushEvent(opener, { type: 'popup_blocked', url: redactPageMessage(url, 1024), reason: EXTRA_TABS_FULL });
     return false;
+  }
+
+  // Another tab of the chat around a view in the chat's profile: listed,
+  // driven and closed by its tab id like the chat's own page, and closed
+  // with it.
+  addExtraTab(owner, view, fields) {
+    this.extraTabSeq = (this.extraTabSeq || 0) + 1;
+    const key = `${owner.chatId}#tab${this.extraTabSeq}`;
+    const tab = this.newEntry(key, view);
+    tab.tabId = Number(view.webContents.id);
+    tab.extraTab = true;
+    tab.ownerChatId = owner.chatId;
+    tab.ownerConversationId = owner.conversationId || owner.chatId;
+    tab.agentActiveAt = Date.now();
+    Object.assign(tab, fields);
+    try { view.setBackgroundColor('#ffffff'); } catch { /* older Electron */ }
+    try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
+    this.entries.set(key, tab);
+    this.bind(tab);
+    // A tab whose page goes away (a popup's window.close() at the end of a
+    // sign-in) ends with it.
+    const lifecycleToken = tab.lifecycleToken;
+    if (typeof view.webContents.once === 'function') {
+      view.webContents.once('destroyed', () => { if (this.isCurrentEntry(tab, lifecycleToken)) this.close(tab.chatId); });
+    }
+    return tab;
+  }
+
+  // workass_browser_open with new_tab: a blank tab of the chat, out of sight,
+  // with its own operation queue, so it runs beside the chat's other tabs.
+  openAgentTab(owner) {
+    if (!this.extraTabRoom(owner)) throw new Error(EXTRA_TABS_FULL);
+    const view = new this.WebContentsView({ webPreferences: this.popupWebPreferences() });
+    const tab = this.addExtraTab(owner, view, { openerTabId: null });
+    const lifecycleToken = tab.lifecycleToken;
+    tab.ready = this.initializeEntry(tab, lifecycleToken).catch((error) => {
+      if (!this.isCurrentEntry(tab, lifecycleToken)) return false;
+      tab.error = redactPageMessage(error && error.message || error);
+      this.publish(tab);
+      return false;
+    });
+    return tab;
   }
 
   // Electron's createWindow for a popup an agent-driven page opened: a native
@@ -3543,28 +3604,8 @@ class BrowserManager {
       webPreferences: { ...(options.webPreferences || {}), ...this.popupWebPreferences() },
       ...(options.webContents ? { webContents: options.webContents } : {}),
     });
-    this.extraTabSeq = (this.extraTabSeq || 0) + 1;
-    const key = `${owner.chatId}#tab${this.extraTabSeq}`;
-    const tab = this.newEntry(key, view);
-    tab.tabId = Number(view.webContents.id);
-    tab.url = url;
-    tab.loading = true;
-    tab.popup = true;
-    tab.extraTab = true;
-    tab.ownerChatId = owner.chatId;
-    tab.ownerConversationId = owner.conversationId || owner.chatId;
-    tab.openerTabId = this.tabIdOf(opener);
-    tab.agentActiveAt = Date.now();
-    try { view.setBackgroundColor('#ffffff'); } catch { /* older Electron */ }
-    try { view.webContents.setUserAgent(this.userAgent); } catch { /* best effort */ }
-    this.entries.set(key, tab);
-    this.bind(tab);
+    const tab = this.addExtraTab(owner, view, { url, loading: true, popup: true, openerTabId: this.tabIdOf(opener) });
     const lifecycleToken = tab.lifecycleToken;
-    // A popup that closes itself (window.close() at the end of a sign-in)
-    // ends its tab, and its window.
-    if (typeof view.webContents.once === 'function') {
-      view.webContents.once('destroyed', () => { if (this.isCurrentEntry(tab, lifecycleToken)) this.close(tab.chatId); });
-    }
     opener.pendingTabs = (opener.pendingTabs || 0) + 1;
     touchActivity(opener);
     let pending = true;

@@ -113,7 +113,11 @@ func browserMCPTools() []map[string]any {
 	}, "action")
 	return []map[string]any{
 		tool("workass_browser_list", agenttext.Get("tools.workass_browser_list"), object(map[string]any{}), true, true),
-		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "visible": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "operation_id": operationID}, "operation_id"), false, false),
+		tool("workass_browser_open", agenttext.Get("tools.workass_browser_open"), object(map[string]any{
+			"tab_id": tabID, "url": map[string]any{"type": "string"}, "visible": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"},
+			"new_tab":      map[string]any{"type": "boolean", "description": agenttext.Get("schema.browserOpen.new_tab")},
+			"operation_id": operationID,
+		}, "operation_id"), false, false),
 		tool("workass_browser_navigate", agenttext.Get("tools.workass_browser_navigate"), object(map[string]any{"tab_id": tabID, "url": map[string]any{"type": "string"}, "operation_id": operationID}, "url", "operation_id"), false, false),
 		tool("workass_browser_snapshot", agenttext.Get("tools.workass_browser_snapshot"), object(map[string]any{
 			"tab_id":            tabID,
@@ -306,7 +310,7 @@ func browserMCPToolBoundary(name string) (string, bool, bool, map[string]string,
 	case "workass_browser_list":
 		return "browser.list", false, false, fields(), nil
 	case "workass_browser_open":
-		return "browser.open", true, false, fields("tab_id", "tabId", "url", "url", "visible", "visible", "reason", "reason"), nil
+		return "browser.open", true, false, fields("tab_id", "tabId", "url", "url", "visible", "visible", "reason", "reason", "new_tab", "newTab"), nil
 	case "workass_browser_navigate":
 		return "browser.navigate", true, false, fields("tab_id", "tabId", "url", "url"), nil
 	case "workass_browser_snapshot":
@@ -400,7 +404,7 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 			}
 		}
 	}
-	for _, key := range []string{"visible", "submit", "observeAfter", "includeFrames", "accept"} {
+	for _, key := range []string{"visible", "submit", "observeAfter", "includeFrames", "accept", "newTab"} {
 		if err := boolField(key); err != nil {
 			return err
 		}
@@ -441,6 +445,10 @@ func validateBrowserMCPParams(name string, params map[string]any) error {
 		}
 	case "workass_browser_read":
 		return validateBrowserReadParams(params)
+	case "workass_browser_open":
+		if _, hasTab := params["tabId"]; hasTab && params["newTab"] == true {
+			return errors.New("new_tab opens a tab that has no id yet; leave out tab_id")
+		}
 	case "workass_browser_navigate":
 		return stringField("url", true)
 	case "workass_browser_click":

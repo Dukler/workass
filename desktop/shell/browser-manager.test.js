@@ -2492,3 +2492,131 @@ test('a tab an agent page opens starts silent', async () => {
   const contents = manager.adoptPopup(opener, 'https://video.example/clip.mp4', 'new-window', {});
   assert.equal(contents.audioMuted, true);
 });
+
+test('browser.open with newTab opens another hidden tab of the chat that every tool takes by its id', async () => {
+  const asks = [];
+  const { manager, win } = fixture({ requestOpen: (chatId, request) => asks.push([chatId, request]) });
+  const own = await manager.browserControl('browser.open', { chatId: 'nt-chat', url: 'own.example' });
+  const second = await manager.browserControl('browser.open', { chatId: 'nt-chat', newTab: true, url: 'second.example' });
+  assert.notEqual(second.id, own.id, 'a tab of its own');
+  assert.equal(second.url, 'https://second.example');
+  assert.equal(second.visible, false, 'out of sight');
+  assert.equal(second.opened_by_tab_id, null, 'no page opened it');
+  assert.equal(win.contentView.children.length, 0, 'never attached to the window');
+  const entry = [...manager.entries.values()].find((candidate) => manager.tabIdOf(candidate) === second.id);
+  assert.equal(entry.extraTab, true);
+  assert.equal(entry.ownerChatId, 'nt-chat');
+  assert.equal(entry.view.options.webPreferences.partition, manager.partition, 'the chat\'s signed-in profile');
+  assert.equal(entry.view.options.webPreferences.sandbox, true);
+  assert.equal(entry.view.webContents.audioMuted, true);
+  // Without a url it is a blank tab.
+  const blank = await manager.browserControl('browser.open', { chatId: 'nt-chat', newTab: true });
+  assert.equal(blank.url, 'about:blank');
+  assert.notEqual(blank.id, second.id);
+  // Every tool takes it by its tab id; the chat's own page is untouched.
+  assert.deepEqual((await manager.browserControl('browser.list', { chatId: 'nt-chat' })).tabs.map((tab) => tab.id).sort(), [own.id, second.id, blank.id].sort());
+  assert.equal((await manager.browserControl('browser.snapshot', { chatId: 'nt-chat', tabId: second.id })).url, 'https://second.example');
+  assert.equal((await manager.browserControl('browser.navigate', { chatId: 'nt-chat', tabId: blank.id, url: 'third.example' })).url, 'https://third.example');
+  assert.equal((await manager.browserControl('browser.click', { chatId: 'nt-chat', tabId: blank.id, selector: '#save' })).ok, true);
+  assert.equal((await manager.browserControl('browser.screenshot', { chatId: 'nt-chat', tabId: second.id })).mimeType, 'image/png');
+  assert.equal((await manager.browserControl('browser.snapshot', { chatId: 'nt-chat' })).url, 'https://own.example');
+  // Another chat cannot drive it.
+  await assert.rejects(manager.browserControl('browser.snapshot', { chatId: 'other-chat', tabId: second.id }), /belongs to another chat/);
+  // A tab id names an existing tab; a new tab has none yet.
+  await assert.rejects(manager.browserControl('browser.open', { chatId: 'nt-chat', newTab: true, tabId: own.id }), /tab_id/);
+  // visible works as for any tab of the chat.
+  await assert.rejects(manager.browserControl('browser.open', { chatId: 'nt-chat', newTab: true, visible: true }), /needs reason/);
+  const shown = await manager.browserControl('browser.open', { chatId: 'nt-chat', newTab: true, visible: true, reason: 'Pick the account' });
+  const shownEntry = [...manager.entries.values()].find((candidate) => manager.tabIdOf(candidate) === shown.id);
+  assert.deepEqual(asks, [['nt-chat', { reason: 'Pick the account', pageKey: shownEntry.chatId }]]);
+  // The panel lists it like a tab a page opened.
+  assert.deepEqual(manager.pagesFor('nt-chat').map((page) => page.primary), [true, false, false, false]);
+  // Closing it ends it; closing the chat's own page ends every tab it has.
+  assert.equal((await manager.browserControl('browser.close', { chatId: 'nt-chat', tabId: second.id })).status, 'closed');
+  assert.equal((await manager.browserControl('browser.list', { chatId: 'nt-chat' })).tabs.length, 3);
+  manager.close('nt-chat');
+  assert.equal([...manager.entries.values()].filter((candidate) => candidate.ownerChatId === 'nt-chat').length, 0);
+  manager.destroy();
+});
+
+test('browser.open with newTab gives a chat with no page yet its own page too', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  const tab = await manager.browserControl('browser.open', { chatId: 'fresh-chat', newTab: true, url: 'first.example' });
+  const own = manager.primaryEntryFor('fresh-chat');
+  assert.ok(own, 'the chat\'s own page owns the tab');
+  assert.notEqual(manager.tabIdOf(own), tab.id);
+  assert.equal(tab.url, 'https://first.example');
+  manager.destroy();
+});
+
+test('tabs an agent opens and popups its pages open share one limit per chat', async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  await manager.browserControl('browser.open', { chatId: 'limit-chat' });
+  const owner = manager.entries.get('limit-chat');
+  const popup = () => {
+    owner.agentActiveAt = Date.now();
+    const decision = owner.view.webContents.windowOpenHandler({ url: 'https://popup.example/', disposition: 'new-window' });
+    if (decision.action === 'allow') decision.createWindow({ webContents: new FakeWebContents(FakeView.profile), webPreferences: {} });
+    return decision.action;
+  };
+  assert.equal(popup(), 'allow');
+  const opened = [];
+  for (let index = 0; index < 7; index += 1) opened.push(await manager.browserControl('browser.open', { chatId: 'limit-chat', newTab: true }));
+  await assert.rejects(manager.browserControl('browser.open', { chatId: 'limit-chat', newTab: true }), (error) => {
+    assert.match(error.message, /\b8\b/);
+    assert.match(error.message, /workass_browser_close/);
+    return true;
+  });
+  assert.equal(popup(), 'deny', 'a page cannot open one past the limit either');
+  assert.equal([...manager.entries.values()].filter((entry) => entry.extraTab).length, 8);
+  // Closing one frees a place, for either kind.
+  await manager.browserControl('browser.close', { chatId: 'limit-chat', tabId: opened[0].id });
+  const again = await manager.browserControl('browser.open', { chatId: 'limit-chat', newTab: true });
+  assert.ok(again.id);
+  await manager.browserControl('browser.close', { chatId: 'limit-chat', tabId: again.id });
+  assert.equal(popup(), 'allow');
+  // Another chat has its own limit.
+  assert.ok((await manager.browserControl('browser.open', { chatId: 'limit-other', newTab: true })).id);
+  manager.destroy();
+});
+
+// The order of events is the proof, not their timing. The timeout only ends a
+// run whose tabs share one queue, which would otherwise wait forever.
+test('a slow operation on one tab of a chat does not hold an operation on another of its tabs', { timeout: 120000 }, async () => {
+  const { manager } = fixture({ requestOpen: () => {} });
+  // Nothing here is timed: the held call never gives up on its own.
+  manager.operationDeadlineMs = 3600000;
+  const first = await manager.browserControl('browser.open', { chatId: 'pair-chat', url: 'slow.example' });
+  const second = await manager.browserControl('browser.open', { chatId: 'pair-chat', newTab: true });
+  assert.notEqual(second.id, first.id, 'two tabs of one chat');
+  // The first tab's page takes as long as the test says: its scroll is held.
+  const firstContents = manager.entries.get('pair-chat').view.webContents;
+  const realRun = firstContents.executeJavaScript.bind(firstContents);
+  let entered;
+  const reachedPage = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  firstContents.executeJavaScript = async (script, ...rest) => {
+    if (String(script).includes('window.scrollBy(')) { entered(); await held; }
+    return realRun(script, ...rest);
+  };
+  const order = [];
+  const slow = manager.browserControl('browser.scroll', { chatId: 'pair-chat', tabId: first.id, y: 400 })
+    .then((result) => { order.push('slow'); return result; });
+  await reachedPage;
+  // Behind the held one on its own tab, a call waits its turn.
+  const queued = manager.browserControl('browser.snapshot', { chatId: 'pair-chat', tabId: first.id })
+    .then((result) => { order.push('queued-same-tab'); return result; });
+  // On the other tab, calls go through while the first tab is still held.
+  const fast = await manager.browserControl('browser.navigate', { chatId: 'pair-chat', tabId: second.id, url: 'fast.example' });
+  order.push('other-tab-navigate');
+  await manager.browserControl('browser.snapshot', { chatId: 'pair-chat', tabId: second.id });
+  order.push('other-tab-snapshot');
+  assert.equal(fast.url, 'https://fast.example');
+  assert.deepEqual(order, ['other-tab-navigate', 'other-tab-snapshot'], 'the other tab finished while the first was held');
+  release();
+  await slow;
+  assert.equal((await queued).url, 'https://slow.example');
+  assert.deepEqual(order, ['other-tab-navigate', 'other-tab-snapshot', 'slow', 'queued-same-tab']);
+  manager.destroy();
+});

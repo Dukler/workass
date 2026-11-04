@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
@@ -26,15 +28,69 @@ func (r *providerChatRuntime) executeBrowserMutation(
 	readback func() (browserControlReply, error),
 ) (browserControlReply, error) {
 	return r.executeBrowserMutationWithAdmission(
-		ctx, tabID, chatID, operationID, kind, method, digest, nil, dispatch, readback,
+		ctx, tabID, chatID, operationID, kind, method, digest, "", nil, dispatch, readback,
 	)
+}
+
+// browserMutationLane names the executor lock an agent's browser call holds
+// while it reaches the shell: one per browser tab it drives, as the shell
+// keeps one queue per tab, so the tabs of one chat run side by side. A call
+// without tab_id drives the chat's own page and keeps the chat's lock ("");
+// a new tab is its own lane until it has an id. The lane follows from the
+// request alone, so every retry of an operation waits on the lock its first
+// dispatch holds.
+func browserMutationLane(params map[string]any, operationID providercontract.OperationID) string {
+	if params["newTab"] == true {
+		return "new-tab:" + string(operationID)
+	}
+	if raw, present := params["tabId"]; present {
+		if number, ok := browserFiniteNumber(raw); ok {
+			return "tab:" + strconv.FormatInt(int64(number), 10)
+		}
+	}
+	return ""
+}
+
+// browserLaneLocks holds one lock per lane while a call is on it.
+type browserLaneLocks struct {
+	mu    sync.Mutex
+	lanes map[string]*browserLaneLock
+}
+
+type browserLaneLock struct {
+	mu    sync.Mutex
+	users int
+}
+
+func (l *browserLaneLocks) lock(lane string) (unlock func()) {
+	l.mu.Lock()
+	if l.lanes == nil {
+		l.lanes = map[string]*browserLaneLock{}
+	}
+	entry := l.lanes[lane]
+	if entry == nil {
+		entry = &browserLaneLock{}
+		l.lanes[lane] = entry
+	}
+	entry.users++
+	l.mu.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.users--
+		if entry.users == 0 {
+			delete(l.lanes, lane)
+		}
+		l.mu.Unlock()
+	}
 }
 
 func (r *providerChatRuntime) executeBrowserMutationWithAdmission(
 	ctx context.Context,
 	tabID, chatID string,
 	operationID providercontract.OperationID,
-	kind, method, digest string,
+	kind, method, digest, lane string,
 	admit func() error,
 	dispatch func() (browserControlReply, error),
 	readback func() (browserControlReply, error),
@@ -49,11 +105,17 @@ func (r *providerChatRuntime) executeBrowserMutationWithAdmission(
 	}
 	operationID = validatedOperationID
 
-	// One dedicated executor lock preserves external-effect ordering and keeps a
+	// A dedicated executor lock preserves external-effect ordering and keeps a
 	// retry from reading a receipt before the first dispatch has reached the
-	// shell. The actor state lock is never held across shell HTTP.
-	actor.externalMutationMu.Lock()
-	defer actor.externalMutationMu.Unlock()
+	// shell. The actor state lock is never held across shell HTTP. A browser
+	// call to one of the chat's tabs holds that tab's lane instead of the
+	// chat's lock (browserMutationLane).
+	if lane == "" {
+		actor.externalMutationMu.Lock()
+		defer actor.externalMutationMu.Unlock()
+	} else {
+		defer actor.browserLanes.lock(lane)()
+	}
 
 	existing, exists, err := inspectBrowserMutation(actor, tabID, chatID, operationID, kind, method, digest)
 	if err != nil {

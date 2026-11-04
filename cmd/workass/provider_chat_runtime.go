@@ -82,8 +82,11 @@ type providerChatRuntime struct {
 type providerChatActor struct {
 	mu                 sync.Mutex
 	externalMutationMu sync.Mutex
-	engine             *chat.Engine
-	coordinator        *chat.Coordinator
+	// browserLanes lets browser calls to different tabs of the chat reach the
+	// shell together (browserMutationLane).
+	browserLanes browserLaneLocks
+	engine       *chat.Engine
+	coordinator  *chat.Coordinator
 	// lastUsed is the unix-nano time of the last lookup that returned this
 	// actor; an actor untouched for the idle TTL may be closed.
 	lastUsed atomic.Int64

@@ -124,7 +124,11 @@ them to open a human question; they can report the blocker to the parent.
 `workass_browser_open` creates the page for the exact owning chat, out of sight:
 agents browse without the person seeing it, and no page, popup or `window.open`
 ever opens a window or takes focus. Tabs a page opens stay hidden too, with their
-opener, and a person can pick them in the chat's browser panel. Only when the
+opener, and a person can pick them in the chat's browser panel. `new_tab:true`
+opens another blank tab of the chat in the same profile (optionally navigated to
+`url`) and returns its `tab_id`. Each tab has its own operation queue, and the
+daemon holds one lock per tab a call drives, so tabs of one chat run in parallel;
+popups and agent tabs share a limit of 8 per chat besides its own page. Only when the
 person must act on a page (a sign-in, a second factor, a captcha, a passkey) ask
 them with `workass_ask_user_question`, then call `workass_browser_open` with
 `visible:true`, the `reason` and the page's `tab_id`: it opens in that chat's panel
@@ -283,9 +287,9 @@ result up to 16 KiB as `page_data`, redacted); a frame with no script context
 yet fails with `unavailable` rather than running in its parent. It can change
 the page, so it is a mutation with an `operation_id`, never labelled
 read-only. `workass_browser_close` closes a tab
-one of the chat's pages opened, or resets the chat's own page to a fresh blank
+one of the chat's pages or its agent opened, or resets the chat's own page to a fresh blank
 page in the same profile (a new tab id), shown in place when the person was
-looking at it; a page's popup tabs close with it. It fails for a tab id that
+looking at it; a page's popup tabs and the agent's tabs close with it. It fails for a tab id that
 is not the chat's.
 
 Links (`target=_blank`) and `window.open` popups of a page an agent is driving

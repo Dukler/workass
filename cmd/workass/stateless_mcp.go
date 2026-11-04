@@ -373,9 +373,10 @@ func (h *workassToolHandler) callTool(r *http.Request, call browserMCPCallParams
 		digest := browserMCPRequestDigest(prepared.Method, params)
 		reply, err := h.providerChats.executeBrowserMutationWithAdmission(
 			r.Context(), tabID, chatID, providercontract.OperationID(operationID), call.Name, prepared.Method, digest,
+			browserMutationLane(params, operationID),
 			// Prove a live, controller-owning shell before the first durable
-			// Record+Claim. The executor runs this inside the per-actor external
-			// mutation lock, but never while holding the actor state lock. Existing
+			// Record+Claim. The executor runs this inside the executor lock of the
+			// tab the call drives, never while holding the actor state lock. Existing
 			// terminal operations skip admission; dispatched/ambiguous operations
 			// remain pure receipt readbacks.
 			func() error {

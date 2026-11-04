@@ -376,9 +376,53 @@ func TestBrowserOpenCarriesTheAsksReasonAndTabToTheShell(t *testing.T) {
 	if err != nil || method != "browser.open" || !mutates {
 		t.Fatalf("boundary = %q %v %v", method, mutates, err)
 	}
-	for public, shell := range map[string]string{"reason": "reason", "tab_id": "tabId", "visible": "visible", "url": "url"} {
+	for public, shell := range map[string]string{"reason": "reason", "tab_id": "tabId", "visible": "visible", "url": "url", "new_tab": "newTab"} {
 		if fields[public] != shell {
 			t.Errorf("field %s maps to %q, want %q", public, fields[public], shell)
 		}
+	}
+}
+
+func TestBrowserOpenNewTabReachesTheShellAndIsChecked(t *testing.T) {
+	prepared, err := prepareBrowserMCPCall(browserMCPCallParams{Name: "workass_browser_open", Arguments: map[string]any{
+		"operation_id": "open-new-tab", "new_tab": true, "url": "http://127.0.0.1:8080/a",
+	}})
+	if err != nil || prepared.Method != "browser.open" || !prepared.Mutating {
+		t.Fatalf("prepared = %#v, %v", prepared, err)
+	}
+	if prepared.Params["newTab"] != true || prepared.Params["url"] != "http://127.0.0.1:8080/a" {
+		t.Fatalf("shell params = %#v", prepared.Params)
+	}
+	if _, leaked := prepared.Params["new_tab"]; leaked {
+		t.Fatalf("snake_case name leaked to the shell: %#v", prepared.Params)
+	}
+	for name, arguments := range map[string]map[string]any{
+		"not a boolean":   {"operation_id": "open-bad", "new_tab": "yes"},
+		"with its tab id": {"operation_id": "open-bad", "new_tab": true, "tab_id": 3},
+	} {
+		if _, err := prepareBrowserMCPCall(browserMCPCallParams{Name: "workass_browser_open", Arguments: arguments}); err == nil {
+			t.Errorf("%s: accepted %#v", name, arguments)
+		} else if name == "with its tab id" && !strings.Contains(err.Error(), "tab_id") {
+			t.Errorf("%s: error does not name tab_id: %v", name, err)
+		}
+	}
+	if _, err := prepareBrowserMCPCall(browserMCPCallParams{Name: "workass_browser_open", Arguments: map[string]any{
+		"operation_id": "open-existing", "new_tab": false, "tab_id": 3,
+	}}); err != nil {
+		t.Fatalf("new_tab false with a tab id: %v", err)
+	}
+	var schema map[string]any
+	for _, tool := range browserMCPTools() {
+		if tool["name"] == "workass_browser_open" {
+			schema = mapFromAnyMain(tool["inputSchema"])
+		}
+	}
+	property := mapFromAnyMain(mapFromAnyMain(schema["properties"])["new_tab"])
+	if property["type"] != "boolean" || strings.TrimSpace(browserString(property["description"])) == "" {
+		t.Fatalf("new_tab schema = %#v", property)
+	}
+	if err := validateToolArguments(map[string]any{"name": "workass_browser_open", "inputSchema": schema},
+		map[string]any{"operation_id": "open-schema", "new_tab": true}); err != nil {
+		t.Fatalf("schema refuses new_tab: %v", err)
 	}
 }

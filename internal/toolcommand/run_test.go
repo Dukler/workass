@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,5 +164,44 @@ func TestRunPrintsURLsInResultsLiterally(t *testing.T) {
 	var decoded map[string]any
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded["href"] != href {
 		t.Fatalf("decoded = %#v, err=%v", decoded, err)
+	}
+}
+
+// Each tools call is one request of its own: several calls made at once, as an
+// agent makes them from its shell, are all in the daemon together. The server
+// answers none until both have arrived, so calls that waited for each other
+// would never be answered; the minute only ends such a run.
+func TestRunCallsAreIndependentOfEachOther(t *testing.T) {
+	const calls = 2
+	var mu sync.Mutex
+	arrivals := 0
+	together := make(chan struct{})
+	path := fixtureContextFileHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		arrivals++
+		if arrivals == calls {
+			close(together)
+		}
+		mu.Unlock()
+		select {
+		case <-together:
+			_ = json.NewEncoder(w).Encode(toolcli.Response{Result: map[string]any{"ok": true}})
+		case <-time.After(time.Minute):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(toolcli.Response{Error: "the other call never arrived"})
+		}
+	})
+	errs := make(chan error, calls)
+	for index := 0; index < calls; index++ {
+		go func(index int) {
+			var output, diagnostics bytes.Buffer
+			input := fmt.Sprintf(`{"tab_id":%d,"selector":"#next","operation_id":"call-%d"}`, index+1, index)
+			errs <- Run(context.Background(), []string{"--context", path, "call", "workass_browser_click"}, strings.NewReader(input), &output, &diagnostics)
+		}(index)
+	}
+	for index := 0; index < calls; index++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("call: %v", err)
+		}
 	}
 }
