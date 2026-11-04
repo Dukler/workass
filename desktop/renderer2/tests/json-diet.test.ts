@@ -97,8 +97,19 @@ function subject(chats: Chat[], api: Record<string, unknown>): any {
   return store;
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// For an effect of the store's own unawaited work: waits however long the
+// machine takes, and fails only on a wait no machine would need.
+async function until<T>(read: () => T | null | undefined, what: string, limitMs = 10_000): Promise<T> {
+  const deadline = Date.now() + limitMs;
+  for (;;) {
+    const value = read();
+    if (value) return value;
+    assert.ok(Date.now() < deadline, `${what} after ${limitMs} ms`);
+    await wait(5);
+  }
+}
 
 describe('session shell delta', () => {
   test('a delta rebuilds exactly the shell it names', () => {
@@ -292,8 +303,10 @@ describe('the provider list a window kept', () => {
     const list = [{ id: 'mock', name: 'Mock <dev> & co', status: 'ready', enabled: true }];
     const first = subject([], {});
     first.rememberProvidersList(list);
-    await settle(); await settle();
-    const kept = wireCache.readWireCache('providers-list');
+    // The store names the list by a WebCrypto SHA-256, which settles on a
+    // libuv worker thread, and keeps it only then. No count of timer turns
+    // covers that worker on a loaded machine, so wait for the kept entry.
+    const kept = await until(() => wireCache.readWireCache('providers-list'), 'the provider list was never kept');
     assert.equal(kept.etag, await digestHash.stateDigestHash(list));
     assert.match(kept.etag, /^[0-9a-f]{64}$/);
     const second = subject([], {});
