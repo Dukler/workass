@@ -2,16 +2,18 @@ package changes
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // activityIndex is what the chats say, resolved onto repos: which repos they
-// touched and when, and for each file an agent edited, the chat that edited it
-// last.
+// touched and when, which chats touched each repo, and for each file an agent
+// edited, the chat that edited it last.
 type activityIndex struct {
-	repos map[string]int64
-	files map[string]map[string]editRef
-	chats map[string]ChatActivity
+	repos     map[string]int64
+	repoChats map[string]map[string]struct{}
+	files     map[string]map[string]editRef
+	chats     map[string]ChatActivity
 }
 
 type editRef struct {
@@ -22,11 +24,17 @@ type editRef struct {
 // buildIndex resolves chat folders and edited files to their repos. It only
 // stats the filesystem; it never starts git.
 func buildIndex(finder *rootFinder, activity []ChatActivity) activityIndex {
-	index := activityIndex{repos: map[string]int64{}, files: map[string]map[string]editRef{}, chats: map[string]ChatActivity{}}
-	touch := func(root string, at int64) {
+	index := activityIndex{repos: map[string]int64{}, repoChats: map[string]map[string]struct{}{}, files: map[string]map[string]editRef{}, chats: map[string]ChatActivity{}}
+	touch := func(root, chatID string, at int64) {
 		if root == "" {
 			return
 		}
+		chats := index.repoChats[root]
+		if chats == nil {
+			chats = map[string]struct{}{}
+			index.repoChats[root] = chats
+		}
+		chats[chatID] = struct{}{}
 		if at > index.repos[root] {
 			index.repos[root] = at
 		} else if _, ok := index.repos[root]; !ok {
@@ -42,7 +50,7 @@ func buildIndex(finder *rootFinder, activity []ChatActivity) activityIndex {
 		summary.Edits = nil
 		index.chats[chatID] = summary
 		if cwd := strings.TrimSpace(chat.CWD); cwd != "" {
-			touch(finder.rootOf(cwd), chat.LastActivityAt)
+			touch(finder.rootOf(cwd), chatID, chat.LastActivityAt)
 		}
 		for _, edit := range chat.Edits {
 			if !filepath.IsAbs(edit.Path) {
@@ -57,7 +65,7 @@ func buildIndex(finder *rootFinder, activity []ChatActivity) activityIndex {
 			if !ok {
 				continue
 			}
-			touch(root, edit.At)
+			touch(root, chatID, edit.At)
 			files := index.files[root]
 			if files == nil {
 				files = map[string]editRef{}
@@ -70,4 +78,14 @@ func buildIndex(finder *rootFinder, activity []ChatActivity) activityIndex {
 		}
 	}
 	return index
+}
+
+// chatsOf lists the chats that work in or edited the repo, sorted.
+func (index activityIndex) chatsOf(root string) []string {
+	out := make([]string, 0, len(index.repoChats[root]))
+	for chatID := range index.repoChats[root] {
+		out = append(out, chatID)
+	}
+	sort.Strings(out)
+	return out
 }

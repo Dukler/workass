@@ -22,6 +22,8 @@ const listeners = new Set<() => void>();
 let wanted = 0;
 let visible = true;
 let watchId = '';
+// The chat whose repos the tab shows: the daemon runs git for those only.
+let watchChat = '';
 let starting: Promise<void> | null = null;
 let renewTimer: ReturnType<typeof setInterval> | null = null;
 let subscribed = false;
@@ -72,7 +74,7 @@ function sync(): void {
 async function start(): Promise<void> {
   if (!has('changesWatch')) return;
   subscribe();
-  const reply = await call('changesWatch', {});
+  const reply = await call('changesWatch', { chatId: watchChat });
   if (!reply?.id) return;
   if (!shouldWatch()) {
     // Closed while the watch was being opened.
@@ -87,7 +89,7 @@ async function start(): Promise<void> {
 
 async function renew(): Promise<void> {
   if (!watchId) return;
-  const reply = await call('changesWatch', { id: watchId });
+  const reply = await call('changesWatch', { id: watchId, chatId: watchChat });
   if (reply?.id && watchId && reply.id !== watchId) watchId = reply.id;
 }
 
@@ -96,6 +98,15 @@ function stop(): void {
   watchId = '';
   if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
   if (id) void call('changesUnwatch', { id });
+}
+
+/** The chat the tab shows. Set before the watch opens; a change while it is
+ *  open moves the watch to that chat's repos at once. */
+export function setChangesChat(chatId: string): void {
+  const next = String(chatId ?? '');
+  if (next === watchChat) return;
+  watchChat = next;
+  if (watchId) void renew();
 }
 
 /** The tab is on screen. Returns the release for when it leaves. */
@@ -162,6 +173,7 @@ export function resetChangesStore(state: ChangesState | null = null): void {
   snapshot = state;
   wanted = 0;
   watchId = '';
+  watchChat = '';
   starting = null;
   if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
   diffs.clear();

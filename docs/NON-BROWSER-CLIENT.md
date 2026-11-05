@@ -276,21 +276,29 @@ GET /workass/chat-image/<tabId, URL-escaped>/<sha256>?k=<imageKey>
 
 ## 8 · «Cambios»: repo changes while a watch is open (additive, 2026-11-05)
 
-The activity pane's «Cambios» tab lists every git repo the owner's chats
-touched in the last seven days, its changed files, and which chat's agent
+The activity pane's «Cambios» tab lists the git repos the shown chat works in
+or edited in the last seven days, their changed files, and which chat's agent
 edited each (from the chats' stored edit tool calls; a file no chat edited is
-"outside Workass"). The daemon runs git for it only while a client watches:
+"outside Workass"). The daemon runs git for it only while a client watches,
+and only for the repos of the watched chats:
 
-- `changes:watch [{id?}]` → `{id, state?}` starts a watch and is the "tab
-  opened" trigger; repeating it with the `id` renews the 90 s lease and
-  triggers nothing. The watch also ends when the socket that opened it closes.
+- `changes:watch [{id?, chatId?}]` → `{id, state?}` starts a watch of one
+  chat's repos and is the "tab opened" trigger; repeating it with the `id`
+  renews the 90 s lease and triggers nothing unless `chatId` changed (the tab
+  moved to another chat). No `chatId` watches every chat's repos, as clients
+  from before 2026-11-05 do. The watch also ends when the socket that opened
+  it closes.
 - `changes:unwatch [{id}]` ends it. With no watch left, no git runs at all.
 - `changes:focus []` asks for a fresh look (the window regained focus).
 - `changes:diff [{root, path}]` → `{root, path, text, truncated?, new?,
   binary?}`: one changed file's unified diff, bounded, only while a watch is
   open and only for a file the last answer reported. It runs beside every
   other lane, so a slow repo never holds up a send.
-- `changes:state` (event) carries `{seq, windowDays, repos[], chats[]}`. A repo
+- `changes:state` (event) carries `{seq, windowDays, repos[], chats[], scope?}`.
+  `scope` lists the watched chats, and is left out when a watch shows every
+  chat. Each repo's `chatIds` are the chats that work in it or edited it, so a
+  client shows a chat only its own repos. `fileCount`, `adds` and `dels` cover
+  every changed file, while `files` keeps at most 300 (`filesTruncated`). A repo
   with `checked: false` has not answered yet; `ahead`/`behind` are left out
   when zero or unknown; `checking` is set while it is being looked at.
 

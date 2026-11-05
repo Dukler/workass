@@ -1,6 +1,7 @@
 // Package changes is the daemon side of the activity pane's «Cambios» tab:
-// which git repos the owner's chats touched recently, what changed in each,
-// and which chat changed it.
+// which git repos the shown chat works in or edited recently, what changed in
+// each, and which chat changed it. A tab shows one chat, and git runs only for
+// the repos of the chats an open tab shows.
 //
 // Git is the expensive part, and the owner was once burned by a version that
 // ran it after every send. So git runs only while at least one client watches
@@ -22,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,15 +99,20 @@ var ErrNotWatching = errors.New("changes: no client is watching")
 var ErrUnknownFile = errors.New("changes: file is not a known change")
 
 // State is the `changes:state` payload and the `changes:watch` reply's state.
+// Scope lists the chats the open tabs show when the state was built; it is
+// left out when a tab shows every chat.
 type State struct {
 	Seq        uint64     `json:"seq"`
 	WindowDays int        `json:"windowDays"`
 	Repos      []RepoView `json:"repos"`
 	Chats      []ChatView `json:"chats"`
+	Scope      []string   `json:"scope,omitempty"`
 }
 
 // RepoView is one repo row. Ahead and Behind are left out when zero or
-// unknown. Checked is false until the repo's first check answers.
+// unknown. Checked is false until the repo's first check answers. FileCount,
+// Adds and Dels cover every changed file, also those Files leaves out. ChatIDs
+// are the chats that work in the repo or edited it.
 type RepoView struct {
 	Root           string     `json:"root"`
 	Name           string     `json:"name"`
@@ -116,8 +123,10 @@ type RepoView struct {
 	Behind         int        `json:"behind,omitempty"`
 	Adds           int        `json:"adds"`
 	Dels           int        `json:"dels"`
+	FileCount      int        `json:"fileCount"`
 	Files          []FileView `json:"files"`
 	FilesTruncated bool       `json:"filesTruncated,omitempty"`
+	ChatIDs        []string   `json:"chatIds"`
 	Checked        bool       `json:"checked"`
 	Checking       bool       `json:"checking,omitempty"`
 	CheckedAt      int64      `json:"checkedAt,omitempty"`
@@ -150,6 +159,9 @@ type ChatView struct {
 type watcher struct {
 	expires time.Time
 	gone    chan struct{}
+	// chatID is the chat the tab shows; "" is every chat (a client from
+	// before tabs were scoped).
+	chatID string
 }
 
 type repoState struct {
@@ -164,8 +176,10 @@ type repoState struct {
 	checkedAt  time.Time
 	interval   time.Duration
 	activityAt int64
-	poll       *time.Timer
-	debounce   *time.Timer
+	// liveChats are the chats whose edits added a live repo.
+	liveChats map[string]struct{}
+	poll      *time.Timer
+	debounce  *time.Timer
 }
 
 func (r *repoState) stopTimers() {
@@ -253,23 +267,37 @@ func (s *Service) Watched() bool { return s != nil && s.watched.Load() }
 // GitRuns counts the git processes this service has started.
 func (s *Service) GitRuns() int64 { return s.gitRuns.Load() }
 
-// Watch starts a watcher, or renews the one named id. A renewal changes
-// nothing else; a new watcher is the "tab opened" trigger. done, when not
-// nil, ends the watcher when it closes (the client's socket). The reply holds
-// the last built state, nil before the first one: the checks themselves run
-// in the background and arrive through Publish.
+// Watch is WatchChat for a tab that shows every chat.
 func (s *Service) Watch(id string, done <-chan struct{}) (string, *State) {
+	return s.WatchChat(id, "", done)
+}
+
+// WatchChat starts a watcher for the tab of one chat, or renews the one named
+// id. Only the repos the watched chats work in or edited are checked; chatID
+// "" watches every chat. A renewal naming another chat is the tab moving to
+// that chat, and checks its repos; otherwise a renewal changes nothing else.
+// A new watcher is the "tab opened" trigger. done, when not nil, ends the
+// watcher when it closes (the client's socket). The reply holds the last built
+// state, nil before the first one: the checks themselves run in the
+// background and arrive through Publish.
+func (s *Service) WatchChat(id, chatID string, done <-chan struct{}) (string, *State) {
+	chatID = strings.TrimSpace(chatID)
 	s.mu.Lock()
 	now := time.Now()
 	if existing := s.watchers[id]; id != "" && existing != nil {
 		existing.expires = now.Add(s.opts.WatchTTL)
-		snapshot := s.snapshot
+		moved := existing.chatID != chatID
+		existing.chatID = chatID
+		snapshot, gen := s.snapshot, s.gen
 		s.mu.Unlock()
+		if moved {
+			go s.refreshAll(gen)
+		}
 		return id, snapshot
 	}
 	s.nextWatch++
 	id = "w" + strconv.FormatUint(s.nextWatch, 10) + "-" + strconv.FormatInt(now.UnixNano()%1_000_000, 36)
-	w := &watcher{expires: now.Add(s.opts.WatchTTL), gone: make(chan struct{})}
+	w := &watcher{expires: now.Add(s.opts.WatchTTL), gone: make(chan struct{}), chatID: chatID}
 	s.watchers[id] = w
 	if len(s.watchers) == 1 {
 		s.startLocked()
@@ -319,20 +347,24 @@ func (s *Service) Focus() {
 	go s.refreshAll(gen)
 }
 
-// NoteEdit is an agent edit tool call naming paths (absolute). While nobody
-// watches it returns at once; otherwise the repos holding those paths are
-// checked, each at most once every EditDebounce.
-func (s *Service) NoteEdit(paths []string) {
+// NoteEdit is NoteChatEdit for an edit whose chat is unknown.
+func (s *Service) NoteEdit(paths []string) { s.NoteChatEdit("", paths) }
+
+// NoteChatEdit is an agent edit tool call naming paths (absolute), made in
+// chatID. While nobody watches it returns at once; otherwise the repos holding
+// those paths are checked, each at most once every EditDebounce. A repo no
+// open tab shows yet is added only for an edit by a watched chat.
+func (s *Service) NoteChatEdit(chatID string, paths []string) {
 	if !s.Watched() || len(paths) == 0 {
 		return
 	}
 	s.mu.Lock()
 	gen := s.gen
 	s.mu.Unlock()
-	go s.noteEdit(gen, append([]string(nil), paths...))
+	go s.noteEdit(gen, strings.TrimSpace(chatID), append([]string(nil), paths...))
 }
 
-func (s *Service) noteEdit(gen uint64, paths []string) {
+func (s *Service) noteEdit(gen uint64, chatID string, paths []string) {
 	roots := map[string]struct{}{}
 	for _, path := range paths {
 		if root := s.finder.rootOf(filepath.Dir(path)); root != "" {
@@ -344,17 +376,49 @@ func (s *Service) noteEdit(gen uint64, paths []string) {
 	if gen != s.gen || len(s.watchers) == 0 {
 		return
 	}
+	all, scope := s.scopeLocked()
 	for root := range roots {
 		repo := s.repos[root]
 		if repo == nil {
 			if len(s.repos) >= s.opts.MaxRepos {
 				continue
 			}
+			if _, watched := scope[chatID]; !all && (chatID == "" || !watched) {
+				continue
+			}
 			repo = &repoState{root: root, live: true, interval: s.opts.PollInterval, activityAt: time.Now().UnixMilli()}
 			s.repos[root] = repo
 		}
+		if repo.live && chatID != "" {
+			if repo.liveChats == nil {
+				repo.liveChats = map[string]struct{}{}
+			}
+			repo.liveChats[chatID] = struct{}{}
+		}
 		s.requestLocked(repo)
 	}
+}
+
+// scopeLocked is which chats the open tabs show. all is set when one of them
+// shows every chat.
+func (s *Service) scopeLocked() (all bool, chats map[string]struct{}) {
+	chats = map[string]struct{}{}
+	for _, w := range s.watchers {
+		if w.chatID == "" {
+			return true, chats
+		}
+		chats[w.chatID] = struct{}{}
+	}
+	return false, chats
+}
+
+func touchedBy(chats, scope map[string]struct{}) bool {
+	for chatID := range chats {
+		if _, ok := scope[chatID]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // State returns the last built state, or nil.
@@ -649,14 +713,19 @@ func (s *Service) readActivity() activityIndex {
 	return buildIndex(s.finder, s.opts.Source(time.Now().Add(-s.opts.Window)))
 }
 
-// applyIndexLocked makes the repo set the repos the chats touched (the most
-// recently active MaxRepos of them) plus any an edit added since. A repo new
-// to the set is checked when request is set; refreshAll asks for every repo
-// itself.
+// applyIndexLocked makes the repo set the repos the watched chats touched (the
+// most recently active MaxRepos of them) plus any their edits added since. A
+// repo new to the set is checked when request is set; refreshAll asks for
+// every repo itself. A repo no open tab shows is dropped, so git never runs
+// for it.
 func (s *Service) applyIndexLocked(index activityIndex, request bool) {
+	all, scope := s.scopeLocked()
 	keep := map[string]int64{}
 	roots := make([]string, 0, len(index.repos))
 	for root := range index.repos {
+		if !all && !touchedBy(index.repoChats[root], scope) {
+			continue
+		}
 		roots = append(roots, root)
 	}
 	sort.Slice(roots, func(i, j int) bool {
@@ -676,7 +745,7 @@ func (s *Service) applyIndexLocked(index activityIndex, request bool) {
 			repo.activityAt, repo.live = max(repo.activityAt, at), false
 			continue
 		}
-		if repo.live {
+		if repo.live && (all || touchedBy(repo.liveChats, scope)) {
 			continue
 		}
 		repo.stopTimers()
@@ -697,6 +766,13 @@ func (s *Service) applyIndexLocked(index activityIndex, request bool) {
 func (s *Service) buildLocked(index activityIndex) State {
 	s.seq++
 	state := State{Seq: s.seq, WindowDays: int(s.opts.Window / (24 * time.Hour)), Repos: []RepoView{}, Chats: []ChatView{}}
+	if all, scope := s.scopeLocked(); !all {
+		state.Scope = make([]string, 0, len(scope))
+		for chatID := range scope {
+			state.Scope = append(state.Scope, chatID)
+		}
+		sort.Strings(state.Scope)
+	}
 	chats := map[string]*ChatView{}
 	for _, repo := range s.repos {
 		if repo.missing {
@@ -704,8 +780,14 @@ func (s *Service) buildLocked(index activityIndex) State {
 		}
 		view := RepoView{
 			Root: repo.root, Name: filepath.Base(repo.root), Files: []FileView{},
-			Checking: repo.checking, ActivityAt: repo.activityAt,
+			Checking: repo.checking, ActivityAt: repo.activityAt, ChatIDs: index.chatsOf(repo.root),
 		}
+		for chatID := range repo.liveChats {
+			if _, known := index.repoChats[repo.root][chatID]; !known {
+				view.ChatIDs = append(view.ChatIDs, chatID)
+			}
+		}
+		sort.Strings(view.ChatIDs)
 		if repo.status != nil {
 			status := repo.status
 			view.Checked = true
@@ -715,6 +797,7 @@ func (s *Service) buildLocked(index activityIndex) State {
 				view.Ahead, view.Behind = status.ahead, status.behind
 			}
 			view.FilesTruncated = status.filesTruncated
+			view.FileCount, view.Adds, view.Dels = max(status.fileCount, len(status.files)), status.adds, status.dels
 			edits := index.files[repo.root]
 			for _, file := range status.files {
 				fv := FileView{
@@ -734,8 +817,6 @@ func (s *Service) buildLocked(index activityIndex) State {
 						view.ActivityAt = max(view.ActivityAt, edit.at)
 					}
 				}
-				view.Adds += fv.Adds
-				view.Dels += fv.Dels
 				view.Files = append(view.Files, fv)
 			}
 		}

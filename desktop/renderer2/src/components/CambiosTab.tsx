@@ -4,7 +4,7 @@ import { store, useClock } from '../store/store';
 import { has } from '../wire/api';
 import { IcCheck, IcChevron, IcGit, IcPerson, ModelIcon, hasModelIcon, providerIconBrand } from '../icons';
 import { relTime } from '../rel-time';
-import { changesDiff, openChangesWatch, useChangesState } from '../changes-store';
+import { changesDiff, openChangesWatch, setChangesChat, useChangesState } from '../changes-store';
 import {
   changesView, changesWord, cleanLine, diffLines, diffPeek, filesWord,
   type ChangesFileRow, type ChangesGroup, type ChangesRepoRow, type DiffLine,
@@ -250,25 +250,29 @@ function RepoRow({ repo, defaultOpen }: { repo: ChangesRepoRow; defaultOpen: boo
       {open && (
         <div className="cb-body">
           {repo.groups.map((group) => <Group key={group.key} root={repo.root} group={group} />)}
-          {repo.filesTruncated && <div className="cb-trunc">lista recortada</div>}
+          {repo.filesTruncated && <div className="cb-trunc">{`se muestran ${repo.shown} de ${repo.fileCount} archivos`}</div>}
         </div>
       )}
     </div>
   );
 }
 
-/** How many files the last snapshot shows changed, for the tab's count. */
-export function cambiosCount(state: ReturnType<typeof useChangesState>): number {
-  return changesView(state, { chatId: '' }).fileCount;
+/** How many files the last snapshot shows changed in this chat's repos, for
+ *  the tab's count. */
+export function cambiosCount(state: ReturnType<typeof useChangesState>, chatId: string): number {
+  return changesView(state, { chatId }).fileCount;
 }
 
 export function CambiosTab({ chat }: { chat: Chat | null }) {
   const state = useChangesState();
+  const chatId = chat?.chatId ?? '';
+  // Before the watch opens, so its first request already names the chat.
+  useEffect(() => setChangesChat(chatId), [chatId]);
   // The watch lives exactly as long as this tab is on screen.
   useEffect(() => openChangesWatch(), []);
   const chats = store.state.chats ?? [];
   const view = changesView(state, {
-    chatId: chat?.chatId ?? '',
+    chatId,
     chatTitle: (chatId) => chats.find((item) => item.chatId === chatId)?.title || undefined,
     chatProvider: (chatId) => chats.find((item) => item.chatId === chatId)?.providerId || undefined,
   });

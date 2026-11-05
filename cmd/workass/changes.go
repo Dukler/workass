@@ -16,7 +16,7 @@ import (
 // The activity pane's «Cambios» tab (internal/changes). Four additive
 // channels and one event:
 //
-//	changes:watch   [{id?}]          → {id, state}  start, or renew, a watch
+//	changes:watch   [{id?, chatId?}] → {id, state}  start, or renew, a watch of one chat's repos
 //	changes:unwatch [{id}]           → {ok}
 //	changes:focus   []               → {ok}         the window regained focus
 //	changes:diff    [{root, path}]   → Diff         one file, on hover/expand
@@ -49,14 +49,15 @@ func registerChangesHandlers(hub *wire.Hub, manager *acp.Manager, runtime *provi
 			if status != "completed" && status != "success" {
 				return
 			}
-			service.NoteEdit(changes.EditPaths(edit.Location, edit.Input, edit.CWD))
+			service.NoteChatEdit(edit.ChatID, changes.EditPaths(edit.Location, edit.Input, edit.CWD))
 		})
 	}
 	hub.RegisterWithCaller("changes:watch", func(caller wire.Caller, args []any) (any, error) {
 		if caller.IsPeer() {
 			return nil, errors.New("changes:watch is for a client that shows the tab")
 		}
-		id, state := service.Watch(fieldString(firstMapArg(args), "id"), caller.Done)
+		arg := firstMapArg(args)
+		id, state := service.WatchChat(fieldString(arg, "id"), fieldString(arg, "chatId"), caller.Done)
 		reply := map[string]any{"id": id}
 		if state != nil {
 			reply["state"] = state

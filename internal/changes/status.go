@@ -32,6 +32,11 @@ type repoStatus struct {
 	initial        bool
 	files          []fileStatus
 	filesTruncated bool
+	// fileCount, adds and dels cover every changed file git reported, also
+	// the ones capFiles leaves out of the list.
+	fileCount int
+	adds      int
+	dels      int
 }
 
 type fileStatus struct {
@@ -243,8 +248,11 @@ func countFileLines(path string) (int, bool) {
 }
 
 // capFiles keeps the payload bounded: the first repoFileLimit files in git's
-// path order, and says the list was cut.
+// path order, and says the list was cut. The repo's file count and line totals
+// are taken first, so they stay whole.
 func (s *repoStatus) capFiles() {
+	s.fileCount = len(s.files)
+	s.adds, s.dels = s.totals()
 	if len(s.files) <= repoFileLimit {
 		return
 	}

@@ -261,9 +261,61 @@ test('the watch opens with the tab and closes with it; nothing is watched otherw
 });
 
 test('the tab count is the changed files of the last snapshot', () => {
-  const count = (cambios as unknown as { cambiosCount(state: ChangesState | null): number }).cambiosCount;
-  assert.equal(count(snapshot()), 7);
-  assert.equal(count(null), 0);
+  const count = (cambios as unknown as { cambiosCount(state: ChangesState | null, chatId: string): number }).cambiosCount;
+  assert.equal(count(snapshot(), 'chat-1'), 7);
+  assert.equal(count(null, 'chat-1'), 0);
+});
+
+// 2026-11-05: a chat showed a repo only another chat works in, with a count
+// stuck at the 300 files the list keeps.
+const scopedSnapshot = (scope: string[] = ['chat-1']): ChangesState => ({
+  seq: 9, windowDays: 7, scope, chats: [],
+  repos: [
+    { root: '/work/workass', name: 'workass', branch: 'main', adds: 0, dels: 0, files: [], checked: true, chatIds: ['chat-1', 'chat-2'] },
+    { root: '/work/bigrepo', name: 'bigrepo', branch: 'port', adds: 9162, dels: 66338, fileCount: 353, filesTruncated: true, checked: true, chatIds: ['chat-9'],
+      files: [{ path: 'a.py', adds: 1, dels: 2 }] },
+    { root: '/work/tools', name: 'tools', branch: 'main', adds: 4, dels: 1, fileCount: 2, checked: true, chatIds: ['chat-1'],
+      files: [{ path: 'x.go', adds: 3, dels: 1, chatId: 'chat-1', tabId: 'tab-1', at: NOW - MIN }, { path: 'y.go', adds: 1, dels: 0 }] },
+  ],
+});
+
+test('a chat sees only the repos it works in or edited; another chat\'s repo is not drawn or counted', () => {
+  changes.resetChangesStore(scopedSnapshot());
+  const html = render();
+  assert.doesNotMatch(html, /bigrepo/);
+  assert.match(html, /<span class="cb-name" title="\/work\/tools">tools<\/span>/);
+  assert.match(html, /<div class="cb-clean" title="workass">[\s\S]*?1 repo sin cambios<\/div>/);
+  const count = (cambios as unknown as { cambiosCount(state: ChangesState | null, chatId: string): number }).cambiosCount;
+  assert.equal(count(scopedSnapshot(), 'chat-1'), 2);
+});
+
+test('a snapshot built for another chat\'s tab draws nothing for this one, not «Sin cambios»', () => {
+  changes.resetChangesStore(scopedSnapshot(['chat-9']));
+  assert.equal(render(), '<div class="cb-list" aria-busy="true"></div>');
+});
+
+test('a repo past the list cap counts every changed file and says how many are listed', () => {
+  const state = scopedSnapshot(['chat-9']);
+  changes.resetChangesStore(state);
+  cambios.setCambiosFold('/work/bigrepo', true);
+  const html = render({ id: 'tab-9', chatId: 'chat-9', title: 'Port', messages: [] });
+  assert.match(html, /<span class="a">\+9162<\/span><span class="d">−66338<\/span>/);
+  assert.match(html, /<div class="cb-trunc">se muestran 1 de 353 archivos<\/div>/);
+  const count = (cambios as unknown as { cambiosCount(state: ChangesState | null, chatId: string): number }).cambiosCount;
+  assert.equal(count(state, 'chat-9'), 353);
+});
+
+test('the watch names the chat; moving to another chat moves the open watch', async () => {
+  changes.setChangesChat('chat-1');
+  const release = changes.openChangesWatch();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls.watch, [{ chatId: 'chat-1' }]);
+  changes.setChangesChat('chat-2');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls.watch[1], { id: 'w-1', chatId: 'chat-2' });
+  changes.setChangesChat('chat-2');
+  assert.equal(calls.watch.length, 2, 'the same chat again asks nothing');
+  release();
 });
 
 test('diffPeek numbers the new file\'s lines and counts hunks', () => {

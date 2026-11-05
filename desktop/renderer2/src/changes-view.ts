@@ -2,6 +2,8 @@
 // snapshot (approved mock rail-cambios-v2). Pure, so the grouping, the folding
 // and the diff peek are tested without React.
 //
+//   - only the repos this chat works in or edited (2026-11-05: another chat's
+//     repo is not this chat's business);
 //   - one row per repo with changes, the most recently changed first; repos
 //     with nothing changed collapse into one «N repos sin cambios» line;
 //   - inside a repo, files grouped by who changed them: THIS chat first, then
@@ -46,7 +48,9 @@ export interface ChangesRepoRow {
   bar: BarCell[];
   checking: boolean;
   latest: number;
+  /** Every changed file; `shown` of them are listed. */
   fileCount: number;
+  shown: number;
   filesTruncated: boolean;
   groups: ChangesGroup[];
 }
@@ -141,13 +145,22 @@ function groupsOf(repo: ChangesRepo, chats: Map<string, { title: string; provide
   return groups;
 }
 
+/** Whether a repo belongs in this chat's tab. A daemon from before scoping
+ *  names no chats, and then every repo does. */
+function isChatsRepo(repo: ChangesRepo, chatId: string): boolean {
+  return !Array.isArray(repo.chatIds) || (!!chatId && repo.chatIds.includes(chatId));
+}
+
 export function changesView(state: ChangesState | null | undefined, ctx: ChangesContext): ChangesView {
   const chats = new Map<string, { title: string; providerId: string }>();
   for (const chat of state?.chats ?? []) chats.set(chat.chatId, { title: chat.title ?? '', providerId: chat.providerId ?? '' });
   const repos: ChangesRepoRow[] = [];
   const cleanNames: string[] = [];
   let answered = false;
-  for (const repo of state?.repos ?? []) {
+  // A snapshot built for other chats' tabs says nothing about this one yet.
+  const scoped = !Array.isArray(state?.scope) || state.scope.includes(ctx.chatId);
+  const mine = scoped ? (state?.repos ?? []).filter((repo) => isChatsRepo(repo, ctx.chatId)) : [];
+  for (const repo of mine) {
     if (!repo.checked) continue;
     answered = true;
     const files = repo.files ?? [];
@@ -158,7 +171,8 @@ export function changesView(state: ChangesState | null | undefined, ctx: Changes
       root: repo.root, name: repo.name, branch: repo.branch || (repo.detached ? 'HEAD' : ''),
       ahead: Math.max(0, repo.ahead || 0), behind: Math.max(0, repo.behind || 0),
       adds: repo.adds || 0, dels: repo.dels || 0, bar: changeBar(repo.adds || 0, repo.dels || 0),
-      checking: !!repo.checking, latest, fileCount: files.length, filesTruncated: !!repo.filesTruncated, groups,
+      checking: !!repo.checking, latest, fileCount: Math.max(files.length, repo.fileCount || 0), shown: files.length,
+      filesTruncated: !!repo.filesTruncated, groups,
     });
   }
   repos.sort((a, b) => (b.latest - a.latest) || a.name.localeCompare(b.name));
@@ -166,7 +180,7 @@ export function changesView(state: ChangesState | null | undefined, ctx: Changes
   const fileCount = repos.reduce((sum, repo) => sum + repo.fileCount, 0);
   // Pending: no snapshot yet, or repos whose first answer has not come. A
   // snapshot with no repos at all is an answer: nothing was touched.
-  const pending = !state || (!answered && (state.repos ?? []).length > 0);
+  const pending = !state || !scoped || (!answered && mine.length > 0);
   return {
     repos, clean: { count: cleanNames.length, names: cleanNames }, fileCount,
     empty: !pending && repos.length === 0, pending,

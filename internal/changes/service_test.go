@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -462,4 +463,101 @@ func TestEditInARepoNoChatWorksInAddsIt(t *testing.T) {
 	waitFor(t, "the chat's repo", time.Second, func() bool { return len(git.statusStarts(roots[0])) == 1 })
 	service.NoteEdit([]string{filepath.Join(roots[1], "x.txt")})
 	waitFor(t, "the edited repo", time.Second, func() bool { return len(git.statusStarts(roots[1])) == 1 })
+}
+
+func TestATabChecksOnlyTheReposItsChatTouched(t *testing.T) {
+	roots := makeRepos(t, "mine", "theirs")
+	git := &fakeGit{}
+	sink := &published{}
+	service := New(fastOptions(git, chatsIn(roots...), sink))
+	id, _ := service.WatchChat("", "chat-mine", nil)
+	defer service.Unwatch(id)
+	waitFor(t, "this chat's repo", time.Second, func() bool {
+		state, ok := sink.last()
+		return ok && len(state.Repos) == 1 && state.Repos[0].Checked
+	})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(git.statusStarts(roots[1])); n != 0 {
+		t.Fatalf("git ran %d times on a repo only another chat touched", n)
+	}
+	state, _ := sink.last()
+	if repo := state.Repos[0]; repo.Root != roots[0] || strings.Join(repo.ChatIDs, ",") != "chat-mine" {
+		t.Fatalf("repo row %+v", repo)
+	}
+	if strings.Join(state.Scope, ",") != "chat-mine" {
+		t.Fatalf("scope %v", state.Scope)
+	}
+
+	// The tab moves to the other chat: its repo is checked, the first one leaves.
+	if renewed, _ := service.WatchChat(id, "chat-theirs", nil); renewed != id {
+		t.Fatalf("renewal changed the id: %s", renewed)
+	}
+	waitFor(t, "the other chat's repo", time.Second, func() bool {
+		state, ok := sink.last()
+		return ok && len(state.Repos) == 1 && state.Repos[0].Root == roots[1] && state.Repos[0].Checked &&
+			strings.Join(state.Scope, ",") == "chat-theirs"
+	})
+}
+
+func TestAnEditAddsARepoOnlyForAWatchedChat(t *testing.T) {
+	roots := makeRepos(t, "home", "elsewhere")
+	git := &fakeGit{}
+	sink := &published{}
+	service := New(fastOptions(git, chatsIn(roots[0]), sink))
+	id, _ := service.WatchChat("", "chat-home", nil)
+	defer service.Unwatch(id)
+	waitFor(t, "the chat's repo", time.Second, func() bool { return len(git.statusStarts(roots[0])) == 1 })
+	service.NoteChatEdit("chat-other", []string{filepath.Join(roots[1], "x.txt")})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(git.statusStarts(roots[1])); n != 0 {
+		t.Fatalf("another chat's edit ran git %d times on a repo no tab shows", n)
+	}
+	service.NoteChatEdit("chat-home", []string{filepath.Join(roots[1], "x.txt")})
+	waitFor(t, "the edited repo, owned by the chat that edited it", time.Second, func() bool {
+		state, ok := sink.last()
+		if !ok {
+			return false
+		}
+		for _, repo := range state.Repos {
+			if repo.Root == roots[1] && repo.Checked && strings.Join(repo.ChatIDs, ",") == "chat-home" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestRepoTotalsCoverTheFilesPastTheListCap(t *testing.T) {
+	roots := makeRepos(t, "big")
+	const files = repoFileLimit + 53
+	var status, numstat strings.Builder
+	status.WriteString("# branch.oid abc\x00# branch.head main\x00")
+	for index := 0; index < files; index++ {
+		name := "f" + strconv.Itoa(1000+index) + ".go"
+		status.WriteString("1 .M N... 100644 100644 100644 a a " + name + "\x00")
+		numstat.WriteString("1\t2\t" + name + "\x00")
+	}
+	git := &fakeGit{behave: func(ctx context.Context, dir string, args []string) ([]byte, error) {
+		if args[0] == "status" {
+			return []byte(status.String()), nil
+		}
+		return []byte(numstat.String()), nil
+	}}
+	sink := &published{}
+	service := New(fastOptions(git, chatsIn(roots...), sink))
+	id, _ := service.Watch("", nil)
+	defer service.Unwatch(id)
+	var state State
+	waitFor(t, "the checked repo", time.Second, func() bool {
+		var ok bool
+		state, ok = sink.last()
+		return ok && len(state.Repos) == 1 && state.Repos[0].Checked
+	})
+	repo := state.Repos[0]
+	if len(repo.Files) != repoFileLimit || !repo.FilesTruncated {
+		t.Fatalf("listed %d files, truncated=%v", len(repo.Files), repo.FilesTruncated)
+	}
+	if repo.FileCount != files || repo.Adds != files || repo.Dels != 2*files {
+		t.Fatalf("totals count=%d +%d -%d, want %d +%d -%d", repo.FileCount, repo.Adds, repo.Dels, files, files, 2*files)
+	}
 }

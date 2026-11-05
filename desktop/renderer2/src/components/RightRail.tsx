@@ -72,7 +72,7 @@ function ActivityPane({ chat }: { chat: Chat | null }) {
   const outputs = chatOutputs(chat?.messages);
   const counts: Record<RailTab, number> = {
     trabajos: trabajosModel(chat).count,
-    cambios: cambiosCount(changes),
+    cambios: cambiosCount(changes, chat?.chatId ?? ''),
     salidas: outputs.length,
   };
 

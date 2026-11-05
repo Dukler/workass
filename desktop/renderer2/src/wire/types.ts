@@ -575,9 +575,15 @@ export interface ChangesRepo {
   root: string; name: string; branch?: string; detached?: boolean; upstream?: string; ahead?: number; behind?: number;
   adds: number; dels: number; files: ChangesFile[]; filesTruncated?: boolean;
   checked: boolean; checking?: boolean; checkedAt?: number; activityAt?: number;
+  /** Every changed file, also those `files` leaves out. */
+  fileCount?: number;
+  /** The chats that work in this repo or edited it. Absent from older daemons. */
+  chatIds?: string[];
 }
 export interface ChangesChat { chatId: string; tabId: string; title: string; providerId?: string; at?: number; }
-export interface ChangesState { seq: number; windowDays: number; repos: ChangesRepo[]; chats: ChangesChat[]; }
+/** `scope`: the chats the open tabs showed when this was built; absent when a
+ *  tab showed every chat, or from an older daemon. */
+export interface ChangesState { seq: number; windowDays: number; repos: ChangesRepo[]; chats: ChangesChat[]; scope?: string[]; }
 export interface ChangesWatchReply { id: string; state?: ChangesState; }
 export interface ChangesDiff { root: string; path: string; text: string; truncated?: boolean; new?: boolean; binary?: boolean; }
 
@@ -914,7 +920,7 @@ export interface WorkassApi {
   // «Cambios»: the daemon looks at repos only while a watch is open. The tab
   // starts one when it opens and ends it when it closes or the window hides;
   // repeating changesWatch with the id renews the lease. Feature-detected.
-  changesWatch?: (opts: { id?: string }) => Promise<ChangesWatchReply>;
+  changesWatch?: (opts: { id?: string; chatId?: string }) => Promise<ChangesWatchReply>;
   changesUnwatch?: (opts: { id: string }) => Promise<unknown>;
   changesFocus?: () => Promise<unknown>;
   changesDiff?: (opts: { root: string; path: string }) => Promise<ChangesDiff>;
