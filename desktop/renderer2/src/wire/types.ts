@@ -424,6 +424,10 @@ export interface SpawnedWorkItem {
   queuedAt?: string;
   execStartedAt?: string;
   runMs?: number;
+  // The named resource a supervised job holds or waits for, and its place in
+  // that resource's queue (1 is the holder). Older daemons omit both.
+  resource?: string;
+  queuePosition?: number;
   // The fleet machine this work runs on, when that is not this one. Older daemons
   // and every local row omit both.
   hostMachine?: string;

@@ -89,7 +89,7 @@ function StructuredAssistantImages({ tabId, images }: { tabId: string; images: M
 
 function EventView({ ev }: { ev: TimelineEvent }) {
   if (ev.kind === 'thinking') return null; // thoughts live in the Working line / Worked row
-  if (ev.kind === 'plan') return null; // plan lives in the Tareas rail only (no chat dupe)
+  if (ev.kind === 'plan') return null; // not drawn inline; the activity pane dropped its plan block too (2026-11-05)
   if (ev.kind === 'compaction') return <CompactionRow />;
   if (ev.kind === 'restored') return <RestoredRow ev={ev} />;
   return null; // tool events render as grouped runs (foldToolGroups), never standalone

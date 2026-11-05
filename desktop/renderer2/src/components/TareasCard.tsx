@@ -1,271 +1,110 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ToolEvent, PlanEntry } from '../store/types';
+import type { Chat, ToolEvent } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
-import { toolState, fmtDur, extractSubagents, nodeState } from './messages';
+import { extractSubagents, nodeState } from './messages';
 import { currentTurnMessages, nestSpawnedWork, reconcileSubagentWork, type SubagentNode } from '../subagent-layout';
+import { backgroundWork, loadSegments, machineLoads, workTotals, type MachineContext } from '../rail-work';
 import { SubagentRow } from './SubagentRow';
-import { SpawnedWorkDoneKids, SpawnedWorkKids, SpawnedWorkLive } from './SpawnedWorkCard';
-import { renderInline } from '../markdown/inline';
-import { IcActivity, ActionGlyph } from '../icons';
-import { toolPresentation } from '../tool-names';
-import { displayDetail } from '../tool-display';
+import { BackgroundJobs, FinishedWork, MachineGlyph, SpawnedWorkDoneKids, SpawnedWorkKids, WorkQueue } from './SpawnedWorkCard';
 
-// The action slot's icon matches WHAT the call is — a pencil for an edit, a
-// document for a read, a terminal for a command — instead of one generic glyph
-// for everything (mock b3). It reads from the SAME action vocabulary as the
-// transcript rows (tool-names.ts), so the rail and the chat never disagree
-// about what a call was.
-function toolIconFor(t: ToolEvent) {
-  return <ActionGlyph icon={toolPresentation(t).icon} />;
-}
-
-// The row's action + the exact evidence behind it, shortened against the chat
-// cwd exactly like the transcript does. Only the icon used to come from the
-// action vocabulary here; the name stayed the provider's raw id («Read»,
-// «/bin/zsh -lc …») until the rail-actions mock (2026-07-27).
-function railAction(t: ToolEvent) {
-  const act = toolPresentation(t);
-  const raw = t.command || t.location || act.evidence || null;
-  return { act, raw, detail: raw ? displayDetail(raw, store.active()?.cwd ?? null) : null };
-}
-
-// "Turnos" — the live turn of the chat you're watching (approved mocks b3/b4).
-// The rail's step-by-step is the agent's REAL plan and nothing else: dots collapse
-// the provider's plan entries, tapping expands the exact checklist, and the hero
-// is the entry the provider marked in_progress — verbatim.
-//
-// NOTHING here may be synthesized. An earlier version fabricated "steps" from
-// tool-call kinds and used tool titles / streamed thought fragments as the title;
-// that was rejected outright. If the provider sent no plan, the rail says so and
-// shows no dots — it never invents a step and never infers a current one.
-
-const PLAN_MARK: Record<string, string> = { completed: '✓', in_progress: '◐', pending: '○' };
-
-// Progress as dots only: done = filled, in_progress = ring, pending = hollow.
-function PlanDots({ entries }: { entries: readonly PlanEntry[] }) {
-  return (
-    <span className="r-pdots" aria-hidden="true">
-      {entries.map((e, i) => (
-        <i key={i} className={e.status === 'completed' ? 'done' : e.status === 'in_progress' ? 'now' : ''} />
-      ))}
-    </span>
-  );
-}
-
-// The current action — a FIXED-HEIGHT slot that always holds the most recent
-// main-thread call: live (pulse) while it runs, then held in a calm done state
-// until the next call replaces it, so the rail never bounces as calls come and
-// go. The status light just stops pulsing when the call finishes.
-function CurrentCall({ t, nowMs }: { t: ToolEvent; nowMs: number }) {
-  const st = toolState(t.status);
-  const running = st === 'running';
-  const dur = running
-    ? (typeof t.startedAt === 'number' ? fmtDur(nowMs - t.startedAt) : '')
-    : doneDur(t);
-  // No outcome word for a failure and no red — the rail states what ran, not how
-  // it ended (user, 2026-07-25). A failed call shows its duration alone; "listo"
-  // stays reserved for calls that actually succeeded, so nothing lies.
-  const sub = running
-    ? `en curso${dur ? ` · ${dur}` : ''}`
-    : st === 'failed'
-      ? dur
-      : st === 'cancelled'
-        ? 'cancelado'
-        : (dur ? `listo · ${dur}` : 'listo');
-  const { act, raw, detail } = railAction(t);
-  return (
-    <div className="r-live-call" data-status={st}>
-      <span className="r-lc-ic">{toolIconFor(t)}</span>
-      <span className="r-lc-info">
-        <span className="r-lc-n" title={raw || act.raw}>
-          {act.label}
-          {act.tag && <span className="r-lc-tag"> · {act.tag}</span>}
-          {detail && <span className="r-lc-loc"> · {detail}</span>}
-        </span>
-        <span className="r-lc-s">{sub}</span>
-      </span>
-      <span className="r-lc-end" aria-hidden="true">
-        {running ? <span className="r-pulse" /> : <span className="r-lc-dot" />}
-      </span>
-    </div>
-  );
-}
-
-function doneDur(t: ToolEvent): string {
-  if (typeof t.startedAt === 'number' && typeof t.endedAt === 'number') return fmtDur(t.endedAt - t.startedAt);
-  return '';
-}
-
-// Coarse "hace N …" for the settled-turn recap header.
-function relTime(ms: number): string {
-  const s = Math.round(ms / 1000);
-  if (s < 45) return 'recién';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `hace ${Math.max(1, m)} min`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `hace ${h} h`;
-  return `hace ${Math.floor(h / 24)} d`;
-}
-
-export function TareasCard() {
-  const app = useApp();
-  useActivity(); // re-render on live tool/plan events
-  useSpawnedWork(); // …and when spawned work appears/settles, for the dedupe below
-  const [nowMs, setNowMs] = useState(Date.now());
-  const cardRef = useRef<HTMLElement>(null);
-
-  const chat = store.active();
-  const turnMessages = currentTurnMessages(chat);
-  const running = turnMessages.some((message) => message.status === 'running');
-  const events = turnMessages.flatMap((message) => message.events);
-  const tools = events.filter((e): e is ToolEvent => e.kind === 'tool');
+// Everything the Trabajos tab draws, and its count: the turn's subagents (the
+// shared subagent rows), the chat's running background work and what waits.
+export function trabajosModel(chat: Chat | null) {
+  const tools = currentTurnMessages(chat).flatMap((message) => message.events)
+    .filter((event): event is ToolEvent => event.kind === 'tool');
   const grouped = extractSubagents(tools);
-  const mainTools = grouped.mainTools;
   // Tracked child lifetime survives foreground settlement. While the child is
   // live its spawned-work row owns activity and elapsed time; after completion
   // the grouped tool row uses the durable child result.
   const work = chat ? store.spawnedWork(chat) : [];
   const { nodes } = reconcileSubagentWork(grouped.nodes, work);
   const { byParent } = nestSpawnedWork(work);
-  const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
-  const doneKidsOf = (n: SubagentNode) => n.work ? <SpawnedWorkDoneKids items={byParent.get(n.work.taskId)} nowMs={nowMs} calls={n.calls} /> : null;
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
   // A cancelled child leaves the rail; its card stays in the conversation.
   const doneNodes = nodes.filter((n) => nodeState(n) !== 'running' && nodeState(n) !== 'cancelled');
-  const runningTools = mainTools.filter((t) => toolState(t.status) === 'running');
-  const doneTools = mainTools.filter((t) => toolState(t.status) !== 'running');
-  // The most recent main-thread call: the running one if any, else the last
-  // finished one — held so the action slot never empties between calls.
-  const currentTool = running ? (runningTools[runningTools.length - 1] ?? doneTools[doneTools.length - 1]) : undefined;
+  const { running, queued } = backgroundWork(work);
+  return { runningNodes, doneNodes, byParent, running, queued, count: runningNodes.length + running.length + queued.length };
+}
 
-  // Actor projection owns the current plan, including an explicit empty plan.
-  const planEntries: readonly PlanEntry[] = chat?.planLatest ?? [];
-  const hasPlan = planEntries.length > 0;
-  const doneCount = planEntries.filter((e) => e.status === 'completed').length;
+export function machineContextFor(chat: Chat | null): MachineContext {
+  return { chatMachineId: chat?.machineId, localMachineId: store.localMachineId(), names: store.machineNames() };
+}
 
-  // The hero is the provider's in_progress entry, verbatim. Never inferred: no
-  // in_progress entry means no sentence.
-  const currentStep = planEntries.find((e) => e.status === 'in_progress')?.content ?? null;
-  const planLabel = !hasPlan
-    ? ''
-    : doneCount >= planEntries.length ? 'Plan completado' : `Plan · ${doneCount} de ${planEntries.length}`;
+// «Trabajos» — the activity pane's first tab (approved mock rail-v7,
+// 2026-11-05): totals and per-machine load, the turn's subagents, the running
+// background work, the queue, and what finished today. The live turn itself
+// (intent, plan, current call, calls) is the chat's to show, not this tab's.
+export function TareasCard() {
+  const app = useApp();
+  useActivity(); // re-render on live tool events (subagent calls)
+  useSpawnedWork(); // …and when spawned work appears/settles
+  const [nowMs, setNowMs] = useState(Date.now());
+  const cardRef = useRef<HTMLElement>(null);
 
-  const starts = tools.map((t) => t.startedAt).filter((x): x is number => typeof x === 'number');
-  const turnElapsed = running && starts.length ? fmtDur(nowMs - Math.min(...starts)) : '';
-  const ends = tools.map((t) => t.endedAt).filter((x): x is number => typeof x === 'number');
-  const lastEnd = ends.length ? Math.max(...ends) : null;
-  const when = !running && lastEnd ? relTime(Date.now() - lastEnd) : '';
-
-  const hasContent = hasPlan || nodes.length > 0 || mainTools.length > 0;
+  const chat = store.active();
+  const { runningNodes, doneNodes, byParent, running, queued } = trabajosModel(chat);
+  const context = machineContextFor(chat);
+  const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
+  const doneKidsOf = (n: SubagentNode) => n.work ? <SpawnedWorkDoneKids items={byParent.get(n.work.taskId)} nowMs={nowMs} calls={n.calls} /> : null;
+  const live = runningNodes.length + running.length + queued.length > 0;
+  const totals = workTotals(runningNodes.length, running.length, queued.length);
+  const loads = machineLoads(running, queued, context);
+  const empty = runningNodes.length + doneNodes.length + running.length + queued.length === 0;
 
   useEffect(() => {
-    if (!running && runningNodes.length === 0) return;
+    if (!live) return;
     const iv = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(iv);
-  }, [running, runningNodes.length]);
+  }, [live]);
   useEffect(() => {
     if (app.flashTareas) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [app.flashTareas]);
 
   return (
-    <section className={`r-turno${app.flashTareas ? ' flash' : ''}`} ref={cardRef}>
-      {running ? (
-        <>
-          <div className="r-ahora">
-            <span className="r-lbl">Ahora</span>
-            {turnElapsed && <span className="r-live"><span className="r-pulse" />{turnElapsed}</span>}
-          </div>
-          {currentStep && <div className="r-say">{renderInline(currentStep)}</div>}
-        </>
-      ) : hasContent ? (
-        <>
-          <div className="r-rechead">
-            <span className="r-lbl">Último turno</span>
-            {when && <span className="r-when">{when}</span>}
-          </div>
-          {currentStep && <div className="r-recsay">{renderInline(currentStep)}</div>}
-        </>
-      ) : (
-        <div className="r-empty">
-          <span className="r-empty-g"><IcActivity /></span>
-          <span className="r-empty-t">Sin turno activo</span>
-          <span className="r-empty-d">Cuando el agente trabaje, vas a ver acá su rumbo, sus archivos y sus tareas — en vivo.</span>
+    <section className={`rp-work${app.flashTareas ? ' flash' : ''}`} ref={cardRef}>
+      {empty && <div className="rp-empty">Nada corriendo</div>}
+      {totals.length > 0 && (
+        <div className="wtotals">
+          {totals.map((part, index) => (
+            <span key={part.word} className="wtotal">
+              {index > 0 && <span className="wtotal-sep" aria-hidden="true">·</span>}
+              <b>{part.count}</b> {part.word}
+            </span>
+          ))}
         </div>
       )}
-
-      {hasPlan ? (
-        <details className="r-plan-d">
-          <summary>
-            <PlanDots entries={planEntries} />
-            {!running && planLabel && <span className="r-plabel">{planLabel}</span>}
-          </summary>
-          <div className="r-plan">
-            {planEntries.map((e, i) => (
-              <div key={i} className={`r-prow ${e.status === 'completed' ? 'done' : e.status === 'in_progress' ? 'now' : 'todo'}`}>
-                <span className="r-mk">{PLAN_MARK[e.status] ?? '•'}</span>
-                <span className="r-tx">{renderInline(e.content)}</span>
+      {loads.length > 0 && (
+        <div className="wload">
+          {loads.map((load) => {
+            const segments = loadSegments(load.running, load.waiting);
+            return (
+              <div key={load.machine.key || 'local'} className="wload-r" data-local={load.machine.local ? '' : undefined}>
+                <span className="wload-who" title={load.machine.name}><MachineGlyph local={load.machine.local} /><span className="wload-nm">{load.machine.name}</span></span>
+                <span className="wseg" aria-hidden="true">
+                  {Array.from({ length: segments.running }, (_, i) => <i key={`r${i}`} className="r" />)}
+                  {Array.from({ length: segments.waiting }, (_, i) => <i key={`w${i}`} />)}
+                </span>
+                <span className="wload-n" aria-label={`${load.running} corriendo, ${load.waiting} en espera`}>{load.running} + {load.waiting}</span>
               </div>
-            ))}
-          </div>
-        </details>
-      ) : hasContent ? (
-        <div className="r-noplan">Sin plan del agente.</div>
-      ) : null}
-
-      {running && <div className="r-hair" />}
-      {running && (currentTool
-        ? <CurrentCall t={currentTool} nowMs={nowMs} />
-        // Reserve the slot before the first call so its arrival doesn't jump.
-        // NO placeholder glyph: there is no action yet, so there is nothing for
-        // an icon to depict — the squiggle was standing in for one (user,
-        // 2026-07-25). The pulsing light already says "live".
-        : <div className="r-live-call r-live-idle" data-status="running" aria-hidden="true">
-            <span className="r-lc-info"><span className="r-lc-s">en curso</span></span>
-            <span className="r-lc-end"><span className="r-pulse" /></span>
-          </div>)}
+            );
+          })}
+        </div>
+      )}
       {/* EVERY subagent of this turn is one flat list — a finished one is not
           worth a fold inside a fold inside a row (user, 2026-07-25). Running
           first, then settled; each still opens to its own calls. */}
       {(runningNodes.length > 0 || doneNodes.length > 0) && (
-        <div className="r-subs">
-          {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
-          {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
-        </div>
-      )}
-      {/* Running background processes live HERE — inline with the live call and
-          subagents, never behind a fold (approved mock f-bg2). They outlive
-          turns, so they render in the recap/empty states too. */}
-      {chat && <SpawnedWorkLive chat={chat} />}
-
-      {/* Llamadas now holds ONLY the main thread's own calls; subagents left it. */}
-      {doneTools.length > 0 && (
-        <details className="r-meta">
-          <summary>
-            <span className="r-ml">Llamadas</span>
-            <span className="r-count">{doneTools.length}</span>
-          </summary>
-          <div className="r-meta-b">
-            {doneTools.map((t) => {
-              const st = toolState(t.status);
-              const { act, raw, detail } = railAction(t);
-              return (
-                <div key={t.key} className="r-dline r-dcall" data-status={st}>
-                  {st === 'cancelled' && <span className="r-g">–</span>}
-                  <span className="r-dic" aria-hidden="true"><ActionGlyph icon={act.icon} /></span>
-                  <span className="r-dt" title={raw || act.raw}>{act.label}</span>
-                  {/* the evidence column: the exact path/command, or the MCP
-                      server when the call had none — mono, ellipsized, never
-                      pushing the duration off the row */}
-                  {detail
-                    ? <span className="r-dev">{detail}</span>
-                    : act.tag && <span className="r-dev">· {act.tag}</span>}
-                  {doneDur(t) && <span className="r-dl">{doneDur(t)}</span>}
-                </div>
-              );
-            })}
+        <>
+          <div className="wsec">Subagentes{runningNodes.length > 0 && <span className="wsec-h">{runningNodes.length} trabajando</span>}</div>
+          <div className="r-subs">
+            {runningNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
+            {doneNodes.map((n) => <SubagentRow key={n.id} n={n} nowMs={nowMs} chat={chat} kids={kidsOf(n)} doneKids={doneKidsOf(n)} />)}
           </div>
-        </details>
+        </>
       )}
+      {chat && <BackgroundJobs chat={chat} running={running} nowMs={nowMs} context={context} />}
+      {chat && <WorkQueue chat={chat} queued={queued} nowMs={nowMs} context={context} />}
+      {chat && <FinishedWork chat={chat} />}
     </section>
   );
 }

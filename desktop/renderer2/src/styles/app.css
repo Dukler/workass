@@ -1404,32 +1404,148 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .ehint span { color: var(--muted); font-size: 11.5px; }
 .rail-empty { color: var(--faint); font-size: 11.5px; padding: 4px 8px 6px; }
 
-/* Entorno — files changed in this chat's current/most-recent turn. Filename-led,
-   parent context dimmed and shown only to disambiguate same-name files; warm
-   neutral surface + hairlines, green reserved for additions and focus. */
-.envcard .ehead .ecount { font-size: 11px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
-.elist { display: flex; flex-direction: column; padding: 1px 2px 2px; }
-.egroup + .egroup { margin-top: 5px; }
-.egrouphd { display: flex; align-items: baseline; gap: 7px; padding: 5px 8px 3px; min-width: 0; }
-.egrouphd .egname { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.egrouphd .egbranch { flex: none; font-size: 10px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; }
-.efile { display: flex; align-items: baseline; gap: 7px; width: 100%; text-align: left; border: 0; background: transparent; font-family: inherit; cursor: pointer; padding: 4px 8px; border-radius: 7px; color: var(--ink); min-width: 0; }
-.efile:hover { background: var(--line); }
+/* ── Actividad — the activity pane (approved mock rail-v7, 2026-11-05) ───────
+   One flat column against the chat: no tiles, no boxed sections, no filled
+   panels. Text tabs with a 2px accent underline; hairlines only between the
+   queue, the footer and what is above them. Green is the accent: the active
+   tab, a live dot, a running segment, an addition. Every name clamps to one
+   line with ellipsis; the full text is the row's title. */
+.railhead .rp-title { margin-right: auto; padding-left: 1px; font-size: 13px; font-weight: 650; color: var(--ink); }
+aside.rail:not(.browser-col) > .railhead { margin-bottom: 0; }
+.rp-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--line); }
+.rp-tab { flex: none; display: inline-flex; align-items: center; height: 30px; margin: 0 0 -1px; padding: 0 1px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; }
+.rp-tab:hover { color: var(--ink2); }
+.rp-tab.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--acc); }
+.rp-tab:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: 2px; }
+.rp-tab-c { margin-left: 6px; font-size: 10.5px; font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums; }
+.rp-tab.on .rp-tab-c { color: var(--acc); }
+.rp-body { padding-top: 12px; }
+/* The pane is a column the open queue gives way in: everything keeps its
+   height, and the queue's own box shrinks (from 150px, to a few rows at least)
+   before the pane would grow a scroll bar. Taller content still scrolls the
+   pane, as before. */
+aside.rail:not(.browser-col) { display: flex; flex-direction: column; }
+aside.rail:not(.browser-col) > *, .rp-body > *, .rp-work > * { flex: none; }
+aside.rail:not(.browser-col) > .rp-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.rp-body > .rp-work { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.rp-empty { padding: 2px 0; font-size: 12px; color: var(--faint); }
+.rp-work.flash { border-radius: 10px; animation: ecard-flash 1.3s ease; }
+
+/* totals + one row per machine: name, one segment per job, running + waiting */
+.wtotals { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; font-size: 12px; color: var(--muted); }
+.wtotal { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.wtotal b { font-size: 15px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+.wtotal-sep { margin-right: 2px; color: var(--line2); }
+/* One grid for every machine row, so the bars line up whatever the names. */
+.wload { display: grid; grid-template-columns: fit-content(128px) minmax(0, 1fr) auto; align-items: center; gap: 7px 8px; margin: 15px 0 0; font-size: 11.5px; color: var(--ink2); }
+.wload-r { display: contents; }
+.wload-who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wload-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wmg { flex: none; display: grid; place-items: center; color: var(--faint); }
+.wmg svg { display: block; width: 12px; height: 12px; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.wseg { display: flex; gap: 2px; height: 8px; min-width: 0; }
+.wseg i { flex: 1; min-width: 2px; border-radius: 2px; background: var(--line2); }
+.wseg i.r { background: var(--acc); }
+.wload-n { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* section heads */
+.wsec { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; font-size: 11.5px; font-weight: 600; color: var(--ink2); }
+.rp-work > .wsec:first-child, .rp-work > .wbg:first-child > .wsec { margin-top: 0; }
+.wsec-h { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--faint); }
+
+/* a running background job */
+.wjob { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 9px; align-items: center; margin: 0 -10px; padding: 8px 10px; border-radius: 10px; min-width: 0; }
+.wjob:hover, .wjob:focus-within { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.wdot { width: 8px; height: 8px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 16%, transparent); animation: wdot-pulse 2s ease-in-out infinite; }
+@keyframes wdot-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--acc) 5%, transparent); } }
+.wjob-n { min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wjob-t { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wjob-m { grid-column: 2 / -1; display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--muted); }
+.wjob-m .wmg svg { width: 11px; height: 11px; }
+.wjob-mt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wjob-acts { grid-column: 2 / -1; display: none; gap: 2px; margin: 4px 0 0 -6px; }
+.wjob:hover .wjob-acts, .wjob:focus-within .wjob-acts, .wjob.tail-open .wjob-acts { display: flex; }
+@media (hover: none) { .wjob-acts { display: flex; } }
+.wjob-tail { grid-column: 2 / -1; margin-top: 4px; }
+.wbtn { display: inline-flex; align-items: center; height: 22px; padding: 0 6px; border: 0; border-radius: 6px; background: none; font: inherit; font-size: 11.5px; color: var(--ink2); cursor: pointer; }
+.wbtn:hover:not(:disabled) { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.wbtn.stop:hover:not(:disabled) { color: var(--del); }
+.wbtn:disabled { opacity: .5; cursor: default; }
+.wbtn:focus-visible, .wmore:focus-visible, .wq-sum:focus-visible, .rp-open:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -2px; }
+.wmore { display: block; margin: 2px 0 0 17px; padding: 3px 0; border: 0; background: none; font: inherit; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.wmore:hover { color: var(--ink2); }
+
+/* the queue: one line closed, its own fixed-height scroller open */
+/* .wq is only a grouping: its row and its list are the column's own items, so
+   the list is the one thing that gives way. */
+.wq { display: contents; }
+.wq-sum { display: flex; align-items: center; gap: 9px; min-width: 0; margin: 10px -13px 0; padding: 8px 13px; border: 0; border-top: 1px solid var(--line); background: none; font: inherit; color: var(--ink); text-align: left; cursor: pointer; }
+.wq-sum:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.wq-chev { flex: none; display: grid; place-items: center; color: var(--faint); }
+.wq-chev svg { display: block; width: 12px; height: 12px; }
+.wq-lead { flex: none; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.wq-nx { flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wq-nx b { font-weight: 500; color: var(--ink2); }
+.wq-list { flex: 0 1 auto; min-height: 76px; max-height: 150px; overflow-y: auto; overscroll-behavior: contain; margin: 0 -13px; padding: 0 13px 4px 34px; }
+.wq-mh { display: flex; align-items: center; gap: 5px; padding: 6px 0 2px; font-size: 10.5px; color: var(--faint); min-width: 0; }
+.wq-mh .wmg svg { width: 11px; height: 11px; }
+.wq-mn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wq-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 0; font-size: 11.5px; color: var(--ink2); }
+.wq-p { flex: none; width: 16px; text-align: right; font-size: 10px; font-weight: 650; color: var(--faint); font-variant-numeric: tabular-nums; }
+.wq-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wq-w { flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.wq-stop { display: none; height: 18px; margin: -2px 0; font-size: 10.5px; }
+.wq-row:hover .wq-stop, .wq-row:focus-within .wq-stop { display: inline-flex; }
+@media (hover: none) { .wq-stop { display: inline-flex; } }
+
+/* the footer: Terminados hoy, opening the history in place */
+.wdone { margin: 10px -13px 0; border-top: 1px solid var(--line); }
+.wdone > summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 11px 13px; font-size: 12px; color: var(--ink2); cursor: pointer; user-select: none; }
+.wdone > summary::-webkit-details-marker { display: none; }
+.wdone > summary:hover { color: var(--ink); }
+.wdone-ic { flex: none; display: grid; place-items: center; color: var(--faint); }
+.wdone-ic svg { display: block; width: 13px; height: 13px; }
+.wdone-n { margin-left: auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.wdone-b { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; padding: 0 13px 6px; }
+.wdone-old > summary { list-style: none; padding: 4px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; }
+.wdone-old > summary::-webkit-details-marker { display: none; }
+.wdone-old > summary:hover { color: var(--ink2); }
+
+/* Salidas: type tag, title, Abrir */
+.rp-outs { display: flex; flex-direction: column; }
+.rp-out { display: flex; align-items: center; gap: 9px; min-width: 0; margin: 0 -8px; padding: 6px 8px; border-radius: 8px; }
+.rp-out:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.rp-out-k { flex: none; width: 52px; font-size: 9.5px; font-weight: 650; letter-spacing: .05em; color: var(--faint); }
+.rp-out-t { flex: 1; min-width: 0; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-open { flex: none; padding: 2px 6px; border: 0; border-radius: 6px; background: none; font: inherit; font-size: 11.5px; color: var(--ink2); text-decoration: none; cursor: pointer; }
+.rp-open:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+
+/* Archivos — files changed in this chat's current/most-recent turn, flat rows:
+   file glyph, name, the muted folder, then +N −N in the add/delete colours. */
+.elist { display: flex; flex-direction: column; }
+.egroup + .egroup { margin-top: 8px; }
+.egrouphd { display: flex; align-items: baseline; gap: 7px; padding: 4px 0 3px; min-width: 0; }
+.egrouphd .egname { font-size: 11.5px; font-weight: 600; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.egrouphd .egbranch { flex: none; max-width: 50%; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.efile { display: flex; align-items: center; gap: 8px; width: calc(100% + 16px); margin: 0 -8px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; font-family: inherit; text-align: left; color: var(--ink); cursor: pointer; min-width: 0; }
+.efile:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .efile:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -2px; }
-.efile .efname { flex: none; max-width: 64%; font-size: 12.5px; line-height: 1.3; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.efile .efpar { flex: 0 1 auto; min-width: 0; font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.efile .efic { flex: none; display: grid; place-items: center; color: var(--faint); }
+.efile .efic svg { display: block; width: 13px; height: 13px; stroke-width: 1.4; stroke-linejoin: round; }
+.efile .efname { flex: 0 1 auto; max-width: 64%; min-width: 0; font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.efile .efpar { flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .efile .sp { flex: 1; min-width: 6px; }
-.efile .efstat { flex: none; display: inline-flex; gap: 6px; font-size: 10.5px; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.efile .efstat { flex: none; display: inline-flex; gap: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
 .efile .efstat .a { color: var(--add); }
 .efile .efstat .d { color: var(--del); }
 .emore { margin-top: 1px; }
-.emore > summary { list-style: none; cursor: pointer; padding: 4px 8px; border-radius: 7px; font-size: 11px; color: var(--muted); user-select: none; }
+.emore > summary { list-style: none; cursor: pointer; padding: 4px 0 4px 21px; font-size: 11.5px; color: var(--muted); user-select: none; }
 .emore > summary::-webkit-details-marker { display: none; }
 .emore > summary::marker { content: ''; }
-.emore > summary:hover { background: var(--line); color: var(--ink2); }
+.emore > summary:hover { color: var(--ink2); }
 .emore[open] > summary { color: var(--faint); }
-.efoot { padding: 6px 8px 2px; font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.etrunc { padding: 3px 8px 2px; font-size: 10.5px; color: var(--faint); }
+.efoot { padding: 8px 0 2px; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.etrunc { padding: 3px 0 2px; font-size: 11px; color: var(--faint); }
 
 /* Tareas — background tasks card (compact, one row per running process) */
 .tcard { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 6px 8px; margin: 2px 2px 6px; }
@@ -1501,12 +1617,8 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .donefold.subsdone > .subs { padding: 3px 2px 4px; }
 
 /* Spawned Bash/Agent/Workflow work (Segundo plano) — approved mock f-bg2.
-   RUNNING work renders as .bgr inline rows in the rail's live zone (inside
-   TareasCard, next to the live call and subagents): always visible, several
-   stack, each compact. FINISHED work is ONE .r-meta fold of flat .r-dline
-   rows — never a fold inside a fold. The rail stays a single flush scroll
-   surface: only the opt-in output tail is a bounded scroller. */
-.bglive { display: flex; flex-direction: column; padding: 2px 0; }
+   .bgr rows are the running work an agent started, hung under that agent's
+   row; the chat's own background work is the activity pane's .wjob rows. */
 .bgr { display: flex; align-items: flex-start; gap: 9px; padding: 8px 3px; min-width: 0; }
 /* one neutral for every rail glyph, and no empty box when a row has no
    icon that depicts it (user, 2026-07-25) */
@@ -1568,88 +1680,9 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .subs details.sa .sacount { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; }
 .subs details.sa .sacount svg { width: 13px; height: 13px; }
 
-/* ── Rail redesign — Turno-first, de-carded (approved mock b3, 2026-07-22) ────
-   The rail is ONE flush column, not a stack of bordered cards. The live turn is
-   the hero (intent sentence + progress dots); Archivos / Llamadas / Segundo plano
-   are flush count rows that expand on tap. Green stays an accent only. Long agent
-   labels, model ids, paths and titles clamp with ellipsis and never push the
-   elapsed/stat off their row. */
-.r-turno { padding: 2px 2px 2px; }
-.r-turno.flash { border-radius: 10px; animation: ecard-flash 1.3s ease; }
-@media (prefers-reduced-motion: reduce) { .r-turno.flash { animation: none; } }
-
-.r-ahora, .r-rechead { display: flex; align-items: center; padding: 4px 2px 0; }
-.r-lbl { font: 600 10px/1 ui-monospace, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; color: var(--faint); }
-.r-ahora .r-live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); }
-.r-rechead .r-when { margin-left: auto; font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--faint); }
+/* Live light shared by the subagent rows and the rows hung under them. */
 .r-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); animation: bgpulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .r-pulse { animation: none; } }
-/* The title is free text (a plan step or the agent's reasoning) and can carry a
-   long unbroken path, which ran straight off the rail. Break anywhere and clamp
-   to 3 lines so the hero stays compact instead of swallowing the pane. */
-.r-say { font-size: 15px; line-height: 1.44; color: var(--ink); margin: 9px 2px 0; letter-spacing: -.004em;
-  overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-/* settled recap: what the finished turn was about, so the dots aren't naked */
-.r-recsay { font-size: 14px; line-height: 1.4; color: var(--ink2); margin: 9px 2px 2px;
-  overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.r-plabel { font: 11px/1 ui-monospace, Menlo, monospace; color: var(--muted); }
-/* The provider sent no plan. The rail says so plainly — it never invents steps. */
-.r-noplan { padding: 11px 3px 7px; font-size: 11.5px; color: var(--faint); }
-/* idle: one calm line explaining the panel — no naked dots, no "0" rows */
-.r-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 9px; padding: 40px 16px 14px; }
-.r-empty-g { width: 28px; height: 28px; color: var(--faint); display: grid; place-items: center; }
-.r-empty-g svg { width: 28px; height: 28px; }
-.r-empty-t { font-size: 13px; font-weight: 550; color: var(--ink2); }
-.r-empty-d { font-size: 11.5px; line-height: 1.5; color: var(--faint); }
-
-/* progress = dots only; the dots row is the plan toggle */
-.r-plan-d > summary { list-style: none; display: flex; align-items: center; gap: 9px; padding: 12px 2px 9px; cursor: pointer; user-select: none; }
-.r-plan-d > summary::-webkit-details-marker { display: none; }
-.r-pdots { display: flex; flex-wrap: wrap; gap: 6px; }
-.r-pdots i { width: 8px; height: 8px; border-radius: 50%; background: var(--field); }
-.r-pdots i.done { background: var(--acc); }
-.r-pdots i.now { background: transparent; border: 2px solid var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 16%, transparent); animation: bgpulse 1.6s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .r-pdots i.now { animation: none; } }
-/* No disclosure arrows anywhere in the rail (user, 2026-07-25): every fold here
-   is a whole-row target, so the arrow was decoration on top of an affordance the
-   row already had. .r-chev is gone from the markup; the rules went with it. */
-.r-plan { padding: 1px 2px 4px; }
-.r-prow { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px; color: var(--ink2); padding: 3px 4px; }
-.r-prow .r-mk { flex: none; width: 14px; text-align: center; margin-top: 1px; color: var(--muted); }
-.r-prow .r-tx { min-width: 0; }
-.r-prow.done { color: var(--muted); } .r-prow.done .r-mk { color: var(--acc); }
-.r-prow.now { color: var(--ink); font-weight: 550; } .r-prow.now .r-mk { color: var(--acc); }
-.r-prow.todo { color: var(--faint); }
-
-/* full-bleed hairline (bleeds to the rail's 13px padding edges). The meta rows
-   carry their own border-top, so a hairline immediately above one would read as
-   a double rule — suppress the row's border in that case (user, 2026-07-23). */
-.r-hair { height: 1px; background: var(--line); margin: 8px -13px; }
-.r-hair + .r-meta, .r-hair + .r-metaflat { border-top: 0; }
-
-/* live main-thread call — flush, accent icon + live dot */
-/* Current-action slot: FIXED height so the row never bounces as calls come and
-   go. Live while running (accent icon + pulsing light), then a calm done state
-   (muted icon + static light) held until the next call replaces it. */
-.r-live-call { display: flex; align-items: center; gap: 9px; padding: 7px 2px; min-height: 47px; }
-/* One neutral for every icon in the rail — the call glyph no longer turns green
-   while the row below it stays white (user, 2026-07-25). Live is the pulsing
-   light on the right, which is the only thing that needs the accent. */
-.r-live-call .r-lc-ic { flex: none; color: var(--ink2); display: grid; place-items: center; transition: color .2s ease; }
-.r-live-call .r-lc-ic svg { width: 14px; height: 14px; }
-.r-live-call .r-lc-ic:empty { display: none; }
-.r-live-call .r-lc-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.r-live-call .r-lc-n { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.r-live-call[data-status]:not([data-status="running"]) .r-lc-n { color: var(--ink2); }
-.r-live-call .r-lc-n .r-lc-loc { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-/* MCP origin after the action name, same faint tag the transcript rows use. */
-.r-live-call .r-lc-n .r-lc-tag { color: var(--faint); font-size: 10.5px; opacity: .75; }
-.r-live-call .r-lc-s { font: 10.5px/1 ui-monospace, Menlo, monospace; color: var(--muted); }
-/* status light — pulses while running, sits still when done (no bounce).
-   No red state: the rail carries no failure colour (user, 2026-07-25). */
-.r-live-call .r-lc-end { flex: none; width: 12px; display: grid; place-items: center; }
-.r-live-call .r-lc-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
-.r-live-idle .r-lc-s { color: var(--faint); }
 
 /* subagents — flush rows with model icon; overflow-safe */
 .r-subs { display: flex; flex-direction: column; gap: 1px; padding: 2px 0; }
@@ -1693,37 +1726,10 @@ aside.rail { border-left: 1px solid var(--line); padding: 0 13px 14px; overflow-
 .r-sa > .r-sa-b { border-top: 1px solid var(--line); margin: 2px 4px 4px; padding: 3px 0; }
 .r-sa > .r-sa-b .evt { padding: 4px 4px 4px 8px; }
 
-/* meta rows: Llamadas · Archivos · Segundo plano — flush counts, tap to expand */
-.r-meta, .r-metaflat { border-top: 1px solid var(--line); }
-.r-meta > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 9px 4px; cursor: pointer; user-select: none; }
-.r-meta > summary::-webkit-details-marker { display: none; }
-.r-meta > summary:hover .r-ml { color: var(--ink); }
-.r-meta .r-ml, .r-metaflat .r-ml { font-size: 12.5px; color: var(--ink2); }
-.r-meta .r-count { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 6px; font: 11px/1 ui-monospace, Menlo, monospace; color: var(--muted); font-variant-numeric: tabular-nums; }
-.r-meta .r-count .r-pulse { width: 6px; height: 6px; }
-/* Fold bodies are BOUNDED: a long list scrolls INSIDE the fold it belongs to,
-   so opening Llamadas / Archivos / Segundo plano never spawns a pane-wide
-   scrollbar across the rail (user 2026-07-24). overscroll-behavior keeps the
-   wheel from chain-scrolling the pane when the list hits its edge. */
-.r-meta-b { padding: 1px 2px 6px; max-height: min(46vh, 360px); overflow-y: auto; overscroll-behavior: contain; }
-.r-metaflat { display: flex; align-items: center; gap: 10px; padding: 9px 4px; }
-.r-metaflat .r-flatnote { margin-left: auto; font-size: 11px; color: var(--faint); }
-/* finished lines inside the Llamadas / Segundo plano meta bodies */
+/* finished lines: the Terminados hoy history and an agent's own finished work */
 .r-dline { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); padding: 3px 4px; min-width: 0; }
-.r-dline .r-g { flex: none; width: 12px; text-align: center; color: var(--faint); }
-.r-dline[data-status="failed"] .r-g { color: var(--del); }
 .r-dline .r-dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .r-dline .r-dl { margin-left: auto; flex: none; color: var(--faint); font: 10.5px/1 ui-monospace, Menlo, monospace; }
-/* A Llamadas row is an ACTION (mock rail-actions): glyph + name that never
-   shrinks + the mono evidence taking whatever px are left. Only .r-dcall opts
-   in — the Segundo plano fold shares .r-dline and its .r-dt IS the label, so it
-   must keep ellipsizing. */
-.r-dline .r-dic { flex: none; display: grid; place-items: center; width: 13px; height: 13px; color: var(--faint); }
-.r-dline .r-dic svg { display: block; width: 13px; height: 13px; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
-.r-dline[data-status="failed"] .r-dic { color: var(--del); }
-.r-dcall .r-dt { flex: none; }
-.r-dcall .r-dev { flex: 1 1 auto; min-width: 0; color: var(--faint); font: 10.5px/1.3 ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.r-dcall .r-dl { margin-left: auto; padding-left: 8px; }
 
 /* Demoted background processes (engine + aux) — quiet footer under a hairline. */
 .tprocs { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--line); margin: 6px 4px 0; padding: 8px 0 2px; }

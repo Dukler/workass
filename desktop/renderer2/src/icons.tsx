@@ -69,6 +69,11 @@ export const IcBrowserCard = () => <S><rect x="2.5" y="3" width="11" height="9" 
 // the top icon strip. Used in the Tareas card + inline transcript rows + chip.
 export const IcBgProc = () => <S><circle cx="8" cy="8" r="5.5" /><path d="M6.6 5.7l3.7 2.3-3.7 2.3z" /></S>;
 export const IcRead = () => <S><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M5 6h6M5 8.5h6M5 11h3.5" /></S>;
+// Where work runs (activity pane, mock rail-v7): a screen for this machine, a
+// stacked server for any other one. A changed file in the Archivos tab.
+export const IcMachineLocal = () => <S><rect x="2.3" y="3.3" width="11.4" height="8" rx="1.4" /><path d="M5.7 13.7h4.6" /></S>;
+export const IcMachineServer = () => <S><rect x="2.3" y="2.7" width="11.4" height="4.7" rx="1.1" /><rect x="2.3" y="8.6" width="11.4" height="4.7" rx="1.1" /></S>;
+export const IcFile = () => <S><path d="M4.2 2.4h4.9l2.7 2.7v8.5H4.2z" /><path d="M9 2.4v2.8h2.8" /></S>;
 // Filled, not stroked: the same rounded square the composer's stop button
 // draws, so one shape means "end this" wherever it appears.
 export const IcStopSquare = () => <svg viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>;

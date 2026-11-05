@@ -9,15 +9,25 @@ const router = readFileSync(new URL('../src/wire/machineRouter.ts', import.meta.
 const bridge = readFileSync(new URL('../../../internal/httpserve/lan_bridge.go', import.meta.url), 'utf8');
 const mutating = readFileSync(new URL('../../../internal/wire/wire.go', import.meta.url), 'utf8');
 
-test('a running background row carries a stop square, and only a running one', () => {
-  const running = card.slice(card.indexOf('function RunningRow'), card.indexOf('export function SpawnedWorkLive'));
+test('a running background row carries a stop, and only a running one', () => {
+  // One stop for every row that runs or waits: the agent's own work (the stop
+  // square), the chat's background jobs and its queued jobs (the Detener text).
+  const control = card.slice(card.indexOf('function useWorkStop'), card.indexOf('function RunningRow'));
+  assert.match(control, /store\.stopSpawnedWork\(chat, item\.id\)/);
+  const running = card.slice(card.indexOf('function RunningRow'), card.indexOf('function jobDescription'));
+  assert.match(running, /useWorkStop\(chat, item\)/);
   assert.match(running, /className="bgr-stop"/);
   assert.match(running, /<IcStopSquare \/>/);
-  assert.match(running, /store\.stopSpawnedWork\(chat, item\.id\)/);
-  // The finished fold is flat lines of title + duration. Nothing there is
+  const job = card.slice(card.indexOf('function JobRow'), card.indexOf('export const RUNNING_ROWS_SHOWN'));
+  assert.match(job, /useWorkStop\(chat, item\)/);
+  assert.match(job, /\{canStop && \(/);
+  const queued = card.slice(card.indexOf('function QueueRow'), card.indexOf('function NextNames'));
+  assert.match(queued, /useWorkStop\(chat, item\)/);
+  assert.match(queued, /\{canStop && \(/);
+  // The finished history is flat lines of title + duration. Nothing there is
   // running, so nothing there may offer to stop it.
-  const finished = card.slice(card.indexOf('export function SpawnedWorkCard'));
-  assert.doesNotMatch(finished, /bgr-stop/);
+  const finished = card.slice(card.indexOf('export function FinishedWork'));
+  assert.doesNotMatch(finished, /bgr-stop|wbtn stop|useWorkStop/);
 });
 
 test('the stop square is feature-detected, so an older daemon draws no dead button', () => {

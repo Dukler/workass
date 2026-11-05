@@ -115,7 +115,8 @@ test('steering keeps every subagent from the same logical turn visible', async (
   assert.match(html, /Inspect renderer state/);
   assert.match(html, /Inspect daemon state/);
   assert.equal((html.match(/class="r-sa"/g) ?? []).length, 2, 'each child remains one Turnos row');
-  assert.match(html, /class="r-lbl">Ahora<\/span>/, 'the steered logical turn remains live');
+  // Both children still read as live: the steered logical turn is the current one.
+  assert.equal((html.match(/class="r-sa" data-status="running"/g) ?? []).length, 2, 'the steered logical turn remains live');
 
   // Native receipt-bearing steering first reserves an empty continuation but
   // deliberately leaves the original assistant row running and unsplit. That
@@ -142,7 +143,7 @@ test('steering keeps every subagent from the same logical turn visible', async (
   assert.match(stagedHtml, /Inspect renderer state/);
   assert.match(stagedHtml, /Inspect daemon state/);
   assert.equal((stagedHtml.match(/class="r-sa"/g) ?? []).length, 2);
-  assert.match(stagedHtml, /class="r-lbl">Ahora<\/span>/);
+  assert.equal((stagedHtml.match(/class="r-sa" data-status="running"/g) ?? []).length, 2);
 });
 
 // ⑂ marks a forked subagent on its OWN row only (user 2026-10-16): fresh is

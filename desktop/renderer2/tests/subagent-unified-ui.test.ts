@@ -40,7 +40,7 @@ test('native and managed agents share one inspectable row with controls only for
   let store: any;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const { TareasCard } = await server.ssrLoadModule('/src/components/TareasCard.tsx');
-  const { SpawnedWorkCard, SpawnedWorkLive } = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx');
+  const { FinishedWork } = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx');
   ({ store } = await server.ssrLoadModule('/src/store/store.ts') as { store: typeof store });
   const { setMachineRouter } = await server.ssrLoadModule('/src/wire/api.ts');
   let mutations = 0;
@@ -63,7 +63,7 @@ test('native and managed agents share one inspectable row with controls only for
   assert.match(live, /aria-label="Detener subagent review"/);
   assert.doesNotMatch(live, /aria-label="Detener agent review"/);
   assert.match(live, /Subagente nativo · solo lectura/);
-  assert.equal(renderToStaticMarkup(React.createElement(SpawnedWorkLive, { chat })), '', 'no second live row');
+  assert.doesNotMatch(live, /class="wjob"|class="wq-row"/, 'no second live row');
 
   store.state.spawnedWorkByChat['tab\u0000chat'] = [
     { ...native, status: 'completed', finishedAt: '2026-09-12T12:01:00Z', summary: 'Native result' },
@@ -74,12 +74,12 @@ test('native and managed agents share one inspectable row with controls only for
   assert.doesNotMatch(done, /class="bgr-stop"/);
   assert.match(done, /Native result/);
   assert.match(done, /Managed result/);
-  assert.equal(renderToStaticMarkup(React.createElement(SpawnedWorkCard, { chat })), '', 'no duplicate terminal cards');
+  assert.equal(renderToStaticMarkup(React.createElement(FinishedWork, { chat })), '', 'no duplicate terminal cards');
   assert.equal(mutations, 0, 'inspection never invokes a control');
 
   // A reload with no current transcript header still offers historical results.
   chat.messages = [];
-  const history = renderToStaticMarkup(React.createElement(SpawnedWorkCard, { chat }));
+  const history = renderToStaticMarkup(React.createElement(FinishedWork, { chat }));
   assert.equal((history.match(/<details class="r-sa"/g) ?? []).length, 2);
   assert.match(history, /Native result/);
   assert.doesNotMatch(history, /class="bgr-stop"/);

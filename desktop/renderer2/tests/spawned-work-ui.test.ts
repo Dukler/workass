@@ -6,21 +6,24 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
-// Approved mock f-bg2 (2026-07-23): RUNNING spawned work = inline .bgr rows,
-// visible without opening any fold; FINISHED spawned work = ONE flat
-// "Segundo plano" fold — no fold nested inside a fold.
+// Approved mock rail-v7 (2026-11-05), after f-bg2: RUNNING spawned work = flat
+// inline rows in the Trabajos tab, visible without opening any fold; FINISHED
+// spawned work = ONE «Terminados hoy» fold of flat lines — no fold nested
+// inside a fold for today's work.
 test('running spawned work is inline; finished work is a single flat fold', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
-    SpawnedWorkCard: React.ComponentType<{ chat: unknown }>;
-    SpawnedWorkLive: React.ComponentType<{ chat: unknown }>;
+    FinishedWork: React.ComponentType<{ chat: unknown }>;
   };
+  const { TareasCard } = await server.ssrLoadModule('/src/components/TareasCard.tsx') as { TareasCard: React.ComponentType };
   const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown>; clearToastTimers(): void } };
   store = storeModule.store;
   const chat = { id: 'tab-1', chatId: 'chat-1', messages: [] };
+  storeModule.store.state.activeId = 'tab-1';
+  storeModule.store.state.chats = [chat];
   storeModule.store.state.hasSpawnedWorkChannels = false;
   storeModule.store.state.spawnedWorkByChat = {
     ['tab-1\u0000chat-1']: [
@@ -43,34 +46,33 @@ test('running spawned work is inline; finished work is a single flat fold', asyn
     ],
   };
 
-  // Running rows: inline, flat, no <details> wrapper, pulse + live summary visible.
-  const live = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
-  assert.match(live, /class="bglive"/);
-  assert.match(live, /Serve the complete interactive comparison gallery without truncating this title/);
-  // the kind reads as a word, not the wire enum (mock rail-actions, 2026-07-27)
-  assert.match(live, /comando · pid 321/);
-  // daemon prose we cannot classify stays verbatim — and gets NO action glyph
-  assert.match(live, /<span class="bgr-sum"[^>]*>Reempaquetando la app y esperando el gate\.<\/span>/);
-  assert.doesNotMatch(live, /class="bgr-act"/);
-  assert.match(live, /ver salida/);
-  assert.match(live, /r-pulse/);
+  // Running rows: inline, flat, no <details> wrapper, live dot + what it does visible.
+  const tab = renderToStaticMarkup(React.createElement(TareasCard));
+  const live = tab.slice(0, tab.indexOf('<details class="wdone"'));
+  assert.match(live, /class="wjob"/);
+  assert.match(live, /title="Serve the complete interactive comparison gallery without truncating this title"/);
+  // daemon prose we cannot classify stays verbatim, after where it runs
+  assert.match(live, /<span class="wjob-mt">Este (Mac|equipo) · Reempaquetando la app y esperando el gate\.<\/span>/);
+  assert.match(live, /title="[^"]*pid 321"/);
+  assert.match(live, />Ver salida</);
+  assert.match(live, /class="wdot"/);
   assert.doesNotMatch(live, /<details/);
   assert.doesNotMatch(live, /Review the UI/); // finished items never render inline
 
-  // Finished fold: one details, flat r-dline rows; running item and the old
-  // nested "trabajos terminados" fold are gone. The row says WHAT ran, never how
-  // it ended — the fold's old « · 1 falló» count and every red cue were removed
-  // on the user's call (2026-07-25), so this pins their absence.
-  const card = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkCard, { chat }));
-  assert.match(card, /Segundo plano/);
-  assert.match(card, /<span class="r-count">2<\/span>/);
+  // Finished fold: one details, flat r-dline rows; the running item is not in
+  // it. The row says WHAT ran, never how it ended — the fold's old « · 1 falló»
+  // count and every red cue were removed on the user's call (2026-07-25), so
+  // this pins their absence.
+  const card = renderToStaticMarkup(React.createElement(loaded.FinishedWork, { chat }));
+  assert.match(card, /Terminados hoy/);
+  assert.match(card, /<span class="wdone-n">2<\/span>/);
   assert.match(card, /Review the UI/);
   assert.match(card, /notarize\.sh/);
   assert.doesNotMatch(card, /falló|fracas|error/i);
   assert.match(card, /r-dline/);
-  assert.doesNotMatch(card, /trabajos terminados/);
+  assert.doesNotMatch(card, /trabajos terminados|wdone-old/);
   assert.doesNotMatch(card, /Serve the complete interactive comparison gallery/);
-  assert.equal((card.match(/class="r-meta"/g) ?? []).length, 1, 'one background fold');
+  assert.equal((card.match(/<details class="wdone"/g) ?? []).length, 1, 'one finished fold');
   assert.equal((card.match(/class="r-sa"/g) ?? []).length, 1, 'historical agents use the shared inspection row');
 });
 
@@ -84,10 +86,12 @@ test('spawned-work rail CSS clamps titles and bounds output tails', () => {
   assert.match(tail, /overflow:\s*auto/);
   // Fold bodies scroll INSIDE the fold — opening a long list must never spawn
   // a pane-wide scrollbar on the rail (user 2026-07-24).
-  const foldBody = css.match(/\.r-meta-b\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(foldBody, /max-height:/);
-  assert.match(foldBody, /overflow-y:\s*auto/);
-  assert.match(foldBody, /overscroll-behavior:\s*contain/);
+  for (const fold of ['wdone-b', 'wq-list']) {
+    const body = css.match(new RegExp(`\\.${fold}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    assert.match(body, /max-height:/, fold);
+    assert.match(body, /overflow-y:\s*auto/, fold);
+    assert.match(body, /overscroll-behavior:\s*contain/, fold);
+  }
   // No lingering styles from the removed nested-fold design.
   assert.doesNotMatch(css, /bgwdone|\.bgcard/);
 });
@@ -152,9 +156,10 @@ test('a queued job says so and a finished one counts only its run', async (t) =>
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
-    SpawnedWorkCard: React.ComponentType<{ chat: unknown }>;
-    SpawnedWorkLive: React.ComponentType<{ chat: unknown }>;
+    FinishedWork: React.ComponentType<{ chat: unknown }>;
   };
+  const { TareasCard } = await server.ssrLoadModule('/src/components/TareasCard.tsx') as { TareasCard: React.ComponentType };
+  const railView = await server.ssrLoadModule('/src/rail-view.ts') as { setRailQueueOpen(key: string, open: boolean): void; resetRailViews(): void };
   const storeModule = await server.ssrLoadModule('/src/store/store.ts') as { store: { state: Record<string, unknown>; clearToastTimers(): void } };
   store = storeModule.store;
   const chat = { id: 'tab-1', chatId: 'chat-1', messages: [] };
@@ -162,33 +167,38 @@ test('a queued job says so and a finished one counts only its run', async (t) =>
   const base = { tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'external', updatedAt: at(0) };
   const hour = 3600_000;
   const seed = (items: unknown[]) => {
+    storeModule.store.state.activeId = 'tab-1';
+    storeModule.store.state.chats = [chat];
     storeModule.store.state.hasSpawnedWorkChannels = false;
     storeModule.store.state.spawnedWorkByChat = { ['tab-1\u0000chat-1']: items };
   };
+  railView.resetRailViews();
+  railView.setRailQueueOpen('tab-1', true);
 
   seed([{ ...base, id: 'waiting', taskId: 'waiting', label: 'waiting job', status: 'running', startedAt: at(3 * hour), queuedAt: at(3 * hour) }]);
-  const waiting = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
-  assert.match(waiting, /<span class="bgr-el">en cola 180m/);
-  assert.doesNotMatch(waiting, /r-pulse/);
+  const waiting = renderToStaticMarkup(React.createElement(TareasCard));
+  assert.match(waiting, /<span class="wq-t" title="waiting job">waiting job<\/span><span class="wq-w">espera 3 h<\/span>/);
+  assert.doesNotMatch(waiting, /class="wjob"|class="wdot"/);
 
   seed([{ ...base, id: 'started', taskId: 'started', label: 'started job', status: 'running', startedAt: at(3 * hour), queuedAt: at(3 * hour), execStartedAt: at(hour) }]);
-  const started = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
-  assert.match(started, /<span class="bgr-el">60m/);
-  assert.doesNotMatch(started, /en cola/);
-  assert.match(started, /r-pulse/);
+  const started = renderToStaticMarkup(React.createElement(TareasCard));
+  assert.match(started, /<span class="wjob-t">1 h<\/span>/);
+  assert.doesNotMatch(started, /class="wq|>3 h</, 'it has left the queue and runs from its exec');
+  assert.match(started, /class="wdot"/);
 
   // An older daemon sends none of the fields and its row is what it always was.
   seed([{ ...base, id: 'old', taskId: 'old', label: 'old job', status: 'running', startedAt: at(2 * hour) }]);
-  const old = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkLive, { chat }));
-  assert.match(old, /<span class="bgr-el">120m/);
-  assert.match(old, /r-pulse/);
+  const old = renderToStaticMarkup(React.createElement(TareasCard));
+  assert.match(old, /<span class="wjob-t">2 h<\/span>/);
+  assert.match(old, /class="wdot"/);
 
   seed([
     { ...base, id: 'ran', taskId: 'ran', label: 'ran job', status: 'exited', startedAt: at(5 * hour), finishedAt: at(0), queuedAt: at(5 * hour), execStartedAt: at(hour), runMs: hour },
     { ...base, id: 'never', taskId: 'never', label: 'never ran', status: 'failed', startedAt: at(5 * hour), finishedAt: at(0), queuedAt: at(5 * hour) },
   ]);
-  const finished = renderToStaticMarkup(React.createElement(loaded.SpawnedWorkCard, { chat }));
+  const finished = renderToStaticMarkup(React.createElement(loaded.FinishedWork, { chat }));
   assert.match(finished, /ran job<\/span><span class="r-dl">60m/);
   assert.match(finished, /never ran<\/span>(?!<span class="r-dl">)/);
   assert.doesNotMatch(finished, /300m/);
+  railView.resetRailViews();
 });

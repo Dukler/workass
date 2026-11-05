@@ -1,11 +1,15 @@
+import { useEffect, useState } from 'react';
 import type { Chat } from '../store/types';
-import { store, useApp } from '../store/store';
+import { store, useApp, useActivity, useChatEnv, useSpawnedWork } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { IcExpand, IcClose } from '../icons';
-import { TareasCard } from './TareasCard';
+import { TareasCard, trabajosModel } from './TareasCard';
 import { BrowserPanel } from './BrowserPanel';
 import { localBrowserOwnsChat } from '../browser';
-import { EnvCard } from './EnvCard';
+import { EnvCard, envFileCount } from './EnvCard';
+import { SalidasTab } from './SalidasTab';
+import { chatOutputs } from '../chat-outputs';
+import { RAIL_TABS, railTab, setRailTab, type RailTab } from '../rail-view';
 
 export function RightRail({ chat }: { chat: Chat | null }) {
   const app = useApp();
@@ -36,22 +40,62 @@ export function RightRail({ chat }: { chat: Chat | null }) {
     );
   }
 
-  // Turno-first, de-carded (mock b3, 2026-07-22): the rail is one flush column.
-  // The live turn (intent + dots + live call + subagents) is the hero at the top;
-  // Archivos is a flush count row beneath. Background work shows only while it
-  // runs, inside the live turn — as Claude Code's own /tasks view does ("No
-  // tasks currently running"). The old "Segundo plano" fold listed every task
-  // the chat had ever finished (794 in VisionDemo speed) as if it were current
-  // work (user 2026-10-16); finished results arrive in the conversation.
+  return <ActivityPane chat={chat} />;
+}
+
+const TAB_LABEL: Record<RailTab, string> = { trabajos: 'Trabajos', archivos: 'Archivos', salidas: 'Salidas' };
+
+// «Actividad» (approved mock rail-v7, 2026-11-05): one flat column against the
+// chat, three text tabs. Trabajos is what runs and waits, Archivos what the
+// turn changed, Salidas what the chat produced to open. The live turn's intent,
+// plan, current call and calls are no longer drawn here (owner, 2026-11-05).
+// The open tab is kept per chat.
+function ActivityPane({ chat }: { chat: Chat | null }) {
+  const app = useApp();
+  useActivity();
+  useSpawnedWork();
+  useChatEnv();
+  const chatKey = chat?.id ?? '';
+  const [tab, setTab] = useState<RailTab>(() => railTab(chatKey));
+  const choose = (next: RailTab) => {
+    setRailTab(chatKey, next);
+    setTab(next);
+  };
+
+  // The Archivos count shows on every tab, so the snapshot is read here.
+  useEffect(() => { if (chat) void store.refreshChatEnv(chat); }, [chat]);
+  // The titlebar's background-work chip reveals this pane at Trabajos.
+  useEffect(() => { if (app.flashTareas) choose('trabajos'); }, [app.flashTareas]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const outputs = chatOutputs(chat?.messages);
+  const counts: Record<RailTab, number> = {
+    trabajos: trabajosModel(chat).count,
+    archivos: envFileCount(chat),
+    salidas: outputs.length,
+  };
+
   return (
     <aside className="rail">
       <div className="railhead">
+        <span className="rp-title">Actividad</span>
         <button className="tico" title="Expandir panel" onClick={() => store.toggleRailWide()}><IcExpand /></button>
         <button className="tico" title="Cerrar panel" onClick={() => store.closeRail()}><IcClose /></button>
       </div>
-
-      <TareasCard />
-      {chat && <EnvCard chat={chat} />}
+      <div className="rp-tabs" role="tablist" aria-label="Actividad">
+        {RAIL_TABS.map((key) => (
+          <button key={key} type="button" role="tab" id={`rp-tab-${key}`} aria-selected={tab === key}
+            className={`rp-tab${tab === key ? ' on' : ''}`} onClick={() => choose(key)}>
+            {TAB_LABEL[key]}
+            {/* A zero count is left out, like the zero parts of the totals line. */}
+            {counts[key] > 0 && <span className="rp-tab-c">{counts[key]}</span>}
+          </button>
+        ))}
+      </div>
+      <div className="rp-body" role="tabpanel" aria-labelledby={`rp-tab-${tab}`} data-tab={tab}>
+        {tab === 'trabajos' && <TareasCard />}
+        {tab === 'archivos' && (chat ? <EnvCard chat={chat} /> : <div className="rp-empty">Sin cambios</div>)}
+        {tab === 'salidas' && (chat ? <SalidasTab chat={chat} outputs={outputs} /> : <div className="rp-empty">Nada todavía</div>)}
+      </div>
     </aside>
   );
 }

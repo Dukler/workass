@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
 import type { Chat } from '../store/types';
 import { store, useChatEnv } from '../store/store';
-import { envView, type EnvGroup, type EnvFileRow } from '../env-files';
+import { envView, splitPath, type EnvGroup, type EnvFileRow } from '../env-files';
+import { IcFile } from '../icons';
 
 // How many file rows a repo group shows before the rest fold into a disclosure.
 const ROW_CAP = 8;
@@ -11,11 +11,22 @@ async function copyPath(path: string) {
   await navigator.clipboard.writeText(path).catch(() => undefined);
 }
 
+// The muted folder beside a name: the context that tells same-name files apart
+// when there is one, else the file's own folder (its last two segments).
+function folderOf(row: EnvFileRow): string {
+  if (row.parent) return row.parent;
+  const dirs = splitPath(row.path).slice(0, -1);
+  if (dirs.length === 0) return '';
+  return dirs.length > 2 ? `…/${dirs.slice(-2).join('/')}` : dirs.join('/');
+}
+
 function FileRow({ row }: { row: EnvFileRow }) {
+  const folder = folderOf(row);
   return (
     <button type="button" className="efile" title={`Copiar ruta · ${row.path}`} onClick={() => void copyPath(row.path)}>
+      <span className="efic" aria-hidden="true"><IcFile /></span>
       <span className="efname">{row.name}</span>
-      {row.parent && <span className="efpar">{row.parent}</span>}
+      {folder && <span className="efpar">{folder}</span>}
       <span className="sp" />
       <span className="efstat" aria-label={`+${row.adds} −${row.dels}`}>
         {row.adds > 0 && <span className="a">+{row.adds}</span>}
@@ -32,8 +43,8 @@ function RepoGroup({ group, withHead }: { group: EnvGroup; withHead: boolean }) 
     <div className="egroup">
       {withHead && (
         <div className="egrouphd">
-          <span className="egname">{group.name}</span>
-          {group.branch && <span className="egbranch">{group.branch}</span>}
+          <span className="egname" title={group.name}>{group.name}</span>
+          {group.branch && <span className="egbranch" title={group.branch}>{group.branch}</span>}
         </div>
       )}
       {head.map((row) => <FileRow key={row.path} row={row} />)}
@@ -48,34 +59,28 @@ function RepoGroup({ group, withHead }: { group: EnvGroup; withHead: boolean }) 
   );
 }
 
-// Entorno → the "Archivos" rail row: a flush count that expands to the
-// filename-first list of what this chat's current/most-recent turn changed.
-// De-carded (mock b3) — no bordered box, just a row in the rail column.
+/** How many files this chat's current or most recent turn changed. */
+export function envFileCount(chat: Chat | null): number {
+  return chat ? envView(store.chatEnv(chat)).fileCount : 0;
+}
+
+// «Archivos» — the activity pane's second tab: the filename-first list of what
+// this chat's current or most recent turn changed, flat rows against the pane
+// (mock rail-v7). A row copies its path; the branch closes the list. The pane
+// reads the snapshot on mount (RightRail), so this tab only draws it.
 export function EnvCard({ chat }: { chat: Chat }) {
   useChatEnv();
-  useEffect(() => { void store.refreshChatEnv(chat); }, [chat]);
-
   const view = envView(store.chatEnv(chat));
   const multi = view.groups.length > 1;
   const soleRepo = !multi ? view.groups[0] : undefined;
 
-  // No changes → render nothing. A "sin cambios" row is a scrap in the idle
-  // rail; the Turno empty-state carries the "nothing yet" message instead.
-  if (!view.hasChanges) return null;
+  if (!view.hasChanges) return <div className="rp-empty">Sin cambios</div>;
 
   return (
-    <details className="r-meta">
-      <summary>
-        <span className="r-ml">Archivos</span>
-        <span className="r-count">{view.fileCount}</span>
-      </summary>
-      <div className="r-meta-b">
-        <div className="elist">
-          {view.groups.map((group) => <RepoGroup key={group.name} group={group} withHead={multi} />)}
-          {soleRepo?.branch && <div className="efoot">{soleRepo.name} · {soleRepo.branch}</div>}
-          {view.reposTruncated && <div className="etrunc">más repositorios sin mostrar</div>}
-        </div>
-      </div>
-    </details>
+    <div className="elist">
+      {view.groups.map((group) => <RepoGroup key={group.name} group={group} withHead={multi} />)}
+      {soleRepo?.branch && <div className="efoot" title={`${soleRepo.name} · ${soleRepo.branch}`}>{soleRepo.name} · {soleRepo.branch}</div>}
+      {view.reposTruncated && <div className="etrunc">más repositorios sin mostrar</div>}
+    </div>
   );
 }
