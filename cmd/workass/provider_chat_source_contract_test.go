@@ -254,6 +254,10 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"SetSubagentLifecycleObserver": {},
 	// The same wiring setter for process children (fleet-runtime §13 P4).
 	"SetProcessLifecycleObserver": {},
+	// The «Cambios» watcher's wiring setter: it is told which files an agent
+	// edit tool call named, after publication, and only notes a repo to look
+	// at again. It reads nothing and decides nothing about a chat.
+	"SetToolEditObserver": {},
 	// The three process-child reads: a machine's supervised jobs, the visible
 	// resource queue, and one job with a bounded output tail. None of them
 	// touches a chat actor — a process child's authority is the machine that

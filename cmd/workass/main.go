@@ -1142,6 +1142,8 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count += 4
 	registerVoiceHandlers(hub)
 	count += 2
+	_, changesChannels := registerChangesHandlers(hub, acpManager, providerChats)
+	count += changesChannels
 	if acpManager != nil {
 		chatControl := opts.ChatControl
 		if chatControl == nil {

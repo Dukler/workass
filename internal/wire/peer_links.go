@@ -290,6 +290,10 @@ type Caller struct {
 	// which is what fleet membership has always meant.
 	Grant string
 	Local bool
+	// Done closes when the socket the invoke arrived on closes, so a handler
+	// can end something that should live only as long as the connection (a
+	// watch). Nil when the invoke did not come over a socket.
+	Done <-chan struct{}
 }
 
 // IsPeer reports whether this invoke arrived over a peer daemon's link.
@@ -331,7 +335,7 @@ func (h *Hub) callerFor(c *client) Caller {
 	if c == nil {
 		return Caller{}
 	}
-	caller := Caller{IP: c.ip, Local: isLocalIP(c.ip)}
+	caller := Caller{IP: c.ip, Local: isLocalIP(c.ip), Done: c.done}
 	if device, paired := c.deviceSnapshot(); paired {
 		caller.DeviceID, caller.Name = device.ID, device.Name
 		if device.IsPeer() {

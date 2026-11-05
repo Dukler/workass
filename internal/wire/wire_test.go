@@ -290,6 +290,44 @@ func TestHistoryReadsBypassSlowOrderedInvokeAndStayOrdered(t *testing.T) {
 	}
 }
 
+// A concurrent read (one git diff with its own timeout) holds up neither
+// lane: an ordered send and a history page both answer while it runs.
+func TestConcurrentReadHoldsUpNoLane(t *testing.T) {
+	hub := NewHub()
+	slowStarted := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	hub.RegisterConcurrentRead("changes:diff", func(args []any) (any, error) {
+		close(slowStarted)
+		<-releaseSlow
+		return "diff", nil
+	})
+	hub.Register("job:start", func(args []any) (any, error) { return "started", nil })
+	hub.RegisterHistoryRead("chat:archive-load", func(args []any) (any, error) { return "page", nil })
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	defer server.Close()
+	client := dialWS(t, server.URL, "Y29uY3VycmVudC1yZWFkLWxhbmU=")
+	defer client.conn.Close()
+
+	client.sendText(t, `{"t":"invoke","id":1,"channel":"changes:diff","args":[]}`)
+	select {
+	case <-slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent read never started")
+	}
+	client.sendText(t, `{"t":"invoke","id":2,"channel":"job:start","args":[]}`)
+	if reply := readReply(t, client); reply.ID != json.Number("2") || reply.Error != nil {
+		t.Fatalf("ordered invoke waited behind the concurrent read: %+v", reply)
+	}
+	client.sendText(t, `{"t":"invoke","id":3,"channel":"chat:archive-load","args":[]}`)
+	if reply := readReply(t, client); reply.ID != json.Number("3") || reply.Error != nil {
+		t.Fatalf("history read waited behind the concurrent read: %+v", reply)
+	}
+	close(releaseSlow)
+	if reply := readReply(t, client); reply.ID != json.Number("1") || reply.Error != nil {
+		t.Fatalf("concurrent read reply = %+v", reply)
+	}
+}
+
 func TestMutatingHandlerCannotUseHistoryReadLane(t *testing.T) {
 	hub := NewHub()
 	defer func() {

@@ -175,6 +175,7 @@ const (
 	invokeOrdered invokeScheduling = iota
 	invokeOutOfBandRead
 	invokeHistoryRead
+	invokeConcurrentRead
 )
 
 type registeredHandler struct {
@@ -486,6 +487,19 @@ func (h *Hub) RegisterHistoryRead(channel string, fn Handler) {
 		panic("wire: mutating channel cannot run on the history read lane: " + channel)
 	}
 	h.register(channel, fn, invokeHistoryRead)
+}
+
+// RegisterConcurrentRead installs a read-only handler that runs on its own
+// goroutine and replies whenever it finishes, waiting behind nothing and
+// holding nothing up. It is for a read that may legitimately take seconds
+// (one external command under its own timeout) and must never delay a send
+// on the ordered lane or a transcript page on the history lane. The handler
+// bounds its own work.
+func (h *Hub) RegisterConcurrentRead(channel string, fn Handler) {
+	if _, mutating := mutatingChannels[channel]; mutating {
+		panic("wire: mutating channel cannot run as a concurrent read: " + channel)
+	}
+	h.register(channel, fn, invokeConcurrentRead)
 }
 
 func (h *Hub) register(channel string, fn Handler, scheduling invokeScheduling) {
@@ -1445,6 +1459,9 @@ func (h *Hub) readLoop(c *client) {
 					continue
 				case invokeHistoryRead:
 					queue = history
+				case invokeConcurrentRead:
+					go h.handleInvoke(c, msg)
+					continue
 				}
 				c.live.blockReader()
 				select {
@@ -1634,6 +1651,15 @@ func encodeRawReplyFrame(id any, raw RawResult, validate bool) ([]byte, int, err
 
 func (h *Hub) invokeForClient(c *client, channel string, args []any) (any, error) {
 	if h.lease == nil {
+		// No pairing: the caller is anonymous, exactly as before, but a
+		// handler that ties something to the socket still learns when it
+		// closes.
+		if fn := h.callerHandler(channel); fn != nil && c != nil {
+			caller := Caller{Done: c.done}
+			return h.invokeRegistered(channel, append([]any(nil), args...), func(args []any) (any, error) {
+				return fn(caller, args)
+			})
+		}
 		return h.invokeRegistered(channel, args)
 	}
 	if channel == "lan:pairing-info" {

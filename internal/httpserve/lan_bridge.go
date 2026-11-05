@@ -261,6 +261,10 @@ const LANBridgeJS = `(() => {
     appChatFork: (o) => invoke('app-chat:fork', o),
     chatCheckpoints: (o) => invoke('chat:checkpoints', o), chatRewind: (o) => invoke('chat:rewind', o),
     chatDiff: (o) => invoke('chat:diff', o), chatEnvGet: (o) => invoke('chat:env-get', o),
+    // «Cambios»: a watch lives while the tab is open (additive; an older
+    // daemon answers "unknown channel" and the tab stays empty).
+    changesWatch: (o) => invoke('changes:watch', o || {}), changesUnwatch: (o) => invoke('changes:unwatch', o || {}),
+    changesFocus: () => invoke('changes:focus'), changesDiff: (o) => invoke('changes:diff', o),
     providersList: (o) => o && o.ifNoneMatch ? invoke('providers:list', { ifNoneMatch: o.ifNoneMatch }) : invoke('providers:list'), providersCatalog: () => invoke('providers:catalog'), providersDetect: (o) => invoke('providers:detect', o || {}), providersUpdate: (providerId) => invoke('providers:update', { providerId }), providersToggle: (id, enabled) => invoke('providers:toggle', { id, enabled }),
     pickDirectory: () => invoke('dialog:pick-directory'), listDir: (p) => invoke('fs:list-dir', p), createDir: (parent, name) => invoke('fs:create-dir', { parent, name }), projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? (o.byURL === true ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch, byURL: true } : { chatId, cwd, ifNoneMatch: o.ifNoneMatch }) : { chatId, cwd }), appChatCloseSession: (s) => invoke('app-chat:close-session', s),
     codeUnlock: (pin) => invoke('code:unlock', pin), codeLock: () => invoke('code:lock'), codeTree: () => invoke('code:tree'), codeRead: (rel) => invoke('code:read', rel),
@@ -275,6 +279,7 @@ const LANBridgeJS = `(() => {
     onChatGoal: (cb) => on('chat:goal', cb),
     onChatPermissionRequest: (cb) => on('chat:permission-request', cb), onChatPermissionResolved: (cb) => on('chat:permission-resolved', cb), onLanControllerChanged: (cb) => on('lan:controller-changed', cb), onLanAccessState: (cb) => on('lan:access-state', cb), onLanAccessRequest: (cb) => on('lan:access-request', cb), onLanAccessRequestClosed: (cb) => on('lan:access-request-closed', cb),
     onChatCheckpointRestored: (cb) => on('chat:checkpoint-restored', cb), onChatEngineRecovered: (cb) => on('chat:engine-recovered', cb), onChatEnv: (cb) => on('chat:env', cb),
+    onChangesState: (cb) => on('changes:state', cb),
     onNotify: (cb) => on('notify', cb), onNotifyBacklog: (cb) => on('notify:backlog', cb),
     onChatPlanUsage: (cb) => on('chat:plan-usage', cb),
     onMachinesChanged: (cb) => on('machines:changed', cb),

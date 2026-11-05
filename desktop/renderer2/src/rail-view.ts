@@ -3,8 +3,8 @@
 // renderer reload keeps it too) and never written to the daemon: it is how
 // this window looks, not a property of the chat.
 
-export type RailTab = 'trabajos' | 'archivos' | 'salidas';
-export const RAIL_TABS: readonly RailTab[] = ['trabajos', 'archivos', 'salidas'];
+export type RailTab = 'trabajos' | 'cambios' | 'salidas';
+export const RAIL_TABS: readonly RailTab[] = ['trabajos', 'cambios', 'salidas'];
 
 interface RailView { tab?: RailTab; queueOpen?: boolean }
 
@@ -47,8 +47,10 @@ function update(chatKey: string, patch: RailView): void {
 }
 
 export function railTab(chatKey: string): RailTab {
-  const tab = load().get(chatKey)?.tab;
-  return tab && RAIL_TABS.includes(tab) ? tab : 'trabajos';
+  const tab = load().get(chatKey)?.tab as string | undefined;
+  // «Archivos» became «Cambios»; a window that remembered it keeps its place.
+  if (tab === 'archivos') return 'cambios';
+  return tab && (RAIL_TABS as readonly string[]).includes(tab) ? tab as RailTab : 'trabajos';
 }
 export function setRailTab(chatKey: string, tab: RailTab): void { update(chatKey, { tab }); }
 

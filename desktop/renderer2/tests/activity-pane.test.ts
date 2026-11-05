@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
 import type { ToolEvent } from '../src/store/types.ts';
-import type { ChatEnvPayload, SpawnedWorkItem } from '../src/wire/types.ts';
+import type { ChangesState, SpawnedWorkItem } from '../src/wire/types.ts';
 
 // The activity pane (approved mock rail-v7, 2026-11-05): «Actividad», three
 // text tabs, and a Trabajos tab of totals, machines, subagents, background
@@ -24,6 +24,7 @@ let TareasCard: React.ComponentType;
 let store: { state: Record<string, any>; clearToastTimers(): void };
 let railView: { resetRailViews(): void; setRailTab(key: string, tab: string): void; setRailQueueOpen(key: string, open: boolean): void };
 let setMachineRouter: (router: unknown) => void;
+let changesStore: { resetChangesStore(state?: ChangesState | null): void };
 const realNow = Date.now;
 
 before(async () => {
@@ -34,6 +35,7 @@ before(async () => {
   ({ store } = await server.ssrLoadModule('/src/store/store.ts') as { store: typeof store });
   railView = await server.ssrLoadModule('/src/rail-view.ts') as typeof railView;
   ({ setMachineRouter } = await server.ssrLoadModule('/src/wire/api.ts') as { setMachineRouter: typeof setMachineRouter });
+  changesStore = await server.ssrLoadModule('/src/changes-store.ts') as typeof changesStore;
 });
 
 after(async () => { Date.now = realNow; setMachineRouter(undefined); store.clearToastTimers(); await server.close(); });
@@ -42,6 +44,7 @@ beforeEach(() => {
   Date.now = () => NOW;
   railView.resetRailViews();
   setMachineRouter(undefined);
+  changesStore.resetChangesStore(null);
 });
 
 const tool = (over: Partial<ToolEvent>): ToolEvent => ({
@@ -58,7 +61,7 @@ const waitingJob = (id: string, waitedMs: number, extra: Partial<SpawnedWorkItem
   job(id, { queuedAt: ago(waitedMs), startedAt: ago(waitedMs), resource: 'gpu0', ...extra });
 const far = { hostMachine: 'm-far', hostMachineName: 'buildbox' };
 
-function seed({ messages = [], work = [], env, pane }: { messages?: unknown[]; work?: SpawnedWorkItem[]; env?: ChatEnvPayload; pane?: string } = {}) {
+function seed({ messages = [], work = [], changes, pane }: { messages?: unknown[]; work?: SpawnedWorkItem[]; changes?: ChangesState; pane?: string } = {}) {
   const chat: Record<string, unknown> = { id: 'tab-1', chatId: 'chat-1', cwd: '/work/project', messages };
   if (pane) chat.pane = pane;
   store.state.meta = { profile: 'dev' };
@@ -66,19 +69,19 @@ function seed({ messages = [], work = [], env, pane }: { messages?: unknown[]; w
   store.state.chats = [chat, { id: 'tab-2', chatId: 'chat-2', cwd: null, messages: [] }];
   store.state.hasSpawnedWorkChannels = false;
   store.state.spawnedWorkByChat = { 'tab-1\u0000chat-1': work };
-  store.state.chatEnvByChat = env ? { 'tab-1\u0000chat-1': env } : {};
+  changesStore.resetChangesStore(changes ?? null);
   return chat;
 }
 const rail = (chat: unknown) => renderToStaticMarkup(React.createElement(RightRail, { chat }));
 const work = () => renderToStaticMarkup(React.createElement(TareasCard));
 const count = (html: string, pattern: RegExp) => (html.match(pattern) ?? []).length;
 
-const envPayload = (): ChatEnvPayload => ({
-  chatId: 'chat-1', tabId: 'tab-1', cwd: '/work/project', unchanged: [], reposTruncated: false, filesTruncated: false,
-  repoLimit: 12, fileLimit: 200, approximation: 'x',
-  repos: [{ name: 'project', branch: 'feature/rail', adds: 0, dels: 0, filesTruncated: false, files: [
-    { path: 'internal/wire/wire.go', adds: 12, dels: 3 },
-    { path: 'desktop/renderer2/src/components/RightRail.tsx', adds: 40, dels: 0 },
+// Three changed files in one repo, as changes:state reports them.
+const changesPayload = (): ChangesState => ({
+  seq: 1, windowDays: 7, chats: [{ chatId: 'chat-1', tabId: 'tab-1', title: 'Panel', providerId: 'claude' }],
+  repos: [{ root: '/work/project', name: 'project', branch: 'feature/rail', adds: 52, dels: 5, checked: true, files: [
+    { path: 'internal/wire/wire.go', adds: 12, dels: 3, chatId: 'chat-1', tabId: 'tab-1', at: NOW - MIN },
+    { path: 'desktop/renderer2/src/components/RightRail.tsx', adds: 40, dels: 0, chatId: 'chat-1', tabId: 'tab-1', at: NOW - MIN },
     { path: 'README.md', adds: 0, dels: 2 },
   ] }],
 });
@@ -100,14 +103,14 @@ test('the header says Actividad and keeps its expand and close buttons; three te
   const chat = seed({
     messages: [{ id: 'a-1', role: 'assistant', content: 'Listo: [informe.pdf](/workass/artifacts/informe-1/informe.pdf)', status: 'done', at: null, events: [] }],
     work: [runningJob('r1', 10 * MIN), runningJob('r2', 5 * MIN), waitingJob('w1', HOUR)],
-    env: envPayload(),
+    changes: changesPayload(),
   });
   const html = rail(chat);
   assert.match(html, /<div class="railhead"><span class="rp-title">Actividad<\/span><button class="tico" title="Expandir panel">/);
   assert.match(html, /<button class="tico" title="Cerrar panel">/);
   const tabs = [...html.matchAll(/<button type="button" role="tab" id="rp-tab-(\w+)" aria-selected="(true|false)" class="rp-tab( on)?">(\w+)(?:<span class="rp-tab-c">(\d+)<\/span>)?<\/button>/g)]
     .map((m) => [m[4], m[2], m[5] ?? '']);
-  assert.deepEqual(tabs, [['Trabajos', 'true', '3'], ['Archivos', 'false', '3'], ['Salidas', 'false', '1']]);
+  assert.deepEqual(tabs, [['Trabajos', 'true', '3'], ['Cambios', 'false', '3'], ['Salidas', 'false', '1']]);
   assert.match(html, /<div class="rp-body" role="tabpanel" aria-labelledby="rp-tab-trabajos" data-tab="trabajos">/);
   // No pill, no filled tab: the active tab is its underline (CSS below).
   const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
@@ -118,14 +121,17 @@ test('the header says Actividad and keeps its expand and close buttons; three te
 });
 
 test('zero counts are left out and the chosen tab is kept per chat', () => {
-  const chat = seed({ env: envPayload() });
+  const chat = seed({ changes: changesPayload() });
   let html = rail(chat);
   assert.match(html, /class="rp-tab on">Trabajos<\/button>/, 'Trabajos is the default and shows no 0');
   assert.match(html, /class="rp-tab">Salidas<\/button>/);
-  railView.setRailTab('tab-1', 'archivos');
+  railView.setRailTab('tab-1', 'cambios');
   html = rail(chat);
-  assert.match(html, /aria-selected="true" class="rp-tab on">Archivos<span class="rp-tab-c">3<\/span>/);
-  assert.match(html, /data-tab="archivos"/);
+  assert.match(html, /aria-selected="true" class="rp-tab on">Cambios<span class="rp-tab-c">3<\/span>/);
+  assert.match(html, /data-tab="cambios"/);
+  // A window that remembered the old «Archivos» tab lands on «Cambios».
+  railView.setRailTab('tab-1', 'archivos');
+  assert.match(rail(chat), /data-tab="cambios"/);
   // Another chat keeps its own choice.
   store.state.activeId = 'tab-2';
   assert.match(rail(store.state.chats[1]), /data-tab="trabajos"/);
@@ -229,21 +235,21 @@ test('Terminados hoy counts today and opens the history in place; earlier days f
 test('the tabs say so in one short line when there is nothing', () => {
   const chat = seed();
   assert.match(rail(chat), /<div class="rp-body"[^>]*><section class="rp-work"><div class="rp-empty">Nada corriendo<\/div><\/section><\/div>/);
-  railView.setRailTab('tab-1', 'archivos');
-  assert.match(rail(chat), /<div class="rp-body"[^>]*><div class="rp-empty">Sin cambios<\/div><\/div>/);
+  railView.setRailTab('tab-1', 'cambios');
+  assert.match(rail(chat), /<div class="rp-body"[^>]*><div class="rp-empty">Sin cambios todavía<\/div><\/div>/);
   railView.setRailTab('tab-1', 'salidas');
   assert.match(rail(chat), /<div class="rp-body"[^>]*><div class="rp-empty">Nada todavía<\/div><\/div>/);
 });
 
-test('Archivos is flat rows: file glyph, name, muted folder, +N −N, and a click copies the path', () => {
-  const chat = seed({ env: envPayload() });
-  railView.setRailTab('tab-1', 'archivos');
+test('Cambios is flat repo rows with the files grouped by who changed them', () => {
+  const chat = seed({ changes: changesPayload() });
+  railView.setRailTab('tab-1', 'cambios');
+  setMachineRouter({ changesWatch: async () => ({ id: 'w' }) });
   const html = rail(chat);
-  assert.doesNotMatch(html, /<details class="r-meta"|class="ecard"/, 'no fold, no box');
-  assert.match(html, /<button type="button" class="efile" title="Copiar ruta · internal\/wire\/wire.go"><span class="efic" aria-hidden="true"><svg[\s\S]*?<\/span><span class="efname">wire\.go<\/span><span class="efpar">internal\/wire<\/span><span class="sp"><\/span><span class="efstat" aria-label="\+12 −3"><span class="a">\+12<\/span><span class="d">−3<\/span><\/span><\/button>/);
-  assert.match(html, /<span class="efname">RightRail\.tsx<\/span><span class="efpar">…\/src\/components<\/span>/);
-  assert.match(html, /<span class="efname">README\.md<\/span><span class="sp">/, 'a root file has no folder');
-  assert.match(html, /<div class="efoot" title="project · feature\/rail">project · feature\/rail<\/div>/);
+  assert.doesNotMatch(html, /class="ecard"|class="efile"/, 'the old Archivos list is gone');
+  assert.match(html, /<div class="cb-list"><div class="cb-repo open"><button type="button" class="cb-rh" aria-expanded="true">[\s\S]*?<span class="cb-name" title="\/work\/project">project<\/span>/);
+  assert.match(html, /<b title="Panel">Panel<\/b><span class="cb-who-m"> · este chat · 2 archivos<\/span>/);
+  assert.match(html, /Fuera de Workass · 1 archivo/);
 });
 
 test('Salidas lists pages, images and hosted files with their tag, title and Abrir', () => {

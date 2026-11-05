@@ -202,6 +202,9 @@ type Manager struct {
 	// owned.
 	workspaceInvalidatedSessions sync.Map // map[sessionID]struct{}
 
+	// toolEditObserver is told about agent edit tool events (tool_edits.go).
+	toolEditObserver atomic.Pointer[toolEditObserverBox]
+
 	envMu             sync.Mutex
 	envBySession      map[string]*chatEnvTracker
 	envByChatID       map[string]*chatEnvTracker

@@ -1279,6 +1279,9 @@ func (b *Bridge) emitToolEvent(job *Job, acpKind string, update map[string]any, 
 	if !suppressed {
 		b.manager.emit("job:event", map[string]any{"type": "acp", "id": visibleJobID, "event": event})
 	}
+	// After publication, never before it: the «Cambios» watcher only notes
+	// which repo to look at again, and returns at once when nobody watches.
+	b.manager.noteToolEdit(job, asString(event["toolKind"]), asString(event["status"]), firstLocation(update["locations"]), asString(event["input"]))
 	if job.SubagentID != "" {
 		b.manager.forwardHostedSubagentCall(job.SubagentID, event)
 	}

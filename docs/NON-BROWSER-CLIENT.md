@@ -274,6 +274,26 @@ GET /workass/chat-image/<tabId, URL-escaped>/<sha256>?k=<imageKey>
   format, comes back as it is. Its ETag is `"<sha256>-w<px>"`. Size it to what
   you draw (CSS width x device pixel ratio) and open the full image without it.
 
+## 8 · «Cambios»: repo changes while a watch is open (additive, 2026-11-05)
+
+The activity pane's «Cambios» tab lists every git repo the owner's chats
+touched in the last seven days, its changed files, and which chat's agent
+edited each (from the chats' stored edit tool calls; a file no chat edited is
+"outside Workass"). The daemon runs git for it only while a client watches:
+
+- `changes:watch [{id?}]` → `{id, state?}` starts a watch and is the "tab
+  opened" trigger; repeating it with the `id` renews the 90 s lease and
+  triggers nothing. The watch also ends when the socket that opened it closes.
+- `changes:unwatch [{id}]` ends it. With no watch left, no git runs at all.
+- `changes:focus []` asks for a fresh look (the window regained focus).
+- `changes:diff [{root, path}]` → `{root, path, text, truncated?, new?,
+  binary?}`: one changed file's unified diff, bounded, only while a watch is
+  open and only for a file the last answer reported. It runs beside every
+  other lane, so a slow repo never holds up a send.
+- `changes:state` (event) carries `{seq, windowDays, repos[], chats[]}`. A repo
+  with `checked: false` has not answered yet; `ahead`/`behind` are left out
+  when zero or unknown; `checking` is set while it is being looked at.
+
 ---
 
 ## What is owed, and by whom

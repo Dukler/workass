@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { Chat } from '../store/types';
-import { store, useApp, useActivity, useChatEnv, useSpawnedWork } from '../store/store';
+import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { chatPane } from '../store/right-pane';
 import { IcExpand, IcClose } from '../icons';
 import { TareasCard, trabajosModel } from './TareasCard';
 import { BrowserPanel } from './BrowserPanel';
 import { localBrowserOwnsChat } from '../browser';
-import { EnvCard, envFileCount } from './EnvCard';
+import { CambiosTab, cambiosCount } from './CambiosTab';
+import { useChangesState } from '../changes-store';
 import { SalidasTab } from './SalidasTab';
 import { chatOutputs } from '../chat-outputs';
 import { RAIL_TABS, railTab, setRailTab, type RailTab } from '../rail-view';
@@ -43,18 +44,21 @@ export function RightRail({ chat }: { chat: Chat | null }) {
   return <ActivityPane chat={chat} />;
 }
 
-const TAB_LABEL: Record<RailTab, string> = { trabajos: 'Trabajos', archivos: 'Archivos', salidas: 'Salidas' };
+const TAB_LABEL: Record<RailTab, string> = { trabajos: 'Trabajos', cambios: 'Cambios', salidas: 'Salidas' };
 
 // «Actividad» (approved mock rail-v7, 2026-11-05): one flat column against the
-// chat, three text tabs. Trabajos is what runs and waits, Archivos what the
-// turn changed, Salidas what the chat produced to open. The live turn's intent,
+// chat, three text tabs. Trabajos is what runs and waits, Cambios what the
+// owner's chats changed in their repos (mock rail-cambios-v2), Salidas what the
+// chat produced to open. The live turn's intent,
 // plan, current call and calls are no longer drawn here (owner, 2026-11-05).
 // The open tab is kept per chat.
 function ActivityPane({ chat }: { chat: Chat | null }) {
   const app = useApp();
   useActivity();
   useSpawnedWork();
-  useChatEnv();
+  // Cambios's count is the last snapshot's: the daemon only looks while the
+  // tab is open, so it is not refreshed for the other tabs.
+  const changes = useChangesState();
   const chatKey = chat?.id ?? '';
   const [tab, setTab] = useState<RailTab>(() => railTab(chatKey));
   const choose = (next: RailTab) => {
@@ -62,15 +66,13 @@ function ActivityPane({ chat }: { chat: Chat | null }) {
     setTab(next);
   };
 
-  // The Archivos count shows on every tab, so the snapshot is read here.
-  useEffect(() => { if (chat) void store.refreshChatEnv(chat); }, [chat]);
   // The titlebar's background-work chip reveals this pane at Trabajos.
   useEffect(() => { if (app.flashTareas) choose('trabajos'); }, [app.flashTareas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const outputs = chatOutputs(chat?.messages);
   const counts: Record<RailTab, number> = {
     trabajos: trabajosModel(chat).count,
-    archivos: envFileCount(chat),
+    cambios: cambiosCount(changes),
     salidas: outputs.length,
   };
 
@@ -93,7 +95,7 @@ function ActivityPane({ chat }: { chat: Chat | null }) {
       </div>
       <div className="rp-body" role="tabpanel" aria-labelledby={`rp-tab-${tab}`} data-tab={tab}>
         {tab === 'trabajos' && <TareasCard />}
-        {tab === 'archivos' && (chat ? <EnvCard chat={chat} /> : <div className="rp-empty">Sin cambios</div>)}
+        {tab === 'cambios' && <CambiosTab chat={chat} />}
         {tab === 'salidas' && (chat ? <SalidasTab chat={chat} outputs={outputs} /> : <div className="rp-empty">Nada todavía</div>)}
       </div>
     </aside>

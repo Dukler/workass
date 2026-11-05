@@ -68,6 +68,7 @@ import { setRemoteChatImageAccess } from '../chat-image-url';
 import type { AppUpdaterAuthorizedRequest, AppUpdaterDiagnostics } from '../app-updater';
 import { isCancelledWork, settleSubagentCards } from '../subagent-layout';
 import { updateChainAfterCheck } from '../update-card';
+import { changesReconnected } from '../changes-store';
 
 const APP = 'app';
 const PROC = 'proc';
@@ -4374,6 +4375,8 @@ export class Store {
   // what distinguishes those cases; never discard a live ACP binding merely
   // because the view's WebSocket was replaced.
   private async onReconnected() {
+    // The daemon ended the «Cambios» watch with the old socket.
+    changesReconnected();
     // A daemon handoff may cross the version where runtime profile metadata was
     // introduced. Re-read it before restoring catalog-dependent UI so dev never
     // remains stuck on the conservative production filter until Electron reloads.

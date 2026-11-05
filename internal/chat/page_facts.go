@@ -15,9 +15,11 @@ type PageFacts struct {
 	Deleted     bool
 	Title       string
 	CWD         string
-	Settled     string
-	SettledAt   int64
-	Unread      bool
+	// ProviderID is the provider the chat last ran on (its sidebar mark).
+	ProviderID string
+	Settled    string
+	SettledAt  int64
+	Unread     bool
 	// LastActivityAt is what a metadata-only session read reports as the
 	// chat's lastActivityAt (unix ms; 0 when none).
 	LastActivityAt int64
@@ -37,7 +39,7 @@ func pageFactsOf(state *State, lastActivityAt int64) PageFacts {
 	p := view.Presentation
 	facts := PageFacts{
 		ChatID: view.ChatID, TabID: p.TabID, Initialized: view.Initialized, Deleted: view.Deleted,
-		Title: p.Title, Settled: p.Settled, SettledAt: p.SettledAt, Unread: p.Unread,
+		Title: p.Title, ProviderID: string(p.ProviderID), Settled: p.Settled, SettledAt: p.SettledAt, Unread: p.Unread,
 		LastActivityAt: lastActivityAt,
 		Foreground:     view.Foreground != nil,
 		Queued:         len(view.StagedQueue)+len(view.Queue) > 0,

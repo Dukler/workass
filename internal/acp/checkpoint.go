@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
 	providercontract "workass/internal/provider"
@@ -244,100 +243,6 @@ func (m *Manager) ChatDiffFromCheckpoints(ctx context.Context, chatID string, ch
 	}, nil
 }
 
-func (m *Manager) recordCheckpointAfterTurn(ctx context.Context, snapshot chatEnvSnapshot, payload ChatEnvPayload, currentRepos []gitRepoBaseline) {
-	if snapshot.turnSeq <= 0 || snapshot.jobID == "" || snapshot.chatID == "" || len(payload.Repos) == 0 {
-		return
-	}
-	touched := map[string]struct{}{}
-	for _, repo := range payload.Repos {
-		touched[repo.Name] = struct{}{}
-	}
-	currentByPath := map[string]gitRepoBaseline{}
-	for _, repo := range currentRepos {
-		currentByPath[repo.path] = repo
-	}
-	checkpoint := ChatCheckpoint{
-		TurnSeq: snapshot.turnSeq,
-		JobID:   snapshot.jobID,
-		Ts:      time.Now().UTC().Format(time.RFC3339Nano),
-		Repos:   []ChatCheckpointRepo{},
-	}
-	for _, pending := range snapshot.preRefs {
-		if _, ok := touched[pending.name]; !ok {
-			continue
-		}
-		repo := ChatCheckpointRepo{
-			Name:   pending.name,
-			Path:   pending.path,
-			Branch: pending.branch,
-			Ref:    pending.ref,
-			Commit: pending.commit,
-		}
-		if current, ok := currentByPath[pending.path]; ok {
-			repo.ObservedTree = current.tree
-		}
-		if pending.err != "" || pending.commit == "" {
-			repo.Skipped = true
-			repo.SkipReason = firstNonEmpty(pending.err, "checkpoint-create-failed")
-			checkpoint.Repos = append(checkpoint.Repos, repo)
-			continue
-		}
-		count, err := changedPathCountFromTreeishToWorktree(ctx, pending.path, pending.commit)
-		if err != nil {
-			repo.Skipped = true
-			repo.SkipReason = "changed-count-failed: " + err.Error()
-			checkpoint.Repos = append(checkpoint.Repos, repo)
-			continue
-		}
-		repo.ChangedFiles = count
-		if count > checkpointFileLimit {
-			repo.Skipped = true
-			repo.SkipReason = "changed-file-limit"
-			checkpoint.Repos = append(checkpoint.Repos, repo)
-			continue
-		}
-		if _, err := gitOutput(ctx, pending.path, "update-ref", pending.ref, pending.commit); err != nil {
-			repo.Skipped = true
-			repo.SkipReason = "update-ref-failed: " + err.Error()
-		}
-		checkpoint.Repos = append(checkpoint.Repos, repo)
-	}
-	if len(checkpoint.Repos) == 0 {
-		return
-	}
-	if err := m.appendCheckpoint(snapshot.chatID, checkpoint); err != nil {
-		m.opts.Logf("checkpoint record failed", map[string]any{"chatId": snapshot.chatID, "turnSeq": snapshot.turnSeq, "error": err.Error()})
-	}
-}
-
-func (m *Manager) appendCheckpoint(chatID string, checkpoint ChatCheckpoint) error {
-	m.checkpointMu.Lock()
-	defer m.checkpointMu.Unlock()
-	state, err := m.loadCheckpointStateUnlocked(chatID)
-	if err != nil {
-		return err
-	}
-	state.Checkpoints = append(state.Checkpoints, checkpoint)
-	sort.SliceStable(state.Checkpoints, func(i, j int) bool { return state.Checkpoints[i].TurnSeq < state.Checkpoints[j].TurnSeq })
-	var rotated []ChatCheckpoint
-	if len(state.Checkpoints) > checkpointLimit {
-		rotated = append(rotated, state.Checkpoints[:len(state.Checkpoints)-checkpointLimit]...)
-		state.Checkpoints = append([]ChatCheckpoint(nil), state.Checkpoints[len(state.Checkpoints)-checkpointLimit:]...)
-	}
-	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	if err := m.saveCheckpointStateUnlocked(state); err != nil {
-		return err
-	}
-	for _, old := range rotated {
-		for _, repo := range old.Repos {
-			if repo.Ref != "" && repo.Path != "" {
-				_, _ = gitOutput(context.Background(), repo.Path, "update-ref", "-d", repo.Ref)
-			}
-		}
-	}
-	return nil
-}
-
 func (m *Manager) loadCheckpointState(chatID string) (chatCheckpointFile, error) {
 	m.checkpointMu.Lock()
 	defer m.checkpointMu.Unlock()
@@ -375,40 +280,8 @@ func (m *Manager) loadCheckpointStateUnlocked(chatID string) (chatCheckpointFile
 	return state, nil
 }
 
-func (m *Manager) saveCheckpointStateUnlocked(state chatCheckpointFile) error {
-	dir := filepath.Join(m.opts.StateDir, "checkpoints")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	state.Version = checkpointStateVersion
-	path := m.checkpointStatePath(state.ChatID)
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
 func (m *Manager) checkpointStatePath(chatID string) string {
 	return filepath.Join(m.opts.StateDir, "checkpoints", checkpointFileName(chatID)+".json")
-}
-
-func (m *Manager) maxCheckpointTurnSeq(chatID string) int {
-	state, err := m.loadCheckpointState(chatID)
-	if err != nil {
-		return 0
-	}
-	maxSeq := 0
-	for _, checkpoint := range state.Checkpoints {
-		if checkpoint.TurnSeq > maxSeq {
-			maxSeq = checkpoint.TurnSeq
-		}
-	}
-	return maxSeq
 }
 
 func (m *Manager) resolveCheckpointChatID(chatID, tabID string) string {
@@ -497,15 +370,6 @@ func (m *Manager) latestCheckpointRepo(chatID, repoName string) (ChatCheckpointR
 	return ChatCheckpointRepo{}, 0, false
 }
 
-func checkpointByTurn(checkpoints []ChatCheckpoint, turnSeq int) (ChatCheckpoint, bool) {
-	for _, checkpoint := range checkpoints {
-		if checkpoint.TurnSeq == turnSeq {
-			return checkpoint, true
-		}
-	}
-	return ChatCheckpoint{}, false
-}
-
 func checkpointReposPublic(repos []ChatCheckpointRepo) []map[string]any {
 	out := make([]map[string]any, 0, len(repos))
 	for _, repo := range repos {
@@ -546,14 +410,6 @@ func checkpointFileName(chatID string) string {
 	return sanitizeToken(chatID)
 }
 
-func checkpointRef(chatID string, turnSeq int) string {
-	return "refs/workass/checkpoints/" + sanitizeToken(chatID) + "/" + strconv.Itoa(turnSeq)
-}
-
-func checkpointCommitMessage(chatID string, turnSeq int, jobID string) string {
-	return fmt.Sprintf("workass checkpoint turn %d job %s", turnSeq, sanitizeToken(jobID))
-}
-
 func sanitizeToken(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -583,119 +439,12 @@ func sanitizeToken(raw string) string {
 	return out
 }
 
-func createWorktreeCheckpointCommit(ctx context.Context, repo, message string) (string, error) {
-	tree, err := writeWorktreeTree(ctx, repo)
-	if err != nil {
-		return "", err
-	}
-	return createCheckpointCommitFromTree(ctx, repo, tree, message)
-}
-
-func createCheckpointCommitFromTree(ctx context.Context, repo, tree, message string) (string, error) {
-	if tree == "" {
-		return "", errors.New("checkpoint baseline tree is unavailable")
-	}
-	args := []string{"commit-tree", tree}
-	if head, ok := gitHead(ctx, repo); ok {
-		args = append(args, "-p", head)
-	}
-	args = append(args, "-m", message)
-	out, err := gitOutputWithEnv(ctx, repo, gitCommitIdentityEnv(time.Now().UTC()), args...)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func gitWorktreeTree(ctx context.Context, repo string) string {
-	tree, err := writeWorktreeTree(ctx, repo)
-	if err != nil {
-		return ""
-	}
-	return tree
-}
-
-func writeWorktreeTree(ctx context.Context, repo string) (string, error) {
-	tmp, err := os.MkdirTemp("", "workass-git-index-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tmp)
-	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmp, "index")}
-	if head, ok := gitHead(ctx, repo); ok {
-		if _, err := gitOutputWithEnv(ctx, repo, env, "read-tree", head); err != nil {
-			return "", err
-		}
-	} else if _, err := gitOutputWithEnv(ctx, repo, env, "read-tree", "--empty"); err != nil {
-		return "", err
-	}
-	if _, err := gitOutputWithEnv(ctx, repo, env, "add", "-A", "--", "."); err != nil {
-		return "", err
-	}
-	out, err := gitOutputWithEnv(ctx, repo, env, "write-tree")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func gitHead(ctx context.Context, repo string) (string, bool) {
-	out, err := gitOutput(ctx, repo, "rev-parse", "--verify", "HEAD")
-	if err != nil {
-		return "", false
-	}
-	head := strings.TrimSpace(string(out))
-	return head, head != ""
-}
-
 func gitTreeishTree(ctx context.Context, repo, treeish string) string {
 	out, err := gitOutput(ctx, repo, "rev-parse", treeish+"^{tree}")
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-func gitCommitIdentityEnv(ts time.Time) []string {
-	when := ts.Format(time.RFC3339)
-	return []string{
-		"GIT_AUTHOR_NAME=workass",
-		"GIT_AUTHOR_EMAIL=workass@example.invalid",
-		"GIT_COMMITTER_NAME=workass",
-		"GIT_COMMITTER_EMAIL=workass@example.invalid",
-		"GIT_AUTHOR_DATE=" + when,
-		"GIT_COMMITTER_DATE=" + when,
-	}
-}
-
-func gitOutputWithEnv(ctx context.Context, repo string, extraEnv []string, args ...string) ([]byte, error) {
-	return gitOutputAllowExitWithEnv(ctx, repo, map[int]struct{}{0: {}}, extraEnv, args...)
-}
-
-func gitOutputAllowExitWithEnv(ctx context.Context, repo string, allowed map[int]struct{}, extraEnv []string, args ...string) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	gitCtx, cancel := context.WithTimeout(ctx, chatEnvGitTimeout)
-	defer cancel()
-	cmdArgs := append([]string{"-C", repo}, args...)
-	cmd := managedCommand("git", cmdArgs...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	cmd.Env = append(cmd.Env, extraEnv...)
-	out, err := gitCommandOutput(gitCtx, cmd)
-	if gitCtx.Err() != nil {
-		return out, gitCtx.Err()
-	}
-	if err == nil {
-		return out, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if _, ok := allowed[exitErr.ExitCode()]; ok {
-			return out, nil
-		}
-	}
-	return out, err
 }
 
 func repoChangedSinceBaseline(ctx context.Context, baseline gitRepoBaseline) (bool, string) {
@@ -746,14 +495,6 @@ func gitExitCode(ctx context.Context, repo string, args ...string) (int, error) 
 		return exitErr.ExitCode(), nil
 	}
 	return -1, err
-}
-
-func changedPathCountFromTreeishToWorktree(ctx context.Context, repo, treeish string) (int, error) {
-	paths, err := changedPathsFromTreeishToWorktree(ctx, repo, treeish)
-	if err != nil {
-		return 0, err
-	}
-	return len(paths), nil
 }
 
 func changedPathsFromTreeishToWorktree(ctx context.Context, repo, treeish string) ([]string, error) {

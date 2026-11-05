@@ -563,6 +563,24 @@ export interface ChatEnvPayload {
   reposTruncated: boolean; filesTruncated: boolean; repoLimit: number; fileLimit: number; approximation: string;
 }
 
+// «Cambios» (changes:state, changes:watch): every repo the owner's chats
+// touched recently, its changed files, and which chat's agent edited each.
+// A file with no chatId was changed outside Workass. ahead/behind are left
+// out when zero or unknown; checked is false until the repo's first answer.
+export interface ChangesFile {
+  path: string; adds: number; dels: number; new?: boolean; deleted?: boolean; binary?: boolean;
+  chatId?: string; tabId?: string; at?: number;
+}
+export interface ChangesRepo {
+  root: string; name: string; branch?: string; detached?: boolean; upstream?: string; ahead?: number; behind?: number;
+  adds: number; dels: number; files: ChangesFile[]; filesTruncated?: boolean;
+  checked: boolean; checking?: boolean; checkedAt?: number; activityAt?: number;
+}
+export interface ChangesChat { chatId: string; tabId: string; title: string; providerId?: string; at?: number; }
+export interface ChangesState { seq: number; windowDays: number; repos: ChangesRepo[]; chats: ChangesChat[]; }
+export interface ChangesWatchReply { id: string; state?: ChangesState; }
+export interface ChangesDiff { root: string; path: string; text: string; truncated?: boolean; new?: boolean; binary?: boolean; }
+
 export interface CheckpointRestored { chatId: string; turnSeq: number; repos: unknown[]; }
 
 // ---- R7 notifications (controller-only events; bridge does not subscribe yet) -
@@ -893,6 +911,14 @@ export interface WorkassApi {
   chatRewind?: (opts: { tabId: string; chatId: string; turnSeq: number; operationId: string }) => Promise<ChatRewindResult>;
   chatDiff?: (opts: { tabId: string; chatId: string; repo: string; path: string }) => Promise<ChatDiffResult>;
   chatEnvGet?: (opts: { chatId?: string; tabId?: string }) => Promise<ChatEnvPayload>;
+  // «Cambios»: the daemon looks at repos only while a watch is open. The tab
+  // starts one when it opens and ends it when it closes or the window hides;
+  // repeating changesWatch with the id renews the lease. Feature-detected.
+  changesWatch?: (opts: { id?: string }) => Promise<ChangesWatchReply>;
+  changesUnwatch?: (opts: { id: string }) => Promise<unknown>;
+  changesFocus?: () => Promise<unknown>;
+  changesDiff?: (opts: { root: string; path: string }) => Promise<ChangesDiff>;
+  onChangesState?: (cb: (e: ChangesState) => void) => void;
   // R7 native bridge notify (Electron host / future daemon); renderer prefers
   // Web Notifications and only calls this when present.
   notify?: (title: string, body: string) => Promise<boolean>;

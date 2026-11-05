@@ -528,6 +528,22 @@ async function runPrompt(id, params) {
   });
   await pause();
 
+  // [mock:edit=PATH], any number of them: append one line to each file and
+  // report it as an edit call, the way a real agent's Edit tool does, so the
+  // «Cambios» tab has agent-made changes to attribute. A relative PATH is in
+  // the session's folder.
+  let editSeq = 0;
+  for (const match of text.matchAll(/\[mock:edit=([^\]]+)\]/g)) {
+    const target = path.resolve(session.cwd || process.cwd(), match[1].trim());
+    const editId = `${toolCallId}-edit-${++editSeq}`;
+    const edit = { toolCallId: editId, title: `Edit ${path.basename(target)}`, kind: 'edit', rawInput: { file_path: target }, locations: [{ path: target }] };
+    notify(session.id, { sessionUpdate: 'tool_call', ...edit, status: 'in_progress' });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.appendFileSync(target, `mock edit ${session.turn}.${editSeq}\n`);
+    notify(session.id, { sessionUpdate: 'tool_call_update', ...edit, status: 'completed', content: { type: 'text', text: 'edited' } });
+    await pause();
+  }
+
   let permissionText = '';
   // The shape the Claude host sends for a Claude Code safety check: the
   // reason and tool in toolCall._meta.workass, the command in rawInput.

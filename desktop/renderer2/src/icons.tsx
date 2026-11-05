@@ -74,6 +74,8 @@ export const IcRead = () => <S><rect x="2.5" y="3" width="11" height="10" rx="1.
 export const IcMachineLocal = () => <S><rect x="2.3" y="3.3" width="11.4" height="8" rx="1.4" /><path d="M5.7 13.7h4.6" /></S>;
 export const IcMachineServer = () => <S><rect x="2.3" y="2.7" width="11.4" height="4.7" rx="1.1" /><rect x="2.3" y="8.6" width="11.4" height="4.7" rx="1.1" /></S>;
 export const IcFile = () => <S><path d="M4.2 2.4h4.9l2.7 2.7v8.5H4.2z" /><path d="M9 2.4v2.8h2.8" /></S>;
+// A person, head and shoulders: changes a human made by hand, outside Workass.
+export const IcPerson = () => <S><circle cx="8" cy="5.5" r="2.5" /><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8" /></S>;
 // Filled, not stroked: the same rounded square the composer's stop button
 // draws, so one shape means "end this" wherever it appears.
 export const IcStopSquare = () => <svg viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="2" /></svg>;
