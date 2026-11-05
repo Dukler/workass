@@ -40,12 +40,8 @@ export interface MachineContext {
   chatMachineId?: string | null;
   localMachineId?: string | null;
   names?: Readonly<Record<string, string>>;
+  /** This machine's own name: the one it was given, else its hostname. */
   localName?: string;
-}
-
-/** «Este Mac» on a Mac, «Este equipo» anywhere else. */
-export function localMachineLabel(platform = typeof navigator !== 'undefined' ? `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}` : ''): string {
-  return /mac/i.test(platform) ? 'Este Mac' : 'Este equipo';
 }
 
 // Where one row runs. A row names its host only when that is not the machine
@@ -54,7 +50,7 @@ export function workMachine(item: Pick<SpawnedWorkItem, 'hostMachine' | 'hostMac
   const host = String(item.hostMachine ?? '').trim();
   const id = host || String(context.chatMachineId ?? '').trim();
   const local = String(context.localMachineId ?? '').trim();
-  if (!id || (local && id === local)) return { key: '', name: context.localName || localMachineLabel(), local: true };
+  if (!id || (local && id === local)) return { key: '', name: String(context.localName ?? '').trim() || 'Esta máquina', local: true };
   const named = String(context.names?.[id] ?? '').trim();
   return { key: id, name: named || (host ? workHostName(item) : '') || shortMachineId(id), local: false };
 }

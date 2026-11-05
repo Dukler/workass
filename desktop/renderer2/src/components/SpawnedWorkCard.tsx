@@ -261,9 +261,11 @@ function QueueRow({ chat, item, position, nowMs }: { chat: Chat; item: SpawnedWo
       <span className="wq-t" title={item.resource ? `${label} · espera ${item.resource}` : label}>{label}</span>
       {waited && <span className="wq-w">espera {waited}</span>}
       {canStop && (
-        <button type="button" className="wbtn stop wq-stop" aria-label={`Detener ${label}`} disabled={stopping} onClick={() => void stop()}>
-          {stopping ? 'Deteniendo…' : 'Detener'}
-        </button>
+        <span className="wq-acts">
+          <button type="button" className="wbtn stop wq-stop" aria-label={`Detener ${label}`} disabled={stopping} onClick={() => void stop()}>
+            {stopping ? 'Deteniendo…' : 'Detener'}
+          </button>
+        </span>
       )}
     </div>
   );

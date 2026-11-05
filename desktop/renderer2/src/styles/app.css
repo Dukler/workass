@@ -1454,8 +1454,8 @@ aside.rail:not(.browser-col) > .rp-body { flex: 1 1 0; min-height: 0; display: f
 .wsec-h { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--faint); }
 
 /* a running background job */
-.wjob { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 9px; align-items: center; margin: 0 -10px; padding: 8px 10px; border-radius: 10px; min-width: 0; }
-.wjob:hover, .wjob:focus-within { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.wjob { --wjob-under: var(--bg); position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 9px; align-items: center; margin: 0 -10px; padding: 8px 10px; border-radius: 10px; min-width: 0; background: var(--wjob-under); }
+.wjob:hover, .wjob:focus-within, .wjob.tail-open { --wjob-under: color-mix(in srgb, var(--ink) 5%, var(--bg)); }
 .wdot { width: 8px; height: 8px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 16%, transparent); animation: wdot-pulse 2s ease-in-out infinite; }
 @keyframes wdot-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--acc) 5%, transparent); } }
 .wjob-n { min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1463,9 +1463,11 @@ aside.rail:not(.browser-col) > .rp-body { flex: 1 1 0; min-height: 0; display: f
 .wjob-m { grid-column: 2 / -1; display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--muted); }
 .wjob-m .wmg svg { width: 11px; height: 11px; }
 .wjob-mt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wjob-acts { grid-column: 2 / -1; display: none; gap: 2px; margin: 4px 0 0 -6px; }
-.wjob:hover .wjob-acts, .wjob:focus-within .wjob-acts, .wjob.tail-open .wjob-acts { display: flex; }
-@media (hover: none) { .wjob-acts { display: flex; } }
+/* The actions lie over the right end of the name and place lines, where the
+   run time is, and fade in: showing them never changes the row's size. */
+.wjob-acts { position: absolute; grid-row: 1 / 3; grid-column: 2 / -1; inset: 0 0 0 auto; display: flex; align-items: center; gap: 2px; padding-left: 26px; background: linear-gradient(to right, transparent, var(--wjob-under) 22px); opacity: 0; pointer-events: none; transition: opacity .14s ease; }
+.wjob:hover .wjob-acts, .wjob:focus-within .wjob-acts, .wjob.tail-open .wjob-acts { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .wjob-acts { position: static; grid-row: auto; justify-self: start; margin: 4px 0 0 -6px; padding: 0; background: none; opacity: 1; pointer-events: auto; } }
 .wjob-tail { grid-column: 2 / -1; margin-top: 4px; }
 .wbtn { display: inline-flex; align-items: center; height: 22px; padding: 0 6px; border: 0; border-radius: 6px; background: none; font: inherit; font-size: 11.5px; color: var(--ink2); cursor: pointer; }
 .wbtn:hover:not(:disabled) { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
@@ -1490,13 +1492,15 @@ aside.rail:not(.browser-col) > .rp-body { flex: 1 1 0; min-height: 0; display: f
 .wq-mh { display: flex; align-items: center; gap: 5px; padding: 6px 0 2px; font-size: 10.5px; color: var(--faint); min-width: 0; }
 .wq-mh .wmg svg { width: 11px; height: 11px; }
 .wq-mn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wq-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 0; font-size: 11.5px; color: var(--ink2); }
+.wq-row { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 0; font-size: 11.5px; color: var(--ink2); }
 .wq-p { flex: none; width: 16px; text-align: right; font-size: 10px; font-weight: 650; color: var(--faint); font-variant-numeric: tabular-nums; }
 .wq-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wq-w { flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
-.wq-stop { display: none; height: 18px; margin: -2px 0; font-size: 10.5px; }
-.wq-row:hover .wq-stop, .wq-row:focus-within .wq-stop { display: inline-flex; }
-@media (hover: none) { .wq-stop { display: inline-flex; } }
+/* Lies over the wait time and fades in, so the row never shifts. */
+.wq-acts { position: absolute; top: 0; bottom: 0; right: 0; display: flex; align-items: center; padding-left: 20px; background: linear-gradient(to right, transparent, var(--bg) 18px); opacity: 0; pointer-events: none; transition: opacity .14s ease; }
+.wq-row:hover .wq-acts, .wq-row:focus-within .wq-acts { opacity: 1; pointer-events: auto; }
+.wq-stop { height: 18px; font-size: 10.5px; }
+@media (hover: none) { .wq-acts { position: static; padding: 0; background: none; opacity: 1; pointer-events: auto; } .wq-stop { margin: -2px 0; } }
 
 /* the footer: Terminados hoy, opening the history in place */
 .wdone { margin: 10px -13px 0; border-top: 1px solid var(--line); }

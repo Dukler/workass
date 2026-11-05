@@ -25,6 +25,7 @@ test('running spawned work is inline; finished work is a single flat fold', asyn
   storeModule.store.state.activeId = 'tab-1';
   storeModule.store.state.chats = [chat];
   storeModule.store.state.hasSpawnedWorkChannels = false;
+  Object.assign(storeModule.store, { selfMachineName: 'workbench' });
   storeModule.store.state.spawnedWorkByChat = {
     ['tab-1\u0000chat-1']: [
       {
@@ -52,7 +53,7 @@ test('running spawned work is inline; finished work is a single flat fold', asyn
   assert.match(live, /class="wjob"/);
   assert.match(live, /title="Serve the complete interactive comparison gallery without truncating this title"/);
   // daemon prose we cannot classify stays verbatim, after where it runs
-  assert.match(live, /<span class="wjob-mt">Este (Mac|equipo) · Reempaquetando la app y esperando el gate\.<\/span>/);
+  assert.match(live, /<span class="wjob-mt">workbench · Reempaquetando la app y esperando el gate\.<\/span>/);
   assert.match(live, /title="[^"]*pid 321"/);
   assert.match(live, />Ver salida</);
   assert.match(live, /class="wdot"/);

@@ -27,7 +27,7 @@ export function trabajosModel(chat: Chat | null) {
 }
 
 export function machineContextFor(chat: Chat | null): MachineContext {
-  return { chatMachineId: chat?.machineId, localMachineId: store.localMachineId(), names: store.machineNames() };
+  return { chatMachineId: chat?.machineId, localMachineId: store.localMachineId(), names: store.machineNames(), localName: store.localMachineName() };
 }
 
 // «Trabajos» — the activity pane's first tab (approved mock rail-v7,

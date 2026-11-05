@@ -14,7 +14,7 @@ const job = (id: string, extra: Partial<SpawnedWorkItem> = {}): SpawnedWorkItem 
 });
 const waiting = (id: string, waitedMs: number, extra: Partial<SpawnedWorkItem> = {}) =>
   job(id, { queuedAt: ago(waitedMs), startedAt: ago(waitedMs), ...extra });
-const context = { localMachineId: 'm-self', names: { 'm-far': 'buildbox' }, localName: 'Este Mac' };
+const context = { localMachineId: 'm-self', names: { 'm-far': 'buildbox' }, localName: 'workbench' };
 
 test('background work splits into running rows and the queue; agents and their own work stay out', () => {
   const work = [
@@ -32,8 +32,8 @@ test('background work splits into running rows and the queue; agents and their o
 });
 
 test('a row runs where the chat lives unless it names another host', () => {
-  assert.deepEqual(workMachine(job('a'), context), { key: '', name: 'Este Mac', local: true });
-  assert.deepEqual(workMachine(job('b', { hostMachine: 'm-self' }), context), { key: '', name: 'Este Mac', local: true });
+  assert.deepEqual(workMachine(job('a'), context), { key: '', name: 'workbench', local: true });
+  assert.deepEqual(workMachine(job('b', { hostMachine: 'm-self' }), context), { key: '', name: 'workbench', local: true });
   assert.deepEqual(workMachine(job('c', { hostMachine: 'm-far' }), context), { key: 'm-far', name: 'buildbox', local: false });
   assert.deepEqual(workMachine(job('d', { hostMachine: 'm-0123456789', hostMachineName: 'workass daemon gpu-host (m-0123456789)' }), context),
     { key: 'm-0123456789', name: 'gpu-host', local: false });
@@ -47,7 +47,7 @@ test('machine rows count running + waiting, this machine first', () => {
     [waiting('w1', 10), waiting('w2', 10, { hostMachine: 'm-far' }), waiting('w3', 10, { hostMachine: 'm-far' })],
     context,
   );
-  assert.deepEqual(loads.map((load) => [load.machine.name, load.running, load.waiting]), [['Este Mac', 2, 1], ['buildbox', 1, 2]]);
+  assert.deepEqual(loads.map((load) => [load.machine.name, load.running, load.waiting]), [['workbench', 2, 1], ['buildbox', 1, 2]]);
 });
 
 test('the queue groups by machine, first asked first, and «sigue» names the head of each', () => {
@@ -58,7 +58,7 @@ test('the queue groups by machine, first asked first, and «sigue» names the he
     waiting('far-first', 8000, { hostMachine: 'm-far' }),
   ], context);
   assert.deepEqual(groups.map((group) => [group.machine.name, group.items.map((item) => item.id)]),
-    [['Este Mac', ['early-here', 'late-here']], ['buildbox', ['far-first', 'far-second']]]);
+    [['workbench', ['early-here', 'late-here']], ['buildbox', ['far-first', 'far-second']]]);
   assert.deepEqual(nextInQueue(groups), ['early-here', 'far-first']);
   assert.equal(joinNames(['a']), 'a');
   assert.equal(joinNames(['a', 'b']), 'a y b');

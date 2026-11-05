@@ -69,6 +69,8 @@ function seed({ messages = [], work = [], changes, pane }: { messages?: unknown[
   store.state.chats = [chat, { id: 'tab-2', chatId: 'chat-2', cwd: null, messages: [] }];
   store.state.hasSpawnedWorkChannels = false;
   store.state.spawnedWorkByChat = { 'tab-1\u0000chat-1': work };
+  // This machine's name as the daemon reports it (its hostname unless renamed).
+  Object.assign(store, { selfMachineName: 'workbench' });
   changesStore.resetChangesStore(changes ?? null);
   return chat;
 }
@@ -148,8 +150,8 @@ test('totals omit zero parts; one row per machine with a segment per job and run
   assert.doesNotMatch(html, /subagente/);
   const rows = [...html.matchAll(/<div class="wload-r"[^>]*>([\s\S]*?)<span class="wload-n"[^>]*>(\d+ \+ \d+)<\/span><\/div>/g)];
   assert.equal(rows.length, 2);
-  assert.match(rows[0][1], /data-local=""|wload-nm">Este (Mac|equipo)</);
-  assert.match(rows[0][1], /<span class="wload-nm">Este (Mac|equipo)<\/span>/);
+  assert.match(rows[0][1], /data-local=""|wload-nm">workbench</);
+  assert.match(rows[0][1], /<span class="wload-nm">workbench<\/span>/);
   assert.equal(count(rows[0][1], /<i class="r"><\/i>/g), 2);
   assert.equal(count(rows[0][1], /<i><\/i>/g), 3);
   assert.equal(rows[0][2], '2 + 3');
@@ -175,14 +177,22 @@ test('running jobs are flat rows capped at four; the rest fold into «+N más co
   assert.match(first, /<span class="wdot" aria-label="En curso"><\/span>/);
   assert.match(first, /<span class="wjob-n" title="mem-reset01-s5-mac with a name long enough to clamp">mem-reset01-s5-mac with a name long enough to clamp<\/span>/);
   assert.match(first, /<span class="wjob-t">2 h 2 min<\/span>/);
-  assert.match(first, /<span class="wjob-mt">Este (Mac|equipo) · python train\.py --run mem-reset01/);
+  assert.match(first, /<span class="wjob-mt">workbench · python train\.py --run mem-reset01/);
   // hover actions: the output tail and the stop, as text
   assert.match(first, /<button type="button" class="wbtn" aria-expanded="false">Ver salida<\/button>/);
   assert.match(first, /<button type="button" class="wbtn stop" aria-label="Detener mem-reset01[^"]*">Detener<\/button>/);
   assert.match(html, /data-work-id="j4"[\s\S]*?<span class="wjob-mt">buildbox · python train\.py --run j4<\/span>/);
   const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
-  assert.match(css.match(/\.wjob-acts\s*\{([^}]*)\}/)?.[1] ?? '', /display:\s*none/);
-  assert.match(css, /\.wjob:hover \.wjob-acts[^{]*\{\s*display:\s*flex;/);
+  // Hover shows the actions without resizing the row: they lie over its end,
+  // out of the layout, and only their opacity changes.
+  for (const [acts, row] of [['wjob-acts', 'wjob'], ['wq-acts', 'wq-row']]) {
+    const rule = css.match(new RegExp(`\\.${acts}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    assert.match(rule, /position:\s*absolute/, acts);
+    assert.match(rule, /opacity:\s*0/, acts);
+    assert.doesNotMatch(rule, /display:\s*none/, acts);
+    assert.match(css, new RegExp(`\\.${row}:hover \\.${acts}[^{]*\\{\\s*opacity:\\s*1;`), acts);
+    assert.match(css, new RegExp(`\\.${row}\\s*\\{[^}]*position:\\s*relative`), row);
+  }
   assert.match(css.match(/\.wjob-n\s*\{([^}]*)\}/)?.[1] ?? '', /text-overflow:\s*ellipsis[\s\S]*white-space:\s*nowrap/);
 });
 
@@ -205,7 +215,7 @@ test('the queue is one closed row by default: how many wait and what runs next o
   const list = open.slice(open.indexOf('<div class="wq-list">'));
   const groups = [...list.matchAll(/<div class="wq-mh">[\s\S]*?<span class="wq-mn" title="[^"]*">([^<]+)<\/span> · (\d+)<\/div>/g)].map((m) => `${m[1]} · ${m[2]}`);
   assert.equal(groups.length, 2);
-  assert.match(groups[0], /^Este (Mac|equipo) · 2$/);
+  assert.match(groups[0], /^workbench · 2$/);
   assert.equal(groups[1], 'buildbox · 2');
   const rows = [...list.matchAll(/<span class="wq-p">(\d+)<\/span><span class="wq-t" title="[^"]*">([^<]+)<\/span><span class="wq-w">([^<]+)<\/span>/g)].map((m) => `${m[1]} ${m[2]} ${m[3]}`);
   assert.deepEqual(rows, ['1 next-here espera 2 h', '2 then-here espera 1 h', '1 next-far espera 44 min', '2 then-far espera 40 min']);
