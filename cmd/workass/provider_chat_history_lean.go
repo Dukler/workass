@@ -22,6 +22,9 @@ const (
 	// The tool whose call the renderer finds in a title to show the page it
 	// published (desktop/renderer2/src/markdown/html-render.ts).
 	htmlRenderToolName = "workass_render_html"
+	// htmlRenderOutputMarker opens the reference the call prints. A long command
+	// is stored cut short, so the tool name is not always left to find.
+	htmlRenderOutputMarker = `{"htmlRender":{`
 )
 
 // leanArchiveToolPayloads trims committed rows only. A running or pending row
@@ -53,8 +56,12 @@ func leanArchiveToolPayloads(messages []any, payloads, titles bool) {
 					continue
 				}
 				// The renderer finds a page the agent published by the call in
-				// the command or title, wherever it sits in a long one.
+				// the command or title, wherever it sits in a long one, or by
+				// the reference the call printed.
 				if field == "title" && strings.Contains(value, htmlRenderToolName) {
+					continue
+				}
+				if field == "output" && strings.Contains(value, htmlRenderOutputMarker) {
 					continue
 				}
 				event[field] = leanToolHead(value)
@@ -91,7 +98,7 @@ func leanArchiveToolSummaries(messages []any) {
 				continue
 			}
 			if strings.Contains(fieldString(event, "title"), htmlRenderToolName) || strings.Contains(fieldString(event, "command"), htmlRenderToolName) ||
-				strings.Contains(fieldString(event, "input"), htmlRenderToolName) {
+				strings.Contains(fieldString(event, "input"), htmlRenderToolName) || strings.Contains(fieldString(event, "output"), htmlRenderOutputMarker) {
 				continue
 			}
 			if value, ok := event["input"].(string); ok && value != "" {

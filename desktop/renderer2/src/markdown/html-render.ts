@@ -323,6 +323,8 @@ export interface HtmlRenderReference {
 // Any call that names the tool: agents run the CLI from scripts, wrappers and
 // pipes, not only as a literal `tools call` line (2026-11-04).
 const TOOL_CALL = /\bworkass_render_html\b/;
+// The CLI prints the reference first: `{"htmlRender":{` opens its output line.
+const OUTPUT_REFERENCE = /(^|\n)\s*(?:\S+\s+)?\{\s*"htmlRender"\s*:\s*\{/;
 const ARTIFACT_URL_PATH = /^\/workass\/artifacts\/(?:@[A-Za-z0-9._~-]{1,200}\/)?[a-z0-9-]{1,200}\/$/;
 
 // The JSON object that starts at `start`, or '' when it is cut short (the
@@ -358,7 +360,11 @@ export function htmlRenderFromToolCall(tool: {
   status?: string | null; command?: string | null; title?: string | null; input?: string | null; output?: string | null;
 }): HtmlRenderReference | null {
   if (tool.status !== 'completed') return null;
-  if (![tool.command, tool.title, tool.input].some((text) => typeof text === 'string' && TOOL_CALL.test(text))) return null;
+  // The command alone is not enough: a long one is stored cut short, so the
+  // tool name can be gone from it (2026-11-05, a mock written inline before the
+  // call). The reference in the output is validated below either way.
+  const named = [tool.command, tool.title, tool.input].some((text) => typeof text === 'string' && TOOL_CALL.test(text));
+  if (!named && !OUTPUT_REFERENCE.test(String(tool.output ?? ''))) return null;
   // The result is one JSON line with the reference first. Only the reference
   // object itself has to be whole: the message after it may be cut off.
   const output = String(tool.output ?? '');

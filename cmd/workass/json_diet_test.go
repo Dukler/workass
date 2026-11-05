@@ -30,6 +30,9 @@ func TestToolSummariesKeepWhatTheFoldedRowShows(t *testing.T) {
 			map[string]any{"kind": "tool", "key": "short", "input": "", "output": "ok"},
 			map[string]any{"kind": "tool", "key": "agent", "subagentHeader": true, "input": "{}", "output": long},
 			map[string]any{"kind": "tool", "key": "page", "command": "workass tools call workass_render_html --title x", "input": "{}", "output": long},
+			// A long command is stored cut short, so only the printed reference says a
+			// page was published (2026-11-05).
+			map[string]any{"kind": "tool", "key": "page-cut", "command": "cat > page.html <<'EOF'", "input": "{}", "output": `{"htmlRender":{"id":"p","urlPath":"/workass/artifacts/p/"}}` + long},
 			map[string]any{"kind": "thinking", "key": "t", "text": "why"},
 		}},
 		map[string]any{"id": "live", "status": "running", "events": []any{
@@ -47,6 +50,9 @@ func TestToolSummariesKeepWhatTheFoldedRowShows(t *testing.T) {
 	}
 	if short := mapFromAnyMain(events[1]); short["output"] != "ok" || short["outputDeferred"] != nil || short["inputDeferred"] != nil {
 		t.Fatalf("a short call changed: %#v", short)
+	}
+	if kept := mapFromAnyMain(events[4]); kept["outputDeferred"] != nil || kept["inputDeferred"] != nil {
+		t.Fatalf("a call that printed a page reference was summarized: %#v", kept)
 	}
 	for _, index := range []int{2, 3} {
 		if kept := mapFromAnyMain(events[index]); kept["output"] != long || kept["input"] != "{}" {

@@ -187,10 +187,21 @@ test('a call made from a script or wrapper still shows its page', () => {
   assert.ok(htmlRenderFromToolCall({ status: 'completed', command: 'echo "$ARGS" | "$WORKASS_TOOLS_COMMAND" tools call workass_render_html | head -c 600', output: RESULT }), 'piped');
 });
 
+// The shape this chat really stored (2026-11-05): a page written inline before
+// the call, so the 400 characters kept of the command end long before the tool
+// name. Only the output still says a page was published.
+test('a long command stored cut short still shows its page from the output', () => {
+  const longCommand = "mkdir -p .dev/mocks && cat > .dev/mocks/rail.html <<'EOF'\n<!doctype html><html><head><style>" + ':root{--ink:#fff}'.repeat(40);
+  const stored = longCommand.slice(0, 400);
+  assert.ok(!stored.includes('workass_render_html'));
+  assert.ok(htmlRenderFromToolCall({ status: 'completed', command: stored, input: stored, title: 'Render the mock in the chat', output: RESULT }));
+  assert.ok(htmlRenderFromToolCall({ status: 'completed', command: stored, output: `0 ${RESULT}` }), 'a status word before the line');
+  assert.equal(htmlRenderFromToolCall({ status: 'completed', command: stored, output: `see ${RESULT}`.replace('{"htmlRender"', 'x {"htmlRender"') }), null, 'a reference buried mid-line is not the call');
+});
+
 test('anything else stays an ordinary tool row', () => {
   assert.equal(htmlRenderFromToolCall({ status: 'in_progress', command: CALL, output: RESULT }), null);
   assert.equal(htmlRenderFromToolCall({ status: 'failed', command: CALL, output: RESULT }), null);
-  assert.equal(htmlRenderFromToolCall({ status: 'completed', command: 'cat result.json', output: RESULT }), null, 'a command that only prints the shape');
   assert.equal(htmlRenderFromToolCall({ status: 'completed', command: CALL, output: '{"error":"page uses 100vh"}' }), null);
   assert.equal(htmlRenderFromToolCall({ status: 'completed', command: CALL, output: RESULT.slice(0, 60) }), null, 'reference cut short');
   for (const urlPath of ['https://evil.example/x/', '/workass/artifacts/../state/', '/other/latencia-del-daemon-3f9a2b1c4d5e/', '/workass/artifacts/another-id/']) {
