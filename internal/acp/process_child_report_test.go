@@ -303,3 +303,55 @@ func unusedPIDForTest(t *testing.T) int {
 	}
 	return process.Pid
 }
+
+// After a daemon restart every restored job's supervisor has to find the new
+// daemon before it can report. The silence clock starts at the first
+// reconciliation, so a supervisor that re-attaches a little after the normal
+// window must not be called silent: that was a false "attention" notice on two
+// healthy jobs.
+func TestARestoredJobGetsAReattachGraceBeforeItIsSaidToBeSilent(t *testing.T) {
+	lifecycle := &recordedLifecycle{}
+	manager := processChildManager(t, lifecycle)
+	childID, _ := seedProcessChild(t, manager, "op-restored", os.Getpid(), nil)
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242})
+
+	// A restart loses the in-memory clock: nothing has been heard since.
+	manager.spawnedWorkMu.Lock()
+	for _, rec := range manager.spawnedWork {
+		rec.LastReportAt = time.Time{}
+	}
+	manager.spawnedWorkMu.Unlock()
+
+	start := time.Now().UTC()
+	manager.reconcileProcessChildren(start)
+	// The normal window plus a minute is where the live false alarm fired.
+	manager.reconcileProcessChildren(start.Add(procchild.SilenceThreshold + time.Minute))
+	if item := itemFor(t, manager, childID); item.Reporting != "" || strings.Contains(lifecycle.kinds(), "attention") {
+		t.Fatalf("a restored job still inside its re-attach grace is not silent: reporting=%q notices=%q", item.Reporting, lifecycle.kinds())
+	}
+	// A supervisor that re-attaches inside the grace is never reported at all.
+	appendSpool(t, manager, childID, procchild.KindHeartbeat, nil)
+	manager.reconcileProcessChildren(time.Now().UTC().Add(2 * time.Minute))
+	if strings.Contains(lifecycle.kinds(), "attention") {
+		t.Fatalf("a job that re-attached must raise nothing, got %q", lifecycle.kinds())
+	}
+}
+
+func TestARestoredJobThatNeverReattachesIsStillSaidToBeSilentAfterTheGrace(t *testing.T) {
+	lifecycle := &recordedLifecycle{}
+	manager := processChildManager(t, lifecycle)
+	childID, _ := seedProcessChild(t, manager, "op-restored-gone", os.Getpid(), nil)
+	appendSpool(t, manager, childID, procchild.KindStarted, map[string]any{"pid": 4242})
+	manager.spawnedWorkMu.Lock()
+	for _, rec := range manager.spawnedWork {
+		rec.LastReportAt = time.Time{}
+	}
+	manager.spawnedWorkMu.Unlock()
+
+	start := time.Now().UTC()
+	manager.reconcileProcessChildren(start)
+	manager.reconcileProcessChildren(start.Add(2*procchild.SilenceThreshold + time.Minute))
+	if item := itemFor(t, manager, childID); item.Reporting != processReportingSilent {
+		t.Fatalf("the grace delays the notice, it does not remove it: reporting=%q", item.Reporting)
+	}
+}

@@ -182,7 +182,14 @@ func formatFleetAttention(notice fleetMonitorNotice) string {
 	var b strings.Builder
 	b.WriteString("<task-notification>\n")
 	fmt.Fprintf(&b, "<task-id>%s</task-id>\n<status>attention</status>\n", notice.TargetID)
-	fmt.Fprintf(&b, "<summary>Agent %q needs a decision on another machine</summary>\n", notice.Label)
+	if notice.AttentionKind == "not_reporting" {
+		// A job that stopped reporting is not waiting on anyone's decision, and
+		// it is usually on this machine; saying so would send a reader looking
+		// for a question that does not exist.
+		fmt.Fprintf(&b, "<summary>Agent %q stopped reporting; it may still be running</summary>\n", notice.Label)
+	} else {
+		fmt.Fprintf(&b, "<summary>Agent %q needs a decision on another machine</summary>\n", notice.Label)
+	}
 	if text := strings.TrimSpace(notice.AttentionText); text != "" {
 		fmt.Fprintf(&b, "<result>%s</result>\n", text)
 	}

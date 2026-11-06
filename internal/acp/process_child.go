@@ -296,6 +296,7 @@ func (m *Manager) RegisterProcessChild(opts ProcessChildRegistrationOptions) (ma
 	// set for an EMPTY report too: a supervisor with nothing to say still said
 	// it, and that is the whole point of the heartbeat.
 	rec.LastReportAt = now
+	rec.Restored = false
 	if opts.AwaitingFirstReport {
 		// Not a report at all: this daemon writing down the supervisor it has
 		// just launched. The clock starts here, and nothing is claimed to have
@@ -744,6 +745,7 @@ func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now ti
 		// restart is every job at once. The clock starts now rather than at a
 		// zero time, so a restart raises no alarm it has not earned.
 		rec.LastReportAt = now
+		rec.Restored = true
 		return
 	}
 	threshold := procchild.SilenceThreshold
@@ -760,6 +762,15 @@ func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now ti
 		// arriving, and the live failure this tightening exists for stayed
 		// invisible for the whole of four jobs.
 		threshold = procchild.HeartbeatInterval
+	}
+	if rec.Restored {
+		// This row came back with a daemon restart, so its supervisor has to
+		// notice the old connection died and attach to the new one before it
+		// can report, and that takes longer than a beat or even the normal
+		// window. The clock started when this daemon came up, so the supervisor
+		// gets one whole stale window on top of the normal one to find it
+		// again; a job that is genuinely gone still gets said, only later.
+		threshold = max(threshold, procchild.SilenceThreshold) + max(threshold, procchild.SilenceThreshold)
 	}
 	silent := now.Sub(rec.LastReportAt)
 	if silent < threshold {

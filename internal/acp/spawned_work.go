@@ -277,6 +277,11 @@ type spawnedWorkRecord struct {
 	// has heard nothing yet from anybody, and treating that as silence would
 	// raise one false alarm per job on every restart. It starts at the restore.
 	LastReportAt time.Time
+	// Restored is set when the silence clock was started by a restart rather
+	// than by a report: the row was loaded from disk and nothing has been heard
+	// since. It is cleared by the first report and gives the supervisor time to
+	// re-attach before its silence is news. Not persisted, like LastReportAt.
+	Restored bool
 	// ReportedSilent keeps the silence notice one-shot.
 	ReportedSilent bool
 	// AwaitingFirstReport is set on a row THIS daemon wrote for a supervisor it
