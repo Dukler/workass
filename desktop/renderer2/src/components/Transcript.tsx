@@ -475,10 +475,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // and every other moment (sending, switching chats, jumping) pin instantly.
   const streamFollow = useRef(false);
   streamFollow.current = !!runningMessage && !prefersReducedMotion();
-  // The tallest the transcript has been during this turn. Half-written
+  // The tallest the transcript has recently been while followed. Half-written
   // markdown can briefly render shorter than what came before (a list marker,
-  // a table before its separator row); held as min-height, the page never
-  // shrinks under a reader pinned to the bottom, so it never drops and rises.
+  // a table before its separator row), and a turn's rows are re-cut as it ends;
+  // held as min-height, the page never shrinks under a reader pinned to the
+  // bottom, so it never drops and rises. A shrink the browser clamps and the
+  // page then grows back from also moves the scroll up with no write of ours,
+  // which the scroll handler must read as the reader leaving (a wheel over an
+  // HTML frame looks the same), so without the hold an unfocused window was
+  // thrown a screen up and stayed there (user 2026-11-07). Layout, not motion:
+  // it holds under Reduce Motion too.
   const heldHeight = useRef(0);
 
   // Provider receipts remain canonical in state. The presentation projection
@@ -992,11 +998,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     });
   });
 
-  // A turn's held height lasts exactly as long as the turn.
+  // A chat's held height goes with the chat. A turn ending keeps it until the
+  // page has been still for HELD_HEIGHT_RELEASE_MS (below), so the end-of-turn
+  // re-layout cannot drop the page under a followed reader.
   useLayoutEffect(() => {
     heldHeight.current = 0;
     docRef.current?.style.removeProperty('min-height');
-  }, [chat?.id, runningMessage?.id]);
+  }, [chat?.id]);
 
   // Pin to bottom whenever content grows (streaming, new cards) while stuck.
   // A resize pins inside the ResizeObserver callback: it runs after layout and
@@ -1051,7 +1059,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       }, HELD_HEIGHT_RELEASE_MS);
     };
     const onResize = () => {
-      if (streamFollow.current && doc) {
+      if (stick.current && doc) {
         const height = doc.offsetHeight;
         if (height > heldHeight.current) {
           heldHeight.current = height;
