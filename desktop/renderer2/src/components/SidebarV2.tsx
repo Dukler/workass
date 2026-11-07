@@ -59,10 +59,13 @@ function IcFolderPlus() {
     </svg>
   );
 }
-function IcCircleDashed() {
+// Working: a hammer (lucide's), not T3's dashed circle (owner, 2026-11-07).
+function IcHammer() {
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <circle cx="8" cy="8" r="5.4" strokeDasharray="2.6 2.4" strokeLinecap="round" />
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m15 12-9.373 9.373a1 1 0 0 1-3.001-3L12 9" />
+      <path d="m18 15 4-4" />
+      <path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172v-.344a2 2 0 0 0-.586-1.414l-1.657-1.657A6 6 0 0 0 12.516 3H9l1.243 1.243A6 6 0 0 1 12 8.485V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5" />
     </svg>
   );
 }
@@ -235,7 +238,7 @@ function WorkingDuration({ since }: { since: number }) {
 
 type Row = {
   chat: Chat; project: string; card: boolean; settled: boolean; archived: boolean; touched: number;
-  status: Status; since: number; bg: number; error: string; order: number;
+  status: Status; since: number; error: string; order: number;
   // Child sessions under this chat — subsession chats and fork children,
   // counted alike; null when it has none. Subagents are not counted here —
   // they are turn work shown in the right rail.
@@ -414,11 +417,14 @@ function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefo
       <span className="sv2-when">
         {pill ? (
           <span className={`sv2-pill ${pill.tone}`}>
-            {pill.icon === 'working' && <IcCircleDashed />}
+            {pill.icon === 'working' && <IcHammer />}
             {pill.icon === 'done' && <IcCircleCheck />}
             {pill.icon === 'alert' && <IcAlert />}
-            <span role="status">{pill.label}</span>
-            {status === 'working' && <WorkingDuration since={row.since} />}
+            {/* Working says it with the hammer and its time alone (owner,
+                2026-11-07); the word stays for screen readers and on hover. */}
+            {status === 'working'
+              ? <span role="status" aria-label={pill.label} title={pill.label}><WorkingDuration since={row.since} /></span>
+              : <span role="status">{pill.label}</span>}
           </span>
         ) : shortAgo(row.touched)}
       </span>
@@ -480,17 +486,9 @@ function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefo
                 <ModelIcon provider={store.providerBrand(chat.providerId, chat)} />
               </span>
             </div>
-            {/* T3's third line is branch / PR / diff, which it almost always
-                has; we almost never do. Rendering it unconditionally inherited
-                its 78px geometry without its content, so most cards carried a
-                strip of dead space. The line now appears only when there IS
-                something live to say, and the card lands on T3's exact 78px
-                when it does — 60px when it doesn't. */}
-            {row.bg > 0 && (
-              <div className="sv2-l3">
-                <span className="sv2-meta">{row.bg} en segundo plano</span>
-              </div>
-            )}
+            {/* No third line: a row is the same height whatever runs in the
+                background (owner, 2026-11-07). Background work is the activity
+                pane's to show. */}
           </>
         ) : (
           <>
@@ -759,7 +757,6 @@ export function SidebarV2() {
         out.push({
           chat, project, touched, status, settled, archived,
           since: status === 'working' ? (workingSince(chat, work) || forkRuns?.since || touched) : 0,
-          bg: work.filter((item) => item.status === 'running').length,
           error: (failing?.content || '').split('\n')[0].slice(0, 140),
           order: manualOrder.get(chat.id) ?? Number.MAX_SAFE_INTEGER,
           // Density follows lifecycle, never age or selection. Every ordinary

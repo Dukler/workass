@@ -2387,8 +2387,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-row.on { background: var(--sv2-active); color: var(--ink); }
 .sv2-row.dragging { opacity: .4; }
 .sv2-row.dropbefore { box-shadow: inset 0 2px 0 var(--acc); }
-/* 8 + 20 + 4 + 20 + 8 = 60 without the third line; + 2 + 16 = T3's exact
-   78 with it. */
+/* 8 + 20 + 4 + 20 + 8 = 60, always: there is no third line. */
 .sv2-row.card { min-height: 60px; padding: 8px 10px; }
 .sv2-row.slim { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; }
 .sv2-row.inflight { opacity: .7; transition: opacity .12s ease; }
@@ -2396,7 +2395,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 
 .sv2-l1 { display: flex; align-items: center; gap: 6px; height: 20px; min-width: 0; }
 .sv2-l2 { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 4px; height: 20px; }
-.sv2-l3 { display: flex; align-items: center; gap: 6px; margin-top: 2px; height: 16px; }
 .sv2-fav { display: inline-flex; flex: none; color: var(--muted); }
 /* Quiet history recedes at rest and returns on hover, so the tail stays
    scannable while hunting (T3's dimmed-favicon rule). */
@@ -2430,10 +2428,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-title.tedit {
   background: var(--field); border: 1px solid color-mix(in srgb, var(--acc) 50%, var(--line2));
   border-radius: 5px; color: var(--ink); font: inherit; font-size: 13px; padding: 0 5px; outline: none;
-}
-.sv2-meta {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; line-height: 16px; color: var(--faint);
 }
 /* Pinned to the card's right edge: a stable anchor, so a ticking status
    can never shove it sideways. */
