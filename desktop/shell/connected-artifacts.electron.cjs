@@ -14,7 +14,9 @@ if (!process.argv.includes('--child')) {
   const skip = fs.existsSync(executable) ? false : 'no dev Electron runtime on this machine';
   require('node:test')('private bridge in real Electron: frames, relative assets and external denial', { skip }, async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-artifact-electron-'));
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    // Killing Electron does not stop its helper processes at once, and they can still be
+    // writing into the profile here: a loaded machine failed the removal with ENOTEMPTY.
+    t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
     const env = { ...process.env, WORKASS_ARTIFACT_TEST_ROOT: root };
     delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(executable, [__filename, '--child'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
