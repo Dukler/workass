@@ -2441,6 +2441,60 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .sv2-row:hover .sv2-when { opacity: 0; }
 .sv2-pill { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
 .sv2-pill svg { width: 14px; height: 14px; flex: none; }
+/* «Trabajando»: a hammer strikes an anvil and throws sparks of light (approved
+   mock sidebar-forge v5, 2026-11-08; ForgeIcon.tsx). Every moving part is its
+   own layer that only moves and fades, so the GPU animates it: 16 working rows
+   cost 0.4 ms of CPU a second, against 45 ms when the parts moved inside one
+   SVG. Keyframes here must stay transform and opacity only. It plays under
+   Reduce Motion, like .sv2-pill.working. */
+.sv2-forge {
+  --fg-anvil: #94a3b8; --fg-steel: #f1f5f9; --fg-wood: #e0892a;
+  --fg-core: #fff; --fg-hot: #fff1c2; --fg-spark: #fcd34d; --fg-ember: #fb923c;
+  position: relative; display: inline-block; flex: none; width: 16px; height: 16px;
+}
+/* On white a white-hot core vanishes: darker metal, and sparks with a deep orange core. */
+:root[data-theme="light"] .sv2-forge {
+  --fg-anvil: #475569; --fg-steel: #64748b; --fg-wood: #a8530f;
+  --fg-core: #c2410c; --fg-hot: #ea580c; --fg-spark: #f59e0b; --fg-ember: #f97316;
+}
+.sv2-forge > * { position: absolute; inset: 0; }
+.sv2-pill .sv2-forge svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.fg-anvil { fill: var(--fg-anvil); }
+.fg-head { fill: var(--fg-steel); }
+.fg-handle { fill: none; stroke: var(--fg-wood); stroke-width: 2.1; stroke-linecap: round; }
+.fg-hammer { transform-origin: 16.67% 36.67%; animation: fg-swing 1.15s infinite; will-change: transform; }
+@keyframes fg-swing {
+  0% { transform: rotate(-30deg); animation-timing-function: ease-in-out; }
+  48% { transform: rotate(-34deg); animation-timing-function: cubic-bezier(.6, 0, 1, .6); }
+  60% { transform: rotate(0deg); animation-timing-function: ease-out; }
+  66% { transform: rotate(-6deg); animation-timing-function: ease-in; }
+  71% { transform: rotate(0deg); animation-timing-function: ease-in-out; }
+  100% { transform: rotate(-30deg); }
+}
+.fg-spark { opacity: 0; will-change: transform, opacity; animation: 2.3s infinite; }
+.fg-spark.a { animation-name: fg-fly-a; }
+.fg-spark.b { animation-name: fg-fly-b; }
+@keyframes fg-fly-a {
+  0%, 29.9% { opacity: 0; transform: translate(0, 0); }
+  30.3% { opacity: 1; transform: translate(calc(var(--dx) * .18), calc(var(--dy) * .18)); }
+  38% { opacity: 1; transform: translate(calc(var(--dx) * .8), calc(var(--dy) * .8)); }
+  46%, 100% { opacity: 0; transform: translate(var(--dx), calc(var(--dy) + 6%)); }
+}
+@keyframes fg-fly-b {
+  0%, 79.9% { opacity: 0; transform: translate(0, 0); }
+  80.3% { opacity: 1; transform: translate(calc(var(--dx) * .18), calc(var(--dy) * .18)); }
+  88% { opacity: 1; transform: translate(calc(var(--dx) * .8), calc(var(--dy) * .8)); }
+  96%, 100% { opacity: 0; transform: translate(var(--dx), calc(var(--dy) + 6%)); }
+}
+.fg-flash { transform-origin: 68.33% 50.63%; opacity: 0; will-change: transform, opacity; animation: fg-flash 2.3s infinite; }
+@keyframes fg-flash {
+  0%, 29.9% { opacity: 0; transform: scale(.4); }
+  30.3% { opacity: 1; transform: scale(1.1); }
+  35% { opacity: 0; transform: scale(.7); }
+  79.9% { opacity: 0; transform: scale(.4); }
+  80.3% { opacity: 1; transform: scale(1.1); }
+  85%, 100% { opacity: 0; transform: scale(.7); }
+}
 .sv2-pill.working { color: var(--sv2-working); }
 .sv2-pill.approval { color: var(--sv2-approval); }
 .sv2-pill.failed { color: var(--sv2-failed); }

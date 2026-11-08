@@ -10,6 +10,7 @@ import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
 import { ForkKidsToggle, ForkNest } from './ForkSidebar';
+import { ForgeIcon } from './ForgeIcon';
 import { forkStore, useForks } from '../store/forks';
 import {
   forkChatBadge, forkSidebarOpen, forkSummaryForChat, nestedSubsessionIds, subsessionChildren, withChildChats,
@@ -56,16 +57,6 @@ function IcFolderPlus() {
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
       <path d="M2 4.5h4L7.5 6H14v6.5H2z" strokeLinejoin="round" />
       <path d="M8 8v3M6.5 9.5h3" strokeLinecap="round" />
-    </svg>
-  );
-}
-// Working: a hammer (lucide's), not T3's dashed circle (owner, 2026-11-07).
-function IcHammer() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="m15 12-9.373 9.373a1 1 0 0 1-3.001-3L12 9" />
-      <path d="m18 15 4-4" />
-      <path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172v-.344a2 2 0 0 0-.586-1.414l-1.657-1.657A6 6 0 0 0 12.516 3H9l1.243 1.243A6 6 0 0 1 12 8.485V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5" />
     </svg>
   );
 }
@@ -417,7 +408,7 @@ function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefo
       <span className="sv2-when">
         {pill ? (
           <span className={`sv2-pill ${pill.tone}`}>
-            {pill.icon === 'working' && <IcHammer />}
+            {pill.icon === 'working' && <ForgeIcon />}
             {pill.icon === 'done' && <IcCircleCheck />}
             {pill.icon === 'alert' && <IcAlert />}
             {/* Working says it with the hammer and its time alone (owner,
