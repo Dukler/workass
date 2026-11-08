@@ -238,6 +238,9 @@ function bootstrapHarness() {
   const documentElement = { scrollHeight: 640, clientHeight: 150, getBoundingClientRect: () => ({ height: 120 }) };
   const win: Record<string, unknown> = {
     parent,
+    innerWidth: 968,
+    // Frames run at once here; the real ones wait for a painted frame.
+    requestAnimationFrame: (callback: () => void) => { callback(); return 1; },
     RTCPeerConnection: function RTC() {},
     webkitRTCPeerConnection: function RTC() {},
     RTCDataChannel: function RTC() {},
@@ -318,6 +321,22 @@ test('the bootstrap reports the page height and follows the theme only from its 
   assert.equal(style.textContent, '', 'a message from anywhere but the parent is ignored');
   fire('message', { source: parent, data: { type: 'wa-html:theme', scheme: 'light', vars: { '--background': '#fff}</style>', 'not a var': 'x' } } });
   assert.equal(style.textContent, ':root{color-scheme:light;--background:#fff/style;}BASE');
+});
+
+test('a page reports nothing before it has loaded, nor while it has no width yet', () => {
+  // 2026-11-08: a frame the browser had not sized yet laid its page out at
+  // width 0 and measured 836 px for a 372 px page; the chat kept that height
+  // and jumped when the page later shrank to its real size.
+  const { messages, fire, win, documentElement } = bootstrapHarness();
+  fire('doc:DOMContentLoaded', {});
+  assert.deepEqual(messages(), [], 'the first layout is not the page yet');
+  win.innerWidth = 0;
+  fire('load', {});
+  assert.deepEqual(messages(), [], 'no width, no measurement');
+  win.innerWidth = 968;
+  documentElement.scrollHeight = 150;
+  fire('load', {});
+  assert.deepEqual(messages(), [{ type: 'wa-html:size', height: 120 }]);
 });
 
 test('the bootstrap turns only trusted clicks on absolute http(s) links into a request', () => {

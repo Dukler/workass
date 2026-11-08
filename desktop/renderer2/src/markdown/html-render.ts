@@ -125,18 +125,36 @@ export function htmlFrameBootstrap(BASE: string): void {
   // t3code's measurement (htmlRender.ts:405): the page's own height, or the
   // scroll height when it overflows the frame.
   function size() {
-    var r = d.documentElement;
+    var r = d.documentElement, b = d.body;
+    // Until the browser gives the frame its size (at load, or off screen) the
+    // page is laid out at width 0, every word on its own line, and measures as
+    // a tall column: 836 px for a 372 px page (user 2026-11-08). The size
+    // observer fires again once the real width arrives.
+    if (!w.innerWidth || (b && !b.getBoundingClientRect().width)) return;
     var v = Math.ceil(r.scrollHeight > r.clientHeight ? r.scrollHeight : r.getBoundingClientRect().height);
-    if (v === last) return;
+    // A document between layouts measures 0 for an instant (the frame's color
+    // scheme being set on load is one); that is never the page's height.
+    if (!v || v === last) return;
     last = v;
     P.postMessage({ type: 'wa-html:size', height: v }, '*');
   }
+  // Measured only once the page has settled: after load, after its fonts, and
+  // two frames later. A first layout reads taller than the page is, and a
+  // frame off screen is throttled right after it, so its correction came only
+  // when the reader scrolled it into view: the page shrank under them and the
+  // chat jumped (user 2026-11-08). Off screen no frame runs, so nothing is
+  // sent until the page is near the reader and laid out for real.
+  var settled = false;
+  function measure() { if (settled) w.requestAnimationFrame(function () { w.requestAnimationFrame(size); }); }
   if (w.ResizeObserver) {
-    var o = new w.ResizeObserver(size);
+    var o = new w.ResizeObserver(measure);
     o.observe(d.documentElement);
-    d.addEventListener('DOMContentLoaded', function () { if (d.body) o.observe(d.body); size(); });
+    d.addEventListener('DOMContentLoaded', function () { if (d.body) o.observe(d.body); });
   }
-  w.addEventListener('load', size);
+  w.addEventListener('load', function () {
+    var go = function () { settled = true; measure(); };
+    if (d.fonts && d.fonts.ready) d.fonts.ready.then(go, go); else go();
+  });
 
   // A link never navigates the frame. A trusted click on an absolute http(s)
   // link asks the host, which shows the full URL and opens it only if the

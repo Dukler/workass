@@ -25,6 +25,17 @@ import {
   type FrameHandlers,
 } from './html-frames';
 
+/** Whether the frame is inside its scroller's visible box (or the window's). */
+export function frameOnScreen(frame: HTMLIFrameElement | null): boolean {
+  if (!frame || !frame.isConnected) return false;
+  const box = frame.getBoundingClientRect();
+  const view = frame.closest('.scroll')?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
+  return box.bottom > view.top && box.top < view.bottom;
+}
+
+// How long a smaller reported height must hold before the frame shrinks.
+export const SHRINK_SETTLE_MS = 150;
+
 export function useLatest<T>(value: T) {
   const ref = useRef(value);
   ref.current = value;
@@ -63,6 +74,9 @@ export function HtmlFrame({ raw, title, blockKey, fill = false, onLink }: {
   // fade is a dissolve, and Reduce Motion is on where this ships).
   const [sized, setSized] = useState(fill);
   const sizedRef = useLatest(sized);
+  const heightRef = useLatest(height);
+  const shrinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (shrinkTimer.current !== null) clearTimeout(shrinkTimer.current); }, []);
   const guard = useRef(createGrowthGuard());
 
   useEffect(() => {
@@ -77,10 +91,26 @@ export function HtmlFrame({ raw, title, blockKey, fill = false, onLink }: {
     const entry: FrameHandlers = {
       iframe, fill, scripted,
       onSize: (reported) => {
-        const applied = guard.current.next(reported);
-        setHeight(applied);
-        setSized(true);
-        if (blockKey) rememberHeight(blockKey, applied);
+        // A frame changing height moves everything under it, which reads as
+        // the chat jumping while someone scrolls (user 2026-11-08: pages
+        // reported 0 and then their height every time they loaded, a whole
+        // page's worth of jump each time). So nothing below 1 px is a height,
+        // a page grows at once, and it only shrinks once the smaller height
+        // has held for SHRINK_SETTLE_MS: a drop and a pop back never move it.
+        if (!(reported >= 1)) return;
+        const apply = (value: number) => {
+          const applied = guard.current.next(value);
+          setHeight(applied);
+          setSized(true);
+          if (blockKey) rememberHeight(blockKey, applied);
+        };
+        if (shrinkTimer.current !== null) { clearTimeout(shrinkTimer.current); shrinkTimer.current = null; }
+        const current = heightRef.current;
+        if (current !== undefined && reported < current && sizedRef.current) {
+          shrinkTimer.current = setTimeout(() => { shrinkTimer.current = null; apply(reported); }, SHRINK_SETTLE_MS);
+          return;
+        }
+        apply(reported);
       },
       onLink: (url) => onLinkRef.current?.(url),
     };
@@ -97,14 +127,23 @@ export function HtmlFrame({ raw, title, blockKey, fill = false, onLink }: {
   const onLoad = () => {
     if (handlers.current) markFrameLoaded(handlers.current);
     if (fill || !scripted) { setSized(true); return; }
+    // A page whose height is already known shows at once; it only reports
+    // once it has settled (htmlFrameBootstrap), which may be a moment later.
+    if (heightRef.current !== undefined) setSized(true);
     // A page that never reports a size is still shown, so it is never invisible.
     if (fallback.current !== null) clearTimeout(fallback.current);
-    fallback.current = setTimeout(() => {
-      fallback.current = null;
-      if (sizedRef.current) return;
-      setHeight((value) => value ?? HTML_RENDER_FALLBACK_HEIGHT);
-      setSized(true);
-    }, 3000);
+    // Off screen a page does not report until it is near (it is not laid out
+    // there), so the fallback waits until the frame is on screen.
+    const arm = () => {
+      fallback.current = setTimeout(() => {
+        fallback.current = null;
+        if (sizedRef.current) return;
+        if (!frameOnScreen(frame.current)) { arm(); return; }
+        setHeight((value) => value ?? HTML_RENDER_FALLBACK_HEIGHT);
+        setSized(true);
+      }, 3000);
+    };
+    arm();
   };
 
   const shown = fill ? undefined : (height ?? 24);

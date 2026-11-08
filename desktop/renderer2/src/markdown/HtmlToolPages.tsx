@@ -13,7 +13,17 @@ import { HtmlBlock } from './HtmlBlock';
 // The page bytes come from the daemon's artifact host (local, or a mounted
 // machine through the shell's artifact bridge). Fetched once per URL.
 const sources = new Map<string, Promise<string>>();
+// The same pages once they arrived, read synchronously: a page that scrolls
+// back into the transcript's window, or whose turn just ended and re-mounted,
+// renders at once instead of collapsing for a tick and growing back by its
+// whole height, which moved everything under the reader (user 2026-11-08).
+const loaded = new Map<string, string>();
 const SOURCE_LIMIT = 32;
+
+/** The page's source if it has already arrived, else null. */
+export function loadedPageSource(url: string): string | null {
+  return loaded.get(url) ?? null;
+}
 
 function loadPageSource(url: string): Promise<string> {
   const cached = sources.get(url);
@@ -23,6 +33,8 @@ function loadPageSource(url: string): Promise<string> {
       if (!response.ok) throw new Error(`page unavailable (${response.status})`);
       const source = storedHtmlSource(await response.text());
       if (!source || source.length > HTML_RENDER_MAX_SOURCE) throw new Error('page is empty or too large');
+      loaded.set(url, source);
+      while (loaded.size > SOURCE_LIMIT) loaded.delete(loaded.keys().next().value as string);
       return source;
     });
   sources.set(url, request);
@@ -33,11 +45,13 @@ function loadPageSource(url: string): Promise<string> {
 
 function ToolHtmlPage({ reference, artifactOrigin }: { reference: HtmlRenderReference; artifactOrigin?: string }) {
   const url = connectedArtifactURL(artifactOrigin ?? '', reference.urlPath, undefined, undefined, store.localMachineId());
-  const [source, setSource] = useState<string | null>(null);
+  const [source, setSource] = useState<string | null>(() => (url ? loadedPageSource(url) : null));
   useEffect(() => {
     let live = true;
+    if (!url) { setSource(null); return () => { live = false; }; }
+    const ready = loadedPageSource(url);
+    if (ready !== null) { setSource(ready); return () => { live = false; }; }
     setSource(null);
-    if (!url) return () => { live = false; };
     loadPageSource(url).then((text) => { if (live) setSource(text); }, () => { /* the call's own row remains */ });
     return () => { live = false; };
   }, [url]);

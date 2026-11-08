@@ -208,7 +208,30 @@ function remember<T>(map: Map<string, T>, key: string, value: T): void {
 }
 
 const views = new Map<string, 'page' | 'code'>();
-const heights = new Map<string, number>();
+// Heights also outlive a reload (an update restarts the app): a page seen
+// before opens at its real height instead of growing from its placeholder
+// when it first comes into view, which moved everything under the reader.
+const HEIGHTS_KEY = 'workass.htmlFrameHeights';
+const heights = new Map<string, number>(loadHeights());
+let savingHeights: ReturnType<typeof setTimeout> | null = null;
+
+function loadHeights(): Array<[string, number]> {
+  try {
+    const raw = typeof localStorage === 'undefined' ? null : localStorage.getItem(HEIGHTS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list)
+      ? list.filter((entry): entry is [string, number] => Array.isArray(entry) && typeof entry[0] === 'string' && Number.isFinite(entry[1]) && entry[1] >= 1).slice(-LIMIT)
+      : [];
+  } catch { return []; }
+}
+
+function saveHeightsSoon(): void {
+  if (savingHeights !== null || typeof localStorage === 'undefined') return;
+  savingHeights = setTimeout(() => {
+    savingHeights = null;
+    try { localStorage.setItem(HEIGHTS_KEY, JSON.stringify([...heights])); } catch { /* full or private: memory still has them */ }
+  }, 500);
+}
 
 export function rememberedView(key: string): 'page' | 'code' {
   return views.get(key) ?? 'page';
@@ -220,7 +243,9 @@ export function rememberedHeight(key: string): number | undefined {
   return heights.get(key);
 }
 export function rememberHeight(key: string, height: number): void {
+  if (heights.get(key) === height) return;
   remember(heights, key, height);
+  saveHeightsSoon();
 }
 
 // ── Link confirmation ─────────────────────────────────────────────────────────
