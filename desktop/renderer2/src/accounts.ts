@@ -63,12 +63,19 @@ function windowBase(id: string | undefined): string {
 }
 
 /** The window's length: as the provider reported it, else from its id. */
+// A window named by its length in days ("30_day", internal/acp codexWindowID).
+function dayWindow(base: string): number | null {
+  const match = /^(\d+)_day$/.exec(base);
+  return match ? Number(match[1]) : null;
+}
+
 export function windowMinutesOf(entry: PlanUsageEntry): number | null {
   if (typeof entry.windowMinutes === 'number' && entry.windowMinutes > 0) return entry.windowMinutes;
   const base = windowBase(entry.id);
   if (base === 'five_hour') return 300;
   if (base.startsWith('seven_day')) return WEEK_MINUTES;
-  return null;
+  const days = dayWindow(base);
+  return days ? days * 24 * 60 : null;
 }
 
 function windowRank(entry: PlanUsageEntry): number {
@@ -92,6 +99,7 @@ export function accountWindowLabel(entry: PlanUsageEntry, hasPerModelWeeks: bool
   let label: string;
   if (base === 'seven_day') label = hasPerModelWeeks ? 'Semana · todos los modelos' : 'Semana';
   else if (base === 'seven_day_model') label = `Semana · ${entry.limitName || 'modelo'}`;
+  else if (dayWindow(base)) label = `${dayWindow(base)} días`;
   else label = WINDOW_LABEL[base] ?? rateLimitLabel(entry.id, entry.limitName);
   // A provider with several metered buckets prefixes each with its name.
   if (entry.id?.includes(':') && base !== 'seven_day_model' && entry.limitName) label = `${entry.limitName} · ${label}`;
@@ -146,6 +154,8 @@ export interface WeeklyPace {
   elapsedPercent: number;
   resetsAt: number;
   runsOutAt?: number;
+  // The window's length: a week for the paid plans, 30 days for ChatGPT Free.
+  windowMinutes: number;
 }
 
 /** The weekly window a pace is told for: the all-models week. */
@@ -173,7 +183,7 @@ export function weeklyPace(entry: PlanUsageEntry | undefined, now: number = Date
   const elapsed = now - start;
   if (elapsed <= 0) return null;
   const elapsedShare = Math.min(1, elapsed / windowMs);
-  const base = { usedPercent: used, elapsedPercent: Math.round(elapsedShare * 100), resetsAt };
+  const base = { usedPercent: used, elapsedPercent: Math.round(elapsedShare * 100), resetsAt, windowMinutes: minutes };
   if (used >= 100) return { state: 'out', ...base };
   if (used > 0 && elapsedShare < 0.02) return null;
   if (used <= 0) return { state: 'ok', ...base };
@@ -184,13 +194,18 @@ export function weeklyPace(entry: PlanUsageEntry | undefined, now: number = Date
 export interface PaceText { line: string; detail: string; warn: boolean }
 
 export function weeklyPaceText(pace: WeeklyPace, now: number = Date.now()): PaceText {
-  const detail = `Usaste ${Math.round(pace.usedPercent)} % y pasó el ${pace.elapsedPercent} % de la semana.`;
+  // Told in the window's own length: a 30-day window is not a week.
+  const week = Math.abs(pace.windowMinutes - WEEK_MINUTES) <= 60;
+  const days = Math.round(pace.windowMinutes / (24 * 60));
+  const span = week ? 'de la semana' : `de los ${days} días`;
+  const use = week ? 'uso semanal' : 'uso';
+  const detail = `Usaste ${Math.round(pace.usedPercent)} % y pasó el ${pace.elapsedPercent} % ${span}.`;
   const reset = resetDayPhrase(pace.resetsAt, now);
   if (pace.state === 'out') {
-    return { line: `Te quedaste sin uso semanal hasta el reset ${reset} a las ${clock(new Date(pace.resetsAt))}.`, detail, warn: true };
+    return { line: `Te quedaste sin ${use} hasta el reset ${reset} a las ${clock(new Date(pace.resetsAt))}.`, detail, warn: true };
   }
   if (pace.state === 'short' && pace.runsOutAt != null) {
-    return { line: `A este ritmo te quedás sin uso semanal ${momentPhrase(pace.runsOutAt, now)}, antes del reset ${reset}.`, detail, warn: true };
+    return { line: `A este ritmo te quedás sin ${use} ${momentPhrase(pace.runsOutAt, now)}, antes del reset ${reset}.`, detail, warn: true };
   }
   return { line: `Vas bien. Llegás al reset ${reset} con margen.`, detail, warn: false };
 }

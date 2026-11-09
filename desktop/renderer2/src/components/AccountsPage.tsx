@@ -311,6 +311,7 @@ function AccountSection({ provider, snapshot, consent, now }: {
   const pace = weeklyPace(weeklyEntry(snapshot?.entries), now);
   const paceText = pace ? weeklyPaceText(pace, now) : null;
   const rows = accountResetRows(summary, now);
+  const freeLogin = snapshot?.account?.billing === 'free';
   const spend = extraUsageLine(snapshot?.extraUsage);
   const host = manageHost(account?.manageUrl);
   const who = [account?.email, account?.organization].filter(Boolean).join(' · ');
@@ -349,13 +350,17 @@ function AccountSection({ provider, snapshot, consent, now }: {
     );
   } else if (rows.length) {
     resetsBody = <>{rows.map((row) => <ResetRowView key={row.key} row={row} providerId={provider.id} name={name} activeChatId={app.activeId} />)}{quietLine}</>;
+  } else if (freeLogin) {
+    // A free login (ChatGPT Free) has no reset credits: "no resets now" read
+    // as if one were coming (owner 2026-11-09).
+    resetsBody = null;
   } else if (summary) {
     resetsBody = <><div className="acct-none"><b>No hay resets ahora</b>Cuando tengas uno, aparece acá con su vencimiento.</div>{quietLine}</>;
   } else if (quietLine) {
     resetsBody = quietLine;
   } else if (resets.loading) {
     resetsBody = <div className="acct-none">Buscando resets…</div>;
-  } else if (snapshot && !needsConsent) {
+  } else if (snapshot && !needsConsent && !freeLogin) {
     resetsBody = <div className="acct-none"><b>No hay resets ahora</b>Cuando tengas uno, aparece acá con su vencimiento.</div>;
   }
 

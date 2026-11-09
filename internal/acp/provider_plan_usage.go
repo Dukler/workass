@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,6 +88,11 @@ func codexPlanUsageAccount(response map[string]any) *PlanUsageAccount {
 		return account
 	default:
 		account.Billing = "subscription"
+	}
+	// A ChatGPT Free login is not a subscription: it has a small Codex
+	// allowance and no reset credits (owner 2026-11-09: "I don't have a sub").
+	if strings.EqualFold(strings.TrimSpace(planType), "free") {
+		account.Billing = "free"
 	}
 	account.Plan = codexPlanName(planType)
 	return account
@@ -388,14 +394,21 @@ func codexRateLimitPlanUsage(meta map[string]any) []PlanUsageEntry {
 	return out
 }
 
+// codexWindowID names a Codex window by its real length. Any window of a
+// week or more used to read as "seven_day", so a ChatGPT Free account's
+// 30-day limit showed as a week (owner 2026-11-09). A week is seven_day; any
+// other whole number of days is "<n>_day" (30_day); the rest keep their name.
 func codexWindowID(limitID, windowName string, duration any, multiple bool) string {
+	const day, week = 24 * 60, 7 * 24 * 60
 	base := ""
 	if minutes, ok := int64FromAny(duration); ok {
 		switch {
 		case minutes == 300:
 			base = "five_hour"
-		case minutes >= 7*24*60:
+		case minutes >= week-60 && minutes <= week+60:
 			base = "seven_day"
+		case minutes >= day && minutes%day == 0:
+			base = fmt.Sprintf("%d_day", minutes/day)
 		}
 	}
 	if base == "" {

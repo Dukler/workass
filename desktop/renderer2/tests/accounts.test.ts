@@ -255,3 +255,30 @@ test('the page asks again when a pause ends, never sooner', () => {
   assert.equal(retryDelayMs({ reason: 'expired', retryAt: iso(at(9, 14, 5)) }, now), null, 'the owner acts, not a timer');
   assert.equal(retryDelayMs(null, now), null);
 });
+
+// 2026-11-09 (owner): a ChatGPT Free login read "Te quedaste sin uso semanal
+// hasta el reset" under a "Semana" bar, and "No hay resets ahora". Its limit
+// is a 30-day window (Codex windowDurationMins 43200) and it has no resets.
+test('a 30-day window is named and told as 30 days, not a week', () => {
+  const now = at(9, 12);
+  const month: PlanUsageEntry = { kind: 'rate-limit', id: '30_day', usedPercent: 100, status: 'rejected', resetsAt: iso(at(17, 21, 22)), windowMinutes: 43200 };
+  const rows = accountWindowRows([month], now);
+  assert.equal(rows[0].label, '30 días');
+  assert.match(rows[0].sub, /^Llegaste al límite · se reinicia /);
+  const pace = weeklyPace(weeklyEntry([month]), now);
+  assert.equal(pace?.state, 'out');
+  const text = weeklyPaceText(pace!, now);
+  assert.match(text.line, /^Te quedaste sin uso hasta el reset .* a las 21:22\.$/);
+  assert.doesNotMatch(text.line, /semanal/);
+  assert.match(text.detail, /% de los 30 días\.$/);
+  // Without windowMinutes, the id alone says how long it is.
+  assert.equal(accountWindowRows([{ kind: 'rate-limit', id: 'codex:30_day', limitName: 'codex', usedPercent: 10, resetsAt: iso(at(17, 21, 22)) }], now)[0].label, 'codex · 30 días');
+});
+
+test('a free login shows no resets block', async () => {
+  const { readFileSync } = await import('node:fs');
+  const page = readFileSync(new URL('../src/components/AccountsPage.tsx', import.meta.url), 'utf8');
+  assert.match(page, /const freeLogin = snapshot\?\.account\?\.billing === 'free';/);
+  assert.match(page, /\} else if \(freeLogin\) \{[\s\S]{0,200}resetsBody = null;/);
+  assert.match(page, /\} else if \(snapshot && !needsConsent && !freeLogin\) \{/);
+});

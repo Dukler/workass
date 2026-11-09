@@ -813,6 +813,36 @@ func TestPlanUsageAccountFromUsageReads(t *testing.T) {
 	}
 }
 
+// 2026-11-09 (owner): a ChatGPT Free login showed as a subscription waiting
+// for a weekly reset. It is free, and its limit is a 30-day window.
+func TestCodexFreeLoginAndItsThirtyDayWindow(t *testing.T) {
+	t.Parallel()
+	free := codexPlanUsageAccount(map[string]any{
+		"rateLimits":     map[string]any{"planType": "free"},
+		"workassAccount": map[string]any{"account": map[string]any{"type": "chatgpt", "email": "vos@ejemplo.com", "planType": "free"}},
+	})
+	if free == nil || free.Billing != "free" || free.Plan != "ChatGPT Free" {
+		t.Fatalf("free account = %#v", free)
+	}
+	for _, tc := range []struct {
+		minutes float64
+		want    string
+	}{
+		{300, "five_hour"},
+		{10080, "seven_day"},
+		{43200, "30_day"},
+		{1440, "1_day"},
+		{90, "primary"},
+	} {
+		if got := codexWindowID("codex", "primary", tc.minutes, false); got != tc.want {
+			t.Fatalf("window of %v minutes = %q, want %q", tc.minutes, got, tc.want)
+		}
+	}
+	if got := codexWindowID("codex", "secondary", 43200.0, true); got != "codex:30_day" {
+		t.Fatalf("a named bucket's 30-day window = %q", got)
+	}
+}
+
 func TestPlanUsageAccountMergeKeepsWhatALaterReadOmits(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{})

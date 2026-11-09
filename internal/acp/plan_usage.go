@@ -37,8 +37,9 @@ type PlanUsageAccount struct {
 	Organization string `json:"organization,omitempty"`
 	// Plan is the display name of the subscription ("Max", "ChatGPT Pro").
 	Plan string `json:"plan,omitempty"`
-	// Billing is how the provider is paid: "subscription", "api-key" or
-	// "cloud" (a third-party cloud named by Backend).
+	// Billing is how the provider is paid: "subscription", "free" (a free
+	// login with a small allowance, e.g. ChatGPT Free), "api-key" or "cloud"
+	// (a third-party cloud named by Backend).
 	Billing   string `json:"billing,omitempty"`
 	Backend   string `json:"backend,omitempty"`
 	KeySource string `json:"keySource,omitempty"`
