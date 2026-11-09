@@ -250,7 +250,7 @@ const LANBridgeJS = `(() => {
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
     // Cuentas: one provider's resets read from its account API with the owner's consented login.
-    accountsResetsRefresh: (providerId) => invoke('accounts:resets-refresh', { providerId }),
+    accountsResetsRefresh: (providerId, force) => invoke('accounts:resets-refresh', { providerId, force: force === true }),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
     // Ajustes > Herramientas: Workass tool groups and what each costs, one
     // switch per group, and the MCP servers each agent's CLI is configured with.

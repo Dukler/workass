@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   accountResetConsentFrom, accountResetRows, accountWindowRows, extraUsageLine, formatMoney, formatResetShort,
-  hasUsableReset, manageHost, payPerUseRows, resetResultToast, subscriptionProviders, weeklyEntry, weeklyPace,
-  weeklyPaceText, withAccountResetConsent,
+  hasUsableReset, manageHost, payPerUseRows, resetResultToast, resetsLine, retryDelayMs, staleAgo, subscriptionProviders,
+  weeklyEntry, weeklyPace, weeklyPaceText, withAccountResetConsent,
 } from '../src/accounts.ts';
 import type { PlanUsageEntry, PlanUsageSnapshot, ProviderRecord, RateLimitResetCreditsSummary } from '../src/wire/types.ts';
 
@@ -211,4 +211,47 @@ test('consent round-trips through the settings blob, touching only its key', () 
   assert.deepEqual(granted.modelFavorites, settings.modelFavorites);
   assert.deepEqual(withAccountResetConsent(granted, 'a', false).accountResetConsent, ['b', 'c']);
   assert.deepEqual(accountResetConsentFrom(null), []);
+});
+
+test('what the page shows dates itself once it is no longer current', () => {
+  const now = at(9, 14, 0);
+  assert.equal(staleAgo(iso(at(9, 13, 58)), now), '', 'two minutes old is current');
+  assert.equal(staleAgo(iso(at(9, 13, 48)), now), 'hace 12 min');
+  assert.equal(staleAgo(iso(at(9, 11, 0)), now), 'hace 3 h');
+  assert.equal(staleAgo(iso(at(7, 14, 0)), now), 'hace 2 d');
+  assert.equal(staleAgo(undefined, now), '');
+});
+
+test('the resets line: cached, waiting on a pause, and needing the owner', () => {
+  const now = at(9, 14, 0);
+  const cached = iso(at(9, 13, 48));
+  const pause = { reason: 'rate-limited', retryAt: iso(at(9, 14, 5)) };
+  // Fresh: nothing to say.
+  assert.equal(resetsLine({}, iso(at(9, 13, 59)), 'Claude Code', now), null);
+  // Cached, whether or not the provider asked for a pause: only the age, no error.
+  assert.deepEqual(resetsLine(undefined, cached, 'Claude Code', now), { text: 'Actualizado hace 12 min', error: false, retry: false });
+  assert.deepEqual(resetsLine(pause, cached, 'Claude Code', now), { text: 'Actualizado hace 12 min', error: false, retry: false });
+  assert.equal(resetsLine(pause, iso(at(9, 13, 59)), 'Claude Code', now), null, 'a pause over a current cache shows nothing');
+  // Nothing cached yet: one quiet line that says when.
+  assert.deepEqual(resetsLine(pause, undefined, 'Claude Code', now),
+    { text: 'Claude Code pidió una pausa. Se vuelve a consultar a las 14:05.', error: false, retry: false });
+  assert.deepEqual(resetsLine({ reason: 'rate-limited', retryAt: iso(at(10, 9, 0)) }, undefined, 'X', now).text,
+    'X pidió una pausa. Se vuelve a consultar mañana a las 09:00.');
+  assert.equal(resetsLine({ reason: 'unavailable', retryAt: iso(at(9, 14, 1)) }, undefined, 'X', now)?.text,
+    'No se pudo consultar. Se vuelve a consultar a las 14:01.');
+  // Something the owner must fix: with a cache it rides the quiet line with a
+  // retry; without one it is the error block.
+  const expired = { reason: 'expired', message: 'Abrí Claude Code para renovar la sesión.', retryAt: iso(at(9, 14, 10)) };
+  assert.deepEqual(resetsLine(expired, cached, 'X', now),
+    { text: 'Actualizado hace 12 min · Abrí Claude Code para renovar la sesión.', error: false, retry: true });
+  assert.deepEqual(resetsLine(expired, undefined, 'X', now), { text: 'Abrí Claude Code para renovar la sesión.', error: true, retry: true });
+});
+
+test('the page asks again when a pause ends, never sooner', () => {
+  const now = at(9, 14, 0);
+  assert.equal(retryDelayMs({ reason: 'rate-limited', retryAt: iso(at(9, 14, 5)) }, now), 5 * 60_000 + 1500);
+  assert.equal(retryDelayMs({ reason: 'rate-limited', retryAt: iso(at(9, 13, 0)) }, now), 1500);
+  assert.equal(retryDelayMs({ reason: 'rate-limited', retryAt: iso(at(9, 16, 0)) }, now), null, 'over an hour away');
+  assert.equal(retryDelayMs({ reason: 'expired', retryAt: iso(at(9, 14, 5)) }, now), null, 'the owner acts, not a timer');
+  assert.equal(retryDelayMs(null, now), null);
 });

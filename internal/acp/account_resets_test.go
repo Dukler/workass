@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +23,10 @@ type fakeAccountResetSource struct {
 	mu       sync.Mutex
 	status   accountResetStatus
 	statusOK error
+	// errs answer the next reads in order before status does.
+	errs []error
+	// hold, when set, keeps every read waiting until it is closed.
+	hold     chan struct{}
 	claim    accountResetClaim
 	claimErr error
 	reads    int
@@ -31,8 +37,21 @@ func (f *fakeAccountResetSource) ConsentNote() string { return "nota" }
 
 func (f *fakeAccountResetSource) Status(context.Context) (accountResetStatus, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.reads++
+	hold := f.hold
+	var err error
+	if len(f.errs) > 0 {
+		err, f.errs = f.errs[0], f.errs[1:]
+	}
+	f.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
+	if err != nil {
+		return accountResetStatus{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.status, f.statusOK
 }
 
@@ -57,6 +76,20 @@ func oneUsableGrant() *RateLimitResetCreditsSummary {
 	}}}
 }
 
+func newAccountResetTestManager(t *testing.T, stateDir string) (*Manager, *fakeAccountResetSource) {
+	t.Helper()
+	manager := NewManager(Options{StateDir: stateDir, Providers: []ProviderConfig{{ID: "acct", Name: "Acct", Command: "acct", Enabled: true}}})
+	t.Cleanup(func() { manager.Reset() })
+	source := &fakeAccountResetSource{status: accountResetStatus{Credits: oneUsableGrant()}}
+	manager.setAccountResetSourceForTest("acct", source)
+	manager.SetAccountResetConsent(func(id string) bool { return id == "acct" })
+	return manager, source
+}
+
+func rateLimited(retryAfter time.Duration) error {
+	return &accountResetError{code: accountResetRateLimited, message: "limit", retryAfter: retryAfter}
+}
+
 func TestAccountResetsNeverReadWithoutConsent(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(Options{})
@@ -64,11 +97,11 @@ func TestAccountResetsNeverReadWithoutConsent(t *testing.T) {
 	source := &fakeAccountResetSource{status: accountResetStatus{Credits: oneUsableGrant()}}
 	manager.setAccountResetSourceForTest("acct", source)
 
-	if _, err := manager.RefreshAccountResets(context.Background(), "acct"); err == nil {
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", false); err == nil {
 		t.Fatal("a refresh without any consent hook must be refused")
 	}
 	manager.SetAccountResetConsent(func(string) bool { return false })
-	_, err := manager.RefreshAccountResets(context.Background(), "acct")
+	_, err := manager.RefreshAccountResets(context.Background(), "acct", true)
 	var refusal *accountResetError
 	if !errors.As(err, &refusal) || refusal.code != accountResetNeedsConsent {
 		t.Fatalf("refresh without consent = %v, want the consent refusal", err)
@@ -76,6 +109,8 @@ func TestAccountResetsNeverReadWithoutConsent(t *testing.T) {
 	if _, err := manager.ConsumeRateLimitResetCredit(context.Background(), "acct", "", "request-1", "grant_full"); err == nil {
 		t.Fatal("a claim without consent must be refused")
 	}
+	manager.refreshConsentedAccountResets()
+	time.Sleep(20 * time.Millisecond)
 	if reads, claims := source.counts(); reads != 0 || claims != 0 {
 		t.Fatalf("source touched without consent: %d reads, %d claims", reads, claims)
 	}
@@ -96,12 +131,13 @@ func TestAccountResetsRecordOnThePlanUsageSnapshotAndForgetOnWithdrawal(t *testi
 	consented.Store(true)
 	manager.SetAccountResetConsent(func(id string) bool { return id == "acct" && consented.Load() })
 
-	reply, err := manager.RefreshAccountResets(context.Background(), "acct")
-	if err != nil || reply["ok"] != true {
+	reply, err := manager.RefreshAccountResets(context.Background(), "acct", false)
+	if err != nil || reply["ok"] != true || reply["readAt"] == nil || reply["retryAt"] != nil {
 		t.Fatalf("refresh = %#v, %v", reply, err)
 	}
 	snapshot := manager.planUsageByProvider["acct"]
-	if snapshot.RateLimitResetCredits == nil || snapshot.RateLimitResetCredits.Source != accountResetSourceAccount || len(snapshot.RateLimitResetCredits.Credits) != 1 {
+	if snapshot.RateLimitResetCredits == nil || snapshot.RateLimitResetCredits.Source != accountResetSourceAccount ||
+		len(snapshot.RateLimitResetCredits.Credits) != 1 || snapshot.RateLimitResetCredits.ReadAt != reply["readAt"] {
 		t.Fatalf("snapshot resets = %#v", snapshot.RateLimitResetCredits)
 	}
 	if snapshot.ExtraUsage == nil || *snapshot.ExtraUsage.MonthlyLimit != 20 {
@@ -109,7 +145,7 @@ func TestAccountResetsRecordOnThePlanUsageSnapshotAndForgetOnWithdrawal(t *testi
 	}
 
 	consented.Store(false)
-	if _, err := manager.RefreshAccountResets(context.Background(), "acct"); err == nil {
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", false); err == nil {
 		t.Fatal("refresh after withdrawal must be refused")
 	}
 	if got := manager.planUsageByProvider["acct"].RateLimitResetCredits; got != nil {
@@ -117,6 +153,276 @@ func TestAccountResetsRecordOnThePlanUsageSnapshotAndForgetOnWithdrawal(t *testi
 	}
 	if reads, _ := source.counts(); reads != 1 {
 		t.Fatalf("source reads = %d, want 1 (none after withdrawal)", reads)
+	}
+}
+
+func TestAccountResetsServeAFreshCacheWithoutAsking(t *testing.T) {
+	t.Parallel()
+	manager, source := newAccountResetTestManager(t, "")
+	first, _ := manager.RefreshAccountResets(context.Background(), "acct", false)
+	for i := 0; i < 5; i++ {
+		again, err := manager.RefreshAccountResets(context.Background(), "acct", false)
+		if err != nil || again["readAt"] != first["readAt"] {
+			t.Fatalf("cached answer %d = %#v, %v", i, again, err)
+		}
+	}
+	manager.refreshConsentedAccountResets()
+	time.Sleep(20 * time.Millisecond)
+	if reads, _ := source.counts(); reads != 1 {
+		t.Fatalf("reads = %d, want 1 while the cache is fresh", reads)
+	}
+	// The owner's retry reads again; a stale cache is read again too.
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", true); err != nil {
+		t.Fatal(err)
+	}
+	if reads, _ := source.counts(); reads != 1 {
+		t.Fatalf("a fresh cache is the answer even to a retry: reads = %d", reads)
+	}
+	ageAccountResetCache(manager, "acct", accountResetsFreshFor+time.Minute)
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", false); err != nil {
+		t.Fatal(err)
+	}
+	if reads, _ := source.counts(); reads != 2 {
+		t.Fatalf("reads = %d, want 2 once the cache went stale", reads)
+	}
+}
+
+func ageAccountResetCache(manager *Manager, providerID string, by time.Duration) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	snapshot := manager.planUsageByProvider[providerID]
+	credits := *snapshot.RateLimitResetCredits
+	readAt, _ := time.Parse(time.RFC3339Nano, credits.ReadAt)
+	credits.ReadAt = readAt.Add(-by).UTC().Format(time.RFC3339Nano)
+	snapshot.RateLimitResetCredits = &credits
+	manager.planUsageByProvider[providerID] = snapshot
+}
+
+func TestAccountResetsAreFreshForLessWhileAWindowIsAtItsLimit(t *testing.T) {
+	t.Parallel()
+	manager, _ := newAccountResetTestManager(t, "")
+	now := time.Now()
+	if got := manager.accountResetsFreshFor("acct", now); got != accountResetsFreshFor {
+		t.Fatalf("fresh for = %s, want %s", got, accountResetsFreshFor)
+	}
+	full, half := 100.0, 50.0
+	manager.recordNormalizedPlanUsageCapture("", "acct", planUsageCapture{entries: []PlanUsageEntry{
+		{Kind: "rate-limit", ID: "five_hour", UsedPercent: &full, ResetsAt: now.Add(time.Hour).UTC().Format(time.RFC3339)},
+		{Kind: "rate-limit", ID: "seven_day", UsedPercent: &half},
+	}})
+	if got := manager.accountResetsFreshFor("acct", now); got != accountResetsFreshAtLimit {
+		t.Fatalf("fresh for at a limit = %s, want %s", got, accountResetsFreshAtLimit)
+	}
+	manager.recordNormalizedPlanUsageCapture("", "acct", planUsageCapture{entries: []PlanUsageEntry{
+		{Kind: "rate-limit", ID: "five_hour", UsedPercent: &full, ResetsAt: now.Add(-time.Minute).UTC().Format(time.RFC3339)},
+	}})
+	if got := manager.accountResetsFreshFor("acct", now); got != accountResetsFreshFor {
+		t.Fatalf("a passed limit is not a limit: fresh for = %s", got)
+	}
+}
+
+func TestAccountResetsCollapseConcurrentAsksIntoOneRead(t *testing.T) {
+	t.Parallel()
+	manager, source := newAccountResetTestManager(t, "")
+	source.hold = make(chan struct{})
+	var wg sync.WaitGroup
+	replies := make([]map[string]any, 6)
+	for i := range replies {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			replies[i], _ = manager.RefreshAccountResets(context.Background(), "acct", i%2 == 0)
+		}(i)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for reads, _ := source.counts(); reads == 0; reads, _ = source.counts() {
+		if time.Now().After(deadline) {
+			t.Fatal("no read started")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	manager.refreshConsentedAccountResets()
+	time.Sleep(30 * time.Millisecond)
+	close(source.hold)
+	wg.Wait()
+	if reads, _ := source.counts(); reads != 1 {
+		t.Fatalf("concurrent asks made %d reads, want 1", reads)
+	}
+	for i, reply := range replies {
+		if reply["readAt"] == nil || reply["readAt"] != replies[0]["readAt"] {
+			t.Fatalf("reply %d = %#v, want the shared read", i, reply)
+		}
+	}
+}
+
+func TestAccountResetsBackOffOnA429AndKeepServingTheCache(t *testing.T) {
+	t.Parallel()
+	manager, source := newAccountResetTestManager(t, "")
+	cached, _ := manager.RefreshAccountResets(context.Background(), "acct", false)
+	ageAccountResetCache(manager, "acct", accountResetsFreshFor+time.Minute)
+	staleReadAt := manager.planUsageByProvider["acct"].RateLimitResetCredits.ReadAt
+	source.errs = []error{rateLimited(90 * time.Second)}
+
+	started := time.Now()
+	reply, err := manager.RefreshAccountResets(context.Background(), "acct", false)
+	if err != nil || reply["reason"] != accountResetRateLimited || reply["readAt"] != staleReadAt || reply["message"] != nil {
+		t.Fatalf("429 reply = %#v, %v (first read %#v)", reply, err, cached)
+	}
+	retryAt, _ := time.Parse(time.RFC3339, reply["retryAt"].(string))
+	if wait := retryAt.Sub(started); wait < 85*time.Second || wait > 95*time.Second {
+		t.Fatalf("Retry-After 90s waits %s", wait)
+	}
+	if credits := manager.planUsageByProvider["acct"].RateLimitResetCredits; credits == nil || len(credits.Credits) != 1 {
+		t.Fatalf("a 429 dropped the cached resets: %#v", credits)
+	}
+	// Nobody asks again before Retry-After: not the page, not its retry, not
+	// the unattended read, not the provider's own plan-usage reads.
+	for _, force := range []bool{false, true} {
+		again, _ := manager.RefreshAccountResets(context.Background(), "acct", force)
+		if again["retryAt"] != reply["retryAt"] {
+			t.Fatalf("ask during backoff (force=%v) = %#v", force, again)
+		}
+	}
+	manager.refreshConsentedAccountResets()
+	time.Sleep(20 * time.Millisecond)
+	if reads, _ := source.counts(); reads != 2 {
+		t.Fatalf("reads = %d, want 2 (the first and the 429)", reads)
+	}
+	if wait := manager.planUsageReadWait("acct", time.Now()); wait < 80*time.Second {
+		t.Fatalf("native plan-usage reads wait %s, want the 429's backoff", wait)
+	}
+}
+
+func TestAccountResetBackoffSchedule(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	var previous accountResetBackoff
+	var waits []time.Duration
+	for i := 0; i < 6; i++ {
+		previous = nextAccountResetBackoff(previous, rateLimited(0), now)
+		waits = append(waits, previous.RetryAt.Sub(now))
+	}
+	want := []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 30 * time.Minute, 30 * time.Minute}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Fatalf("429 without Retry-After waits %v, want %v", waits, want)
+		}
+	}
+	for retryAfter, want := range map[time.Duration]time.Duration{
+		5 * time.Second: accountResetRetryAfterMin, 10 * time.Minute: 10 * time.Minute, 48 * time.Hour: accountResetRetryAfterMax,
+	} {
+		if got := nextAccountResetBackoff(accountResetBackoff{}, rateLimited(retryAfter), now).RetryAt.Sub(now); got != want {
+			t.Fatalf("Retry-After %s waits %s, want %s", retryAfter, got, want)
+		}
+	}
+	transient := nextAccountResetBackoff(accountResetBackoff{}, newAccountResetError(accountResetUnavailable, "down"), now)
+	if transient.RetryAt.Sub(now) != time.Minute || transient.Message != "down" {
+		t.Fatalf("transient backoff = %#v", transient)
+	}
+	action := nextAccountResetBackoff(transient, newAccountResetError(accountResetExpired, "Abrí Claude Code"), now)
+	if action.RetryAt.Sub(now) != accountResetActionBackoff || action.Failures != 1 || action.Reason != accountResetExpired {
+		t.Fatalf("owner-action backoff = %#v", action)
+	}
+}
+
+func TestAnOwnersRetrySkipsABackoffButNeverA429(t *testing.T) {
+	t.Parallel()
+	manager, source := newAccountResetTestManager(t, "")
+	source.errs = []error{newAccountResetError(accountResetExpired, "Abrí Claude Code para renovar la sesión.")}
+	reply, err := manager.RefreshAccountResets(context.Background(), "acct", false)
+	if err != nil || reply["reason"] != accountResetExpired || reply["message"] == nil || reply["readAt"] != nil {
+		t.Fatalf("expired reply = %#v, %v", reply, err)
+	}
+	if again, _ := manager.RefreshAccountResets(context.Background(), "acct", false); again["reason"] != accountResetExpired {
+		t.Fatalf("an unattended ask during the backoff read again: %#v", again)
+	}
+	retried, _ := manager.RefreshAccountResets(context.Background(), "acct", true)
+	if retried["reason"] != nil || retried["readAt"] == nil {
+		t.Fatalf("the owner's retry after renewing = %#v", retried)
+	}
+	if reads, _ := source.counts(); reads != 2 {
+		t.Fatalf("reads = %d, want 2", reads)
+	}
+}
+
+func TestAccountResetCacheAndBackoffSurviveARestart(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	manager, source := newAccountResetTestManager(t, stateDir)
+	used := 42.0
+	manager.recordNormalizedPlanUsageCapture("", "acct", planUsageCapture{
+		entries: []PlanUsageEntry{{Kind: "rate-limit", ID: "five_hour", UsedPercent: &used}},
+		account: &PlanUsageAccount{Email: "vos@ejemplo.com", Plan: "Max", Billing: "subscription"},
+		raw:     map[string]any{"diagnostic": "kept out of the file"},
+	})
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", false); err != nil {
+		t.Fatal(err)
+	}
+	ageAccountResetCache(manager, "acct", accountResetsFreshFor+time.Minute)
+	source.errs = []error{rateLimited(10 * time.Minute)}
+	if reply, _ := manager.RefreshAccountResets(context.Background(), "acct", false); reply["reason"] != accountResetRateLimited {
+		t.Fatalf("429 reply = %#v", reply)
+	}
+	before := manager.planUsageByProvider["acct"]
+
+	data, err := os.ReadFile(filepath.Join(stateDir, planUsageStoreName))
+	if err != nil {
+		t.Fatalf("plan usage store: %v", err)
+	}
+	if strings.Contains(string(data), "kept out of the file") || strings.Contains(string(data), "token") {
+		t.Fatalf("store keeps raw or secret-shaped data: %s", data)
+	}
+	if info, err := os.Stat(filepath.Join(stateDir, planUsageStoreName)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("store mode = %v, %v", info.Mode().Perm(), err)
+	}
+
+	restarted := NewManager(Options{StateDir: stateDir, Providers: []ProviderConfig{{ID: "acct", Name: "Acct", Command: "acct", Enabled: true}}})
+	t.Cleanup(func() { restarted.Reset() })
+	after := restarted.planUsageByProvider["acct"]
+	if after.CapturedAt != before.CapturedAt || after.Account == nil || after.Account.Email != "vos@ejemplo.com" ||
+		len(after.Entries) != 1 || after.Raw != nil || after.RateLimitResetCredits == nil ||
+		after.RateLimitResetCredits.ReadAt != before.RateLimitResetCredits.ReadAt {
+		t.Fatalf("restored snapshot = %#v, want %#v without raw", after, before)
+	}
+	fresh := &fakeAccountResetSource{status: accountResetStatus{Credits: oneUsableGrant()}}
+	restarted.setAccountResetSourceForTest("acct", fresh)
+	restarted.SetAccountResetConsent(func(string) bool { return true })
+	reply, _ := restarted.RefreshAccountResets(context.Background(), "acct", true)
+	if reply["reason"] != accountResetRateLimited || reply["readAt"] != before.RateLimitResetCredits.ReadAt {
+		t.Fatalf("after a restart the 429's wait still holds and the cache answers: %#v", reply)
+	}
+	if reads, _ := fresh.counts(); reads != 0 {
+		t.Fatalf("a restart asked the account API during a 429 backoff: %d reads", reads)
+	}
+	if wait := restarted.planUsageReadWait("acct", time.Now()); wait < 9*time.Minute {
+		t.Fatalf("restored native wait = %s", wait)
+	}
+}
+
+func TestPlanUsageReadsOfOneProviderAreSpaced(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{PlanUsageMinInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	now := time.Now()
+	if wait := manager.planUsageReadWait("acct", now); wait != 0 {
+		t.Fatalf("a first read waits %s", wait)
+	}
+	manager.notePlanUsageRead("acct", now)
+	if wait := manager.planUsageReadWait("acct", now.Add(time.Minute)); wait != 59*time.Minute {
+		t.Fatalf("a read a minute later waits %s, want 59m", wait)
+	}
+	if wait := manager.planUsageReadWait("other", now); wait != 0 {
+		t.Fatalf("spacing leaked to another provider: %s", wait)
+	}
+	// Without a recorded read the spacing is off; a 429 still holds.
+	off := NewManager(Options{PlanUsageMinInterval: -1})
+	t.Cleanup(func() { off.Reset() })
+	off.notePlanUsageRead("acct", now)
+	if wait := off.planUsageReadWait("acct", now); wait != 0 {
+		t.Fatalf("disabled spacing waits %s", wait)
+	}
+	if (Options{}).withDefaults().PlanUsageMinInterval != 2*time.Minute {
+		t.Fatal("the default spacing is two minutes")
 	}
 }
 
@@ -150,34 +456,28 @@ func TestAccountResetClaimGoesToTheAccountSourceAndRereads(t *testing.T) {
 	}
 }
 
-func TestAccountResetBackgroundRefreshIsSpacedAndConsentBound(t *testing.T) {
+func TestAClaimDuringA429MarksTheResetSpentInTheCache(t *testing.T) {
 	t.Parallel()
-	manager := NewManager(Options{Providers: []ProviderConfig{{ID: "acct", Name: "Acct", Command: "acct", Enabled: true}}})
-	t.Cleanup(func() { manager.Reset() })
-	source := &fakeAccountResetSource{status: accountResetStatus{Credits: oneUsableGrant()}}
-	manager.setAccountResetSourceForTest("acct", source)
+	manager, source := newAccountResetTestManager(t, "")
+	if _, err := manager.RefreshAccountResets(context.Background(), "acct", false); err != nil {
+		t.Fatal(err)
+	}
+	ageAccountResetCache(manager, "acct", accountResetsFreshFor+time.Minute)
+	source.errs = []error{rateLimited(time.Hour)}
+	_, _ = manager.RefreshAccountResets(context.Background(), "acct", false)
+	left := int64(0)
+	source.claim = accountResetClaim{Outcome: "reset", Remaining: &left}
 
-	manager.refreshConsentedAccountResets()
-	time.Sleep(20 * time.Millisecond)
-	if reads, _ := source.counts(); reads != 0 {
-		t.Fatalf("background read without consent: %d", reads)
+	result, err := manager.ConsumeRateLimitResetCredit(context.Background(), "acct", "", "request-2", "grant_full")
+	if err != nil || result["outcome"] != "reset" {
+		t.Fatalf("claim = %#v, %v", result, err)
 	}
-	manager.SetAccountResetConsent(func(string) bool { return true })
-	manager.refreshConsentedAccountResets()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if reads, _ := source.counts(); reads == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("background read never ran")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if reads, _ := source.counts(); reads != 2 {
+		t.Fatalf("a claim during a 429 read again: %d reads", reads)
 	}
-	manager.refreshConsentedAccountResets()
-	time.Sleep(20 * time.Millisecond)
-	if reads, _ := source.counts(); reads != 1 {
-		t.Fatalf("background reads = %d, want 1 inside %s", reads, accountResetBackgroundEvery)
+	credits := manager.planUsageByProvider["acct"].RateLimitResetCredits
+	if credits == nil || credits.Credits[0].Status != "used" || *credits.Credits[0].UsableNow || credits.AvailableCount != 0 {
+		t.Fatalf("spent reset in the cache = %#v", credits)
 	}
 }
 
@@ -347,19 +647,46 @@ func TestClaudeAccountResetRereadsTheStoredLoginOnceAfter401(t *testing.T) {
 
 func TestClaudeAccountResetHTTPErrorsAreOwnerWords(t *testing.T) {
 	t.Parallel()
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	for code, want := range map[int]string{
 		http.StatusTooManyRequests:     accountResetRateLimited,
 		http.StatusForbidden:           accountResetAuth,
 		http.StatusInternalServerError: accountResetUnavailable,
 	} {
-		err := claudeAccountHTTPError(code)
+		err := claudeAccountHTTPError(claudeAccountReply{code: code, header: http.Header{}}, now)
 		var refusal *accountResetError
 		if !errors.As(err, &refusal) || refusal.code != want {
 			t.Fatalf("HTTP %d = %v, want %s", code, err, want)
 		}
 	}
-	if claudeAccountHTTPError(http.StatusOK) != nil {
+	if claudeAccountHTTPError(claudeAccountReply{code: http.StatusOK}, now) != nil {
 		t.Fatal("200 is not an error")
+	}
+	for header, want := range map[string]time.Duration{
+		"120":                           2 * time.Minute,
+		"Mon, 09 Nov 2026 12:05:00 GMT": 5 * time.Minute,
+		"":                              0,
+		"soon":                          0,
+		"-3":                            0,
+	} {
+		err := claudeAccountHTTPError(claudeAccountReply{code: http.StatusTooManyRequests, header: http.Header{"Retry-After": {header}}}, now)
+		var refusal *accountResetError
+		if !errors.As(err, &refusal) || refusal.retryAfter != want {
+			t.Fatalf("Retry-After %q = %#v, want %s", header, err, want)
+		}
+	}
+}
+
+func TestClaudeAccountResetStatusCarriesRetryAfterOnA429(t *testing.T) {
+	t.Parallel()
+	source, _ := newTestAccountSource(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "300")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, validCredential("token-a"))
+	_, err := source.Status(context.Background())
+	var refusal *accountResetError
+	if !errors.As(err, &refusal) || refusal.code != accountResetRateLimited || refusal.retryAfter != 5*time.Minute {
+		t.Fatalf("429 status = %#v", err)
 	}
 }
 

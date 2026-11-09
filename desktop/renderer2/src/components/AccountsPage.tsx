@@ -5,11 +5,11 @@ import { call, callThrow, has } from '../wire/api';
 import { ModelIcon } from '../icons';
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { settingsFromReply } from '../settings-blob';
-import type { PlanUsageSnapshot, ProviderRecord } from '../wire/types';
+import type { AccountResetsAnswer, PlanUsageSnapshot, ProviderRecord } from '../wire/types';
 import {
   accountResetConsentFrom, accountResetRows, accountWindowRows, extraUsageLine, hasUsableReset, manageHost, payPerUseRows,
-  resetResultToast, subscriptionProviders, weeklyEntry, weeklyPace, weeklyPaceText, withAccountResetConsent,
-  type AccountResetRow,
+  resetResultToast, resetsLine, retryDelayMs, staleAgo, subscriptionProviders, weeklyEntry, weeklyPace, weeklyPaceText,
+  withAccountResetConsent, type AccountResetRow,
 } from '../accounts';
 
 // Cuentas (owner 2026-11-09, mock cuentas-v3): one page over the chat area,
@@ -115,7 +115,9 @@ function useClock(): number {
   return now;
 }
 
-const PLAN_FRESH_MS = 60_000;
+// The daemon spaces a provider's usage reads by two minutes; inside that the
+// snapshot on screen is the answer, so the page does not ask.
+const PLAN_FRESH_MS = 2 * 60_000;
 
 function IcClose() {
   return <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>;
@@ -240,7 +242,9 @@ function AccountSection({ provider, snapshot, consent, now }: {
   const name = store.providerName(provider.id) ?? provider.name ?? provider.id;
   const brand = provider.assistantBrand || store.providerBrand(provider.id);
   const [plan, setPlan] = useState<{ loading: boolean; error: string }>({ loading: false, error: '' });
-  const [resets, setResets] = useState<{ loading: boolean; error: string }>({ loading: false, error: '' });
+  // The daemon's last answer about this provider's resets (cache date, or
+  // why and until when it waits); refused is a call it turned down.
+  const [resets, setResets] = useState<{ loading: boolean; answer: AccountResetsAnswer | null; refused: string }>({ loading: false, answer: null, refused: '' });
   const [consentBusy, setConsentBusy] = useState(false);
   const needsConsent = !!provider.accountResetConsent;
   const consented = !!consent?.includes(provider.id);
@@ -255,18 +259,20 @@ function AccountSection({ provider, snapshot, consent, now }: {
       setPlan({ loading: false, error: errorText(error) });
     }
   };
-  const refreshResets = async () => {
+  // The daemon answers from its cache unless that went stale, and holds any
+  // read while the provider asked for a pause; force is the owner's retry.
+  const refreshResets = async (force = false) => {
     if (!has('accountsResetsRefresh')) return;
-    setResets({ loading: true, error: '' });
+    setResets((current) => ({ ...current, loading: true }));
     try {
-      await callThrow('accountsResetsRefresh', provider.id);
-      setResets({ loading: false, error: '' });
+      const answer = await callThrow('accountsResetsRefresh', provider.id, force);
+      setResets({ loading: false, answer: answer ?? null, refused: '' });
     } catch (error) {
-      setResets({ loading: false, error: errorText(error) });
+      setResets({ loading: false, answer: null, refused: errorText(error) });
     }
   };
 
-  // Opening the page reads the account once, unless a read just landed.
+  // Opening the page asks once; the daemon reads only what went stale.
   useEffect(() => {
     const age = snapshot ? Date.now() - Date.parse(snapshot.capturedAt) : Infinity;
     if (!(age < PLAN_FRESH_MS)) void refreshPlan();
@@ -276,6 +282,16 @@ function AccountSection({ provider, snapshot, consent, now }: {
     if (needsConsent && consented) void refreshResets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.id, needsConsent, consented]);
+  // With nothing cached yet, ask again when the daemon said it would read.
+  const summary = snapshot?.rateLimitResetCredits;
+  const cachedReadAt = summary?.source === 'account' ? summary.readAt : undefined;
+  useEffect(() => {
+    const delay = cachedReadAt ? null : retryDelayMs(resets.answer);
+    if (delay == null) return undefined;
+    const timer = setTimeout(() => { void refreshResets(); }, delay);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resets.answer, cachedReadAt]);
 
   const grant = async (granted: boolean) => {
     setConsentBusy(true);
@@ -294,14 +310,23 @@ function AccountSection({ provider, snapshot, consent, now }: {
   const windows = accountWindowRows(snapshot?.entries, now);
   const pace = weeklyPace(weeklyEntry(snapshot?.entries), now);
   const paceText = pace ? weeklyPaceText(pace, now) : null;
-  const summary = snapshot?.rateLimitResetCredits;
   const rows = accountResetRows(summary, now);
   const spend = extraUsageLine(snapshot?.extraUsage);
   const host = manageHost(account?.manageUrl);
   const who = [account?.email, account?.organization].filter(Boolean).join(' · ');
   const connected = !provider.needsLogin && !!snapshot && (!!account || windows.length > 0);
-  const state = provider.needsLogin ? 'sin sesión' : connected ? 'conectada' : plan.loading ? 'conectando…' : '';
+  // Kept across restarts, the usage says how old it is until a read lands.
+  const usageAge = staleAgo(snapshot?.capturedAt, now);
+  const state = provider.needsLogin ? 'sin sesión'
+    : connected ? (usageAge ? `actualizado ${usageAge}` : 'conectada')
+      : plan.loading ? 'conectando…' : '';
   const showsResets = !!provider.accountResetSupported || needsConsent;
+
+  const line = needsConsent && consented
+    ? resetsLine(resets.refused ? { reason: 'refused', message: resets.refused } : resets.answer, cachedReadAt, name, now)
+    : null;
+  const retry = <button type="button" className="acct-link" disabled={resets.loading} onClick={() => { void refreshResets(true); }}>Reintentar</button>;
+  const quietLine = line && !line.error ? <div className="acct-age">{line.text}{line.retry && retry}</div> : null;
 
   let resetsBody: ReactNode = null;
   if (needsConsent && consent === null) {
@@ -315,18 +340,22 @@ function AccountSection({ provider, snapshot, consent, now }: {
         {provider.accountResetConsent?.note && <span className="acct-note">{provider.accountResetConsent.note}</span>}
       </div>
     );
-  } else if (resets.error) {
+  } else if (line?.error) {
     resetsBody = (
       <div className="acct-none acct-err">
-        <b>No se pudieron leer los resets</b>{resets.error}
-        <button type="button" className="acct-link" onClick={() => { void refreshResets(); }}>Reintentar</button>
+        <b>No se pudieron leer los resets</b>{line.text}
+        {retry}
       </div>
     );
   } else if (rows.length) {
-    resetsBody = rows.map((row) => <ResetRowView key={row.key} row={row} providerId={provider.id} name={name} activeChatId={app.activeId} />);
-  } else if (resets.loading && !summary) {
+    resetsBody = <>{rows.map((row) => <ResetRowView key={row.key} row={row} providerId={provider.id} name={name} activeChatId={app.activeId} />)}{quietLine}</>;
+  } else if (summary) {
+    resetsBody = <><div className="acct-none"><b>No hay resets ahora</b>Cuando tengas uno, aparece acá con su vencimiento.</div>{quietLine}</>;
+  } else if (quietLine) {
+    resetsBody = quietLine;
+  } else if (resets.loading) {
     resetsBody = <div className="acct-none">Buscando resets…</div>;
-  } else if (snapshot || summary) {
+  } else if (snapshot && !needsConsent) {
     resetsBody = <div className="acct-none"><b>No hay resets ahora</b>Cuando tengas uno, aparece acá con su vencimiento.</div>;
   }
 

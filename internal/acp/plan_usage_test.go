@@ -537,6 +537,9 @@ func newPlanUsageFakeManager(t *testing.T, providerID, mode string) (*Manager, *
 		StdoutFlushInterval:  10 * time.Millisecond,
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
+		// These tests count the read each trigger asks for; the spacing that
+		// folds them in production has its own tests (account_resets_test.go).
+		PlanUsageMinInterval: -1,
 	})
 	return manager, events
 }
@@ -547,6 +550,11 @@ type planUsageFakeProvider struct {
 }
 
 func newPlanUsageFakeManagerWithProviders(t *testing.T, methodLog string, fakes ...planUsageFakeProvider) (*Manager, *eventCollector) {
+	t.Helper()
+	return newSpacedPlanUsageFakeManager(t, methodLog, -1, fakes...)
+}
+
+func newSpacedPlanUsageFakeManager(t *testing.T, methodLog string, spacing time.Duration, fakes ...planUsageFakeProvider) (*Manager, *eventCollector) {
 	t.Helper()
 	events := newEventCollector()
 	root := repoRoot(t)
@@ -578,8 +586,49 @@ func newPlanUsageFakeManagerWithProviders(t *testing.T, methodLog string, fakes 
 		StdoutFlushInterval:  10 * time.Millisecond,
 		ThoughtFlushInterval: 10 * time.Millisecond,
 		RSSSampleInterval:    time.Hour,
+		// Most tests count the read each trigger asks for (-1: no spacing);
+		// the spacing that folds them in production has its own tests.
+		PlanUsageMinInterval: spacing,
 	})
 	return manager, events
+}
+
+// Turn ends, an attach and the renderer's asks inside the spacing fold into
+// one trailing read, so a busy afternoon of agents does not ask the account
+// API after every turn (what tripped its 429).
+func TestPlanUsageTriggersInsideTheSpacingFoldIntoOneTrailingRead(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "spaced-methods.log")
+	spacing := 700 * time.Millisecond
+	manager, events := newSpacedPlanUsageFakeManager(t, tracePath, spacing,
+		planUsageFakeProvider{id: "claude", mode: "claude-plan-limits"},
+	)
+	t.Cleanup(func() { manager.Reset() })
+
+	tabID := "spaced-tab"
+	session := newFakeSessionForProvider(t, manager, tabID, "chat-"+tabID, "claude")
+	waitForMethodLog(t, tracePath, 2*time.Second, func(methods []string) bool {
+		return countMethod(methods, "_workass/claude/usage") == 1
+	})
+	for i := 0; i < 3; i++ {
+		job := startAppChatJob(t, manager, session.SessionID, tabID, fmt.Sprintf("turn %d inside the spacing", i))
+		assertJobStatus(t, events.waitJobEnd(t, jobID(job), 2*time.Second), "done", 0, "end_turn")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.RefreshProviderPlanUsage(ctx, "claude"); err != nil {
+		t.Fatalf("an ask inside the spacing is answered by the snapshot: %v", err)
+	}
+	if methods := readMethodLog(t, tracePath); countMethod(methods, "_workass/claude/usage") != 1 {
+		t.Fatalf("reads inside the spacing = %v, want only the attach read", methods)
+	}
+	waitForMethodLog(t, tracePath, 3*time.Second, func(methods []string) bool {
+		return countMethod(methods, "_workass/claude/usage") == 2
+	})
+	waitPlanUsageRefreshesIdle(t, manager, 2*time.Second)
+	time.Sleep(spacing / 2)
+	if methods := readMethodLog(t, tracePath); countMethod(methods, "_workass/claude/usage") != 2 {
+		t.Fatalf("three turn ends and an ask made %d reads, want one trailing read", countMethod(methods, "_workass/claude/usage")-1)
+	}
 }
 
 func newFakeSessionForProvider(t *testing.T, manager *Manager, tabID, chatID, providerID string) SessionInfo {

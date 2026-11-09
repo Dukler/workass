@@ -30,6 +30,10 @@ const (
 	defaultSpareCheck               = 2500 * time.Millisecond
 	defaultProviderUpdateInterval   = time.Hour
 	defaultPlanUsageRefreshInterval = 5 * time.Minute
+	// Options.PlanUsageMinInterval spaces two native plan-usage reads of one
+	// provider, since each asks the provider's account API (plan_usage.go);
+	// a negative value turns the spacing off.
+	defaultPlanUsageMinInterval     = 2 * time.Minute
 	defaultSpawnedWorkReconcile     = 2 * time.Second
 	defaultProviderUpdateTimeout    = 5 * time.Second
 	defaultProviderUpdateRunTimeout = 10 * time.Minute
@@ -131,6 +135,7 @@ type Options struct {
 	SpareCheckInterval           time.Duration
 	ProviderUpdateInterval       time.Duration
 	PlanUsageRefreshInterval     time.Duration
+	PlanUsageMinInterval         time.Duration
 	SpawnedWorkReconcileInterval time.Duration
 	// How a subagent whose turn ended waits for its own background work
 	// (subagent_background.go): the most it waits, how long a harness gets to wake
@@ -223,6 +228,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.PlanUsageRefreshInterval <= 0 {
 		o.PlanUsageRefreshInterval = defaultPlanUsageRefreshInterval
+	}
+	if o.PlanUsageMinInterval == 0 {
+		o.PlanUsageMinInterval = defaultPlanUsageMinInterval
 	}
 	if o.SpawnedWorkReconcileInterval <= 0 {
 		o.SpawnedWorkReconcileInterval = defaultSpawnedWorkReconcile

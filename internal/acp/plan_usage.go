@@ -60,9 +60,11 @@ type RateLimitResetCreditsSummary struct {
 	AvailableCount int64                  `json:"availableCount"`
 	Credits        []RateLimitResetCredit `json:"credits"`
 	// Additive: Source is "account" when the resets were read from the
-	// provider's account API with the owner's login (account_resets.go).
+	// provider's account API with the owner's login (account_resets.go),
+	// ReadAt when that read happened (the list may be served from cache).
 	Source        string `json:"source,omitempty"`
 	CooldownUntil string `json:"cooldownUntil,omitempty"`
+	ReadAt        string `json:"readAt,omitempty"`
 }
 
 type RateLimitResetCredit struct {
@@ -140,10 +142,16 @@ func (m *Manager) recordNormalizedPlanUsageCapture(sessionID, providerID string,
 	if capture.extraUsageSet {
 		next.ExtraUsage = capture.extraUsage
 	}
+	// CapturedAt dates what the page shows (its age after a restart), so
+	// diagnostic metadata alone does not make old windows look new.
+	if prev.CapturedAt != "" && len(capture.entries) == 0 && !capture.resetCreditsSet && capture.account == nil && !capture.extraUsageSet {
+		next.CapturedAt = prev.CapturedAt
+	}
 	m.planUsageByProvider[providerID] = next
 	m.mu.Unlock()
 
 	m.emit("chat:plan-usage", next)
+	m.persistPlanUsage()
 	return next, true
 }
 
@@ -347,9 +355,17 @@ func (m *Manager) RefreshProviderPlanUsage(ctx context.Context, providerID strin
 	bridgeKey := fmt.Sprintf("plan-usage:%s:%d", providerID, m.bridgeSeq)
 	m.mu.Unlock()
 
+	// Every read asks the provider's account API. Inside the spacing (or a
+	// rate-limit backoff) the snapshot already held is the answer, and a
+	// cold provider is not even started.
+	if m.planUsageReadWait(providerID, time.Now()) > 0 {
+		return nil
+	}
 	if target, ok := m.liveProviderPlanUsageTarget(providerID); ok {
+		m.notePlanUsageRead(providerID, time.Now())
 		return target.bridge.refreshNativePlanUsage(ctx, target.sessionID)
 	}
+	m.notePlanUsageRead(providerID, time.Now())
 
 	bridge := newBridge(bridgeKey, providerOptions, m)
 	// Account metadata has no chat owner. Use the same isolated bootstrap as
@@ -420,7 +436,7 @@ func (m *Manager) schedulePlanUsageRefresh(bridge *Bridge, sessionID string) {
 		m.mu.Unlock()
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), planUsageRefreshTimeout)
+	runCtx, cancel := context.WithCancel(context.Background())
 	run := &planUsageRefreshRun{cancel: cancel}
 	m.planUsageRefreshes[providerID] = run
 	m.planUsageRefreshWG.Add(1)
@@ -429,10 +445,46 @@ func (m *Manager) schedulePlanUsageRefresh(bridge *Bridge, sessionID string) {
 
 	go func() {
 		defer m.planUsageRefreshWG.Done()
+		defer cancel()
+		finish := func() {
+			m.planUsageRefreshMu.Lock()
+			if m.planUsageRefreshes[providerID] == run {
+				delete(m.planUsageRefreshes, providerID)
+			}
+			m.planUsageRefreshMu.Unlock()
+		}
 		target := planUsageRefreshTarget{bridge: bridge, sessionID: sessionID}
 		for {
+			// Turn ends, attaches and ticks all land here. Reads of one
+			// provider are spaced (each asks its account API); requests made
+			// meanwhile fold into one trailing read on the newest target.
+			if wait := m.planUsageReadWait(providerID, time.Now()); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-runCtx.Done():
+					timer.Stop()
+					finish()
+					return
+				case <-timer.C:
+				}
+				m.planUsageRefreshMu.Lock()
+				if run.pending != nil {
+					target, run.pending = *run.pending, nil
+				}
+				m.planUsageRefreshMu.Unlock()
+				if target.bridge.Closed() || target.bridge.Hibernated() {
+					live, ok := m.liveProviderPlanUsageTarget(providerID)
+					if !ok {
+						finish()
+						return
+					}
+					target = live
+				}
+			}
+			m.notePlanUsageRead(providerID, time.Now())
+			ctx, cancelRead := context.WithTimeout(runCtx, planUsageRefreshTimeout)
 			err := target.bridge.refreshNativePlanUsage(ctx, target.sessionID)
-			cancel()
+			cancelRead()
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				m.opts.Logf(planUsageRefreshLogLabel, map[string]any{
 					"providerId": providerID,
@@ -444,7 +496,7 @@ func (m *Manager) schedulePlanUsageRefresh(bridge *Bridge, sessionID string) {
 			resetting := m.resetting
 			m.mu.Unlock()
 			m.planUsageRefreshMu.Lock()
-			if m.planUsageRefreshes[providerID] != run || resetting || run.pending == nil {
+			if m.planUsageRefreshes[providerID] != run || resetting || run.pending == nil || runCtx.Err() != nil {
 				if m.planUsageRefreshes[providerID] == run {
 					delete(m.planUsageRefreshes, providerID)
 				}
@@ -453,8 +505,6 @@ func (m *Manager) schedulePlanUsageRefresh(bridge *Bridge, sessionID string) {
 			}
 			target = *run.pending
 			run.pending = nil
-			ctx, cancel = context.WithTimeout(context.Background(), planUsageRefreshTimeout)
-			run.cancel = cancel
 			m.planUsageRefreshMu.Unlock()
 		}
 	}()
