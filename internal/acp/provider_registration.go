@@ -333,6 +333,7 @@ var providerRegistrations = map[string]providerRegistration{
 			input:         explicitHostInputReceiptPolicy{},
 			delivery:      claudeDeliveryStrategy{},
 			planUsage:     claudePlanUsageStrategy{},
+			accountResets: newClaudeAccountResetSource(),
 			commands:      capabilityCommandCatalogStrategy{capability: "workassClaudeCommandCatalog"},
 			notifications: claudeProviderNotificationStrategy{},
 			spawnedWork:   claudeProviderSpawnedWorkStrategy{},

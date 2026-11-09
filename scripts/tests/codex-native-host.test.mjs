@@ -185,6 +185,8 @@ test('native Codex host drives app-server directly with turns, steering, permiss
   peer.send({ jsonrpc: '2.0', id: 6, method: '_workass/codex/rate-limits', params: {} });
   const limits = await peer.waitFor((message) => message.id === 6);
   assert.equal(limits.result.rateLimits.primary.usedPercent, 17);
+  // The login behind the limits rides along, read without a token refresh.
+  assert.deepEqual(limits.result.workassAccount.account, { type: 'chatgpt', email: 'vos@ejemplo.com', planType: 'pro', workspaceName: null });
 });
 
 test('native Codex host preserves commentary item boundaries across two rapid steers', async (t) => {

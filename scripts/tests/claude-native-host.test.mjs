@@ -860,6 +860,23 @@ test('official Claude SDK host clamps, exposes, and replaces the Claude command 
   assert.equal((await peer.waitFor((message) => message.id === 4)).result.stopReason, 'end_turn');
 });
 
+// Cuentas: the plan read carries the login behind it, the display fields of
+// the SDK's AccountInfo, beside the usage body it already returned.
+test('official Claude SDK host attaches the account to the plan usage read', async (t) => {
+  const peer = startHost({ WORKASS_CLAUDE_FIXTURE_USAGE: '1' });
+  t.after(() => peer.child.kill('SIGKILL'));
+
+  peer.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await peer.waitFor((message) => message.id === 1);
+  peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: repoRoot, mcpServers: [] } });
+  const opened = await peer.waitFor((message) => message.id === 2);
+  peer.send({ jsonrpc: '2.0', id: 3, method: '_workass/claude/usage', params: { sessionId: opened.result.sessionId } });
+  const usage = (await peer.waitFor((message) => message.id === 3)).result;
+  assert.deepEqual(usage.workassAccount, { email: 'fixture@example.test', subscriptionType: 'max' });
+  assert.equal(usage.subscription_type, 'max');
+  assert.equal(usage.rate_limits.extra_usage.monthly_limit, 2000);
+});
+
 // The result's usage sums every API call of the turn; the window's fill is the
 // last main-thread call's prompt (2026-10-19: 1.2M of a 1.0M window).
 test('official Claude SDK host reports the last main call as context usage, not the turn sum', async (t) => {

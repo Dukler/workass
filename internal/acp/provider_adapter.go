@@ -20,6 +20,7 @@ type providerAdapter struct {
 	creation      providercontract.CreationCapabilities
 	input         providerInputReceiptPolicy
 	planUsage     providerPlanUsageStrategy
+	accountResets accountResetSource
 	commands      providerCommandCatalogStrategy
 	notifications providerNotificationStrategy
 	spawnedWork   providerSpawnedWorkStrategy

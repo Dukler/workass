@@ -439,6 +439,9 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"prApprover":         "",
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
+		// Cuentas: providers whose stored login the owner let Workass use
+		// for account resets (account_resets.go).
+		accountResetConsentKey: []any{},
 	}
 	if input == nil {
 		return next
@@ -472,6 +475,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	}
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
+	next[accountResetConsentKey] = normalizeAccountResetConsent(input[accountResetConsentKey])
 	return next
 }
 

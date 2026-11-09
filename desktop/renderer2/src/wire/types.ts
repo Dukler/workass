@@ -175,13 +175,39 @@ export interface PlanUsageSnapshot {
   capturedAt: string;
   entries?: PlanUsageEntry[];
   rateLimitResetCredits?: RateLimitResetCreditsSummary;
+  // Additive (Cuentas page): the login behind the snapshot and its
+  // pay-as-you-go spend, as the provider's adapter reported them.
+  account?: PlanUsageAccount;
+  extraUsage?: PlanUsageExtraUsage;
   raw?: Record<string, unknown>;
+}
+export interface PlanUsageAccount {
+  email?: string;
+  organization?: string;
+  plan?: string;
+  // 'subscription' | 'api-key' | 'cloud' (Backend names the cloud).
+  billing?: string;
+  backend?: string;
+  keySource?: string;
+  manageUrl?: string;
+}
+// Amounts in major currency units; no monthlyLimit means no monthly cap.
+export interface PlanUsageExtraUsage {
+  enabled: boolean;
+  monthlyLimit?: number;
+  used?: number;
+  utilization?: number;
+  currency?: string;
 }
 export interface RateLimitResetCreditsSummary {
   availableCount: number;
   // null means Codex exposed only the authoritative count; [] means it fetched
   // details and found no available detail rows. The count remains authoritative.
   credits: RateLimitResetCredit[] | null;
+  // 'account' when read from the provider's account API with the owner's
+  // consented login (accounts:resets-refresh).
+  source?: string;
+  cooldownUntil?: string;
 }
 export interface RateLimitResetCredit {
   id?: string;
@@ -191,6 +217,16 @@ export interface RateLimitResetCredit {
   expiresAt?: string;
   title?: string;
   description?: string;
+  // Additive, per-grant account resets: uses left of how many, whether it
+  // can be used now (else a neutral reason: needs-limit, cooldown,
+  // blocked:<window>, cannot-clear, paused, unavailable) and the windows it
+  // refills, as plan-usage entry ids.
+  remaining?: number;
+  total?: number;
+  usableNow?: boolean;
+  requiresLimit?: boolean;
+  unavailableReason?: string;
+  refills?: string[];
 }
 export type RateLimitResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
 
@@ -258,6 +294,14 @@ export interface ProviderRecord {
   // rate-limit resets. Drives cold account-level plan refreshes; never branch
   // on a provider id in the renderer.
   accountResetSupported?: boolean;
+  // Additive (Cuentas page): the adapter reads plan usage for the account;
+  // its resets need the owner's consent to use the provider's stored login
+  // (note = the one line under that button); a model server on this machine
+  // at host:port; the provider is waiting for a login.
+  accountUsage?: boolean;
+  accountResetConsent?: { note?: string };
+  localEndpoint?: string;
+  needsLogin?: boolean;
   // Absolute executable path selected from the provider override or daemon PATH.
   resolvedCommand?: string;
   cliVersion?: CliVersion;
@@ -867,7 +911,10 @@ export interface WorkassApi {
     sessionId: string | undefined,
     idempotencyKey: string,
     creditId?: string,
-  ) => Promise<{ outcome: RateLimitResetOutcome; planUsage?: PlanUsageSnapshot }>;
+  ) => Promise<{ outcome: RateLimitResetOutcome; planUsage?: PlanUsageSnapshot; refilled?: string[]; remaining?: number; message?: string }>;
+  // Cuentas: reads one provider's resets from its account API with the
+  // owner's consented login; the snapshot arrives on chat:plan-usage.
+  accountsResetsRefresh?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
   spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;

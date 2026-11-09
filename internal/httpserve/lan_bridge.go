@@ -244,6 +244,8 @@ const LANBridgeJS = `(() => {
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
+    // Cuentas: one provider's resets read from its account API with the owner's consented login.
+    accountsResetsRefresh: (providerId) => invoke('accounts:resets-refresh', { providerId }),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
     spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch } : { tabId, chatId }),
     // Every chat's running background rows, counts and obligation in one read.

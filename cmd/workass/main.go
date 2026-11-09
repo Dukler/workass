@@ -1150,6 +1150,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl, providerChats)
 		registerChatDiagnosticsWire(hub, providerChats)
 		count += 24
+		count += registerAccountResetHandlers(hub, acpManager, state.setting)
 		if providerChats != nil {
 			titler := newChatTitler(acpManager, providerChats, state.setting.get, log.Printf)
 			hub.Register("app-chat:auto-title", func(args []any) (any, error) {

@@ -982,6 +982,22 @@ class FixtureQuery {
     });
   }
 
+  // The structured /usage read (control get_usage). Empty unless a test asks
+  // for the fixture plan, so other tests see what they always saw.
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() {
+    if (process.env.WORKASS_CLAUDE_FIXTURE_USAGE !== '1') return Promise.resolve({});
+    return Promise.resolve({
+      subscription_type: 'max',
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 42, resets_at: '2026-11-09T23:10:00Z' },
+        seven_day: { utilization: 57, resets_at: '2026-11-11T15:00:00Z' },
+        extra_usage: { is_enabled: true, monthly_limit: 2000, used_credits: 0, utilization: 0, currency: 'USD' },
+      },
+      behaviors: null,
+    });
+  }
+
   interrupt() {
     if (process.env.WORKASS_CLAUDE_FIXTURE_INTERRUPT_HANG === '1') {
       return new Promise(() => {});

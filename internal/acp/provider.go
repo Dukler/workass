@@ -839,6 +839,12 @@ func (m *Manager) ProvidersList() []map[string]any {
 		if providerAdapterForID(id).planUsage.ResetCapable() {
 			item["accountResetSupported"] = true
 		}
+		// Additive (Cuentas page): the provider reports plan usage for its
+		// account; its resets need the owner's consent to read its login; it
+		// is a model server on this machine, at this address.
+		for key, value := range providerAccountListFields(id, m.localModelServersLocked()) {
+			item[key] = value
+		}
 		// Additive: the models offered for one-shot prompts (one_shot.go),
 		// which Settings lists for naming chats.
 		if models := OneShotModels(id); len(models) > 0 {

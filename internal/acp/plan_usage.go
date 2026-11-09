@@ -23,12 +23,46 @@ type PlanUsageSnapshot struct {
 	CapturedAt            string                        `json:"capturedAt"`
 	Entries               []PlanUsageEntry              `json:"entries,omitempty"`
 	RateLimitResetCredits *RateLimitResetCreditsSummary `json:"rateLimitResetCredits,omitempty"`
-	Raw                   map[string]any                `json:"raw,omitempty"`
+	// Account and ExtraUsage are additive (Cuentas page): who the provider is
+	// logged in as, on which plan, and its pay-as-you-go spend, as the
+	// provider's adapter reported them.
+	Account    *PlanUsageAccount    `json:"account,omitempty"`
+	ExtraUsage *PlanUsageExtraUsage `json:"extraUsage,omitempty"`
+	Raw        map[string]any       `json:"raw,omitempty"`
+}
+
+// PlanUsageAccount is the provider login behind a plan-usage snapshot.
+type PlanUsageAccount struct {
+	Email        string `json:"email,omitempty"`
+	Organization string `json:"organization,omitempty"`
+	// Plan is the display name of the subscription ("Max", "ChatGPT Pro").
+	Plan string `json:"plan,omitempty"`
+	// Billing is how the provider is paid: "subscription", "api-key" or
+	// "cloud" (a third-party cloud named by Backend).
+	Billing   string `json:"billing,omitempty"`
+	Backend   string `json:"backend,omitempty"`
+	KeySource string `json:"keySource,omitempty"`
+	// ManageURL is the provider's own page for the plan's usage settings.
+	ManageURL string `json:"manageUrl,omitempty"`
+}
+
+// PlanUsageExtraUsage is pay-as-you-go spend beyond the plan, in major
+// currency units. A missing MonthlyLimit means no monthly cap.
+type PlanUsageExtraUsage struct {
+	Enabled      bool     `json:"enabled"`
+	MonthlyLimit *float64 `json:"monthlyLimit,omitempty"`
+	Used         *float64 `json:"used,omitempty"`
+	Utilization  *float64 `json:"utilization,omitempty"`
+	Currency     string   `json:"currency,omitempty"`
 }
 
 type RateLimitResetCreditsSummary struct {
 	AvailableCount int64                  `json:"availableCount"`
 	Credits        []RateLimitResetCredit `json:"credits"`
+	// Additive: Source is "account" when the resets were read from the
+	// provider's account API with the owner's login (account_resets.go).
+	Source        string `json:"source,omitempty"`
+	CooldownUntil string `json:"cooldownUntil,omitempty"`
 }
 
 type RateLimitResetCredit struct {
@@ -39,6 +73,15 @@ type RateLimitResetCredit struct {
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
+	// Additive, per-grant detail of account resets: uses left of how many,
+	// whether it can be used right now (with a neutral reason when not), and
+	// the windows it refills, as plan-usage entry ids.
+	Remaining         *int64   `json:"remaining,omitempty"`
+	Total             *int64   `json:"total,omitempty"`
+	UsableNow         *bool    `json:"usableNow,omitempty"`
+	RequiresLimit     bool     `json:"requiresLimit,omitempty"`
+	UnavailableReason string   `json:"unavailableReason,omitempty"`
+	Refills           []string `json:"refills,omitempty"`
 }
 
 type PlanUsageEntry struct {
@@ -71,7 +114,7 @@ func (m *Manager) recordNormalizedPlanUsageCapture(sessionID, providerID string,
 	// storage boundary so an adapter cannot accidentally expose unbounded or
 	// secret-shaped diagnostic metadata.
 	capture.raw = boundedPlanUsageRaw(redactPlanUsageValue(capture.raw))
-	if len(capture.entries) == 0 && len(capture.raw) == 0 && !capture.resetCreditsSet {
+	if len(capture.entries) == 0 && len(capture.raw) == 0 && !capture.resetCreditsSet && capture.account == nil && !capture.extraUsageSet {
 		return PlanUsageSnapshot{}, false
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -84,10 +127,18 @@ func (m *Manager) recordNormalizedPlanUsageCapture(sessionID, providerID string,
 		CapturedAt:            now,
 		Entries:               mergePlanUsageEntries(prev.Entries, capture.entries),
 		RateLimitResetCredits: prev.RateLimitResetCredits,
+		Account:               prev.Account,
+		ExtraUsage:            prev.ExtraUsage,
 		Raw:                   mergePlanUsageRaw(prev.Raw, capture.raw),
 	}
 	if capture.resetCreditsSet {
 		next.RateLimitResetCredits = capture.resetCredits
+	}
+	if capture.account != nil {
+		next.Account = mergePlanUsageAccount(prev.Account, capture.account)
+	}
+	if capture.extraUsageSet {
+		next.ExtraUsage = capture.extraUsage
 	}
 	m.planUsageByProvider[providerID] = next
 	m.mu.Unlock()
@@ -119,6 +170,9 @@ type planUsageCapture struct {
 	raw             map[string]any
 	resetCredits    *RateLimitResetCreditsSummary
 	resetCreditsSet bool
+	account         *PlanUsageAccount
+	extraUsage      *PlanUsageExtraUsage
+	extraUsageSet   bool
 }
 
 func anySlice(v any) []any {
@@ -187,6 +241,7 @@ func (m *Manager) planUsageLoop() {
 			return
 		case <-ticker.C:
 			m.refreshLivePlanUsage()
+			m.refreshConsentedAccountResets()
 		}
 	}
 }
@@ -443,6 +498,11 @@ func (m *Manager) ConsumeRateLimitResetCredit(ctx context.Context, providerID, s
 	if len(creditID) > 500 {
 		return nil, errors.New("rate-limit reset credit id is too long")
 	}
+	// A provider whose resets live on its account API is claimed there, with
+	// the owner's consented login, and needs no provider session.
+	if source := m.accountResetSourceFor(providerID); source != nil {
+		return m.claimAccountReset(ctx, providerID, source, idempotencyKey, creditID)
+	}
 	var b *Bridge
 	if sessionID != "" {
 		b = m.bridgeForSession(sessionID, SessionOptions{SessionID: sessionID, ProviderID: providerID})
@@ -529,6 +589,29 @@ func (b *Bridge) refreshNativePlanUsage(ctx context.Context, sessionID string) e
 	}
 	b.manager.recordNormalizedPlanUsageCapture(sessionID, providerID, capture)
 	return nil
+}
+
+// mergePlanUsageAccount keeps what an earlier read knew when a later one
+// reports less of the same login (a reset reply names the plan, not the
+// email). A different way of paying is a different login: nothing carries.
+func mergePlanUsageAccount(existing, incoming *PlanUsageAccount) *PlanUsageAccount {
+	merged := *incoming
+	if existing == nil || (merged.Billing != "" && existing.Billing != "" && merged.Billing != existing.Billing) {
+		return &merged
+	}
+	fill := func(value *string, previous string) {
+		if *value == "" {
+			*value = previous
+		}
+	}
+	fill(&merged.Email, existing.Email)
+	fill(&merged.Organization, existing.Organization)
+	fill(&merged.Plan, existing.Plan)
+	fill(&merged.Billing, existing.Billing)
+	fill(&merged.Backend, existing.Backend)
+	fill(&merged.KeySource, existing.KeySource)
+	fill(&merged.ManageURL, existing.ManageURL)
+	return &merged
 }
 
 func mergePlanUsageEntries(existing, incoming []PlanUsageEntry) []PlanUsageEntry {

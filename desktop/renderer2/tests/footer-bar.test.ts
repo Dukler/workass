@@ -9,12 +9,20 @@ import { updatesNeedAttention } from '../src/app-updater.ts';
 const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
 const sidebarV2 = readFileSync(new URL('../src/components/SidebarV2.tsx', import.meta.url), 'utf8');
 const composer = readFileSync(new URL('../src/components/Composer.tsx', import.meta.url), 'utf8');
+const accounts = readFileSync(new URL('../src/components/AccountsPage.tsx', import.meta.url), 'utf8');
 
-test('the foot is two icons, Ajustes and Actualizaciones, and no account menu', () => {
+test('the foot is three icons, Ajustes, Cuentas and Actualizaciones, and no account menu', () => {
   const bar = sidebar.slice(sidebar.indexOf('export function FooterBar()'));
   assert.equal(bar.match(/className=\{?[`"]footbtn/g)?.length, 2);
   assert.match(bar, /aria-label="Ajustes" onClick=\{\(\) => store\.openSettings\(\)\}/);
   assert.match(bar, /<IcDownload \/>/);
+  // 2026-11-09: Cuentas sits between them (AccountsPage.tsx).
+  const order = ['<IcGear />', '<AccountsFootButton />', '<IcDownload />'].map((token) => bar.indexOf(token));
+  assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), `foot order ${order}`);
+  const button = accounts.slice(accounts.indexOf('export function AccountsFootButton()'));
+  assert.match(button, /className=\{`footbtn\$\{open \? ' on' : ''\}`\}/);
+  assert.match(button, /<IcAccount \/>/);
+  assert.match(button, /\{ready && <span className="footdot" aria-hidden="true" \/>\}/);
   assert.doesNotMatch(sidebar, /AccountMenu|acctpop|Martin/);
   assert.match(sidebarV2, /<div className="foot">\s*<FooterBar \/>\s*<\/div>/);
 });

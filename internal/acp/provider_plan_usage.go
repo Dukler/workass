@@ -50,10 +50,59 @@ func (codexPlanUsageStrategy) Normalize(carrier map[string]any) planUsageCapture
 	meta := mapFromAny(carrier["_meta"])
 	out.entries = append(out.entries, codexRateLimitPlanUsage(meta)...)
 	out.resetCredits, out.resetCreditsSet = codexRateLimitResetCredits(meta)
+	out.account = codexPlanUsageAccount(mapFromAny(meta["workass.codex/rateLimits"]))
 	if entry, ok := codexQuotaPlanUsage(meta); ok {
 		out.entries = append(out.entries, entry)
 	}
 	return appendStandardACPPlanUsage(out, carrier)
+}
+
+// codexPlanUsageAccount reads the account the host attaches to a rate-limit
+// read (app-server account/read, as workassAccount) and the plan the limits
+// name. Either alone is enough; a read with neither changes nothing.
+func codexPlanUsageAccount(response map[string]any) *PlanUsageAccount {
+	if len(response) == 0 {
+		return nil
+	}
+	planType := strings.TrimSpace(asString(mapFromAny(response["rateLimits"])["planType"]))
+	info := mapFromAny(mapFromAny(response["workassAccount"])["account"])
+	if len(info) == 0 && planType == "" {
+		return nil
+	}
+	account := &PlanUsageAccount{}
+	switch asString(info["type"]) {
+	case "chatgpt":
+		account.Billing = "subscription"
+		account.Email = boundedPlanUsageText(info["email"], 200)
+		account.Organization = boundedPlanUsageText(info["workspaceName"], 200)
+		planType = firstNonEmpty(strings.TrimSpace(asString(info["planType"])), planType)
+	case "apiKey":
+		account.Billing = "api-key"
+		return account
+	case "amazonBedrock":
+		account.Billing, account.Backend = "cloud", "Amazon Bedrock"
+		return account
+	case "gcp":
+		account.Billing, account.Backend = "cloud", "Google Cloud"
+		return account
+	default:
+		account.Billing = "subscription"
+	}
+	account.Plan = codexPlanName(planType)
+	return account
+}
+
+func codexPlanName(planType string) string {
+	switch planType = strings.ToLower(strings.TrimSpace(planType)); planType {
+	case "", "unknown":
+		return "ChatGPT"
+	case "prolite":
+		return "ChatGPT Pro Lite"
+	case "promax":
+		return "ChatGPT Pro Max"
+	default:
+		return "ChatGPT " + planNameWords(planType)
+	}
 }
 
 func (codexPlanUsageStrategy) Supported(bridge *Bridge) bool {
@@ -104,6 +153,13 @@ func (claudePlanUsageStrategy) Normalize(carrier map[string]any) planUsageCaptur
 	meta := mapFromAny(carrier["_meta"])
 	out.entries = append(out.entries, claudeRateLimitPlanUsage(meta)...)
 	out.entries = append(out.entries, claudeStructuredPlanUsage(meta)...)
+	usage := mapFromAny(meta["workass.claude/usage"])
+	out.account = claudePlanUsageAccount(usage)
+	if rateLimits := mapFromAny(usage["rate_limits"]); len(rateLimits) > 0 {
+		if raw, present := rateLimits["extra_usage"]; present {
+			out.extraUsage, out.extraUsageSet = claudeExtraUsage(raw), true
+		}
+	}
 	return appendStandardACPPlanUsage(out, carrier)
 }
 
@@ -198,6 +254,24 @@ func boundedPlanUsageText(value any, maxRunes int) string {
 		return string(runes[:maxRunes])
 	}
 	return text
+}
+
+// planNameWords turns a plan code ("max", "pro_lite") into its display name.
+func planNameWords(value string) string {
+	words := strings.FieldsFunc(strings.TrimSpace(value), func(r rune) bool { return r == '_' || r == '-' || r == ' ' })
+	for i, word := range words {
+		words[i] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	return boundedPlanUsageText(strings.Join(words, " "), 60)
+}
+
+func stringInList(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeRateLimitPlanUsage(meta map[string]any) []PlanUsageEntry {

@@ -237,6 +237,8 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"ProvidersList":                  {},
 	"ReadProcess":                    {},
 	"RefreshProviderPlanUsage":       {},
+	"RefreshAccountResets":           {},
+	"SetAccountResetConsent":         {},
 	"PublishProviderSnapshots":       {},
 	"Reset":                          {},
 	"SetProviderAttachmentPersister": {},
