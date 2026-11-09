@@ -121,6 +121,42 @@ export function transcriptAnchorAt(units: readonly MeasuredUnit[], viewportTop: 
   return last ? { key: last.key, offset: last.top - viewportTop } : null;
 }
 
+/** What the anchor descent reads of an element. */
+export interface AnchorBox {
+  readonly children: ArrayLike<unknown>;
+  getBoundingClientRect(): { top: number; bottom: number; width: number; height: number };
+}
+
+/**
+ * The block the reader's top line belongs to. The hit test at the viewport's
+ * top edge lands on a whole message when the edge falls between its blocks (a
+ * margin), and a message's own top does not move when the text inside it
+ * rewraps: opening the right pane moved the reader's line by hundreds of px
+ * (user 2026-11-08). This descends to the first block that reaches past the
+ * edge, and stops at one wholly below it or at inline content, which moves
+ * with its block.
+ */
+export function anchorBlockAt<T extends AnchorBox>(hit: T, line: number, isInline: (node: T) => boolean): T {
+  let current = hit;
+  for (let depth = 0; depth < 12; depth++) {
+    let next: T | null = null;
+    for (let index = 0; index < current.children.length; index++) {
+      const child = current.children[index] as T;
+      if (isInline(child)) continue;
+      const box = child.getBoundingClientRect();
+      if (!box.width && !box.height) continue;
+      if (box.bottom > line) { next = child; break; }
+    }
+    if (!next) return current;
+    current = next;
+    if (current.getBoundingClientRect().top >= line) return current;
+  }
+  return current;
+}
+
+/** How far below the top edge a held anchor block may sit and still be kept. */
+export const ANCHOR_HOLD_SLACK_PX = 48;
+
 /**
  * Messages appended after the newest one the reader saw pinned. An identity,
  * not a count: older history loading above the reader is never "new".

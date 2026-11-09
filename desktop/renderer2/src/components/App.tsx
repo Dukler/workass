@@ -1,7 +1,7 @@
 import { useEffect, useInsertionEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
-import { chatPane } from '../store/right-pane';
+import { chatPane, PANE_SLIDE_MS, railSlides } from '../store/right-pane';
 import { SidebarV2 } from './SidebarV2';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -91,9 +91,25 @@ export function App() {
   // a passive effect leaves the old chat's columns in place for that first read.
   // Custom drag widths drive CSS vars the grid templates consume; rail-wide folds
   // into the effective rail width so ⤢ composes with a custom width.
+  // The info rail slides open and shut in the same chat (#root.pane-anim);
+  // a chat switch, a drag, a window resize and the browser stay instant.
+  const paneSlide = useRef<{ chatId: string | null; pane: typeof activePane; until: number; timer: ReturnType<typeof setTimeout> | null }>({
+    chatId: null, pane: null, until: 0, timer: null,
+  });
   useInsertionEffect(() => {
     const root = document.getElementById('root');
     if (!root) return;
+    const slide = paneSlide.current;
+    const chatId = chat?.id ?? null;
+    if (slide.chatId === chatId && railSlides(slide.pane, activePane)) {
+      slide.until = performance.now() + PANE_SLIDE_MS;
+      if (slide.timer) clearTimeout(slide.timer);
+      slide.timer = setTimeout(() => { slide.timer = null; root.classList.remove('pane-anim'); }, PANE_SLIDE_MS + 30);
+    } else if (slide.chatId !== chatId) {
+      slide.until = 0;
+    }
+    slide.chatId = chatId;
+    slide.pane = activePane;
     root.style.setProperty('--side-w', `${app.panes.sideW}px`);
     const railBase = app.panes.railWide ? Math.max(app.panes.railW, 470) : app.panes.railW;
     // Never let the (shared, drag-persisted) right pane grow so wide it shoves the
@@ -114,8 +130,9 @@ export function App() {
     } else {
       cls.push('no-rail');
     }
+    if (performance.now() < slide.until) cls.push('pane-anim');
     root.className = cls.join(' ');
-  }, [app.panes.side, app.panes.railWide, app.panes.sideW, app.panes.railW, app.settingsOpen, activePane, winW]);
+  }, [app.panes.side, app.panes.railWide, app.panes.sideW, app.panes.railW, app.settingsOpen, activePane, winW, chat?.id]);
 
   // ⌘, opens the command box (user, 2026-07-26 — after a promotion left the app
   // running but not the controller with no in-app way out). Ajustes moved into

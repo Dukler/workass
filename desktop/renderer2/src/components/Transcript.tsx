@@ -19,6 +19,7 @@ import { CHAT_MESSAGE_TAIL } from '../chat/residency';
 import { forkStore } from '../store/forks';
 import {
   newMessagesSince, recallTranscriptView, recordUnitHeights, rememberTranscriptView, transcriptAnchorAt, transcriptAnchorDepth,
+  anchorBlockAt, ANCHOR_HOLD_SLACK_PX,
   transcriptRestoredScrollTop, transcriptRestoreStep, transcriptWindow, transcriptWindowStale,
   TRANSCRIPT_LOAD_AHEAD_PX, type MeasuredUnit, type TranscriptAnchor, type TranscriptRestore, type TranscriptView, type TranscriptWindow,
 } from '../transcript-window';
@@ -273,6 +274,11 @@ function EmptyChat({ chat }: { chat: Chat | null }) {
 // The first and last elements of a transcript unit that generate a box. Units
 // and their message wrappers are display:contents, so the spacing between
 // messages (collapsed margins) is exactly what it was before windowing.
+// Inline content moves with its block, so the anchor descent stops above it.
+function isInlineBox(node: Element): boolean {
+  return getComputedStyle(node).display.startsWith('inline');
+}
+
 function firstBox(parent: Element): Element | null {
   for (const child of parent.children) {
     if (child.getClientRects().length > 0) return child;
@@ -543,12 +549,19 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     const doc = docRef.current;
     if (!el || !doc || restoring.current || stick.current) return;
+    // This runs in an animation frame, after that frame's animations have
+    // moved the layout (a pane sliding narrows the transcript every frame).
+    // Re-reading the held element's place first would adopt that shift as its
+    // new baseline, and the resize callback would then find nothing to undo:
+    // the reader's line drifted hundreds of px while the pane slid open (user
+    // 2026-11-08). Undo the shift, then look.
+    holdAnchor();
     const viewport = el.getBoundingClientRect();
     const line = viewport.top + 1;
     const held = anchorNode.current;
     if (held && held.node.isConnected && doc.contains(held.node)) {
       const box = held.node.getBoundingClientRect();
-      if (box.top <= line && box.bottom > line && box.height <= viewport.height) {
+      if (box.top <= line + ANCHOR_HOLD_SLACK_PX && box.bottom > line && box.height <= viewport.height) {
         held.contentTop = box.top - viewport.top + el.scrollTop;
         return;
       }
@@ -556,9 +569,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const hit = typeof document.elementFromPoint === 'function'
       ? document.elementFromPoint(viewport.left + viewport.width / 2, line)
       : null;
-    anchorNode.current = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
-      ? { node: hit, contentTop: hit.getBoundingClientRect().top - viewport.top + el.scrollTop }
+    const node = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
+      ? anchorBlockAt(hit, line, isInlineBox)
       : null;
+    anchorNode.current = node ? { node, contentTop: node.getBoundingClientRect().top - viewport.top + el.scrollTop } : null;
   };
   const recordAnchor = () => {
     const el = scrollRef.current;

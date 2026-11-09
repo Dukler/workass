@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
-import { chatPane } from '../store/right-pane';
+import { chatPane, PANE_SLIDE_MS } from '../store/right-pane';
 import { IcExpand, IcClose } from '../icons';
 import { TareasCard, trabajosModel } from './TareasCard';
 import { BrowserPanel } from './BrowserPanel';
@@ -15,11 +15,26 @@ import { RAIL_TABS, railTab, setRailTab, type RailTab } from '../rail-view';
 export function RightRail({ chat }: { chat: Chat | null }) {
   const app = useApp();
   const pane = chatPane(chat);
+  // Closing the rail slides its column shut (App: #root.pane-anim), so the
+  // rail stays drawn while it slides out instead of leaving an empty band.
+  // This component is keyed per chat, so a chat switch never holds it.
+  const lastPane = useRef(pane);
+  const [sliding, setSliding] = useState(false);
+  useLayoutEffect(() => {
+    const was = lastPane.current;
+    lastPane.current = pane;
+    if (was === 'rail' && pane === null) {
+      setSliding(true);
+      const timer = setTimeout(() => setSliding(false), PANE_SLIDE_MS);
+      return () => clearTimeout(timer);
+    }
+    setSliding(false);
+  }, [pane]);
 
   // A closed per-chat pane owns no hidden work. Keeping the rail mounted behind
   // CSS left its activity subscription, tool sorting and one-second timers live
   // while the user could not see any of it.
-  if (!pane) return null;
+  if (!pane && !sliding) return null;
 
   // Browser mode (own titlebar toggle, 2026-07-12): the right column becomes the
   // live browser — its own frame, no rail chrome. Electron-only; a client without
