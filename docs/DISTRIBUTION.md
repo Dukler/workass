@@ -131,14 +131,37 @@ release (`stageInBackground`, 2026-11-09): Workass stays open while the release
 downloads, verifies and stages, and the click then only does steps 4–7, the
 handoff, swap and relaunch. A background attempt that fails returns to the
 plain offer and is not retried for that version; the click runs the whole path.
-The staged release lives in memory, so a restart before the click stages it
-again. Windows keeps doing steps 1–3 after the click.
+Windows keeps doing steps 1–3 after the click.
 
-The UI exposes this through the same compact sidebar update card used for
-provider updates; it does not add a separate Settings section. Workass never
-installs or schedules an install on its own. A user click updates immediately
-regardless of running work. `workass_apply_update` takes the exact machine, the
-expected versions and a stable operation id.
+A staged Mac release survives a restart. `staged.json` in its transaction
+directory names it; on launch the shell keeps it out of startup cleanup and
+believes nothing in that file as written: the ids and paths must be this
+installation's, the manifest must verify against the pinned keys and still be
+newer than the running version, and the staged app must still be there. Then
+the platform verification staging ran (signature, mutual designated
+requirement, version, bundled daemon) runs again off the main thread, and the
+worker runtime is copied again from that app and self-tested. Only then is it
+ready; anything that fails is removed and the next check stages again. A
+directory an install began from (it has `transaction.json`) is left to
+recovery. While a release waits staged, discovery keeps running, and a newer
+release replaces it (staged again) rather than the older one installing.
+
+The UI exposes this through the left panel's update icon and Ajustes ·
+Actualizaciones, both driving the same updater with the same single
+"Actualizar". A user click updates immediately regardless of running work.
+Otherwise Workass installs nothing on its own unless the owner turns on
+"Instalar solo" (settings key `autoInstallUpdates`, off by default, Mac only).
+Then a staged release installs by itself only while nothing would be cut: the
+shell first reads `POST /workass/update/work` (loopback, changes nothing) and
+asks for the handoff only when it is quiet, and backs off again unless the
+handoff's own counts, taken with admission closed, are all zero. It never
+installs over a turn, subagent, background task, job, agent update or starting
+operation; it waits and asks again a minute later. An unattended install shows
+its progress window and relaunches without taking focus. A release adopted
+after a restart waits for one discovery first, so a newer one can replace it.
+`workass_apply_update` takes the exact machine, the expected versions and a
+stable operation id; Ajustes · Actualizaciones uses the same exact-machine
+route for "Actualizar <máquina>".
 
 ### Release manifest signature
 

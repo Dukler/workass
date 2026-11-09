@@ -460,6 +460,10 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"jobs":               defaultJobSettings(),
 		// Ajustes · Permisos (agent_permissions.go).
 		agentPermissionsSettingsKey: normalizeAgentPermissions(nil),
+		// Ajustes · Actualizaciones "Instalar solo": the Mac shell installs a
+		// staged Workass release by itself only while nothing would be cut. Off
+		// unless the owner turns it on.
+		"autoInstallUpdates": false,
 	}
 	next[agentToolGroupsOffKey] = []any{}
 	applyGeneralSettings(next, input)
@@ -498,6 +502,9 @@ func normalizeSettings(input map[string]any) map[string]any {
 	next["jobs"] = normalizeJobSettings(input["jobs"])
 	next[agentToolGroupsOffKey] = normalizeToolGroupsOff(input[agentToolGroupsOffKey])
 	next[agentPermissionsSettingsKey] = normalizeAgentPermissions(input[agentPermissionsSettingsKey])
+	if v, ok := input["autoInstallUpdates"].(bool); ok {
+		next["autoInstallUpdates"] = v
+	}
 	return next
 }
 

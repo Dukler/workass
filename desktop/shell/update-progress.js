@@ -379,8 +379,13 @@ async function runUpdateProgressProcess({
   win.webContents.setWindowOpenHandler?.(() => ({ action: 'deny' }));
   try {
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(progressHTML())}`);
-    win.show();
-    win.focus();
+    // Nobody clicked an unattended install ("Instalar solo"): stay visible,
+    // but never take focus from what the owner is typing into.
+    if (transaction.unattended === true && typeof win.showInactive === 'function') win.showInactive();
+    else {
+      win.show();
+      win.focus();
+    }
     if (!win.isVisible()) throw new Error('the Workass update progress window did not become visible');
   } catch (err) {
     dispose();

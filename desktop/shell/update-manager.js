@@ -31,6 +31,15 @@ const MAX_UPDATE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 120000;
 const DEFAULT_INITIAL_CHECK_DELAY_MS = 15_000;
 const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+// "Instalar solo": how long after a release is staged (or the setting is turned
+// on) the first unattended attempt waits, and how often it asks again while
+// work is running.
+const AUTO_INSTALL_SETTLE_MS = 10_000;
+const AUTO_INSTALL_RETRY_MS = 60_000;
+const AUTO_INSTALL_RELEASE_RETRIES = 10;
+// Beside a staged (not yet installing) macOS release: what it takes to believe
+// it again after a restart, once it is verified again.
+const STAGED_RELEASE_FILE = 'staged.json';
 const DEFAULT_WORKER_ARM_TIMEOUT_MS = 15_000;
 const DEFAULT_WORKER_ARM_POLL_MS = 25;
 const MAX_PROGRESS_CLEANUP_RETRIES = 4;
@@ -853,12 +862,34 @@ function stageAndVerifyRelease(rawRequest, dependencies = {}) {
   return { designatedRequirement: String(designatedRequirement || '') };
 }
 
-function runUpdateStageWorker(request, { WorkerClass = Worker, workerFile = __filename } = {}) {
+// A release staged before a restart is believed again only after the same
+// platform verification staging ran (verifyRelease), off Electron main.
+function validateStagedVerifyRequest(request) {
+  if (!request || request.schemaVersion !== 1 || request.platform !== 'darwin' || !parseVersion(request.targetVersion)) {
+    throw new Error('invalid staged update verification request');
+  }
+  for (const key of ['currentRoot', 'incomingTarget']) {
+    if (!path.isAbsolute(String(request[key] || ''))) throw new Error(`staged update ${key} must be absolute`);
+  }
+  if (path.dirname(request.incomingTarget) !== path.dirname(request.currentRoot) ||
+      !path.basename(request.incomingTarget).startsWith('.Workass.app.incoming-')) {
+    throw new Error('a staged macOS release must stay beside the installed app');
+  }
+  return request;
+}
+
+function verifyStagedRelease(rawRequest, { verify = verifyRelease } = {}) {
+  const request = validateStagedVerifyRequest(rawRequest);
+  const designatedRequirement = verify(request.currentRoot, request.incomingTarget, request.targetVersion, request.platform, request.arch);
+  return { designatedRequirement: String(designatedRequirement || '') };
+}
+
+function runUpdateStageWorker(request, { WorkerClass = Worker, workerFile = __filename, task = 'stage-update' } = {}) {
   return new Promise((resolve, reject) => {
     let thread;
     try {
       thread = new WorkerClass(workerFile, {
-        workerData: { workassTask: 'stage-update', request },
+        workerData: { workassTask: task, request },
       });
     } catch (err) {
       reject(err);
@@ -1289,6 +1320,8 @@ function updateDiagnosticRecord(value, fields) {
       out[field] = updateDiagnosticRecord(item, [
         'reason', 'foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions', 'daemonUnavailable',
       ]);
+    } else if (field === 'autoInstall') {
+      out[field] = updateDiagnosticRecord(item, ['supported', 'enabled', 'waiting']);
     }
   }
   return out;
@@ -1377,6 +1410,21 @@ function interruptedWorkFromReadiness(readiness, { daemonUnavailable = false } =
     admissions: Math.min(boundedCount('admissions'), 1_000_000),
     ...(daemonUnavailable ? { daemonUnavailable: true } : {}),
   };
+}
+
+// An unattended install may only go ahead on a handoff the daemon granted with
+// every count stated and zero: anything else, including a reply that does not
+// say (an older daemon, a repeated prepare, a lost reply), is work it might cut.
+const WORK_COUNT_FIELDS = ['foregroundTurns', 'backgroundWork', 'providerUpdates', 'admissions'];
+
+function handoffCutsNothing(reply) {
+  if (reply?.status !== 200 || reply.body?.ready !== true) return false;
+  return WORK_COUNT_FIELDS.every((field) => reply.body[field] === 0);
+}
+
+function workReadIsQuiet(reply) {
+  return reply?.status === 200 && reply.body?.quiet === true &&
+    WORK_COUNT_FIELDS.every((field) => reply.body[field] === 0);
 }
 
 function interruptedWorkForReceipt(value) {
@@ -1790,6 +1838,10 @@ class UpdateManager {
     // Stage a discovered release in the background (prestage), so a click
     // only hands off, swaps and relaunches. Off unless the app turns it on.
     stageInBackground = false,
+    // "Instalar solo": install a staged release by itself while nothing would
+    // be cut. Needs background staging. The renderer sets it from the owner's
+    // setting (setAutoInstall); off until then.
+    autoInstall = false,
     executablePath = process.execPath,
     currentVersion = '',
     platform = process.platform,
@@ -1835,6 +1887,7 @@ class UpdateManager {
       spawn,
       spawnNativeInstaller: (plan) => spawnNativeWindowsInstaller(plan),
       stageAndVerify: runUpdateStageWorker,
+      verifyStaged: (request) => runUpdateStageWorker(request, { task: 'verify-staged-update' }),
       schedule: setTimeout,
       cancelSchedule: clearTimeout,
       repeat: setInterval,
@@ -1869,6 +1922,19 @@ class UpdateManager {
     this.stageInBackground = stageInBackground === true;
     this.prestagePromise = null;
     this.prestageFailedVersion = '';
+    this.autoInstall = autoInstall === true;
+    this.autoInstallTimer = null;
+    this.autoInstallPromise = null;
+    this.autoInstallWaiting = false;
+    this.unattendedApply = null;
+    this.clickedDuringUnattended = false;
+    // A release staged before the last restart (staged.json), protected from
+    // startup cleanup while it is verified again, and the verification itself.
+    this.stagedCandidate = null;
+    this.stagedRecoveryPromise = null;
+    // An adopted release waits for one discovery before it may install by
+    // itself, so a newer release replaces it instead of an old one installing.
+    this.stagedNeedsDiscovery = false;
     this.activeOperation = null;
     this.discoveryPromise = null;
     this.applyPromise = null;
@@ -1892,6 +1958,7 @@ class UpdateManager {
       blockers: null,
       receipt: null,
       availableVersion: null,
+      autoInstall: { supported: false, enabled: this.autoInstall, waiting: false },
     };
   }
 
@@ -1932,7 +1999,7 @@ class UpdateManager {
       schemaVersion: 1,
       state: updateDiagnosticRecord(state, [
         'supported', 'phase', 'currentVersion', 'targetVersion', 'availableVersion',
-        'checkedAt', 'progress', 'error', 'blockers',
+        'checkedAt', 'progress', 'error', 'blockers', 'autoInstall',
       ]),
       receipt: updateDiagnosticRecord(receipt, [
         'schemaVersion', 'updateId', 'phase', 'previousVersion', 'targetVersion', 'installedVersion',
@@ -2211,7 +2278,9 @@ class UpdateManager {
       this.transactionCleanupQueued = true;
       return this.transactionCleanupPromise;
     }
-    const protectedUpdateIds = [this.prepared?.updateId, this.activeDownloadUpdateId, this.watchedUpdateId].filter(Boolean);
+    const protectedUpdateIds = [
+      this.prepared?.updateId, this.activeDownloadUpdateId, this.watchedUpdateId, this.stagedCandidate?.updateId,
+    ].filter(Boolean);
     const operation = Promise.resolve().then(() => this.deps.cleanupUpdateTransactions({
       transactionsRoot: path.join(this.updateRoot, 'transactions'),
       platform: this.platform,
@@ -2278,7 +2347,15 @@ class UpdateManager {
       phase: supported ? 'idle' : 'unavailable',
       error: supported ? null : unsupportedReason,
       receipt: null,
+      autoInstall: {
+        supported: supported && this.stageInBackground && this.platform !== 'win32',
+        enabled: this.autoInstall,
+        waiting: false,
+      },
     });
+    // Found before startup cleanup runs, so cleanup leaves it alone while it is
+    // verified again (adoptOrDiscardStaged, below).
+    if (supported && this.platform === 'darwin') this.stagedCandidate = this.findStagedRelease();
     let storedReceipt = null;
     let cleanupRequested = false;
     try {
@@ -2312,6 +2389,196 @@ class UpdateManager {
       }
     } catch { /* no prior transaction */ }
     if (!cleanupRequested) this.requestTransactionCleanup(storedReceipt);
+    this.adoptOrDiscardStaged();
+    return this.snapshot();
+  }
+
+  // A macOS release staged in the background survives a restart (owner
+  // 2026-11-09): download() leaves staged.json beside it. Nothing in that file
+  // is believed as written. The ids and paths must be this installation's own,
+  // the manifest must verify against the pinned keys and still be newer than
+  // what runs, and the staged app must still be there; adoptOrDiscardStaged
+  // then runs the platform verification again before calling it ready.
+  findStagedRelease() {
+    let entries;
+    try { entries = fs.readdirSync(path.join(this.updateRoot, 'transactions'), { withFileTypes: true }); }
+    catch { return null; }
+    let best = null;
+    const stale = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{8,96}$/.test(entry.name)) continue;
+      const transactionRoot = path.join(this.updateRoot, 'transactions', entry.name);
+      const staged = readJSONFile(path.join(transactionRoot, STAGED_RELEASE_FILE));
+      // An install that began owns its directory: recovery decides, not this.
+      if (!staged || fs.existsSync(path.join(transactionRoot, 'transaction.json'))) continue;
+      const candidate = this.stagedReleaseFrom(entry.name, staged);
+      if (!candidate) { stale.push(entry.name); continue; }
+      if (best && compareVersions(best.release.version, candidate.release.version) >= 0) { stale.push(candidate.updateId); continue; }
+      if (best) stale.push(best.updateId);
+      best = candidate;
+    }
+    for (const updateId of stale) void this.discardStaged(updateId);
+    return best;
+  }
+
+  stagedReleaseFrom(updateId, staged) {
+    try {
+      if (staged.schemaVersion !== 1 || staged.updateId !== updateId ||
+          staged.installationId !== this.installationIdentity?.installationId ||
+          path.resolve(String(staged.installTarget || '')) !== path.resolve(this.installTarget)) return null;
+      const validated = validateReleaseManifest(staged.manifest, { platform: this.platform, arch: this.arch });
+      this.verifyReleaseSignature(validated);
+      const release = snapshotReleaseManifest(validated);
+      if (release.version !== staged.targetVersion || compareVersions(this.currentVersion, release.version) >= 0) return null;
+      const parent = path.dirname(this.installTarget);
+      const incomingTarget = path.join(parent, `.Workass.app.incoming-${updateId}`);
+      if (!fs.statSync(incomingTarget, { throwIfNoEntry: false })?.isDirectory()) return null;
+      return {
+        updateId,
+        release,
+        transactionRoot: path.join(this.updateRoot, 'transactions', updateId),
+        incomingTarget,
+        backupTarget: path.join(parent, `.Workass.app.previous-${updateId}`),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  rememberStagedRelease(prepared) {
+    try {
+      atomicJSON(path.join(prepared.transactionRoot, STAGED_RELEASE_FILE), {
+        schemaVersion: 1,
+        updateId: prepared.updateId,
+        installationId: prepared.installationId,
+        installTarget: prepared.installTarget,
+        stagedBy: this.currentVersion,
+        targetVersion: prepared.targetVersion,
+        manifest: prepared.release,
+        stagedAt: new Date().toISOString(),
+      });
+    } catch { /* it stays staged in memory; a restart stages it again */ }
+  }
+
+  // Removes a staged release that will not be used: its app beside the
+  // installed one and its directory. Never one in use or one an install began
+  // from.
+  async discardStaged(updateId) {
+    if (!/^[A-Za-z0-9_-]{8,96}$/.test(String(updateId || '')) || this.prepared?.updateId === updateId) return;
+    const transactionRoot = path.join(this.updateRoot, 'transactions', updateId);
+    if (fs.existsSync(path.join(transactionRoot, 'transaction.json'))) return;
+    const incomingTarget = path.join(path.dirname(this.installTarget), `.Workass.app.incoming-${updateId}`);
+    for (const target of [incomingTarget, transactionRoot]) {
+      try { await fs.promises.rm(target, { recursive: true, force: true }); }
+      catch { /* a later launch retries */ }
+    }
+  }
+
+  adoptOrDiscardStaged() {
+    const candidate = this.stagedCandidate;
+    if (!candidate) return;
+    const before = this.snapshot();
+    if (!['idle', 'healthy', 'installed'].includes(before.phase)) {
+      // A failed or unfinished update is what the owner needs to see now; the
+      // newer release is offered again by discovery.
+      this.stagedCandidate = null;
+      void this.discardStaged(candidate.updateId);
+      return;
+    }
+    const release = candidate.release;
+    const operation = (async () => {
+      this.publish({ phase: 'staging', targetVersion: release.version, availableVersion: null, progress: 1, error: null });
+      const verified = await this.deps.verifyStaged({
+        schemaVersion: 1,
+        platform: this.platform,
+        arch: this.arch,
+        currentRoot: this.installTarget,
+        incomingTarget: candidate.incomingTarget,
+        targetVersion: release.version,
+      });
+      // The worker runtime is copied again from the app just verified, and
+      // self-tested, exactly as staging does.
+      const targetAppCode = incomingAppCode(candidate.incomingTarget, this.platform);
+      const runtime = await this.deps.prepareWorkerRuntime({
+        transactionRoot: candidate.transactionRoot,
+        workerSource: path.join(targetAppCode, 'update-worker.js'),
+        progressSource: path.join(targetAppCode, 'update-progress.js'),
+        nodeSource: incomingNode(candidate.incomingTarget, this.platform, this.arch),
+        platform: this.platform,
+      });
+      if (this.state.phase !== 'staging' || this.prepared || this.activeOperation) {
+        throw new Error('the updater moved on while the staged release was verified again');
+      }
+      this.manifest = release;
+      this.prepared = {
+        updateId: candidate.updateId,
+        transactionRoot: candidate.transactionRoot,
+        installTarget: this.installTarget,
+        incomingTarget: candidate.incomingTarget,
+        backupTarget: candidate.backupTarget,
+        designatedRequirement: String(verified?.designatedRequirement || ''),
+        installationId: this.installationIdentity.installationId,
+        targetVersion: release.version,
+        artifact: release.artifacts.update,
+        release,
+        workerPath: runtime.workerPath,
+        progressModulePath: runtime.progressModulePath,
+        nodePath: runtime.nodePath,
+        progressExecutable: path.join(candidate.incomingTarget, 'Contents', 'MacOS', 'Workass'),
+      };
+      this.stagedNeedsDiscovery = true;
+      return this.publish({
+        phase: 'ready',
+        targetVersion: release.version,
+        availableVersion: null,
+        progress: 1,
+        error: null,
+        notes: String(release.notes || ''),
+        size: release.artifacts.update.size,
+      });
+    })().catch(async () => {
+      await this.discardStaged(candidate.updateId);
+      if (this.state.phase === 'staging' && !this.prepared) {
+        return this.publish({ phase: before.phase, targetVersion: before.targetVersion, progress: before.progress, error: before.error });
+      }
+      return this.snapshot();
+    });
+    this.stagedRecoveryPromise = operation;
+    void operation.finally(() => {
+      if (this.stagedRecoveryPromise === operation) this.stagedRecoveryPromise = null;
+      if (this.stagedCandidate === candidate) this.stagedCandidate = null;
+    });
+  }
+
+  // While a staged release waits for its click, discovery keeps running: a
+  // newer release replaces it (staged again in the background) rather than an
+  // older one installing.
+  async restageIfNewer() {
+    let state;
+    try { state = await this.check({ background: true }); }
+    catch { state = this.snapshot(); }
+    this.stagedNeedsDiscovery = false;
+    const staged = this.prepared;
+    const newer = state.availableVersion;
+    if (!staged || this.state.phase !== 'ready' || !newer || compareVersions(newer, staged.targetVersion) <= 0 ||
+        !this.manifest || this.manifest.version !== newer ||
+        this.applyPromise || this.activeOperation || this.autoInstallPromise) {
+      if (this.state.phase === 'ready' && !this.autoInstallTimer) this.scheduleAutoInstall(AUTO_INSTALL_SETTLE_MS);
+      return this.snapshot();
+    }
+    this.cancelAutoInstall();
+    this.prepared = null;
+    this.publish({
+      phase: 'available',
+      targetVersion: newer,
+      availableVersion: newer,
+      progress: 0,
+      error: null,
+      notes: String(this.manifest.notes || ''),
+      size: this.manifest.artifacts.update.size,
+    });
+    await this.discardStaged(staged.updateId);
+    if (this.state.phase === 'available') void this.prestage();
     return this.snapshot();
   }
 
@@ -2881,7 +3148,8 @@ class UpdateManager {
   }
 
   async autoCheck() {
-    if (!this.state.supported || this.activeOperation) return this.snapshot();
+    if (!this.state.supported || this.activeOperation || this.stagedRecoveryPromise) return this.snapshot();
+    if (this.stageInBackground && this.state.phase === 'ready' && this.prepared) return this.restageIfNewer();
     // A plain offer has no downloaded payload and may advance to a newer
     // release. Once download/staging begins, that exact transaction is pinned.
     if (!['idle', 'current', 'available', 'healthy', 'installed', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
@@ -2915,8 +3183,133 @@ class UpdateManager {
     this.prestagePromise = operation;
     void operation.finally(() => {
       if (this.prestagePromise === operation) this.prestagePromise = null;
+      if (this.state.phase === 'ready') this.scheduleAutoInstall(AUTO_INSTALL_SETTLE_MS);
     });
     return operation;
+  }
+
+  // "Instalar solo" (Ajustes · Actualizaciones, owner 2026-11-09). With it on,
+  // a release staged in the background installs by itself, but only while
+  // nothing would be cut: no turn, subagent, background task, job, agent update
+  // or starting operation. Otherwise it waits and asks again. It never installs
+  // over work, which is the whole difference from a click.
+  autoInstallSupported() {
+    return this.state.supported === true && this.stageInBackground && this.platform !== 'win32';
+  }
+
+  publishAutoInstall() {
+    return this.publish({
+      autoInstall: {
+        supported: this.autoInstallSupported(),
+        enabled: this.autoInstall,
+        waiting: this.autoInstall && this.autoInstallWaiting,
+      },
+    });
+  }
+
+  setAutoInstall(enabled) {
+    this.autoInstall = enabled === true;
+    this.autoInstallWaiting = false;
+    if (this.autoInstall) this.scheduleAutoInstall(AUTO_INSTALL_SETTLE_MS);
+    else this.cancelAutoInstall();
+    return this.publishAutoInstall();
+  }
+
+  cancelAutoInstall() {
+    if (this.autoInstallTimer) this.deps.cancelSchedule(this.autoInstallTimer);
+    this.autoInstallTimer = null;
+  }
+
+  scheduleAutoInstall(delayMs = AUTO_INSTALL_RETRY_MS) {
+    if (!this.autoInstall || !this.autoInstallSupported()) return;
+    this.cancelAutoInstall();
+    this.autoInstallTimer = this.deps.schedule(() => {
+      this.autoInstallTimer = null;
+      void this.autoInstallWhenQuiet();
+    }, delayMs);
+    this.autoInstallTimer?.unref?.();
+  }
+
+  // Whether an unattended attempt may start now: the setting is on, a verified
+  // release is staged, and nothing else owns the updater.
+  autoInstallMayStart() {
+    return this.autoInstall && this.autoInstallSupported() && this.state.phase === 'ready' && !!this.prepared &&
+      !this.applyPromise && !this.activeOperation && !this.prestagePromise && !this.discoveryPromise &&
+      !this.recoveryPromise && !this.stagedRecoveryPromise && !this.stagedNeedsDiscovery;
+  }
+
+  autoInstallWait() {
+    this.autoInstallWaiting = true;
+    this.publishAutoInstall();
+    this.scheduleAutoInstall(AUTO_INSTALL_RETRY_MS);
+    return this.snapshot();
+  }
+
+  // One unattended attempt. A read that changes nothing comes first, so a busy
+  // daemon is never fenced just to be asked; the handoff, which closes
+  // admission, is requested only after a quiet answer, and install() backs off
+  // again unless the handoff's own count is zero too.
+  autoInstallWhenQuiet() {
+    if (this.autoInstallPromise) return this.autoInstallPromise;
+    const attempt = (async () => {
+      if (!this.autoInstallMayStart()) return this.snapshot();
+      let work;
+      try { work = await this.deps.postLocalUpdate(this.runtime.daemonURL, 'work', 'auto-install-work'); }
+      catch { work = { status: 0, body: {} }; }
+      if (!this.autoInstallMayStart()) return this.snapshot();
+      if (!workReadIsQuiet(work)) return this.autoInstallWait();
+      const operation = this.install({ unattended: true }).catch((err) => this.settleApplyError(err));
+      this.applyPromise = operation;
+      this.unattendedApply = operation;
+      let state;
+      try { state = await operation; }
+      finally {
+        if (this.applyPromise === operation) this.applyPromise = null;
+        if (this.unattendedApply === operation) this.unattendedApply = null;
+      }
+      if (this.clickedDuringUnattended) {
+        // A click that arrived while this attempt held the updater still gets
+        // its update, work or not, as a click always does.
+        this.clickedDuringUnattended = false;
+        if (state.phase === 'ready') return this.startApply();
+      }
+      return state;
+    })();
+    this.autoInstallPromise = attempt;
+    void attempt.finally(() => {
+      if (this.autoInstallPromise === attempt) this.autoInstallPromise = null;
+    });
+    return attempt;
+  }
+
+  // The handoff found work, or did not say: give the daemon its admission back
+  // and leave the release staged exactly as download() left it, for the next
+  // attempt or a click. Nothing durable says an update began, so a restart
+  // never resumes this one.
+  async withdrawUnattendedInstall(transaction, reply) {
+    if (reply?.status === 200 || reply?.status === 0) {
+      if (reply.status === 200) writeHandoffState(transaction, 'prepared');
+      let released = false;
+      for (let attempt = 0; attempt < AUTO_INSTALL_RELEASE_RETRIES && !released; attempt += 1) {
+        try { released = await this.releasePreparedHandoff(transaction); }
+        catch (err) {
+          if (err?.code !== 'WORKASS_UPDATE_CANCEL_UNCONFIRMED') throw err;
+          await new Promise((resolve) => { this.deps.schedule(resolve, 1000)?.unref?.(); });
+        }
+      }
+      if (!released) {
+        // Still never installs over work. The fence ends with the daemon
+        // process at the latest; say so instead of retrying forever.
+        this.autoInstallWaiting = true;
+        this.publishAutoInstall();
+        return this.publish({
+          phase: 'ready',
+          error: 'Workass could not confirm that the daemon reopened admission after an automatic update check',
+        });
+      }
+    }
+    try { fs.rmSync(handoffPathForTransaction(transaction), { force: true }); } catch { /* the next attempt rewrites it */ }
+    return this.autoInstallWait();
   }
 
   startAutoChecks({
@@ -3034,6 +3427,7 @@ class UpdateManager {
           ? path.join(incomingTarget, 'Contents', 'MacOS', 'Workass')
           : path.join(incomingTarget, 'Workass.exe'),
       };
+      if (this.platform === 'darwin') this.rememberStagedRelease(this.prepared);
       return this.publish({ phase: 'ready', targetVersion: release.version, progress: 1, error: null });
     } catch (err) {
       const cleanupErrors = [];
@@ -3062,7 +3456,10 @@ class UpdateManager {
     }
   }
 
-  async install() {
+  // unattended: an "Instalar solo" attempt (autoInstallWhenQuiet). It asks for
+  // the handoff before anything durable is written and goes ahead only if the
+  // handoff cuts nothing; otherwise it backs off with the release still staged.
+  async install({ unattended = false } = {}) {
     this.beginOperation('install');
     try {
     if (!this.prepared || !['ready', 'busy'].includes(this.state.phase)) throw new Error('the verified Workass update is not ready');
@@ -3119,11 +3516,21 @@ class UpdateManager {
       daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
       shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,
       requireVisibleWindow: true,
+      // Nobody clicked: the progress window and the relaunched app show
+      // without taking focus from whatever the owner is doing.
+      ...(unattended ? { unattended: true } : {}),
       designatedRequirement: prepared.designatedRequirement,
       launchAgentPath: this.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${this.runtime.launchdLabel}.plist`) : '',
       launchdDomain: this.platform === 'darwin' && typeof process.getuid === 'function' ? `gui/${process.getuid()}` : '',
     };
     const transactionPath = path.join(prepared.transactionRoot, 'transaction.json');
+    let preparedReply = null;
+    if (unattended) {
+      writeHandoffState(transaction, 'intent');
+      preparedReply = await this.prepareHandoff(prepared.updateId);
+      if (!handoffCutsNothing(preparedReply)) return await this.withdrawUnattendedInstall(transaction, preparedReply);
+      this.autoInstallWaiting = false;
+    }
     atomicJSON(transactionPath, transaction);
     atomicJSON(transaction.journalPath, {
       schemaVersion: 1,
@@ -3158,8 +3565,10 @@ class UpdateManager {
       updatedAt: new Date().toISOString(),
     });
 
-    writeHandoffState(transaction, 'intent');
-    const preparedReply = await this.prepareHandoff(prepared.updateId);
+    if (!unattended) {
+      writeHandoffState(transaction, 'intent');
+      preparedReply = await this.prepareHandoff(prepared.updateId);
+    }
     if (preparedReply.status === 409) {
       return this.publish({ phase: 'busy', blockers: preparedReply.body, error: null });
     }
@@ -3287,6 +3696,9 @@ class UpdateManager {
   // methods remain separate for recovery/tests, but the renderer never asks the
   // user to click once to stage and again to activate the same verified release.
   async apply() {
+    // A click right after launch waits for the release staged before the
+    // restart to be verified again, rather than downloading it a second time.
+    if (this.stagedRecoveryPromise) await this.stagedRecoveryPromise;
     if (this.discoveryPromise) await this.discoveryPromise;
     // A click while the release is still downloading in the background waits
     // for that download instead of starting a second one, then installs it.
@@ -3314,20 +3726,17 @@ class UpdateManager {
   // the one owned apply operation and immediately return the first running
   // snapshot (download() publishes it before its first network await).
   startApply() {
-    if (this.applyPromise) return this.snapshot();
+    if (this.applyPromise) {
+      // An unattended attempt holds the updater for a moment; a click that
+      // lands then runs right after it if that attempt backed off.
+      if (this.applyPromise === this.unattendedApply) this.clickedDuringUnattended = true;
+      return this.snapshot();
+    }
     // A busy retry is a short readiness refresh, not a download. Let its IPC
     // resolve with the newly measured blockers; returning the old snapshot can
     // race the state event and overwrite the fresh result in the renderer.
     const waitForBusyRefresh = this.state.phase === 'busy';
-    const operation = this.apply().catch((err) => {
-      if (err?.code === 'WORKASS_UPDATE_CANCEL_UNCONFIRMED') {
-        const receipt = readJSONFile(this.receiptPath) || this.state.receipt;
-        this.publish({ phase: 'installing', receipt, error: String(err && err.message || err) });
-        if (receipt?.updateId) this.scheduleReceiptRecovery(receipt);
-        return this.snapshot();
-      }
-      return this.publish({ phase: 'failed', error: String(err && err.message || err) });
-    });
+    const operation = this.apply().catch((err) => this.settleApplyError(err));
     this.applyPromise = operation;
     void operation.then(() => {
       if (this.applyPromise === operation) this.applyPromise = null;
@@ -3335,8 +3744,19 @@ class UpdateManager {
     return waitForBusyRefresh ? operation : this.snapshot();
   }
 
+  settleApplyError(err) {
+    if (err?.code === 'WORKASS_UPDATE_CANCEL_UNCONFIRMED') {
+      const receipt = readJSONFile(this.receiptPath) || this.state.receipt;
+      this.publish({ phase: 'installing', receipt, error: String(err && err.message || err) });
+      if (receipt?.updateId) this.scheduleReceiptRecovery(receipt);
+      return this.snapshot();
+    }
+    return this.publish({ phase: 'failed', error: String(err && err.message || err) });
+  }
+
   dispose() {
     this.stopAutoChecks();
+    this.cancelAutoInstall();
     if (this.receiptTimer) this.deps.cancelRepeat(this.receiptTimer);
     this.receiptTimer = null;
     this.watchedUpdateId = '';
@@ -3396,6 +3816,7 @@ module.exports = {
   validateReleaseManifest,
   verifyRelease,
   verifyMacRelease,
+  verifyStagedRelease,
   verifyWindowsPE,
   verifyWindowsRelease,
   workerProcessOwnership,
@@ -3406,6 +3827,13 @@ module.exports = {
 if (!isMainThread && workerData?.workassTask === 'stage-update' && parentPort) {
   try {
     parentPort.postMessage({ ok: true, result: stageAndVerifyRelease(workerData.request) });
+  } catch (err) {
+    parentPort.postMessage({ ok: false, error: String(err && err.message || err) });
+  }
+}
+if (!isMainThread && workerData?.workassTask === 'verify-staged-update' && parentPort) {
+  try {
+    parentPort.postMessage({ ok: true, result: verifyStagedRelease(workerData.request) });
   } catch (err) {
     parentPort.postMessage({ ok: false, error: String(err && err.message || err) });
   }

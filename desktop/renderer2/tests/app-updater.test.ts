@@ -7,6 +7,7 @@ const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.met
 const updaterSource = readFileSync(new URL('../src/app-updater.ts', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src/components/Settings.tsx', import.meta.url), 'utf8');
 const settingsTypes = readFileSync(new URL('../src/store/types.ts', import.meta.url), 'utf8');
+const updatesPage = readFileSync(new URL('../src/components/settings/ActualizacionesPage.tsx', import.meta.url), 'utf8');
 
 const state = (phase: AppUpdaterState['phase'], overrides: Partial<AppUpdaterState> = {}): AppUpdaterState => ({
   supported: true,
@@ -71,7 +72,11 @@ test('only a fresh terminal receipt can replay the success seal after an app res
   assert.equal(appUpdaterReceiptIsRecent({ updatedAt: 'invalid' }, now), false);
 });
 
-test('Workass updater uses the existing footer update-card lifecycle and never adds a Settings section', () => {
+// 2026-11-09: the owner approved Ajustes · Actualizaciones (mock page 8), so the
+// Workass updater now also has a Settings page. It is not a second updater: it
+// drives the same shell UpdateManager through useAppUpdater, with the same one
+// "Actualizar" (tests/settings-updates.test.ts holds the page to that).
+test('Workass updater keeps the footer update-card lifecycle, and its Settings page is the approved Actualizaciones page', () => {
   const selfCard = sidebar.slice(sidebar.indexOf('{showSelfUpdate && ('), sidebar.indexOf('{showProvider && ('));
   assert.match(selfCard, /className=\{`updslot/);
   assert.match(selfCard, /className="updring"/);
@@ -85,8 +90,14 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
   assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
   assert.doesNotMatch(updaterSource, /\b(?:download|install)\(\):\s*Promise<AppUpdaterState>/);
   assert.doesNotMatch(sidebar, /const selfActionLabel[\s\S]{0,180}'Reiniciar'/);
+  // The shell around the pages holds no updater of its own; the one page that
+  // shows it is Actualizaciones, never a separate "workass" section.
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);
   assert.doesNotMatch(settingsTypes, /SettingsSection\s*=\s*[^;]*'workass'/);
+  assert.match(settingsTypes, /SettingsSection\s*=\s*[^;]*'actualizaciones'/);
+  assert.match(settings, /actualizaciones: ActualizacionesPage/);
+  assert.match(updatesPage, /useAppUpdater\(\)/);
+  assert.doesNotMatch(updatesPage, /'Reiniciar'|Buscar ahora/);
 });
 
 test('provider updates keep the left footer card as their only renderer surface', () => {

@@ -402,6 +402,9 @@ export interface AppState {
   // Ajustes · Permisos: the owner's rules for agents (daemon app settings key
   // "agentPermissions"); the daemon enforces them.
   agentPermissions: AgentPermissionSettings;
+  // "Instalar solo": the Mac shell installs a staged Workass release by itself
+  // while nothing would be cut (daemon app settings key "autoInstallUpdates").
+  autoInstallUpdates: boolean;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.
