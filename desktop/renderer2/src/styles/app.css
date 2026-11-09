@@ -1882,6 +1882,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .gtitle { display: flex; align-items: center; gap: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .09em; color: var(--faint); text-transform: uppercase; margin: 18px 2px 7px; }
 .stgs .gtitle:first-of-type { margin-top: 2px; }
 .stgs .gtag { font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
+.stgs .set .why { font-size: 11px; color: var(--faint); }
 .stgs .ghint { color: var(--muted); font-size: 12px; margin: 8px 2px 0; max-width: 62ch; }
 .stgs .ghint code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11px; color: var(--ink2); }
 .stgs .pairing-advanced { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 12px; }

@@ -80,3 +80,19 @@ func resolveInstalledOMPExecutable(provider ProviderConfig) (string, error) {
 	}
 	return "", fmt.Errorf("OMP installed executable: omp was not found on PATH (set WORKASS_OMP to the existing install)")
 }
+
+// OMP's "default" clears Workass's override and runs whatever approval mode the
+// user configured in OMP, so it sits at no level of ours.
+func (ompPermissionPolicy) LevelCandidates(level string) []string {
+	switch level {
+	case OwnerLevelAsk:
+		return []string{"always-ask"}
+	case OwnerLevelEdit:
+		return []string{"write"}
+	case OwnerLevelPlan:
+		return []string{"plan"}
+	case OwnerLevelFull:
+		return []string{"yolo"}
+	}
+	return nil
+}

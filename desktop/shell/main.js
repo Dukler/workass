@@ -378,6 +378,9 @@ function createWindow(url, browserReporter, isController) {
     : { ok: false, reason: 'untrusted renderer' });
   ipcMain.handle('workass-browser:pages', (event, payload) => own(event) && payload ? browserManager.pagesFor(payload.chatId, payload.conversationId) : []);
   ipcMain.handle('workass-browser:hosts', (event) => own(event) ? browserManager.hostList() : []);
+  // Ajustes · Permisos: the browser profile's signed-in sites, and signing out of all.
+  ipcMain.handle('workass-browser:profile-sites', (event) => own(event) ? browserManager.profileSites() : null);
+  ipcMain.handle('workass-browser:clear-sessions', (event) => own(event) ? browserManager.clearProfileSessions() : null);
   ipcMain.on('workass-browser:host-mode', (event) => {
     event.returnValue = own(event) && browserManager ? browserManager.rendererHostMode() : 'view';
   });

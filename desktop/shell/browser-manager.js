@@ -302,6 +302,20 @@ function normalizeBrowserURL(value) {
   return resolved.url;
 }
 
+// The site a cookie domain belongs to, to count sign-ins by site rather than
+// by host (accounts.example.com and example.com are one). Without a public
+// suffix list this keeps a third label only under the common second-level
+// suffixes (example.co.uk, example.com.ar); an IP or a one-label host is itself.
+const SECOND_LEVEL_SUFFIXES = new Set(['ac', 'co', 'com', 'edu', 'gob', 'gov', 'net', 'or', 'org', 'ne']);
+function cookieSite(domain) {
+  const host = String(domain || '').trim().replace(/^\./, '').toLowerCase();
+  if (!host || /^[0-9.]+$/.test(host) || host.includes(':')) return host;
+  const labels = host.split('.').filter(Boolean);
+  if (labels.length <= 2) return labels.join('.');
+  const keep = labels[labels.length - 1].length === 2 && SECOND_LEVEL_SUFFIXES.has(labels[labels.length - 2]) ? 3 : 2;
+  return labels.slice(-keep).join('.');
+}
+
 function cleanUserAgent(chromeVersion, platform = process.platform) {
   const major = String(chromeVersion || '').split('.')[0].replace(/\D/g, '') || '140';
   const os = platform === 'win32'
@@ -497,6 +511,10 @@ class BrowserManager {
     try { this.profile.setPermissionRequestHandler((_wc, _permission, callback) => callback(false)); } catch { /* older Electron */ }
     // Files an agent's page downloads go to a folder of the chat's own.
     this.downloadsRoot = String(downloadsDir || '');
+    // The owner's rule for those downloads (Ajustes · Permisos), 'allow' or
+    // 'block'. Every agent action brings the current one from the daemon; a
+    // daemon that sends none leaves downloads allowed, as before.
+    this.agentDownloadPolicy = 'allow';
     // A page an agent drives keeps producing frames through a frame
     // subscription only while the app window is not on screen (holdPainting).
     if (typeof win.on === 'function') {
@@ -3423,6 +3441,27 @@ class BrowserManager {
     };
   }
 
+  // Ajustes · Permisos: the sites that keep cookies in this profile, which is
+  // where a sign-in lives, and the one action on them: closing every session.
+  async profileSites() {
+    const cookies = await this.profile.cookies.get({});
+    const sites = new Set();
+    for (const cookie of Array.isArray(cookies) ? cookies : []) {
+      const domain = String(cookie && cookie.domain || '').trim().replace(/^\./, '').toLowerCase();
+      if (domain) sites.add(cookieSite(domain));
+    }
+    return { sites: Array.from(sites).sort() };
+  }
+
+  // Signs the profile out of everything: cookies and every kind of site storage
+  // (local storage, IndexedDB, service workers, cache storage), which is where
+  // pages keep a session. Open pages stay open and load signed out next time.
+  async clearProfileSessions() {
+    await this.profile.clearStorageData();
+    try { await this.profile.clearAuthCache(); } catch { /* older Electron */ }
+    return this.profileSites();
+  }
+
   entryBelongsToChat(entry, chatId) {
     const owner = String(chatId || '').trim();
     return !owner || entry.chatId === owner || entry.conversationId === owner || (!!entry.ownerChatId && entry.ownerChatId === owner) ||
@@ -5963,6 +6002,9 @@ class BrowserManager {
   }
 
   async browserControl(method, params = {}, internal = {}) {
+    if (params && (params.downloadPolicy === 'allow' || params.downloadPolicy === 'block')) {
+      this.agentDownloadPolicy = params.downloadPolicy;
+    }
     if (method === 'browser.list') return { tabs: this.browserTabs(params.chatId) };
     if (method === 'browser.open') {
       const entry = this.openConversation(params);
@@ -6240,4 +6282,4 @@ class BrowserManager {
   }
 }
 
-module.exports = { BrowserManager, DEFAULT_PARTITION, cleanUserAgent, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };
+module.exports = { BrowserManager, DEFAULT_PARTITION, cleanUserAgent, cookieSite, normalizeBrowserURL, parseBrowserKey, resolveBrowserURL, safeBounds };

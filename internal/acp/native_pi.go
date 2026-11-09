@@ -82,3 +82,11 @@ func resolveInstalledPiExecutable(provider ProviderConfig) (string, error) {
 	}
 	return "", fmt.Errorf("Pi installed executable: pi was not found on PATH (set WORKASS_PI to the existing install)")
 }
+
+// Pi has no approval modes of its own: its one native mode is full access.
+func (piPermissionPolicy) LevelCandidates(level string) []string {
+	if level == OwnerLevelFull {
+		return []string{"native"}
+	}
+	return nil
+}

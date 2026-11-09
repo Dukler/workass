@@ -747,6 +747,11 @@ function downloadFolderUse(dir) {
 
 function takeDownload(manager, entry, item) {
   if (!manager.downloadsRoot || !agentDriven(entry)) return false;
+  if (manager.agentDownloadPolicy === 'block') {
+    try { item.cancel(); } catch { /* finishing */ }
+    pushEvent(entry, { type: 'download_blocked', file_name: redactPageMessage(String(item.getFilename() || ''), 200), reason: 'the user blocks agent browser downloads in Workass settings (Permissions)' });
+    return true;
+  }
   const dir = downloadsDirFor(manager.downloadsRoot, entry.ownerConversationId || entry.conversationId || entry.chatId);
   try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { return false; }
   const now = Date.now();
