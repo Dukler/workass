@@ -96,7 +96,6 @@ type Manager struct {
 	permissions                 map[string]*permissionResolver
 	subagents                   map[string]*SubagentRun
 	subagentWake                chan struct{}
-	modelScores                 ModelScores
 	providerUpdateRuns          map[string]*providerUpdateRun
 	providerUpdateFailures      map[string]providerUpdateFailure
 	providerUpdateRechecks      map[string]string
@@ -399,7 +398,6 @@ func NewManager(opts Options) *Manager {
 		finishedJobIDs:          make(map[string]struct{}),
 		permissions:             make(map[string]*permissionResolver),
 		subagents:               make(map[string]*SubagentRun),
-		modelScores:             make(ModelScores),
 		providerUpdateRuns:      make(map[string]*providerUpdateRun),
 		providerUpdateFailures:  make(map[string]providerUpdateFailure),
 		providerUpdateRechecks:  make(map[string]string),

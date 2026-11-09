@@ -29,6 +29,9 @@ type providerAdapter struct {
 	launch        providerLaunchStrategy
 	// fork is the provider's native session fork; nil means it cannot fork.
 	fork providerForkStrategy
+	// oneShot answers one prompt and exits (one_shot.go); nil means the
+	// provider offers no one-shot prompt.
+	oneShot providerOneShotStrategy
 	// subagentEnvironment contains only provider-owned launch settings. The
 	// generic bridge adds its provider-neutral owner marker separately.
 	subagentEnvironment map[string]string

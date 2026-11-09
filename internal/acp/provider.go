@@ -765,18 +765,6 @@ func (m *Manager) enabledProviderIDsLocked() []string {
 	return out
 }
 
-// ProviderCommand is the executable Workass runs for an enabled provider: its
-// resolved path, else its configured command. False when the provider is
-// unknown, turned off, or has no command.
-func (m *Manager) ProviderCommand(id string) (string, bool) {
-	cfg, ok := m.providerSnapshot(id)
-	if !ok || !cfg.Enabled || cfg.DisabledByUser {
-		return "", false
-	}
-	command := launchCommand(cfg)
-	return command, command != ""
-}
-
 func (m *Manager) providerSnapshot(id string) (ProviderConfig, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -850,6 +838,11 @@ func (m *Manager) ProvidersList() []map[string]any {
 		// without requiring an open chat for that provider.
 		if providerAdapterForID(id).planUsage.ResetCapable() {
 			item["accountResetSupported"] = true
+		}
+		// Additive: the models offered for one-shot prompts (one_shot.go),
+		// which Settings lists for naming chats.
+		if models := OneShotModels(id); len(models) > 0 {
+			item["oneShotModels"] = models
 		}
 		if hint := firstNonEmpty(runtime.FixHint, runtime.Config.FixHint); hint != "" {
 			item["fixHint"] = hint

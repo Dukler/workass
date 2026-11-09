@@ -2223,29 +2223,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
   .ticons .tico.soon { display: none; }
 }
 
-/* ------------------------------------------------------------------ *
- * Settings · Modelos — user-authored per-model score grid.
- * Neutral surfaces; green stays an accent (focus ring only), never a
- * background or body tint. AA in light + dark via the shared tokens.
- * ------------------------------------------------------------------ */
-.stgs .gtitle .stg-reset { margin-left: auto; text-transform: none; letter-spacing: normal; }
-.stgs .mscore-provider:first-of-type .mscore-gtitle { margin-top: 14px; }
-.stgs .mscore-gtitle { margin-top: 18px; }
-.stgs .mscore-group { padding: 2px 16px; }
-.stgs .mscore { padding: 14px 0; border-top: 1px solid var(--line); }
-.stgs .mscore:first-child { border-top: 0; }
-.stgs .mscore-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.stgs .mscore-nm { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 13px; font-weight: 550; color: var(--ink); }
-.stgs .mscore-id { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--faint); background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stgs .mscore-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(94px, 1fr)); gap: 9px 12px; }
-.stgs .mscore-dim { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.stgs .mscore-dlabel { font-size: 11px; color: var(--muted); }
-.stgs .mscore-dcue { color: var(--faint); }
-.stgs .mscore-inp { width: 100%; }
-.stgs .mscore-note { display: block; width: 100%; margin-top: 10px; text-align: left; }
-.stgs .mscore-inp:focus, .stgs .mscore-note:focus { border-color: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); }
-.stgs .mscore-inp::placeholder, .stgs .mscore-note::placeholder { color: var(--faint); }
-
 /* ============ sidebar v2 (port of T3 Code's Sidebar v2 beta) ============
    Every number here is the literal Tailwind pixel value from T3's source, not
    an approximation: card 78px (h-[4.875rem]) with px-2.5/py-2, slim h-9, radius

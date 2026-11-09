@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -52,18 +51,12 @@ type chatTitleSettings struct {
 	Model      string
 }
 
-// The agents that can name a chat, and how each is asked once. Only Claude
-// Code today; another provider is added here with its own one-shot flags.
-var chatTitleProviders = map[string]func(command, model, system string) []string{
-	"claude": func(command, model, system string) []string {
-		return []string{command, "-p", "--model", model, "--no-session-persistence", "--tools", "",
-			"--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
-			"--output-format", "text", "--system-prompt", system}
-	},
-}
-
+// Which agents can name a chat, and how each is asked once, is the provider
+// adapter's one-shot prompt (internal/acp/one_shot.go); this file names none.
+// An empty agent or model in the setting means "the app's default", which the
+// app resolves from the providers that offer one-shot models.
 func defaultChatTitleSettings() map[string]any {
-	return map[string]any{"mode": chatTitleModePrompt, "providerId": "claude", "model": "haiku"}
+	return map[string]any{"mode": chatTitleModePrompt, "providerId": "", "model": ""}
 }
 
 func normalizeChatTitles(value any) map[string]any {
@@ -80,10 +73,6 @@ func normalizeChatTitles(value any) map[string]any {
 	}
 	return out
 }
-
-// chatTitleModelPattern keeps a requested model a plain name, so it can never
-// read as another command-line flag.
-var chatTitleModelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,119}$`)
 
 // chatTitleRequest is one app-chat:auto-title call.
 type chatTitleRequest struct {
@@ -132,8 +121,9 @@ func cleanGeneratedTitle(answer string) string {
 }
 
 type chatTitler struct {
-	// command finds the executable of an enabled agent.
-	command  func(providerID string) (string, bool)
+	// command builds the one-shot command line for an enabled agent and a
+	// model it offers, or says why there is none.
+	command  func(providerID, model, system string) ([]string, string)
 	chats    *providerChatRuntime
 	settings func() map[string]any
 	logf     func(string, ...any)
@@ -149,7 +139,7 @@ func newChatTitler(manager *acp.Manager, chats *providerChatRuntime, settings fu
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &chatTitler{command: manager.ProviderCommand, chats: chats, settings: settings, logf: logf, slots: make(chan struct{}, 2), settlePoll: 300 * time.Millisecond, run: runChatTitleCommand}
+	return &chatTitler{command: manager.OneShotCommand, chats: chats, settings: settings, logf: logf, slots: make(chan struct{}, 2), settlePoll: 300 * time.Millisecond, run: runChatTitleCommand}
 }
 
 // Start begins naming one chat in the background. It answers at once: false
@@ -158,27 +148,16 @@ func (t *chatTitler) Start(req chatTitleRequest) (bool, string) {
 	var cfg chatTitleSettings
 	if req.ProviderID != "" || req.Model != "" {
 		cfg = chatTitleSettings{Mode: chatTitleModeAgent, ProviderID: strings.TrimSpace(req.ProviderID), Model: strings.TrimSpace(req.Model)}
-		if cfg.ProviderID == "" || !chatTitleModelPattern.MatchString(cfg.Model) {
-			return false, "needs an agent and a model"
-		}
 	} else {
 		cfg = chatTitleSettingsFrom(t.settings())
 		if cfg.Mode != chatTitleModeAgent {
 			return false, "off"
 		}
 	}
-	if !chatTitleModelPattern.MatchString(cfg.Model) {
+	if cfg.ProviderID == "" || cfg.Model == "" {
 		return false, "needs an agent and a model"
 	}
 	tabID, chatID, text, expect := req.TabID, req.ChatID, req.Text, req.Expect
-	build, ok := chatTitleProviders[cfg.ProviderID]
-	if !ok {
-		return false, "this agent cannot name chats"
-	}
-	command, ok := t.command(cfg.ProviderID)
-	if !ok {
-		return false, "agent not available"
-	}
 	text = strings.TrimSpace(acp.RedactSensitiveText(text))
 	if text == "" || strings.TrimSpace(expect) == "" || strings.TrimSpace(tabID) == "" {
 		return false, "nothing to name"
@@ -186,7 +165,10 @@ func (t *chatTitler) Start(req chatTitleRequest) (bool, string) {
 	if runes := []rune(text); len(runes) > chatTitleInputMax {
 		text = string(runes[:chatTitleInputMax])
 	}
-	argv := build(command, cfg.Model, agenttext.Get("chatTitle.system"))
+	argv, refused := t.command(cfg.ProviderID, cfg.Model, agenttext.Get("chatTitle.system"))
+	if refused != "" {
+		return false, refused
+	}
 	select {
 	case t.slots <- struct{}{}:
 	default:

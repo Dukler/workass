@@ -203,7 +203,6 @@ func agentMCPTools() []map[string]any {
 				"operation_id":      operationID(),
 				"task":              str(agenttext.Get("schema.agentMCPTools.guidance.45")),
 				"label":             str(agenttext.Get("schema.agentMCPTools.guidance.46")),
-				"profile":           enum(agenttext.Get("schema.agentMCPTools.guidance.47"), "smart", "tasteful", "budget", "balanced", "independent-review"),
 				"provider_id":       str(agenttext.Get("schema.agentMCPTools.guidance.48")),
 				"model_id":          str(agenttext.Get("schema.agentMCPTools.guidance.49")),
 				"effort":            str(agenttext.Get("schema.agentMCPTools.guidance.50")),

@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"workass/internal/acp"
 	"workass/internal/artifacthost"
 )
 
@@ -438,7 +437,6 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"autoProcessEnabled": base["autoProcessEnabled"],
 		"notifications":      base["notifications"],
 		"prApprover":         "",
-		"modelScores":        acp.ModelScores{},
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
 	}
@@ -472,7 +470,6 @@ func normalizeSettings(input map[string]any) map[string]any {
 	if v := normalizeNotifications(input["notifications"]); v != "" {
 		next["notifications"] = v
 	}
-	next["modelScores"] = acp.NormalizeModelScores(input["modelScores"])
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
 	return next

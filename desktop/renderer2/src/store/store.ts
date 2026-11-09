@@ -45,15 +45,14 @@ import {
   normalizeModelControlMemory, permissionIntentForMode, rememberModelControls, rememberedModelControls,
   restoredControlSelection, restoredProviderBinding,
 } from '../model-controls';
-import {
-  clearAllModelScores, clearModelScore, countScoredModels,
-  modelScoresFromSettings, settingsFromReply, withModelScoresInSettings,
-  withNoteValue, withScoreValue, type ScoreDimension,
-} from '../model-scores';
+import { settingsFromReply } from '../settings-blob';
 import {
   modelFavoritesFromSettings, toggleModelFavorite, withModelFavoritesInSettings,
 } from '../model-favorites';
-import { DEFAULT_CHAT_TITLES, chatTitlesFromSettings, withChatTitlesInSettings, type ChatTitleSettings } from '../chat-titles';
+import {
+  DEFAULT_CHAT_TITLES, chatTitleAgents, chatTitlesFromSettings, resolveChatTitleChoice, withChatTitlesInSettings,
+  type ChatTitleSettings,
+} from '../chat-titles';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1155,8 +1154,8 @@ export class Store {
       panes: this.state.panes,
       mode: this.state.mode,
       notifEnabled: this.state.notifEnabled,
-      // modelScores are NOT mirrored here — they persist through the daemon
-      // app-settings blob (settings:get / settings:set), hydrated separately.
+      // Model favorites and chat titles are NOT mirrored here — they persist
+      // through the daemon app-settings blob, hydrated separately.
       chats: chats.map((c) => ({
         id: c.id, chatId: c.chatId, actorRevision: c.actorRevision, title: c.title, titleLocked: c.titleLocked, group: c.group, cwd: c.cwd,
         workspaceRevision: c.workspaceRevision,
@@ -1342,7 +1341,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelScores: {}, modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -1370,7 +1369,7 @@ export class Store {
     base.seq = m.seq ?? 0;
     base.globalRevision = Number.isInteger(m.globalRevision) ? m.globalRevision ?? 0 : 0;
     base.notifEnabled = !!m.notifEnabled;
-    // Model scores/favorites are hydrated from the daemon app-settings blob
+    // Model favorites and chat titles are hydrated from the daemon app-settings blob
     // (hydrateSettings), not this session mirror, so defaults stay untouched.
     // themePref is authoritative; a resolved theme remains a valid explicit
     // preference when no system-mode choice was stored.
@@ -4307,9 +4306,9 @@ export class Store {
       if (cfg && typeof cfg === 'object') this.state.daemonConfig = cfg;
     }
 
-    // Settings · Modelos scores live in the daemon app-settings blob. Hydrate
-    // AFTER the session-mirror restore above (which resets modelScores to {}),
-    // so the authoritative daemon value wins on every startup/reload.
+    // Model favorites and chat titles live in the daemon app-settings blob.
+    // Hydrate AFTER the session-mirror restore above, so the authoritative
+    // daemon value wins on every startup/reload.
     await this.guardedStep('boot settings', () => this.hydrateSettings());
 
     // The daemon replays its provider list to every socket it accepts; once
@@ -4650,38 +4649,11 @@ export class Store {
   toggleCommandBar() { this.state.commandBarOpen ? this.closeCommandBar() : this.openCommandBar(); }
   setSettingsSection(section: SettingsSection) { this.state.settingsSection = section; this.bumpApp(false); }
 
-  // ---- model scoring (Settings · Modelos) ------------------------------
-  // Durable user PREFERENCES persisted through the daemon app-settings blob
-  // (settings:get / settings:set) — the SAME authority the agent-facing catalog
-  // reads back, never the session mirror or a second localStorage copy. Each
-  // mutation bumps APP for an instant repaint (no session-mirror write) and
-  // schedules a debounced, read-modify-write settings save. All value changes go
-  // through the pure model-scores helpers, which clamp and prune empty entries.
-  setModelScore(providerId: string, modelId: string, dimension: ScoreDimension, value: unknown) {
-    const next = withScoreValue(this.state.modelScores, providerId, modelId, dimension, value);
-    if (next === this.state.modelScores) return;
-    this.state.modelScores = next;
-    this.commitModelScores();
-  }
-  setModelNote(providerId: string, modelId: string, note: string) {
-    const next = withNoteValue(this.state.modelScores, providerId, modelId, note);
-    if (next === this.state.modelScores) return;
-    this.state.modelScores = next;
-    this.commitModelScores();
-  }
-  // Reset one model to unscored.
-  resetModelScore(providerId: string, modelId: string) {
-    const next = clearModelScore(this.state.modelScores, providerId, modelId);
-    if (next === this.state.modelScores) return;
-    this.state.modelScores = next;
-    this.commitModelScores();
-  }
-  // Reset every model to unscored (panel-level action).
-  resetAllModelScores() {
-    if (countScoredModels(this.state.modelScores) === 0) return;
-    this.state.modelScores = clearAllModelScores();
-    this.commitModelScores();
-  }
+  // ---- app-settings preferences ------------------------------------------
+  // Model favorites and the chat-title choice are durable preferences in the
+  // daemon app-settings blob (settings:get / settings:set), never the session
+  // mirror or a second localStorage copy. Each change repaints at once (no
+  // session-mirror write) and schedules a debounced read-modify-write save.
   toggleModelFavorite(providerId: string, modelId: string) {
     const next = toggleModelFavorite(this.state.modelFavorites, providerId, modelId);
     this.state.modelFavorites = next;
@@ -4692,9 +4664,10 @@ export class Store {
   // the chat still has the first-message title, so a rename always wins; the
   // new title arrives like any other presentation change.
   private nameChatWithAgent(tabId: string, chatId: string, text: string, expectTitle: string) {
-    const choice = this.state.chatTitles;
-    if (choice.mode !== 'agent' || !has('appChatAutoTitle')) return;
-    void call('appChatAutoTitle', { tabId, chatId, text, expectTitle, providerId: choice.providerId, model: choice.model });
+    if (this.state.chatTitles.mode !== 'agent' || !has('appChatAutoTitle')) return;
+    const pick = resolveChatTitleChoice(this.state.chatTitles, chatTitleAgents(this.state.providers));
+    if (!pick) return;
+    void call('appChatAutoTitle', { tabId, chatId, text, expectTitle, providerId: pick.agent.providerId, model: pick.model.id });
   }
   setChatTitles(next: ChatTitleSettings) {
     this.state.chatTitles = { ...next };
@@ -4702,26 +4675,22 @@ export class Store {
   }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
-  private commitModelScores() {
-    this.commitModelPreferences();
-  }
   private commitModelPreferences() {
     this.bumpApp(false);
     this.scheduleModelPreferencesSave();
   }
-  // Read scores from the daemon app-settings blob and adopt them. Feature-detected
-  // (older bridges omit getSettings → keep whatever is in memory). A malformed
-  // reply degrades to "no scores" rather than throwing.
+  // Read preferences from the daemon app-settings blob and adopt them.
+  // Feature-detected (older bridges omit getSettings → keep whatever is in
+  // memory). A malformed reply degrades to the defaults rather than throwing.
   private async hydrateSettings() {
     if (!has('getSettings')) return;
     const reply = await call('getSettings');
-    if (reply === undefined) return;   // call() swallowed an error — don't wipe scores
+    if (reply === undefined) return;   // call() swallowed an error — don't wipe preferences
     this.captureSettingsHash(settingsFromReply(reply));
     // A pending local edit (debounce still armed, possibly started during the
     // await above) is newer than anything the daemon can return — never let a
-    // startup/reconnect re-hydrate clobber an unsaved score change.
+    // startup/reconnect re-hydrate clobber an unsaved change.
     if (this.settingsSaveTimer) return;
-    this.state.modelScores = modelScoresFromSettings(reply);
     this.state.modelFavorites = modelFavoritesFromSettings(reply);
     this.state.chatTitles = chatTitlesFromSettings(reply);
     this.bumpApp(false);
@@ -4731,10 +4700,10 @@ export class Store {
     if (this.settingsSaveTimer) clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = setTimeout(() => { void this.flushModelPreferences(); }, 600);
   }
-  // Persist the current scores into the daemon app-settings blob. settings:set
-  // REPLACES the blob, so we round-trip a fresh getSettings read and overwrite ONLY
-  // modelScores — preserving every other key (models, permissionModes, chatMode,
-  // …) and reconciling any concurrent edit made since the last read. If the read
+  // Persist the current preferences into the daemon app-settings blob.
+  // settings:set REPLACES the blob, so we round-trip a fresh getSettings read
+  // and overwrite ONLY our keys — preserving every other key and reconciling
+  // any concurrent edit made since the last read. If the read
   // fails we abort rather than write a blob that would wipe the other keys.
   // A daemon that names its settingsRevision refuses the write if another
   // window saved in between (B-8); we re-read and merge again, a few times.
@@ -4744,8 +4713,7 @@ export class Store {
     for (let attempt = 0; attempt < 3; attempt++) {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
-      const withScores = withModelScoresInSettings(settingsFromReply(reply), this.state.modelScores);
-      const withFavorites = withModelFavoritesInSettings(withScores, this.state.modelFavorites);
+      const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
       const merged = withChatTitlesInSettings(withFavorites, this.state.chatTitles);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }

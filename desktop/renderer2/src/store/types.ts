@@ -4,7 +4,6 @@ import type { ModelFavorite } from '../model-favorites';
 import type { ChatTitleSettings } from '../chat-titles';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
-import type { ModelScores } from '../model-scores';
 import type { WorkassRuntimeProfile } from '../model-catalog';
 import type { ContextUsageByProvider } from '../context-usage';
 import type { DeferredChats } from './session-page';
@@ -359,7 +358,7 @@ export interface FleetKeyView {
   createdAt: string;
 }
 
-export type SettingsSection = 'agentes' | 'modelos' | 'maquinas' | 'dispositivos' | 'engines' | 'apariencia' | 'atajos';
+export type SettingsSection = 'agentes' | 'maquinas' | 'dispositivos' | 'engines' | 'apariencia' | 'atajos';
 
 export interface AppState {
   chats: Chat[];
@@ -387,12 +386,6 @@ export interface AppState {
   // chat with no explicit provider runs on.
   defaultProviderId?: string | null;
   providers: ProviderRecord[];
-  // User-authored per-model scores (Settings · Modelos). A durable PREFERENCE —
-  // the user's own rating of each catalog model, not any vendor claim — keyed by
-  // providerId → base modelId. Persisted through the daemon app-settings blob
-  // (settings:get / settings:set), the same authority the agent-facing catalog
-  // reads back — never the session mirror or localStorage.
-  modelScores: ModelScores;
   // Global model shortcuts, keyed by provider + base model id. Like scores,
   // these live in daemon-owned app settings so every controller sees the same
   // favorites and a renderer reload cannot lose a click.

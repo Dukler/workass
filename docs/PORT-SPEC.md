@@ -531,11 +531,9 @@ that are Electron-shell-local (dialogs, clipboard, window state) stay in the she
       receipts; what stays forbidden is accidental double-driving, never
       designed concurrency.
    d. The agent-facing orchestration contract is schema-versioned. Catalog v2
-      is the sole source for provider/model/effort/mode ids and exposes the
-      user's optional 1..10 intelligence, taste, and cost ratings (higher cost
-      means more expensive), freeform note, provider-neutral permission
-      intents, recommendation profiles, and hard limits. Omitted spawn fields
-      inherit the parent or a scored profile; permission inheritance translates
+      is the sole source for provider/model/effort/mode ids and exposes
+      provider-neutral permission intents and hard limits. Omitted spawn
+      fields inherit the parent; permission inheritance translates
       semantic intent across providers (`agent-full-access` ↔
       `bypassPermissions`, `agent` ↔ `acceptEdits`, `read-only` ↔ `plan`) so a
       headless child never silently falls into an unattended ask mode. Agents

@@ -1,57 +1,6 @@
 package acp
 
-import (
-	"encoding/json"
-	"strings"
-	"testing"
-)
-
-func TestNormalizeModelScoresClampsAndDropsUnknownData(t *testing.T) {
-	raw := map[string]any{
-		" Codex ": map[string]any{
-			" gpt-test ": map[string]any{
-				"intelligence": json.Number("14"), "taste": float64(-2), "cost": float64(8),
-				"unknown": 99, "note": strings.Repeat("useful ", 80),
-			},
-			"empty": map[string]any{"unknown": true},
-		},
-	}
-	scores := NormalizeModelScores(raw)
-	score, ok := scores["codex"]["gpt-test"]
-	if !ok || score.Intelligence == nil || *score.Intelligence != 10 || score.Taste == nil || *score.Taste != 1 || score.Cost == nil || *score.Cost != 8 {
-		t.Fatalf("normalized score = %#v", scores)
-	}
-	if len([]rune(score.Note)) > 500 {
-		t.Fatalf("note was not bounded: %d characters", len([]rune(score.Note)))
-	}
-	if _, ok := scores["codex"]["empty"]; ok {
-		t.Fatalf("empty score survived normalization: %#v", scores)
-	}
-}
-
-func TestNormalizeModelScoresPreservesTypedSettingsReload(t *testing.T) {
-	intelligence, taste, cost := 8, 3, 8
-	raw := ModelScores{"codex": {"gpt-5.6-sol": {
-		Intelligence: &intelligence, Taste: &taste, Cost: &cost,
-		Note: "really smart coding; use xhigh",
-	}}}
-	normalized := NormalizeModelScores(raw)
-	score, ok := normalized["codex"]["gpt-5.6-sol"]
-	if !ok || score.Intelligence == nil || *score.Intelligence != 8 || score.Taste == nil || *score.Taste != 3 || score.Cost == nil || *score.Cost != 8 {
-		t.Fatalf("typed settings reload = %#v", normalized)
-	}
-}
-
-func TestRecommendationTreatsHigherCostAsLessDesirable(t *testing.T) {
-	cheap, expensive := 2, 9
-	intelligence, taste := 8, 7
-	weights := map[string]int{"intelligence": 20, "taste": 20, "cost": 60}
-	cheapScore, _ := scoreRecommendation(ModelScore{Intelligence: &intelligence, Taste: &taste, Cost: &cheap}, weights)
-	expensiveScore, _ := scoreRecommendation(ModelScore{Intelligence: &intelligence, Taste: &taste, Cost: &expensive}, weights)
-	if cheapScore <= expensiveScore {
-		t.Fatalf("cheap score %.2f must exceed expensive score %.2f", cheapScore, expensiveScore)
-	}
-}
+import "testing"
 
 func TestPermissionIntentModesUsesProviderNativeIds(t *testing.T) {
 	codex := permissionIntentModes("codex", []Mode{{ID: "read-only"}, {ID: "agent"}, {ID: "agent-full-access"}})

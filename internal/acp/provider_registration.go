@@ -344,6 +344,7 @@ var providerRegistrations = map[string]providerRegistration{
 			instructions:        nativeInstructionDelivery{HostEnvironment: "WORKASS_CLAUDE_EXECUTABLE"},
 			launch:              nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch},
 			fork:                claudeForkStrategy{},
+			oneShot:             claudeOneShotStrategy{},
 			subagentEnvironment: map[string]string{"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
 			context:             staticProviderContextPolicy{capabilities: exactNativeContextCapabilities()},
 		},

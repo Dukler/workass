@@ -29,17 +29,29 @@ func TestCleanGeneratedTitleKeepsAShortPlainTitle(t *testing.T) {
 
 func TestChatTitleSettingDefaultsToTheFirstMessage(t *testing.T) {
 	settings := normalizeSettings(nil)
-	if got := chatTitleSettingsFrom(settings); got.Mode != chatTitleModePrompt || got.ProviderID != "claude" || got.Model != "haiku" {
+	if got := chatTitleSettingsFrom(settings); got.Mode != chatTitleModePrompt || got.ProviderID != "" || got.Model != "" {
 		t.Fatalf("default = %#v", got)
 	}
-	settings = normalizeSettings(map[string]any{"chatTitles": map[string]any{"mode": "agent", "model": "sonnet"}})
-	if got := chatTitleSettingsFrom(settings); got.Mode != chatTitleModeAgent || got.Model != "sonnet" || got.ProviderID != "claude" {
+	settings = normalizeSettings(map[string]any{"chatTitles": map[string]any{"mode": "agent", "providerId": "agent-a", "model": "small"}})
+	if got := chatTitleSettingsFrom(settings); got.Mode != chatTitleModeAgent || got.Model != "small" || got.ProviderID != "agent-a" {
 		t.Fatalf("agent setting = %#v", got)
 	}
 	settings = normalizeSettings(map[string]any{"chatTitles": map[string]any{"mode": "whatever"}})
 	if got := chatTitleSettingsFrom(settings); got.Mode != chatTitleModePrompt {
 		t.Fatalf("an unknown mode must fall back to the first message: %#v", got)
 	}
+}
+
+// fakeOneShot stands in for the provider adapter's one-shot command: agent-a
+// offers "small" and "large".
+func fakeOneShot(providerID, model, system string) ([]string, string) {
+	if providerID != "agent-a" {
+		return nil, "this agent cannot answer one-shot prompts"
+	}
+	if model != "small" && model != "large" {
+		return nil, "this agent does not offer that model here"
+	}
+	return []string{"/fake/agent", "--model", model, "--system", system}, ""
 }
 
 func newTitleTestChat(t *testing.T, title string) (*providerChatRuntime, string, string) {
@@ -85,9 +97,9 @@ func TestAutoTitleReplacesOnlyTheFirstMessageTitle(t *testing.T) {
 
 func TestChatTitlerAsksTheAgentOnceInIsolationAndAppliesItsAnswer(t *testing.T) {
 	runtime, tabID, chatID := newTitleTestChat(t, "arreglá el salto del…")
-	settings := map[string]any{"chatTitles": map[string]any{"mode": "agent", "providerId": "claude", "model": "haiku"}}
+	settings := map[string]any{"chatTitles": map[string]any{"mode": "agent", "providerId": "agent-a", "model": "small"}}
 	titler := &chatTitler{
-		command:  func(id string) (string, bool) { return "/fake/claude", id == "claude" },
+		command:  fakeOneShot,
 		chats:    runtime,
 		settings: func() map[string]any { return settings },
 		logf:     func(string, ...any) {},
@@ -123,16 +135,8 @@ func TestChatTitlerAsksTheAgentOnceInIsolationAndAppliesItsAnswer(t *testing.T) 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	joined := strings.Join(gotArgv, " ")
-	for _, flag := range []string{"/fake/claude -p", "--model haiku", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--system-prompt"} {
-		if !strings.Contains(joined, flag) {
-			t.Errorf("argv lacks %q: %v", flag, gotArgv)
-		}
-	}
-	for i, arg := range gotArgv {
-		if (arg == "--tools" || arg == "--setting-sources") && (i+1 >= len(gotArgv) || gotArgv[i+1] != "") {
-			t.Errorf("%s must be empty: %v", arg, gotArgv)
-		}
+	if joined := strings.Join(gotArgv, " "); !strings.HasPrefix(joined, "/fake/agent --model small --system You name chat conversations.") {
+		t.Errorf("argv = %v", gotArgv)
 	}
 	if strings.Contains(gotStdin, "sk-ant-api03") {
 		t.Errorf("a secret reached the title agent: %q", gotStdin)
@@ -141,7 +145,7 @@ func TestChatTitlerAsksTheAgentOnceInIsolationAndAppliesItsAnswer(t *testing.T) 
 
 func TestChatTitlerDoesNothingWhenTheSettingIsOff(t *testing.T) {
 	titler := &chatTitler{
-		command:  func(string) (string, bool) { return "/fake/claude", true },
+		command:  fakeOneShot,
 		settings: func() map[string]any { return normalizeSettings(nil) },
 		slots:    make(chan struct{}, 2),
 		run: func(context.Context, []string, string) (string, error) {
@@ -156,12 +160,12 @@ func TestChatTitlerDoesNothingWhenTheSettingIsOff(t *testing.T) {
 
 // The app sends its own choice, so a chat on a machine whose setting is off
 // is still named, with the app's model, and a model that would read as a
-// command-line flag is refused before anything runs.
+// model the agent does not offer is refused before anything runs.
 func TestChatTitlerUsesTheAgentAndModelTheAppSends(t *testing.T) {
 	runtime, tabID, chatID := newTitleTestChat(t, "hola")
 	ran := make(chan []string, 1)
 	titler := &chatTitler{
-		command:    func(id string) (string, bool) { return "/fake/claude", id == "claude" },
+		command:    fakeOneShot,
 		chats:      runtime,
 		settings:   func() map[string]any { return normalizeSettings(nil) },
 		logf:       func(string, ...any) {},
@@ -172,15 +176,15 @@ func TestChatTitlerUsesTheAgentAndModelTheAppSends(t *testing.T) {
 			return "Saludo", nil
 		},
 	}
-	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola", Expect: "hola", ProviderID: "claude", Model: "--dangerously-skip-permissions"}); started || reason == "" {
-		t.Fatalf("a flag-shaped model started: %v %q", started, reason)
+	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola", Expect: "hola", ProviderID: "agent-a", Model: "--dangerously-skip-permissions"}); started || reason == "" {
+		t.Fatalf("a model the agent does not offer started: %v %q", started, reason)
 	}
-	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola", Expect: "hola", ProviderID: "claude", Model: "sonnet"}); !started {
+	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola", Expect: "hola", ProviderID: "agent-a", Model: "large"}); !started {
 		t.Fatalf("not started: %s", reason)
 	}
 	select {
 	case argv := <-ran:
-		if !strings.Contains(strings.Join(argv, " "), "--model sonnet") {
+		if !strings.Contains(strings.Join(argv, " "), "--model large") {
 			t.Fatalf("argv = %v", argv)
 		}
 	case <-time.After(5 * time.Second):
@@ -201,7 +205,7 @@ func TestChatTitlerUsesTheAgentAndModelTheAppSends(t *testing.T) {
 func TestChatTitlerWaitsForTheFirstMessageTitleToLand(t *testing.T) {
 	runtime, tabID, chatID := newTitleTestChatLocked(t, "Chat 4", false)
 	titler := &chatTitler{
-		command:    func(string) (string, bool) { return "/fake/claude", true },
+		command:    fakeOneShot,
 		chats:      runtime,
 		settings:   func() map[string]any { return normalizeSettings(nil) },
 		logf:       func(string, ...any) {},
@@ -209,7 +213,7 @@ func TestChatTitlerWaitsForTheFirstMessageTitleToLand(t *testing.T) {
 		settlePoll: 10 * time.Millisecond,
 		run:        func(context.Context, []string, string) (string, error) { return "Saludo inicial", nil },
 	}
-	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola, ¿cómo va?", Expect: "hola, ¿cómo va?", ProviderID: "claude", Model: "haiku"}); !started {
+	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola, ¿cómo va?", Expect: "hola, ¿cómo va?", ProviderID: "agent-a", Model: "small"}); !started {
 		t.Fatalf("not started: %s", reason)
 	}
 	time.Sleep(100 * time.Millisecond)

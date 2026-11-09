@@ -285,9 +285,8 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 				Prompt: fieldString(params, "prompt"), Label: acp.SanitizeDisplayText(fieldString(params, "label"), 80),
 				ProviderID: fieldString(params, "provider_id"), ModelID: fieldString(params, "model_id"),
 				Effort: fieldString(params, "effort"), ModeID: fieldString(params, "mode_id"),
-				CWD: fieldString(params, "cwd"), Profile: fieldString(params, "profile"),
-				PermissionIntent: fieldString(params, "permission_intent"),
-				Fork:             boolFieldValue(params, "fork"),
+				CWD: fieldString(params, "cwd"), PermissionIntent: fieldString(params, "permission_intent"),
+				Fork: boolFieldValue(params, "fork"),
 				// The origin stamp, when this spawn arrived over a fleet link.
 				// A child used to report into the chat on the machine that HOSTS
 				// it; carrying the asking chat into the durable action is what

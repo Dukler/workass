@@ -12,6 +12,6 @@ Ordinary UI labels, diagnostic errors, protocol identifiers, user content and
 provider-owned prompts are not Workass instruction text.
 
 Lane manifest: this document; internal/agenttext/*;
-internal/acp/{manager.go,subagents.go,tool_context.go,native_instructions.go,model_scores.go};
+internal/acp/{manager.go,subagents.go,tool_context.go,native_instructions.go,agent_catalog.go};
 cmd/workass/{agent_mcp.go,browser_mcp.go}; affected prompt contract tests if needed.
 Dev validation and activation only. No publication or production activation.

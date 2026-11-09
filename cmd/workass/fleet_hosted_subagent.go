@@ -70,7 +70,6 @@ func (h *agentControlHandler) hostedSpawnForOrigin(ctx context.Context, forwarde
 		Effort:           fieldString(params, "effort"),
 		ModeID:           fieldString(params, "mode_id"),
 		CWD:              fieldString(params, "cwd"),
-		Profile:          fieldString(params, "profile"),
 		PermissionIntent: fieldString(params, "permission_intent"),
 	})
 }

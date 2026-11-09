@@ -479,7 +479,7 @@ func (h *agentControlHandler) admitSpawn(ctx context.Context, ownerKey, tabID, c
 			OwnerKey: ownerKey, ParentChatID: chatID, ParentTabID: tabID,
 			ProviderID: fieldString(p, "provider_id"), ModelID: fieldString(p, "model_id"),
 			Effort: fieldString(p, "effort"), ModeID: fieldString(p, "mode_id"),
-			Profile: fieldString(p, "profile"), PermissionIntent: fieldString(p, "permission_intent"),
+			PermissionIntent: fieldString(p, "permission_intent"),
 		})
 	}
 	providerID, modeID, err := resolve(params)

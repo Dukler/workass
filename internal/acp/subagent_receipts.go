@@ -29,7 +29,6 @@ type SubagentReceipt struct {
 	Effort            string `json:"effort,omitempty"`
 	ModelLabel        string `json:"modelLabel,omitempty"`
 	ModeID            string `json:"modeId,omitempty"`
-	Profile           string `json:"profile,omitempty"`
 	RetryOf           string `json:"retryOf,omitempty"`
 	StartedAt         string `json:"startedAt"`
 	FinishedAt        string `json:"finishedAt"`
@@ -60,7 +59,7 @@ func receiptFromRun(run SubagentRun) SubagentReceipt {
 	return SubagentReceipt{
 		ReceiptID: run.ReceiptID, SubagentID: run.ID, Label: run.Label, Status: run.Status,
 		ProviderID: run.ProviderID, ModelID: run.ModelID, Effort: run.Effort,
-		ModelLabel: run.ModelLabel, ModeID: run.ModeID, Profile: run.Profile, RetryOf: run.RetryOf,
+		ModelLabel: run.ModelLabel, ModeID: run.ModeID, RetryOf: run.RetryOf,
 		StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, ElapsedMs: run.ElapsedMs,
 		StopReason: run.StopReason, Result: run.Result, Error: run.Error,
 		ResultTruncated: run.ResultTruncated, ErrorTruncated: run.ErrorTruncated,

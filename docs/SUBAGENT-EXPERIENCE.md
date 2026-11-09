@@ -10,8 +10,8 @@ The coordinator should be able to delegate without memorizing opaque provider
 ids or babysitting one child at a time:
 
 1. Call `workass_agent_catalog` and receive one normalized schema.
-2. Spawn with only a task to inherit the current setup, with a scored profile,
-   or with explicit catalog ids.
+2. Spawn with only a task to inherit the current setup, or with explicit
+   catalog ids.
 3. Inspect meaningful progress (`phase`, `latestActivity`, sequence, elapsed
    time), not merely `running`.
 4. Send corrections between tool turns without losing them to an unsupported
@@ -19,20 +19,6 @@ ids or babysitting one child at a time:
 5. Wait for first or all children and retain snapshots on timeout.
 6. Retry a settled child with the exact prior setup plus new guidance.
 7. Recover bounded, redacted receipts after renderer or daemon restarts.
-
-## Personal model knowledge
-
-Settings owns optional per-provider/base-model fields:
-
-- Intelligence: integer 1–10.
-- Taste: integer 1–10.
-- Cost: integer 1–10, where a larger value means more expensive.
-- Note: freeform user guidance, capped at 500 characters.
-
-Workass never invents these values. Recommendation profiles rank only models
-the user scored; unconfigured profiles fail with an actionable message. The
-catalog returns both the raw user score and the resolved recommendation so the
-agent can explain its choice.
 
 ## Delivery and recovery
 
@@ -67,7 +53,6 @@ running, and report to it themselves, so they never hold a child open.
 
 - Catalog has one schema version and no duplicate legacy top-level model list.
 - A task-only spawn inherits provider/model/effort/mode/cwd correctly.
-- User-scored profiles choose deterministically; high cost reduces budget rank.
 - Provider-neutral permissions resolve only to advertised native mode ids.
 - Eight children can fan out, wait-first, receive feedback, then wait-all.
 - Parent cancellation cascades and cannot leave an orphan engine.

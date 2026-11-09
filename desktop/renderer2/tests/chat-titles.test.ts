@@ -3,8 +3,10 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 import {
-  CHAT_TITLES_SETTINGS_KEY, DEFAULT_CHAT_TITLES, chatTitlesFromSettings, parseChatTitles, withChatTitlesInSettings,
+  CHAT_TITLES_SETTINGS_KEY, DEFAULT_CHAT_TITLES, chatTitleAgents, chatTitlesFromSettings, parseChatTitles,
+  resolveChatTitleChoice, withChatTitlesInSettings,
 } from '../src/chat-titles.ts';
+import type { ProviderRecord } from '../src/wire/types.ts';
 import type { Chat } from '../src/store/types.ts';
 
 let vite: ViteDevServer;
@@ -29,11 +31,34 @@ after(async () => {
 test('the title setting defaults to the first message and survives the settings envelope', () => {
   assert.deepEqual(parseChatTitles(undefined), DEFAULT_CHAT_TITLES);
   assert.deepEqual(parseChatTitles({ mode: 'whatever', model: '  ' }), DEFAULT_CHAT_TITLES);
-  assert.deepEqual(chatTitlesFromSettings({ settings: { [CHAT_TITLES_SETTINGS_KEY]: { mode: 'agent', model: 'sonnet' } } }),
-    { mode: 'agent', providerId: 'claude', model: 'sonnet' });
-  const merged = withChatTitlesInSettings({ modelScores: { a: 1 } }, { mode: 'agent', providerId: 'claude', model: 'opus' });
-  assert.deepEqual(merged.modelScores, { a: 1 }, 'saving the title choice keeps every other setting');
-  assert.deepEqual(merged[CHAT_TITLES_SETTINGS_KEY], { mode: 'agent', providerId: 'claude', model: 'opus' });
+  assert.deepEqual(chatTitlesFromSettings({ settings: { [CHAT_TITLES_SETTINGS_KEY]: { mode: 'agent', model: 'large' } } }),
+    { mode: 'agent', providerId: '', model: 'large' });
+  const merged = withChatTitlesInSettings({ modelFavorites: [{ providerId: 'a', modelId: 'b' }] }, { mode: 'agent', providerId: 'agent-a', model: 'large' });
+  assert.deepEqual(merged.modelFavorites, [{ providerId: 'a', modelId: 'b' }], 'saving the title choice keeps every other setting');
+  assert.deepEqual(merged[CHAT_TITLES_SETTINGS_KEY], { mode: 'agent', providerId: 'agent-a', model: 'large' });
+});
+
+// The agents come from the provider list: only enabled providers that offer
+// one-shot models, and the default is the first one with its first model.
+const providers = [
+  { id: 'agent-off', name: 'Off', enabled: false, status: 'off', oneShotModels: [{ id: 'x', name: 'X' }] },
+  { id: 'agent-none', name: 'None', enabled: true, status: 'ready' },
+  { id: 'agent-a', name: 'Agent A', enabled: true, status: 'ready', oneShotModels: [{ id: 'small', name: 'Small' }, { id: 'large', name: 'Large' }] },
+  { id: 'agent-b', name: 'Agent B', enabled: true, status: 'ready', oneShotModels: [{ id: 'tiny', name: 'Tiny' }] },
+] as ProviderRecord[];
+
+test('the agents that can name chats are the enabled ones offering one-shot models', () => {
+  const agents = chatTitleAgents(providers);
+  assert.deepEqual(agents.map((a) => a.providerId), ['agent-a', 'agent-b']);
+  const pick = (providerId: string, model: string) => {
+    const choice = resolveChatTitleChoice({ mode: 'agent', providerId, model }, agents);
+    return choice && [choice.agent.providerId, choice.model.id];
+  };
+  assert.deepEqual(pick('', ''), ['agent-a', 'small'], 'the default is the first agent and its first model');
+  assert.deepEqual(pick('agent-a', 'large'), ['agent-a', 'large']);
+  assert.deepEqual(pick('agent-b', 'gone'), ['agent-b', 'tiny'], 'a model no longer offered falls back to the first');
+  assert.deepEqual(pick('agent-off', 'x'), ['agent-a', 'small'], 'a disabled agent falls back to the default');
+  assert.equal(resolveChatTitleChoice({ mode: 'agent', providerId: '', model: '' }, []), null);
 });
 
 function chat(id: string, titleLocked: boolean): Chat {
@@ -52,7 +77,8 @@ async function sendWith(owner: Chat, mode: 'agent' | 'prompt', prompts: string[]
   subject.state.chats = [owner];
   subject.state.activeId = owner.id;
   subject.state.connection = 'connected';
-  subject.state.chatTitles = { mode, providerId: 'claude', model: 'haiku' };
+  subject.state.chatTitles = { mode, providerId: 'agent-a', model: 'large' };
+  subject.state.providers = providers;
   subject.schedulePersist = () => {};
   (globalThis as any).window = {
     api: {
@@ -80,7 +106,7 @@ test('with an agent chosen, a chat\'s first message is sent once for a title', a
   assert.equal(asked.length, 1, 'only the first message names the chat');
   assert.deepEqual(asked[0], {
     tabId: owner.id, chatId: owner.chatId, text: 'arreglá el salto del scroll cuando subo la lista',
-    expectTitle: 'arreglá el salto del scroll…', providerId: 'claude', model: 'haiku',
+    expectTitle: 'arreglá el salto del scroll…', providerId: 'agent-a', model: 'large',
   });
 });
 

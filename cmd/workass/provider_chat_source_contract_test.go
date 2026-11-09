@@ -239,7 +239,6 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"RefreshProviderPlanUsage":       {},
 	"PublishProviderSnapshots":       {},
 	"Reset":                          {},
-	"SetModelScores":                 {},
 	"SetProviderAttachmentPersister": {},
 	"SetProviderAttachmentResolver":  {},
 	"SetSessionRefreshFunc":          {},

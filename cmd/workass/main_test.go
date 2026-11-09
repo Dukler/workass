@@ -2141,8 +2141,10 @@ func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
 		"autoProcessEnabled": false,
 		"notifications":      "all",
 		"prApprover":         " reviewer ",
+		// Model scores were removed (2026-11-08); a blob that still has
+		// them loses them on its next save.
 		"modelScores": map[string]any{
-			"codex": map[string]any{"gpt-test": map[string]any{"intelligence": 12, "taste": 7, "cost": -3, "note": "my ranking"}},
+			"codex": map[string]any{"gpt-test": map[string]any{"intelligence": 9}},
 		},
 		"modelFavorites": []any{
 			map[string]any{"providerId": " codex ", "modelId": " gpt-5.6-sol "},
@@ -2205,9 +2207,8 @@ func TestConfigAndSettingsPersistInStateDir(t *testing.T) {
 	if rawSettings["models"].(map[string]any)["chat"] != "chat-model" || rawSettings["permissionModes"].(map[string]any)["chat"] != nil {
 		t.Fatalf("settings file subset = %#v", rawSettings)
 	}
-	modelScore := rawSettings["modelScores"].(map[string]any)["codex"].(map[string]any)["gpt-test"].(map[string]any)
-	if fmt.Sprint(modelScore["intelligence"]) != "10" || fmt.Sprint(modelScore["taste"]) != "7" || fmt.Sprint(modelScore["cost"]) != "1" || modelScore["note"] != "my ranking" {
-		t.Fatalf("normalized model score = %#v", modelScore)
+	if _, ok := rawSettings["modelScores"]; ok {
+		t.Fatalf("settings kept the removed model scores: %#v", rawSettings["modelScores"])
 	}
 	favorites := rawSettings["modelFavorites"].([]any)
 	if len(favorites) != 1 || fieldString(mapFromAnyMain(favorites[0]), "providerId") != "codex" || fieldString(mapFromAnyMain(favorites[0]), "modelId") != "gpt-5.6-sol" {

@@ -54,7 +54,6 @@ type SpawnAgentAction struct {
 	Effort           string
 	ModeID           string
 	CWD              string
-	Profile          string
 	PermissionIntent string
 	// Fork starts the subagent as a native fork of this chat's session.
 	Fork bool `json:",omitempty"`

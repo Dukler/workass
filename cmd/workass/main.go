@@ -1075,9 +1075,6 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		opts = options[0]
 	}
 	state := newDaemonState(cwd, opts)
-	if acpManager != nil {
-		acpManager.SetModelScores(state.setting.get()["modelScores"])
-	}
 	count := 0
 	hub.RegisterOutOfBandRead("app:meta", func(args []any) (any, error) {
 		return appMeta(cwd), nil
@@ -1463,7 +1460,7 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 	})
 	hub.Register("settings:set", func(args []any) (any, error) {
 		// settings:set replaces the whole blob. A missing, non-object or empty
-		// payload used to replace it with defaults — every score, favourite and
+		// payload used to replace it with defaults — every favourite and
 		// notification setting wiped by one malformed call (2026-10-11 QA).
 		incoming, err := requiredSettingsObject(args)
 		if err != nil {
@@ -1481,9 +1478,6 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 		saved, err := state.setting.setExpecting(incoming, expectedRevision)
 		if err != nil {
 			return nil, err
-		}
-		if manager != nil {
-			manager.SetModelScores(saved["modelScores"])
 		}
 		hub.Broadcast("settings:changed", saved)
 		return saved, nil
@@ -2363,7 +2357,6 @@ func defaultSettings() map[string]any {
 		"autoProcessEnabled": true,
 		"notifications":      "none",
 		"prApprover":         "",
-		"modelScores":        acp.ModelScores{},
 		"modelFavorites":     []any{},
 	}
 }

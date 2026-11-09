@@ -18,15 +18,10 @@ import { store, useApp, useProc, type ProviderSettingsMachine } from '../store/s
 import { call, has } from '../wire/api';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { hasModelIcon, ModelIcon, providerIconBrand } from '../icons';
-import {
-  countScoredModels, getModelScore, groupModelsForScoring, isEmptyScore,
-  normalizeNote, NOTE_MAX, SCORE_DIMENSIONS, SCORE_MAX, SCORE_MIN,
-  type ModelScore, type ScoreableModel,
-} from '../model-scores';
-import { CHAT_TITLE_AGENTS } from '../chat-titles';
+import { chatTitleAgents, resolveChatTitleChoice } from '../chat-titles';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
-  agentes: 'Agentes', modelos: 'Modelos', maquinas: 'Conectar Workass', dispositivos: 'Acceso aprobado', engines: 'Engines',
+  agentes: 'Agentes', maquinas: 'Conectar Workass', dispositivos: 'Acceso aprobado', engines: 'Engines',
   apariencia: 'Apariencia', atajos: 'Atajos',
 };
 
@@ -35,7 +30,6 @@ function Svg({ children }: { children: ReactNode }) {
 }
 const NavIcon = {
   agentes: <Svg><rect x="2.5" y="3" width="11" height="8" rx="2" /><circle cx="6" cy="7" r="1" /><circle cx="10" cy="7" r="1" /><path d="M8 11v2M5 14h6" /></Svg>,
-  modelos: <Svg><path d="M3 5h5M12 5h1.5M3 11h1.5M8 11h5" /><circle cx="10" cy="5" r="1.6" /><circle cx="5.5" cy="11" r="1.6" /></Svg>,
   maquinas: <Svg><rect x="1.8" y="3" width="12.4" height="8" rx="1.6" /><path d="M5.5 13.5h5M8 11v2.5" /></Svg>,
   dispositivos: <Svg><rect x="2" y="3.5" width="9" height="6.5" rx="1.5" /><path d="M4 12.5h5" /><rect x="11.5" y="6" width="3" height="7" rx="1" /></Svg>,
   engines: <Svg><rect x="2.5" y="2.5" width="11" height="4" rx="1.2" /><rect x="2.5" y="9.5" width="11" height="4" rx="1.2" /><circle cx="5" cy="4.5" r=".6" fill="currentColor" /><circle cx="5" cy="11.5" r=".6" fill="currentColor" /></Svg>,
@@ -214,15 +208,15 @@ function AgentesPanel() {
 
 // How new chats are named. "Primer mensaje" is the old behavior; "Un agente"
 // also sends the first message once to the chosen agent for a short title
-// (daemon app-chat:auto-title). A rename typed by hand always wins.
+// (daemon app-chat:auto-title). A rename typed by hand always wins. The agents
+// and models listed are the ones this machine's providers offer for one-shot
+// prompts.
 function ChatTitlesGroup() {
   const app = useApp();
-  const choice = app.chatTitles;
   if (!has('appChatAutoTitle') || !has('setSettings')) return null;
-  const agent = CHAT_TITLE_AGENTS.find((a) => a.providerId === choice.providerId) ?? CHAT_TITLE_AGENTS[0];
-  const model = agent.models.find((m) => m.id === choice.model);
-  const local = app.providers.find((p) => p.id === agent.providerId);
-  const unavailable = !!local && !local.enabled;
+  const choice = app.chatTitles;
+  const agents = chatTitleAgents(app.providers);
+  const pick = resolveChatTitleChoice(choice, agents);
   const byAgent = choice.mode === 'agent';
   return (
     <>
@@ -231,119 +225,42 @@ function ChatTitlesGroup() {
         <div className="set">
           <div className="lbl">
             <div className="n">Nombrar chats nuevos</div>
-            <div className="d">{byAgent
-              ? `${agent.name} lee el primer mensaje una sola vez, sin herramientas ni proyecto, y le pone un título corto. Si lo renombrás vos, queda tu nombre.`
-              : 'El título son las primeras palabras del primer mensaje.'}</div>
+            <div className="d">{!byAgent
+              ? 'El título son las primeras palabras del primer mensaje.'
+              : pick
+                ? `${pick.agent.name} lee el primer mensaje una sola vez, sin herramientas ni proyecto, y le pone un título corto. Si lo renombrás vos, queda tu nombre.`
+                : 'Ningún agente activo en esta computadora puede nombrar chats: se usa el primer mensaje.'}</div>
           </div>
           <div className="ctl"><div className="seg">
             <button className={!byAgent ? 'on' : ''} onClick={() => store.setChatTitles({ ...choice, mode: 'prompt' })}>Primer mensaje</button>
-            <button className={byAgent ? 'on' : ''} onClick={() => store.setChatTitles({ ...choice, mode: 'agent' })}>Un agente</button>
+            <button className={byAgent ? 'on' : ''} disabled={!pick && !byAgent} title={!pick ? 'Ningún agente activo puede nombrar chats' : undefined}
+              onClick={() => store.setChatTitles({ ...choice, mode: 'agent' })}>Un agente</button>
           </div></div>
         </div>
-        {byAgent && (
+        {byAgent && pick && agents.length > 1 && (
           <div className="set">
-            <div className="lbl">
-              <div className="n">Modelo</div>
-              <div className="d">{unavailable
-                ? `${agent.name} no está activo en esta computadora: los chats se nombran con el primer mensaje.`
-                : `${agent.name} · ${model ? `${model.name}, ${model.note}` : choice.model}.`}</div>
-            </div>
+            <div className="lbl"><div className="n">Agente</div><div className="d">Cuál lee el primer mensaje.</div></div>
             <div className="ctl"><div className="seg">
-              {agent.models.map((m) => (
-                <button key={m.id} className={choice.model === m.id ? 'on' : ''}
-                  onClick={() => store.setChatTitles({ ...choice, providerId: agent.providerId, model: m.id })}>{m.name}</button>
+              {agents.map((a) => (
+                <button key={a.providerId} className={pick.agent.providerId === a.providerId ? 'on' : ''}
+                  onClick={() => store.setChatTitles({ ...choice, providerId: a.providerId, model: a.models[0].id })}>{a.name}</button>
+              ))}
+            </div></div>
+          </div>
+        )}
+        {byAgent && pick && (
+          <div className="set">
+            <div className="lbl"><div className="n">Modelo</div><div className="d">{`${pick.agent.name} · ${pick.model.name}. El primero es el más rápido y barato.`}</div></div>
+            <div className="ctl"><div className="seg">
+              {pick.agent.models.map((m) => (
+                <button key={m.id} className={pick.model.id === m.id ? 'on' : ''}
+                  onClick={() => store.setChatTitles({ ...choice, providerId: pick.agent.providerId, model: m.id })}>{m.name}</button>
               ))}
             </div></div>
           </div>
         )}
       </div>
     </>
-  );
-}
-
-// ---- 2 · Modelos ---------------------------------------------------------
-// User-authored scoring: the user rates every catalog model against THEIR own
-// priorities (Inteligencia / Gusto / Costo, 1–10; Costo higher = more expensive)
-// so the future agent-facing catalog can route on those preferences. Neutral
-// surfaces; the accent is a focus ring only. Scores persist through the daemon
-// app-settings blob (settings:get / settings:set) — never localStorage, never
-// the session mirror.
-function ModelScoreCard({ providerId, model, score }: { providerId: string; model: ScoreableModel; score: ModelScore | undefined }) {
-  const empty = isEmptyScore(score);
-  return (
-    <div className="mscore">
-      <div className="mscore-head">
-        <div className="mscore-nm">{model.name}<code className="mscore-id" title={model.modelId}>{model.modelId}</code></div>
-        <button className="btn sm" disabled={empty} title={empty ? 'Sin puntuar' : 'Volver a sin puntuar'}
-          onClick={() => store.resetModelScore(providerId, model.modelId)}>Restablecer</button>
-      </div>
-      <div className="mscore-grid">
-        {SCORE_DIMENSIONS.map((d) => {
-          const value = score?.[d.key];
-          return (
-            <label key={d.key} className="mscore-dim">
-              <span className="mscore-dlabel">{d.label}{d.key === 'cost' && <span className="mscore-dcue"> · 10 = caro</span>}</span>
-              <input
-                className="inp num mscore-inp"
-                type="number" inputMode="numeric"
-                min={SCORE_MIN} max={SCORE_MAX} step={1}
-                value={value === undefined ? '' : String(value)}
-                placeholder="—"
-                aria-label={`${d.label} — ${model.name} (${SCORE_MIN} a ${SCORE_MAX})`}
-                onChange={(e) => store.setModelScore(providerId, model.modelId, d.key, e.target.value)}
-              />
-            </label>
-          );
-        })}
-      </div>
-      <input
-        className="inp mscore-note"
-        type="text" maxLength={NOTE_MAX}
-        value={score?.note ?? ''}
-        placeholder="Nota (opcional) — para qué te sirve este modelo, cuándo lo preferís…"
-        aria-label={`Nota — ${model.name}`}
-        onChange={(e) => store.setModelNote(providerId, model.modelId, e.target.value)}
-        onBlur={(e) => store.setModelNote(providerId, model.modelId, normalizeNote(e.currentTarget.value) ?? '')}
-      />
-    </div>
-  );
-}
-function ModelosPanel() {
-  const app = useApp();
-  const groups = groupModelsForScoring(app.groups, app.providers);
-  const scored = countScoredModels(app.modelScores);
-  return (
-    <section className="stgs-panel">
-      <div className="phead">
-        <h2>Modelos</h2>
-        <p>Puntuá cada modelo del catálogo según <b>tus</b> prioridades: <b>Inteligencia</b>, <b>Gusto</b> y <b>Costo</b>. Son preferencias tuyas —no afirmaciones del proveedor— y alimentan el catálogo que orientará a los agentes. Escala {SCORE_MIN}–{SCORE_MAX}; en <b>Costo</b>, {SCORE_MAX} = más caro. Dejá una casilla vacía para no puntuar esa dimensión.</p>
-      </div>
-
-      {groups.length === 0 ? (
-        <div className="group"><div className="lrow"><div className="body"><span className="empty">Todavía no hay modelos en el catálogo. Conectá un agente y volvé acá.</span></div></div></div>
-      ) : (
-        <>
-          <div className="gtitle">
-            Puntajes
-            <span className="gtag">{scored === 0 ? 'sin puntuar' : `${scored} ${scored === 1 ? 'modelo puntuado' : 'modelos puntuados'}`}</span>
-            <button className="btn sm stg-reset" disabled={scored === 0}
-              onClick={() => store.resetAllModelScores()}>Restablecer todo</button>
-          </div>
-          {groups.map((g) => (
-            <div key={g.providerId || g.providerName} className="mscore-provider">
-              <div className="gtitle mscore-gtitle">{g.providerName}<span className="gtag">{g.models.length} {g.models.length === 1 ? 'modelo' : 'modelos'}</span></div>
-              <div className="group mscore-group">
-                {g.models.map((m) => (
-                  <ModelScoreCard key={m.modelId} providerId={g.providerId} model={m}
-                    score={getModelScore(app.modelScores, g.providerId, m.modelId)} />
-                ))}
-              </div>
-            </div>
-          ))}
-          <div className="ghint">Los puntajes se guardan en la configuración del daemon (settings) —la misma fuente que consultará el catálogo de los agentes—, no en este dispositivo. <b>Restablecer</b> borra el puntaje de un modelo; <b>Restablecer todo</b> los borra todos.</div>
-        </>
-      )}
-    </section>
   );
 }
 
@@ -756,10 +673,10 @@ function MachineRow({ m }: { m: MachineView }) {
 
 // ---- shell ---------------------------------------------------------------
 const PANELS: Record<SettingsSection, () => ReactNode> = {
-  agentes: AgentesPanel, modelos: ModelosPanel, maquinas: MaquinasPanel, dispositivos: DispositivosPanel,
+  agentes: AgentesPanel, maquinas: MaquinasPanel, dispositivos: DispositivosPanel,
   engines: EnginesPanel, apariencia: AparienciaPanel, atajos: AtajosPanel,
 };
-const ORDER: SettingsSection[] = ['agentes', 'modelos', 'maquinas', 'dispositivos', 'engines', 'apariencia', 'atajos'];
+const ORDER: SettingsSection[] = ['agentes', 'maquinas', 'dispositivos', 'engines', 'apariencia', 'atajos'];
 
 export function Settings() {
   const app = useApp();

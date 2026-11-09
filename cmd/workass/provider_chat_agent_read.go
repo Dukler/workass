@@ -594,7 +594,7 @@ func actorSubagentReceipts(state chat.State) []acp.SubagentReceipt {
 		out = append(out, acp.SubagentReceipt{
 			ReceiptID: run.ReceiptID, SubagentID: run.ID, Label: run.Label, Status: run.Status,
 			ProviderID: run.ProviderID, ModelID: run.ModelID, Effort: run.Effort, ModelLabel: run.ModelLabel,
-			ModeID: run.ModeID, Profile: run.Profile, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
+			ModeID: run.ModeID, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 			ElapsedMs: run.ElapsedMs, Result: run.Result, Error: run.Error,
 		})
 	}

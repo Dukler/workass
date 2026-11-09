@@ -79,10 +79,9 @@ export interface Mirror {
   theme: 'dark' | 'light'; themePref?: ThemePref; density?: Density;
   panes: Panes; mode: 'assist' | 'chats';
   notifEnabled?: boolean;
-  // NOTE: user-authored per-model scores (Settings · Modelos) deliberately do NOT
-  // ride this session mirror. They persist through the daemon app-settings blob
-  // (settings:get / settings:set) so the agent-facing catalog reads the same
-  // authority — never localStorage and never the session mirror.
+  // NOTE: model favorites and the chat-title choice deliberately do NOT ride
+  // this session mirror. They persist through the daemon app-settings blob
+  // (settings:get / settings:set) — never localStorage and never this mirror.
   chats: MirrorChat[];
   // A paged session shell's count of the chats it did not send, by folder
   // (session-page.ts). Absent from every other mirror.

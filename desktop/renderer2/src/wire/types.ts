@@ -262,6 +262,9 @@ export interface ProviderRecord {
   resolvedCommand?: string;
   cliVersion?: CliVersion;
   assistantBrand?: string;
+  // Additive: models offered for one-shot prompts (daemon one_shot.go), used
+  // to name chats. Absent when the provider offers none.
+  oneShotModels?: Array<{ id: string; name: string }>;
 }
 
 export type AcpEvent =

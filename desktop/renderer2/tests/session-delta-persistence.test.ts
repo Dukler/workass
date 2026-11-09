@@ -1090,7 +1090,7 @@ test('a confirmed local create is not sent twice before its session echo', async
 // settingsRevision refuses a write over settings another window saved after
 // our read; the save re-reads, keeps that window's change and lands ours.
 test('a settings save that loses the race re-reads and keeps the other window change', async () => {
-  let stored: Record<string, unknown> = { prApprover: 'me', modelScores: {}, modelFavorites: [] };
+  let stored: Record<string, unknown> = { prApprover: 'me', modelFavorites: [] };
   let revision = 1;
   const writes: any[] = [];
   let otherWindowWrites = true;
@@ -1110,13 +1110,13 @@ test('a settings save that loses the race re-reads and keeps the other window ch
     },
   }, async () => {
     const subject = subjectWithChats([]);
-    subject.state.modelScores = { codex: { 'gpt-test': { intelligence: 9 } } };
+    subject.state.modelFavorites = [{ providerId: 'codex', modelId: 'gpt-test' }];
     await (subject as any).flushModelPreferences();
   });
   assert.equal(writes.length, 2, 'the refused write was retried once');
   assert.equal(writes[1].options.expectedRevision, 'r2');
   assert.equal(stored.prApprover, 'other-window', 'the other window change survived');
-  assert.deepEqual((stored.modelScores as any).codex['gpt-test'].intelligence, 9, 'our change landed');
+  assert.deepEqual(stored.modelFavorites, [{ providerId: 'codex', modelId: 'gpt-test' }], 'our change landed');
 });
 
 // A streaming reply re-renders only when a chunk can change what it shows

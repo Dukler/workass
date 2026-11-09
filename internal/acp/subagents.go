@@ -65,7 +65,6 @@ type SubagentSpawnOptions struct {
 	Effort           string `json:"effort,omitempty"`
 	ModeID           string `json:"modeId,omitempty"`
 	CWD              string `json:"cwd,omitempty"`
-	Profile          string `json:"profile,omitempty"`
 	PermissionIntent string `json:"permissionIntent,omitempty"`
 	RetryOf          string `json:"retryOf,omitempty"`
 	// Fork starts the subagent as a native fork of the calling chat's provider
@@ -204,7 +203,6 @@ type SubagentRun struct {
 	ModelLabel string `json:"modelLabel,omitempty"`
 	ModeID     string `json:"modeId,omitempty"`
 	CWD        string `json:"cwd"`
-	Profile    string `json:"profile,omitempty"`
 	RetryOf    string `json:"retryOf,omitempty"`
 	// Forked marks a subagent started as a native fork of its parent's session.
 	Forked bool   `json:"forked,omitempty"`
@@ -444,7 +442,7 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 	run := &SubagentRun{
 		ID: id, Label: label, Status: "running", ProviderID: providerID,
 		ModelID: modelID, Effort: effort, ModelLabel: modelLabel, ModeID: modeID, CWD: cwd,
-		Profile: strings.TrimSpace(opts.Profile), Phase: "starting", LatestActivity: "Starting subagent",
+		Phase: "starting", LatestActivity: "Starting subagent",
 		RetryOf:     strings.TrimSpace(opts.RetryOf),
 		ParentJobID: parentJobID, RootJobID: rootJobID,
 		Adopted: adopted, AdoptedAt: adoptedAt,
@@ -960,24 +958,6 @@ func (m *Manager) effectiveSubagentParentMode(parent *Job) string {
 
 func (m *Manager) resolveSubagentSelection(ctx context.Context, parent *Job, opts SubagentSpawnOptions) (string, string, string, string, error) {
 	providerID := normalizeProviderID(opts.ProviderID)
-	recommended := recommendedSelection{}
-	if profileID := strings.TrimSpace(opts.Profile); profileID != "" {
-		if _, ok := recommendationProfileByID(profileID); !ok {
-			return "", "", "", "", fmt.Errorf("unknown subagent profile %q; call workass_agent_catalog first", profileID)
-		}
-		avoid := ""
-		if strings.EqualFold(profileID, "independent-review") {
-			avoid = parent.ProviderID
-		}
-		var ok bool
-		recommended, ok = m.recommendSubagentSelection(ctx, profileID, avoid)
-		if !ok && providerID == "" && strings.TrimSpace(opts.ModelID) == "" {
-			return "", "", "", "", fmt.Errorf("subagent profile %q has no scored model; score models in Settings or select provider_id/model_id explicitly", profileID)
-		}
-	}
-	if providerID == "" {
-		providerID = normalizeProviderID(recommended.ProviderID)
-	}
 	if providerID == "" {
 		providerID = normalizeProviderID(parent.ProviderID)
 	}
@@ -989,17 +969,12 @@ func (m *Manager) resolveSubagentSelection(ctx context.Context, parent *Job, opt
 		return "", "", "", "", fmt.Errorf("provider %q is not ready: %s", providerID, firstNonEmpty(group.Error, group.Status))
 	}
 	requestedModel := strings.TrimSpace(opts.ModelID)
-	if requestedModel == "" {
-		if normalizeProviderID(recommended.ProviderID) == providerID {
-			requestedModel = recommended.ModelID
-		}
-	}
 	if requestedModel == "" && normalizeProviderID(parent.ProviderID) == providerID {
 		requestedModel = strings.TrimSpace(parent.startOpts.ModelID)
 	}
 	if requestedModel == "" {
-		// A different provider than the parent's, with no scored pick: start on
-		// that provider's default (first catalog) model rather than failing.
+		// A different provider than the parent's: start on that provider's
+		// default (first catalog) model rather than failing.
 		for _, candidate := range group.Models {
 			if !m.hidesFixtureModel(providerID, candidate) {
 				requestedModel = candidate.ModelID
@@ -1008,7 +983,7 @@ func (m *Manager) resolveSubagentSelection(ctx context.Context, parent *Job, opt
 		}
 	}
 	if requestedModel == "" {
-		return "", "", "", "", errors.New("subagent model_id is required because no parent or scored recommendation is available; call workass_agent_catalog first")
+		return "", "", "", "", errors.New("subagent model_id is required because the parent's model is unknown; call workass_agent_catalog first")
 	}
 	modelID := requestedModel
 	var selected *Model
@@ -1030,9 +1005,6 @@ func (m *Manager) resolveSubagentSelection(ctx context.Context, parent *Job, opt
 		return "", "", "", "", fmt.Errorf("model %q is a development fixture and is unavailable in production", modelID)
 	}
 	effort := strings.TrimSpace(opts.Effort)
-	if effort == "" && recommended.ModelID == modelID && recommended.ProviderID == providerID {
-		effort = recommended.Effort
-	}
 	if effort == "" && normalizeProviderID(parent.ProviderID) == providerID {
 		if base, inherited, split := splitEffortSuffix(strings.TrimSpace(parent.startOpts.ModelID), selected.Efforts); split && base == modelID {
 			effort = inherited
@@ -1982,7 +1954,7 @@ func (m *Manager) RetrySubagent(ctx context.Context, ownerKey, parentChatID, par
 		OwnerKey: ownerKey, ParentChatID: parentChatID, ParentTabID: parentTabID,
 		Prompt: prompt, Label: original.Label, ProviderID: original.ProviderID,
 		ModelID: original.ModelID, Effort: original.Effort, ModeID: original.ModeID,
-		CWD: original.CWD, Profile: original.Profile, RetryOf: original.ID,
+		CWD: original.CWD, RetryOf: original.ID,
 		Fork: original.Forked,
 	}
 	m.mu.Unlock()

@@ -50,9 +50,9 @@ test('favorites resolve only against the authoritative grouped catalog', () => {
 
 test('settings write preserves unrelated fields and replaces only favorites', () => {
   assert.deepEqual(withModelFavoritesInSettings(
-    { chatMode: 'ask', modelScores: { codex: {} }, modelFavorites: [{ providerId: 'old', modelId: 'old' }] },
+    { chatMode: 'ask', chatTitles: { mode: 'agent' }, modelFavorites: [{ providerId: 'old', modelId: 'old' }] },
     [{ providerId: 'codex', modelId: 'gpt-5.6-sol' }],
   ), {
-    chatMode: 'ask', modelScores: { codex: {} }, modelFavorites: [{ providerId: 'codex', modelId: 'gpt-5.6-sol' }],
+    chatMode: 'ask', chatTitles: { mode: 'agent' }, modelFavorites: [{ providerId: 'codex', modelId: 'gpt-5.6-sol' }],
   });
 });

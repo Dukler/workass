@@ -488,9 +488,6 @@ func TestDreamSubagentCatalogProgressMessageWaitManyAndDurableReceipt(t *testing
 		RSSSampleInterval: time.Hour,
 	})
 	t.Cleanup(func() { manager.Reset() })
-	manager.SetModelScores(map[string]any{
-		"mock": map[string]any{"mock-deterministic": map[string]any{"intelligence": 9, "taste": 8, "cost": 4, "note": "Reliable deterministic fixture"}},
-	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
