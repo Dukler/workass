@@ -16,7 +16,10 @@ const source = readFileSync(new URL('../src/components/Transcript.tsx', import.m
 
 test('the page height is held whenever the reader is followed, not only when motion is allowed', () => {
   const onResize = source.slice(source.indexOf('const onResize = () => {'), source.indexOf('const mo = new MutationObserver'));
-  assert.match(onResize, /if \(stick\.current && doc\) \{\s*const height = doc\.offsetHeight;/);
+  // The only thing between "followed" and the hold is starting a new hold at
+  // a new width (rail-slide.test.ts), never a motion setting.
+  assert.match(onResize, /if \(stick\.current && doc\) \{[^]*?const height = doc\.offsetHeight;\s*if \(height > heldHeight\.current\) \{/);
+  assert.doesNotMatch(onResize.slice(0, onResize.indexOf('const height = doc.offsetHeight;')), /streamFollow|prefersReducedMotion/);
   assert.doesNotMatch(onResize, /streamFollow\.current && doc/);
 });
 
