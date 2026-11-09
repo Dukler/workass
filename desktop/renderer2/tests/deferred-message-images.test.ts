@@ -16,7 +16,7 @@ let cachedImageSrc: (image: MessageImage) => string;
 let appStore: { state: { chats: Chat[]; activeId: string | null }; clearToastTimers(): void };
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   ({ Transcript } = await vite.ssrLoadModule('/src/components/Transcript.tsx') as { Transcript: typeof Transcript });
   ({ loadImageSrc, cachedImageSrc } = await vite.ssrLoadModule('/src/components/MessageImage.tsx') as { loadImageSrc: typeof loadImageSrc; cachedImageSrc: typeof cachedImageSrc });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as { store: typeof appStore }).store;

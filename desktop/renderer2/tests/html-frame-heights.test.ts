@@ -23,7 +23,7 @@ describe('page frame heights', () => {
       setItem: (key: string, value: string) => { store.set(key, value); },
       removeItem: (key: string) => { store.delete(key); },
     };
-    vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+    vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
     frames = await vite.ssrLoadModule('/src/markdown/html-frames.ts') as typeof frames;
   });
 

@@ -19,7 +19,7 @@ test('artifact URL qualification preserves local paths and binds remote paths to
 test('visualized artifact navigation keeps the cross-origin iframe decision executable', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   t.after(async () => { await server.close(); });
   const { visualizationNeedsTopLevelOpen } = await server.ssrLoadModule('/src/markdown/VisualizeBlock.tsx') as {
@@ -33,7 +33,7 @@ test('visualized artifact navigation keeps the cross-origin iframe decision exec
 test('remote hosted artifact links and images use the owning machine private bridge', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   t.after(async () => { await server.close(); });
 
@@ -105,7 +105,7 @@ test('remote hosted artifact links and images use the owning machine private bri
 test('artifact clicks navigate the exact remote chat repeatedly without changing the active local chat', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   const { Store } = await server.ssrLoadModule('/src/store/store.ts');
   const { store } = await server.ssrLoadModule('/src/store/store.ts') as { store: { clearToastTimers(): void } };

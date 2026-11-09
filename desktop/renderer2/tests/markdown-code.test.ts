@@ -16,7 +16,7 @@ let copyCodeText: (
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   ({ parseBlocks } = await server.ssrLoadModule('/src/markdown/blocks.ts') as { parseBlocks: typeof parseBlocks });
   ({ MarkdownBlock } = await server.ssrLoadModule('/src/markdown/MarkdownBlock.tsx') as { MarkdownBlock: typeof MarkdownBlock });
   ({ copyCodeText } = await server.ssrLoadModule('/src/markdown/CodeBlock.tsx') as { copyCodeText: typeof copyCodeText });

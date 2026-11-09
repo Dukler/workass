@@ -11,7 +11,7 @@ const FINGERPRINT = 'ab'.repeat(32);
 test('a machine added by its VPN address is asked for access even when the LAN address is listed first', async (t) => {
 	const server = await createServer({
 		root: fileURLToPath(new URL('..', import.meta.url)),
-		server: { middlewareMode: true },
+		server: { middlewareMode: true, ws: false },
 		appType: 'custom',
 		logLevel: 'silent',
 	});

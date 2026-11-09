@@ -16,7 +16,7 @@ const NOW = Date.parse('2026-11-07T12:00:00Z');
 const realNow = Date.now;
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   ({ SidebarV2 } = await vite.ssrLoadModule('/src/components/SidebarV2.tsx') as { SidebarV2: typeof SidebarV2 });
   ({ store } = await vite.ssrLoadModule('/src/store/store.ts') as { store: typeof store });
 });

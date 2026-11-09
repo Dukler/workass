@@ -11,7 +11,7 @@ let MarkdownBlock: React.ComponentType<Record<string, unknown>>;
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   ({ parseBlocks } = await server.ssrLoadModule('/src/markdown/blocks.ts') as any);
   ({ MarkdownBlock } = await server.ssrLoadModule('/src/markdown/MarkdownBlock.tsx') as any);
 });

@@ -22,7 +22,7 @@ let render: { HTML_RENDER_SANDBOX: string; HTML_RENDER_CSP: string; HTML_RENDER_
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   ({ parseBlocks, parseBlocksGrowing } = await server.ssrLoadModule('/src/markdown/blocks.ts') as { parseBlocks: typeof parseBlocks; parseBlocksGrowing: typeof parseBlocksGrowing });
   ({ MarkdownBlock } = await server.ssrLoadModule('/src/markdown/MarkdownBlock.tsx') as { MarkdownBlock: typeof MarkdownBlock });
   ({ ChatFindQueryContext } = await server.ssrLoadModule('/src/markdown/find-context.ts') as { ChatFindQueryContext: typeof ChatFindQueryContext });

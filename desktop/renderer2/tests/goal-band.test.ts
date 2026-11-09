@@ -15,7 +15,7 @@ let appStore: {
 };
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   ({ Composer } = await vite.ssrLoadModule('/src/components/Composer.tsx') as { Composer: React.ComponentType<{ chat: Chat | null }> });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as { store: typeof appStore }).store;
 });

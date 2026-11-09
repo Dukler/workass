@@ -29,7 +29,7 @@ let setMachineRouter: (router: unknown) => void;
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   const tab = await server.ssrLoadModule('/src/components/CambiosTab.tsx') as Record<string, any>;
   ({ CambiosTab, Peek, FullDiff } = tab as typeof tab & { CambiosTab: typeof CambiosTab });
   cambios = tab as typeof cambios;

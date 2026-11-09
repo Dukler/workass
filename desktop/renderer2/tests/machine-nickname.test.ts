@@ -14,7 +14,7 @@ test('machine nicknames trim, clear, and reject bounded invalid input', () => {
 test('saving a nickname updates the local machine projection from the daemon receipt', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, ws: false },
     appType: 'custom',
     logLevel: 'silent',
   });

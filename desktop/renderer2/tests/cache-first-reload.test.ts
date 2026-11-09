@@ -12,7 +12,7 @@ let StoreCtor: new () => any;
 const stores: any[] = [];
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 after(async () => {

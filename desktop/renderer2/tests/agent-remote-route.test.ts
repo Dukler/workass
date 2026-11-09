@@ -50,7 +50,7 @@ async function loadStore(t: { after(fn: () => void | Promise<void>): void }) {
   sharedStore ??= (async () => {
     sharedServer = await createServer({
       root: fileURLToPath(new URL('..', import.meta.url)),
-      server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
     });
     const storeModule = await sharedServer.ssrLoadModule('/src/store/store.ts');
     ownStore(storeModule.store);

@@ -11,7 +11,7 @@ let AssistantMessage: React.ComponentType<Record<string, unknown>>;
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   ({ renderInline } = await server.ssrLoadModule('/src/markdown/inline.tsx') as {
     renderInline: (...args: unknown[]) => React.ReactNode[];
   });

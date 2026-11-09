@@ -24,7 +24,7 @@ before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
     logLevel: 'silent',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, ws: false },
     appType: 'custom',
   });
   const storeModule = await vite.ssrLoadModule('/src/store/store.ts');

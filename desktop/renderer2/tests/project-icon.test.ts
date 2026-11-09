@@ -23,7 +23,7 @@ test('project icon cache is partitioned by owning machine', () => {
 test('the project fallback carries one accessible remote-machine initial', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, ws: false },
     appType: 'custom',
     logLevel: 'silent',
   });
@@ -63,7 +63,7 @@ test('a reload reuses a kept icon on the daemon receipt', async () => {
     { found: true, mimeType: 'image/png', base64: 'iVBORw==' },
   ];
   (globalThis as any).window = { api: { projectIcon: async (...args: unknown[]) => { sent.push(args); return replies.shift(); } } };
-  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   try {
     const first = await server.ssrLoadModule('/src/project-icon.ts') as typeof import('../src/project-icon.ts');
     assert.equal(await first.loadProjectIcon('chat-1', '/workspace/a'), 'data:image/png;base64,iVBORw==');

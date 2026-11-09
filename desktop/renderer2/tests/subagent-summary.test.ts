@@ -8,7 +8,7 @@ import type { ToolEvent } from '../src/store/types.ts';
 
 test('a running subagent defaults closed with model and live activity in its two-line summary', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
 
@@ -57,7 +57,7 @@ test('a running subagent defaults closed with model and live activity in its two
 
 test('steering keeps every subagent from the same logical turn visible', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
 
@@ -150,7 +150,7 @@ test('steering keeps every subagent from the same logical turn visible', async (
 // the default and draws nothing extra.
 test('a forked subagent carries the fork glyph beside its own name; a fresh one does not', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SubagentRow.tsx') as {
@@ -177,7 +177,7 @@ test('a forked subagent carries the fork glyph beside its own name; a fresh one 
 // because the header is the subagent's durable record in the parent.
 test('the fork mark rides the subagent header when no work item is attached', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/TareasCard.tsx') as { TareasCard: React.ComponentType };

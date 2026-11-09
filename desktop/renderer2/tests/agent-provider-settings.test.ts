@@ -31,7 +31,7 @@ test('manual provider disable hides its updates and enable probes it again', asy
 
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   let singleton: { clearToastTimers(): void } | undefined;
   let target: { clearToastTimers(): void; state: Record<string, any>; toggleProvider(providerId: string, enabled: boolean): Promise<boolean> } | undefined;
@@ -100,7 +100,7 @@ test('a catalog digest re-reads providers:list and the catalog snapshot, never a
 
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   const stores: Array<{ clearToastTimers(): void }> = [];
   t.after(async () => { for (const store of stores) store.clearToastTimers(); await server.close(); });
@@ -170,7 +170,7 @@ test('an older daemon converges through one bounded detection pass, and a stuck 
   });
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   const stores: Array<{ clearToastTimers(): void }> = [];
   t.after(async () => { for (const store of stores) store.clearToastTimers(); await server.close(); });
@@ -216,7 +216,7 @@ test('agent settings render a quiet list with provider marks and accessible manu
 
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   let store: { state: Record<string, any>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });

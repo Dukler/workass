@@ -8,7 +8,7 @@ import { createServer } from 'vite';
 test('copied artifact addresses stay native links and images across chats', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   t.after(() => server.close());
   const { renderInline } = await server.ssrLoadModule('/src/markdown/inline.tsx');
@@ -42,7 +42,7 @@ test('copied artifact addresses stay native links and images across chats', asyn
 test('middle-click on returned artifact Markdown stays in the authorized Workass browser', async (t) => {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   t.after(() => server.close());
   const { renderInline } = await server.ssrLoadModule('/src/markdown/inline.tsx');

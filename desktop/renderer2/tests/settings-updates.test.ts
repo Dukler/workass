@@ -10,7 +10,7 @@ const page = readFileSync(new URL('../src/components/settings/ActualizacionesPag
 async function vite(t: { after(fn: () => unknown): void }): Promise<ViteDevServer> {
   const server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent',
   });
   t.after(() => server.close());
   return server;

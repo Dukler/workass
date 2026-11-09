@@ -10,7 +10,7 @@ import { createServer } from 'vite';
 // outcome word, the result folded behind a chevron.
 test('a subagent notice renders as one quiet line, result folded, never red', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   t.after(async () => { await server.close(); });
   const { NoticeLine } = await server.ssrLoadModule('/src/components/NoticeLine.tsx') as {
     NoticeLine: React.ComponentType<{ notice: { kind: string; title?: string; status?: string; body?: string } }>;

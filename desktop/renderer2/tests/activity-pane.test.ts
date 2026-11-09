@@ -29,7 +29,7 @@ const realNow = Date.now;
 
 before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   ({ RightRail } = await server.ssrLoadModule('/src/components/RightRail.tsx') as { RightRail: typeof RightRail });
   ({ TareasCard } = await server.ssrLoadModule('/src/components/TareasCard.tsx') as { TareasCard: typeof TareasCard });
   ({ store } = await server.ssrLoadModule('/src/store/store.ts') as { store: typeof store });

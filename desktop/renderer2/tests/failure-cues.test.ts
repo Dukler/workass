@@ -16,7 +16,7 @@ before(async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   server = await createServer({
     root,
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, ws: false },
     appType: 'custom',
     logLevel: 'silent',
   });

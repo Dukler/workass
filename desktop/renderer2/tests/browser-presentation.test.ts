@@ -17,7 +17,7 @@ before(async () => {
     setItem: (key: string, value: string) => { session.set(key, String(value)); },
     removeItem: (key: string) => { session.delete(key); },
   };
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   StoreCtor = (await vite.ssrLoadModule('/src/store/store.ts')).Store;
 });
 after(async () => {

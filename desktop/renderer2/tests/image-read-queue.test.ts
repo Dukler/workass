@@ -17,7 +17,7 @@ let mod: {
 };
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   mod = await vite.ssrLoadModule('/src/components/MessageImage.tsx') as typeof mod;
 });
 after(async () => { await vite.close(); });

@@ -36,7 +36,7 @@ test('live work retains header metadata and calls, including children from earli
 
 test('native and managed agents share one inspectable row with controls only for managed work', async (t) => {
   const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)),
-    server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+    server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: any;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const { TareasCard } = await server.ssrLoadModule('/src/components/TareasCard.tsx');

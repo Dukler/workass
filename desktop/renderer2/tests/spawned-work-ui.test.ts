@@ -12,7 +12,7 @@ import { createServer } from 'vite';
 // inside a fold for today's work.
 test('running spawned work is inline; finished work is a single flat fold', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
@@ -104,7 +104,7 @@ test('spawned-work rail CSS clamps titles and bounds output tails', () => {
 // calls is drawn once, as the call.
 test('an agent row folds its finished work; only running work hangs outside', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const cards = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {
@@ -153,7 +153,7 @@ test('an agent row folds its finished work; only running work hangs outside', as
 // status 'running' for older renderers; the row reads the additive fields.
 test('a queued job says so and a finished one counts only its run', async (t) => {
   const root = fileURLToPath(new URL('..', import.meta.url));
-  const server = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
+  const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
   t.after(async () => { store?.clearToastTimers(); await server.close(); });
   const loaded = await server.ssrLoadModule('/src/components/SpawnedWorkCard.tsx') as {

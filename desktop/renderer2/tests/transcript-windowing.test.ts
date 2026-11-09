@@ -153,7 +153,7 @@ let Transcript: React.ComponentType<{ chat: Chat }>;
 let appStore: { state: { chats: Chat[]; activeId: string | null }; clearToastTimers(): void };
 
 before(async () => {
-  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true }, appType: 'custom' });
+  vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), logLevel: 'silent', server: { middlewareMode: true, ws: false }, appType: 'custom' });
   ({ Transcript } = await vite.ssrLoadModule('/src/components/Transcript.tsx') as { Transcript: typeof Transcript });
   appStore = (await vite.ssrLoadModule('/src/store/store.ts') as { store: typeof appStore }).store;
 });
