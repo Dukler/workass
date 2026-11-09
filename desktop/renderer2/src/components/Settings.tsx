@@ -1,16 +1,26 @@
 // Settings — full-view takeover. Owner-approved rework (2026-11-08, mock
 // .dev/mocks/settings-v2.html): grouped navigation, flat rows with no cards,
-// the section name as the title bar and no page heading. Pages arrive as their
-// features exist; nothing here is a placeholder:
-//  - General: how new chats are named, desktop notices.
+// the section name as the title bar and no page heading. Every page shows
+// only what Workass really knows or enforces; nothing is a placeholder:
+//  - General (settings/GeneralPage): new-chat defaults, Enter while a turn
+//    runs, notices and their sound, dictation language.
 //  - Apariencia: theme and density, kept on this device.
-//  - Agentes y modelos (settings/AgentsPage): each machine's agents, live
-//    providers:list state with detect, enable/disable and CLI updates.
+//  - Agentes y modelos (settings/AgentsPage): each machine's agents, with
+//    detect, enable/disable and CLI updates.
+//  - Permisos (settings/PermisosPage): each level by every agent's own mode
+//    name, who may raise subagents, the agent browser's rules.
+//  - Herramientas (settings/HerramientasPage): Workass tool groups and their
+//    token cost; each agent's MCP servers, read-only.
 //  - Máquinas y acceso: this machine's name, other Workass, the phone, and
 //    the clients that keep access (lan:devices / access-request / revoke).
+//  - Trabajos (settings/TrabajosPage): job notices and resource holders.
+//  - Actualizaciones (settings/ActualizacionesPage): this Mac, "Instalar
+//    solo", paired machines and agent CLIs, all on the one updater.
 //  - Atajos: the keyboard shortcuts.
-//  - Mantenimiento: the engine fleet from proc:list; lifecycle values are
-//    daemon flags shown read-only (no channel edits them).
+//  - Mantenimiento (settings/MantenimientoPage): disk use, when quiet chats
+//    file themselves away, running agents, diagnostics export, privacy.
+// Accounts (plans, usage pace, resets) are their own page: AccountsPage.tsx,
+// opened from the left panel's foot.
 
 import { useEffect, useState, type ReactNode } from 'react';
 import type { MachineView, SettingsSection } from '../store/types';
