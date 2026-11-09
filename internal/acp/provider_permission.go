@@ -82,3 +82,42 @@ func PermissionLevel(providerID, modeID string) string {
 func PermissionLevelRank(level string) int {
 	return hostedIntentRank(level)
 }
+
+// The owner's permission levels (Ajustes · Permisos): one word per level for every
+// agent, each policy naming which of its native modes sits at which level. This is
+// a classification of what a mode does, not the read/edit/full intent mapping
+// above, which picks a mode BY intent: a mode that asks before editing is "ask"
+// here even where it is also the closest thing a provider has to read-only.
+const (
+	OwnerLevelAsk  = "ask"
+	OwnerLevelEdit = "edit"
+	OwnerLevelPlan = "plan"
+	OwnerLevelFull = "full"
+)
+
+// OwnerPermissionLevels is the order the levels are shown and assigned in. A mode
+// two levels name goes to the first.
+var OwnerPermissionLevels = []string{OwnerLevelAsk, OwnerLevelEdit, OwnerLevelPlan, OwnerLevelFull}
+
+// providerPermissionLevelPolicy is the optional half of a permission policy that
+// names native modes by owner level. A policy without it classifies nothing.
+type providerPermissionLevelPolicy interface {
+	LevelCandidates(level string) []string
+}
+
+func (genericProviderPermissionPolicy) LevelCandidates(level string) []string {
+	switch level {
+	case OwnerLevelAsk:
+		// Asks before an edit or a command. A read-only sandbox that asks for
+		// approval to leave it (on-request) is this, not plan.
+		return []string{"default", "ask", "always-ask", "read-only"}
+	case OwnerLevelEdit:
+		return []string{"agent", "acceptEdits", "auto-edit", "auto"}
+	case OwnerLevelPlan:
+		return []string{"plan"}
+	case OwnerLevelFull:
+		return genericProviderPermissionPolicy{}.Candidates("full")
+	default:
+		return nil
+	}
+}

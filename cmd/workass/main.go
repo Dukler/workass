@@ -472,6 +472,10 @@ func main() {
 		os.Exit(1)
 	}
 	agentControl.artifacts = artifactHosting
+	// The same blob settings:get serves, read at each use (agent_permissions.go).
+	if strings.TrimSpace(stateDir) != "" {
+		agentControl.settings = newAppSettingsStore(appSettingsFile(stateDir)).get
+	}
 	forkService := newForkService(stateDir, acpManager, hub.Broadcast)
 	agentControl.forks = forkService
 	if providerChats != nil && forkService != nil {

@@ -35,6 +35,9 @@ type agentControlHandler struct {
 	stateDir      string
 	forks         *acp.ForkService
 	validateOwner func(ownerKey, chatID, tabID string) bool
+	// settings reads the app-settings blob, for the owner's rules in
+	// agent_permissions.go. Nil keeps their defaults.
+	settings func() map[string]any
 	// fleetHome owns this machine's entity logs and the monitors it holds for
 	// other machines' watchers; fleetWatch owns the monitors this machine holds
 	// on other machines' entities. Both are nil on an install with no fleet

@@ -35,6 +35,66 @@ func PermissionIntentModes(providerID string, modes []Mode) map[string]string {
 	return permissionIntentModes(providerID, modes)
 }
 
+// permissionLevelModes names, for each owner level (OwnerPermissionLevels), the
+// native mode of this provider that sits there, among the modes it offers. A mode
+// is named for one level at most; a level the provider has no mode for is absent.
+func permissionLevelModes(providerID string, modes []Mode) map[string]string {
+	policy, ok := providerAdapterForID(providerID).permission.(providerPermissionLevelPolicy)
+	if !ok {
+		return map[string]string{}
+	}
+	available := map[string]bool{}
+	for _, mode := range modes {
+		available[mode.ID] = true
+	}
+	used := map[string]bool{}
+	out := map[string]string{}
+	for _, level := range OwnerPermissionLevels {
+		for _, id := range policy.LevelCandidates(level) {
+			if available[id] && !used[id] {
+				out[level], used[id] = id, true
+				break
+			}
+		}
+	}
+	return out
+}
+
+// OwnerPermissionLevel is the owner level one native mode sits at, or empty when
+// the provider's policy places it nowhere.
+func OwnerPermissionLevel(providerID, modeID string) string {
+	modeID = strings.TrimSpace(modeID)
+	policy, ok := providerAdapterForID(providerID).permission.(providerPermissionLevelPolicy)
+	if !ok || modeID == "" {
+		return ""
+	}
+	for _, level := range OwnerPermissionLevels {
+		for _, candidate := range policy.LevelCandidates(level) {
+			if strings.EqualFold(candidate, modeID) {
+				return level
+			}
+		}
+	}
+	return ""
+}
+
+// OwnerPermissionRank orders the owner levels by what a mode may do without a
+// person: plan 1, ask 2, edit 3, full 4, anything else 0 (unknown, never low).
+func OwnerPermissionRank(level string) int {
+	switch level {
+	case OwnerLevelPlan:
+		return 1
+	case OwnerLevelAsk:
+		return 2
+	case OwnerLevelEdit:
+		return 3
+	case OwnerLevelFull:
+		return 4
+	default:
+		return 0
+	}
+}
+
 // permissionIntentForMode is the inverse bridge used by inherited subagent
 // permissions. Provider-native ids are not portable: inheriting Codex
 // `agent-full-access` into Claude must select `bypassPermissions`, not fall

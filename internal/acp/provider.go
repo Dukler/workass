@@ -88,6 +88,9 @@ type CatalogGroup struct {
 	// NativeFork: a chat on this provider can start a forked subsession that
 	// remembers the conversation (a native session fork, never a replay).
 	NativeFork bool `json:"nativeFork,omitempty"`
+	// PermissionLevels: the native mode at each owner level (ask, edit, plan,
+	// full) for Settings to name. Additive; absent on older daemons.
+	PermissionLevels map[string]string `json:"permissionLevels,omitempty"`
 }
 
 // Provider is the small provider-specific seam used before any ACP/native
@@ -2481,6 +2484,7 @@ func (r *providerRuntime) catalogGroupLocked() CatalogGroup {
 		Models:            normalizeProviderCatalogModels(r.Config.ID, append([]Model(nil), r.Models...)),
 		Modes:             append([]Mode(nil), r.Modes...),
 		PermissionIntents: permissionIntentModes(r.Config.ID, r.Modes),
+		PermissionLevels:  permissionLevelModes(r.Config.ID, r.Modes),
 		AssistantBrand:    providerAdapterForID(r.Config.ID).model.AssistantBrand,
 		NativeFork:        NativeSessionForkSupported(r.Config.ID),
 		Status:            status,

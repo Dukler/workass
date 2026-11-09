@@ -80,7 +80,7 @@ func newDaemonState(cwd string, opts daemonOptions) *daemonState {
 	}
 	settingsPath := ""
 	if strings.TrimSpace(opts.StateDir) != "" {
-		settingsPath = filepath.Join(opts.StateDir, "app-settings.json")
+		settingsPath = appSettingsFile(opts.StateDir)
 	}
 	store := newAppConfigStore(configPath, engine, opts.EngineFlagOverrides)
 	if configPath != "" {
@@ -352,6 +352,11 @@ type appSettingsStore struct {
 	path string
 }
 
+// appSettingsFile is where a state directory keeps the app-settings blob.
+func appSettingsFile(stateDir string) string {
+	return filepath.Join(stateDir, "app-settings.json")
+}
+
 func newAppSettingsStore(path string) *appSettingsStore {
 	return &appSettingsStore{path: path}
 }
@@ -453,6 +458,8 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
 		"jobs":               defaultJobSettings(),
+		// Ajustes · Permisos (agent_permissions.go).
+		agentPermissionsSettingsKey: normalizeAgentPermissions(nil),
 	}
 	next[agentToolGroupsOffKey] = []any{}
 	applyGeneralSettings(next, input)
@@ -490,6 +497,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
 	next["jobs"] = normalizeJobSettings(input["jobs"])
 	next[agentToolGroupsOffKey] = normalizeToolGroupsOff(input[agentToolGroupsOffKey])
+	next[agentPermissionsSettingsKey] = normalizeAgentPermissions(input[agentPermissionsSettingsKey])
 	return next
 }
 

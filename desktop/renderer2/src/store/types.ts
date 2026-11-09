@@ -3,6 +3,7 @@ import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGro
 import type { ModelFavorite } from '../model-favorites';
 import type { ChatTitleSettings } from '../chat-titles';
 import type { GeneralSettings } from '../general-settings';
+import type { AgentPermissionSettings } from '../agent-permissions';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
 import type { WorkassRuntimeProfile } from '../model-catalog';
@@ -398,6 +399,9 @@ export interface AppState {
   // Ajustes · General: new-chat defaults, what Enter does while a turn runs,
   // which notices fire, dictation language (daemon app settings).
   general: GeneralSettings;
+  // Ajustes · Permisos: the owner's rules for agents (daemon app settings key
+  // "agentPermissions"); the daemon enforces them.
+  agentPermissions: AgentPermissionSettings;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.

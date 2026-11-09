@@ -57,6 +57,10 @@ type permissionCaller struct {
 	providerID string
 	modeID     string
 	level      string
+	// ownerOnly: the owner turned off agents raising other agents (Ajustes ·
+	// Permisos · Subagentes), so a raise of a chat or subagent this caller
+	// starts or changes is the owner's to make, whatever the caller's level.
+	ownerOnly bool
 }
 
 // rank is the caller's ceiling. A caller whose level cannot be read holds the
@@ -99,10 +103,16 @@ type permissionChange struct {
 	currentModeID     string
 	// contentDigest binds an approval to what it was given for.
 	contentDigest string
+	// delegated: the change is to another agent, one the caller starts (a chat,
+	// subsession or subagent) or reconfigures, not to the caller's own chat.
+	delegated bool
 }
 
 // permissionChangeRaises decides whether a change is above the caller's level.
 func permissionChangeRaises(caller permissionCaller, change permissionChange) bool {
+	if caller.ownerOnly && change.delegated {
+		return delegatedChangeRaises(caller, change)
+	}
 	if caller.full() {
 		return false
 	}
@@ -127,6 +137,49 @@ func permissionChangeRaises(caller permissionCaller, change permissionChange) bo
 	// ceiling, and only full access reaches it without asking.
 	return target == 0 || target > caller.rank()
 }
+
+// delegatedChangeRaises is the rule when the owner keeps raising other agents to
+// themselves. A chat or subagent an agent starts may run at most where it would by
+// default, which is the caller's own mode; one it reconfigures, at most where it
+// already is. Levels compare on the owner's ladder (plan, ask, edit, full), where
+// a mode that asks sits below one that edits on its own, and a level that cannot
+// be read on either side is the owner's to decide.
+func delegatedChangeRaises(caller permissionCaller, change permissionChange) bool {
+	if strings.TrimSpace(change.modeID) == "" {
+		return false
+	}
+	baseProvider, baseMode := caller.providerID, caller.modeID
+	if change.reconfigures {
+		baseProvider, baseMode = change.currentProviderID, change.currentModeID
+	}
+	if samePermissionMode(change.providerID, change.modeID, baseProvider, baseMode) {
+		return false
+	}
+	target := acp.OwnerPermissionRank(acp.OwnerPermissionLevel(change.providerID, change.modeID))
+	base := acp.OwnerPermissionRank(acp.OwnerPermissionLevel(baseProvider, baseMode))
+	if !change.reconfigures && caller.kind == permissionCallerForwarded {
+		// A forwarded command has no mode here, only the limit it was sent with.
+		base = forwardedLimitOwnerRank(caller.level)
+	}
+	return target == 0 || base == 0 || target > base
+}
+
+func forwardedLimitOwnerRank(limit string) int {
+	switch limit {
+	case fleetLimitRead:
+		return acp.OwnerPermissionRank(acp.OwnerLevelAsk)
+	case fleetLimitEdit:
+		return acp.OwnerPermissionRank(acp.OwnerLevelEdit)
+	case fleetLimitFull:
+		return acp.OwnerPermissionRank(acp.OwnerLevelFull)
+	default:
+		return 0
+	}
+}
+
+// ownerKeepsRaise is the clause a refusal gives when the owner's setting, not
+// the caller's level, is why a change waits for them.
+const ownerKeepsRaise = "the user set Workass so that only they raise the permissions of a chat or subagent another agent starts or changes"
 
 func samePermissionMode(providerA, modeA, providerB, modeB string) bool {
 	return strings.TrimSpace(modeA) == strings.TrimSpace(modeB) && samePermissionProvider(providerA, providerB)
@@ -175,17 +228,20 @@ func (h *agentControlHandler) permissionCallerFor(ctx context.Context, ownerKey,
 			caller.providerID, caller.modeID, _ = h.manager.SubagentPermissionMode(subagentID)
 		}
 		caller.level = acp.PermissionLevel(caller.providerID, caller.modeID)
+		caller.ownerOnly = !h.agentPermissions().SubagentRaise
 		return caller
 	}
 	if work, forwarded := fleetForwardedWorkFrom(ctx); forwarded {
 		caller.kind = permissionCallerForwarded
 		caller.level = canonicalFleetLimit(work.Limit)
+		caller.ownerOnly = !h.agentPermissions().SubagentRaise
 		return caller
 	}
 	if h != nil && h.chats != nil {
 		caller.providerID, caller.modeID = h.chats.providerChats.chatPermissionMode(tabID, chatID)
 	}
 	caller.level = acp.PermissionLevel(caller.providerID, caller.modeID)
+	caller.ownerOnly = !h.agentPermissions().SubagentRaise
 	return caller
 }
 
@@ -215,6 +271,16 @@ func (h *agentControlHandler) admitPermission(ctx context.Context, caller permis
 	if !permissionChangeRaises(caller, change) {
 		return nil
 	}
+	if caller.ownerOnly && change.delegated {
+		switch caller.kind {
+		case permissionCallerForwarded:
+			return fmt.Errorf("%s: %s, and %s would run at %s. This machine cannot show the user a card for it. Start it at the level it would inherit, or ask the user to set it",
+				permissionCeilingCode, ownerKeepsRaise, change.target, permissionModeWords(change.providerID, change.modeID))
+		case permissionCallerSubagent:
+			return fmt.Errorf("%s: %s, and %s would run at %s. A subagent cannot ask the user. Start it at the level it would inherit; its parent agent can ask the user",
+				permissionCeilingCode, ownerKeepsRaise, change.target, permissionModeWords(change.providerID, change.modeID))
+		}
+	}
 	switch caller.kind {
 	case permissionCallerForwarded:
 		return fmt.Errorf("%s: this command came from another machine with a %s limit, and %s would run at %s, which is above it. This machine cannot show the user a card for it. Raise the calling chat first: call workass_configure_chat on your own chat with permission_intent set to what you need, which asks the user on your machine. Then retry this call",
@@ -225,6 +291,10 @@ func (h *agentControlHandler) admitPermission(ctx context.Context, caller permis
 	}
 	allowed, status, err := h.askPermissionRaise(ctx, caller, change)
 	if err != nil {
+		if acp.IsNoRunningQuestionCaller(err) && caller.ownerOnly && change.delegated {
+			return fmt.Errorf("%s: %s, and %s would run at %s. No turn is running here to show the user a card in. Start it at the level it would inherit, or ask the user to set it in that chat's permission menu",
+				permissionCeilingCode, ownerKeepsRaise, change.target, permissionModeWords(change.providerID, change.modeID))
+		}
 		if acp.IsNoRunningQuestionCaller(err) {
 			return fmt.Errorf("%s: this chat is at %s, and %s would run at %s, which is above it. No turn is running here to show the user a card in. Ask the user: \"Please allow %s to run at %s, or set it yourself in the chat's permission menu.\"",
 				permissionCeilingCode, caller.statedLevel(), change.target, permissionModeWords(change.providerID, change.modeID), change.target, permissionModeWords(change.providerID, change.modeID))
@@ -250,6 +320,12 @@ func (h *agentControlHandler) askPermissionRaise(ctx context.Context, caller per
 	}
 	text := fmt.Sprintf("This chat is at %s. It wants to %s, which would run at %s. Allow it?",
 		permissionLevelWords(caller.statedLevel()), change.summary, permissionModeWords(change.providerID, change.modeID))
+	if caller.ownerOnly && change.delegated {
+		// The caller may be at full access: the card says the owner's own rule
+		// is why it asks, not a level the caller lacks.
+		text = fmt.Sprintf("Only you raise the permissions of the agents another agent starts or changes. This chat wants to %s, which would run at %s. Allow it?",
+			change.summary, permissionModeWords(change.providerID, change.modeID))
+	}
 	if runes := []rune(text); len(runes) > 400 {
 		text = string(runes[:399]) + "…"
 	}
@@ -342,11 +418,15 @@ func permissionGateFrom(ctx context.Context) *permissionGate {
 }
 
 // admit is a no-op with no gate, which is the human's path and every in-process
-// caller that is not an agent tool.
+// caller that is not an agent tool. Everything through a gate is a chat the caller
+// creates or a chat it configures; only configuring its own chat is not delegated.
 func (g *permissionGate) admit(ctx context.Context, change permissionChange) error {
 	if g == nil {
 		return nil
 	}
+	change.delegated = change.method != "chat.configure" ||
+		strings.TrimSpace(change.tabID) != strings.TrimSpace(g.caller.tabID) ||
+		strings.TrimSpace(change.chatID) != strings.TrimSpace(g.caller.chatID)
 	return g.handler.admitPermission(ctx, g.caller, change)
 }
 
@@ -471,7 +551,7 @@ func matchingRemoteChatRow(listed any, tabID, chatID string) map[string]any {
 // report in its own words. It returns the params the spawn should run with.
 func (h *agentControlHandler) admitSpawn(ctx context.Context, ownerKey, tabID, chatID string, params map[string]any) (map[string]any, error) {
 	caller := h.permissionCallerFor(ctx, ownerKey, tabID, chatID)
-	if caller.full() {
+	if caller.full() && !caller.ownerOnly {
 		return params, nil
 	}
 	resolve := func(p map[string]any) (string, string, error) {
@@ -490,7 +570,7 @@ func (h *agentControlHandler) admitSpawn(ctx context.Context, ownerKey, tabID, c
 		method: "agent.spawn", operationID: fieldString(params, "operation_id"),
 		summary: "start a subagent" + permissionMessageWords(fieldString(params, "prompt")),
 		target:  "that subagent", tabID: tabID, chatID: chatID, providerID: providerID, modeID: modeID,
-		contentDigest: permissionContentDigest(fieldString(params, "prompt")),
+		contentDigest: permissionContentDigest(fieldString(params, "prompt")), delegated: true,
 	}
 	if !permissionChangeRaises(caller, change) {
 		return params, nil
@@ -545,6 +625,11 @@ func (h *agentControlHandler) refuseGrantBelowFull(ctx context.Context, ownerKey
 		return nil
 	}
 	caller := h.permissionCallerFor(ctx, ownerKey, tabID, chatID)
+	if caller.ownerOnly {
+		// Allowing a subagent's request is raising it for that request.
+		return fmt.Errorf("%s: %s, so a subagent's request is the user's to answer on its card. Denying it is still allowed",
+			permissionCeilingCode, ownerKeepsRaise)
+	}
 	if caller.full() {
 		return nil
 	}

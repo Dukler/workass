@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('workassBrowser', {
   setViewport: (chatId, width, height) => ipcRenderer.invoke('workass-browser:set-viewport', { chatId, width, height }),
   resetViewport: (chatId) => ipcRenderer.invoke('workass-browser:reset-viewport', { chatId }),
   pages: (chatId, conversationId) => ipcRenderer.invoke('workass-browser:pages', { chatId, conversationId }),
+  profileSites: () => ipcRenderer.invoke('workass-browser:profile-sites'),
+  clearSessions: () => ipcRenderer.invoke('workass-browser:clear-sessions'),
   onOpenRequest: (callback) => {
     const listener = (_event, chatId, request) => callback(chatId || undefined, request || undefined);
     ipcRenderer.on('workass-browser:open-request', listener);

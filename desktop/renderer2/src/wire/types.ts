@@ -21,6 +21,8 @@ export interface CatalogGroup {
   models: ModelOption[];
   modes: ModeOption[];
   permissionIntents?: Partial<Record<PermissionIntent, string>>;
+  // The native mode at each owner level (Ajustes · Permisos); older daemons omit it.
+  permissionLevels?: Partial<Record<'ask' | 'edit' | 'plan' | 'full', string>>;
   assistantBrand?: string;
   status?: string;
   latencyMs?: number;

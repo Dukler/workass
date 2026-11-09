@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -33,11 +34,15 @@ type workassToolHandler struct {
 	validateOwner      func(ownerKey, chatID, tabID string) bool
 	browserControlFile string
 	browserClient      *http.Client
+	// browserApprovals: sites the owner let a chat's agent open while the
+	// browser rule is "ask" (browser_permissions.go).
+	browserApprovals *browserSiteApprovals
 }
 
 func newWorkassToolHandler(manager *acp.Manager, control *agentControlHandler, controlFile string, chats *providerChatRuntime) *workassToolHandler {
 	return &workassToolHandler{manager: manager, agentControl: control, providerChats: chats,
-		browserControlFile: controlFile, browserClient: &http.Client{Timeout: 30 * time.Second}}
+		browserControlFile: controlFile, browserClient: &http.Client{Timeout: 30 * time.Second},
+		browserApprovals: newBrowserSiteApprovals()}
 }
 
 func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -376,6 +381,13 @@ func (h *workassToolHandler) callTool(r *http.Request, call browserMCPCallParams
 		}
 		params := prepared.Params
 		params["chatId"] = chatID
+		admission := context.Background()
+		if r != nil {
+			admission = r.Context()
+		}
+		if refusal := h.admitBrowserCall(admission, prepared, operationID, ownerKey, chatID, tabID); refusal != nil {
+			return refusal, nil
+		}
 		if !prepared.Mutating {
 			actor, err := h.providerChats.exactActorFence(tabID, chatID)
 			if err != nil {
@@ -394,6 +406,7 @@ func (h *workassToolHandler) callTool(r *http.Request, call browserMCPCallParams
 			return formatBrowserMCPResult(call, prepared, result)
 		}
 		digest := browserMCPRequestDigest(prepared.Method, params)
+		h.withBrowserDownloadRule(params)
 		reply, err := h.providerChats.executeBrowserMutationWithAdmission(
 			r.Context(), tabID, chatID, providercontract.OperationID(operationID), call.Name, prepared.Method, digest,
 			browserMutationLane(params, operationID),

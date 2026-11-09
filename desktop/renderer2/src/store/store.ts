@@ -58,6 +58,9 @@ import {
   withGeneralSettingsInSettings, type GeneralSettings,
 } from '../general-settings';
 import { finishedBackgroundWork, finishedWorkText, freshEnding, playNoticeChime } from '../notices';
+import {
+  DEFAULT_AGENT_PERMISSIONS, agentPermissionsFromSettings, withAgentPermissionsInSettings, type AgentPermissionSettings,
+} from '../agent-permissions';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1346,7 +1349,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), agentPermissions: { ...DEFAULT_AGENT_PERMISSIONS }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -4693,6 +4696,12 @@ export class Store {
     this.state.general = parseGeneralSettings(next);
     this.commitModelPreferences();
   }
+  // Ajustes · Permisos: saved with the other app-settings keys; the daemon
+  // reads them at the moment they apply.
+  setAgentPermissions(next: AgentPermissionSettings) {
+    this.state.agentPermissions = { ...next };
+    this.commitModelPreferences();
+  }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
   private commitModelPreferences() {
@@ -4714,6 +4723,7 @@ export class Store {
     this.state.modelFavorites = modelFavoritesFromSettings(reply);
     this.state.chatTitles = chatTitlesFromSettings(reply);
     this.state.general = generalSettingsFromSettings(reply);
+    this.state.agentPermissions = agentPermissionsFromSettings(reply);
     this.bumpApp(false);
   }
   private scheduleModelPreferencesSave() {
@@ -4735,7 +4745,10 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
-      const merged = withGeneralSettingsInSettings(withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.general);
+      const merged = withAgentPermissionsInSettings(
+        withGeneralSettingsInSettings(withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.general),
+        this.state.agentPermissions,
+      );
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {

@@ -103,6 +103,10 @@ export interface WorkassBrowserApi {
   onOpenRequest(callback: (chatId?: string, request?: WorkassBrowserOpenRequest) => void): () => void;
   // Optional, newer shells: the chat's pages, for the person to pick from.
   pages?(chatId: string, conversationId?: string): Promise<WorkassBrowserPage[]>;
+  // Optional, newer shells (Ajustes · Permisos): the sites that keep a session in
+  // the browser profile, and signing out of all of them.
+  profileSites?(): Promise<{ sites: string[] } | null>;
+  clearSessions?(): Promise<{ sites: string[] } | null>;
   onState(callback: (state: WorkassBrowserState) => void): () => void;
 }
 
