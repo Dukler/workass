@@ -384,6 +384,12 @@ export interface ProcessSummary {
 }
 export interface ProcChanged { processes: ProcessSummary[]; }
 
+// resources:list (cmd/workass/job_settings.go): a machine's job resources. A
+// resource is held by one job at a time; `waiting` counts the queue behind it.
+export interface JobResourceHolder { workId: string; label?: string; heldSince?: string; heldForMs?: number; }
+export interface JobResource { name: string; holder?: JobResourceHolder; waiting: number; }
+export interface ResourcesList { resources: JobResource[]; }
+
 // app-update:work reply: what a Workass update would stop right now. External
 // lanes and services are not counted — they outlive the daemon.
 export interface AppUpdateWork {
@@ -900,6 +906,7 @@ export interface WorkassApi {
   getState?: () => Promise<unknown>;
   jiraGet?: () => Promise<unknown>;
   procList?: () => Promise<ProcChanged>;
+  resourcesList?: () => Promise<ResourcesList>;
   procKill?: (id: string, tree: boolean) => Promise<{ ok: boolean; error?: string; already?: boolean }>;
   // P3b LAN devices/access (controller-only mutations; feature-detected).
   lanDevices?: () => Promise<LanDevices>;

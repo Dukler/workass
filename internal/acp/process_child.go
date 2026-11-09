@@ -776,9 +776,28 @@ func (m *Manager) reportProcessChildSilenceLocked(rec *spawnedWorkRecord, now ti
 	if silent < threshold {
 		return
 	}
-	rec.Item.Reporting = processReportingSilent
+	// The owner may choose to be told later than the row says so (Ajustes ·
+	// Trabajos); never earlier, because the window is what keeps one lost
+	// report from being an incident.
+	noticeAfter := max(threshold, m.ProcessSilenceNoticeAfter())
+	if rec.Item.Reporting != processReportingSilent {
+		// The row is marked at the window whatever was chosen for the notice:
+		// a record must never look healthy when nothing has been heard.
+		rec.Item.Reporting = processReportingSilent
+		rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
+		if silent < noticeAfter {
+			// Marked now, told later. The mark still has to reach the chat's
+			// record and, for a job owned on another machine, its owner's row;
+			// a state event is neither a log entry nor a notice.
+			state := hostedWorkStateFromView(processChildView(rec.Item))
+			*events = append(*events, m.processLifecycleLocked(rec, ProcessLifecycleEvent{Kind: ProcessLifecycleState, State: &state}))
+			return
+		}
+	}
+	if silent < noticeAfter {
+		return
+	}
 	rec.ReportedSilent = true
-	rec.Item.UpdatedAt = now.Format(time.RFC3339Nano)
 	*events = append(*events, m.processLifecycleLocked(rec, ProcessLifecycleEvent{
 		Kind: ProcessLifecycleAttention, AttentionKind: "not_reporting",
 		// Longer than the other two attentions on purpose: this one carries an
@@ -820,6 +839,30 @@ func supervisorPIDOf(rec *spawnedWorkRecord) int {
 		return 0
 	}
 	return *rec.Item.SupervisorPID
+}
+
+// MaxProcessSilenceNoticeAfter bounds the owner's choice. Settings offers at
+// most an hour; a day bounds what any other writer of the blob can store.
+const MaxProcessSilenceNoticeAfter = 24 * time.Hour
+
+// SetProcessSilenceNoticeAfter is the owner's choice of how long a running
+// job's supervisor may go unheard before its chat is TOLD (Ajustes ·
+// Trabajos). It moves the notice only: the row is still marked silent at the
+// window above, and a choice shorter than that window changes nothing. Zero is
+// the default, the notice with the mark.
+func (m *Manager) SetProcessSilenceNoticeAfter(after time.Duration) {
+	if m == nil {
+		return
+	}
+	m.processSilenceNoticeAfterNs.Store(int64(min(max(after, 0), MaxProcessSilenceNoticeAfter)))
+}
+
+// ProcessSilenceNoticeAfter is the delay SetProcessSilenceNoticeAfter stored.
+func (m *Manager) ProcessSilenceNoticeAfter() time.Duration {
+	if m == nil {
+		return 0
+	}
+	return time.Duration(m.processSilenceNoticeAfterNs.Load())
 }
 
 // processOutbox opens this machine's supervised-job outbox, once, lazily.

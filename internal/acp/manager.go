@@ -214,6 +214,10 @@ type Manager struct {
 	chatEnvRestorer   func(string, string) error
 
 	checkpointMu sync.Mutex
+
+	// processSilenceNoticeAfterNs is the owner's notice delay for a silent
+	// supervisor (SetProcessSilenceNoticeAfter); zero tells at the mark.
+	processSilenceNoticeAfterNs atomic.Int64
 }
 
 type spareRecord struct {
