@@ -765,6 +765,18 @@ func (m *Manager) enabledProviderIDsLocked() []string {
 	return out
 }
 
+// ProviderCommand is the executable Workass runs for an enabled provider: its
+// resolved path, else its configured command. False when the provider is
+// unknown, turned off, or has no command.
+func (m *Manager) ProviderCommand(id string) (string, bool) {
+	cfg, ok := m.providerSnapshot(id)
+	if !ok || !cfg.Enabled || cfg.DisabledByUser {
+		return "", false
+	}
+	command := launchCommand(cfg)
+	return command, command != ""
+}
+
 func (m *Manager) providerSnapshot(id string) (ProviderConfig, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

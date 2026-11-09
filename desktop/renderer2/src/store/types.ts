@@ -1,6 +1,7 @@
 import type { PermissionContext } from '../permission-explain';
 import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, ChatGoal, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
+import type { ChatTitleSettings } from '../chat-titles';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
 import type { ModelScores } from '../model-scores';
@@ -396,6 +397,9 @@ export interface AppState {
   // these live in daemon-owned app settings so every controller sees the same
   // favorites and a renderer reload cannot lose a click.
   modelFavorites: ModelFavorite[];
+  // How new chats are named: from the first message, or by an agent that
+  // reads it once (daemon app settings key "chatTitles").
+  chatTitles: ChatTitleSettings;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.

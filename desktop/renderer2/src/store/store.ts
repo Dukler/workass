@@ -53,6 +53,7 @@ import {
 import {
   modelFavoritesFromSettings, toggleModelFavorite, withModelFavoritesInSettings,
 } from '../model-favorites';
+import { DEFAULT_CHAT_TITLES, chatTitlesFromSettings, withChatTitlesInSettings, type ChatTitleSettings } from '../chat-titles';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1341,7 +1342,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelScores: {}, modelFavorites: [], planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelScores: {}, modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -4686,6 +4687,19 @@ export class Store {
     this.state.modelFavorites = next;
     this.commitModelPreferences();
   }
+  // With an agent chosen in Settings, a new chat's first message also goes
+  // once to that agent for a short title. The daemon swaps it in only while
+  // the chat still has the first-message title, so a rename always wins; the
+  // new title arrives like any other presentation change.
+  private nameChatWithAgent(tabId: string, chatId: string, text: string, expectTitle: string) {
+    const choice = this.state.chatTitles;
+    if (choice.mode !== 'agent' || !has('appChatAutoTitle')) return;
+    void call('appChatAutoTitle', { tabId, chatId, text, expectTitle, providerId: choice.providerId, model: choice.model });
+  }
+  setChatTitles(next: ChatTitleSettings) {
+    this.state.chatTitles = { ...next };
+    this.commitModelPreferences();
+  }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
   private commitModelScores() {
@@ -4709,6 +4723,7 @@ export class Store {
     if (this.settingsSaveTimer) return;
     this.state.modelScores = modelScoresFromSettings(reply);
     this.state.modelFavorites = modelFavoritesFromSettings(reply);
+    this.state.chatTitles = chatTitlesFromSettings(reply);
     this.bumpApp(false);
   }
   private scheduleModelPreferencesSave() {
@@ -4730,7 +4745,8 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withScores = withModelScoresInSettings(settingsFromReply(reply), this.state.modelScores);
-      const merged = withModelFavoritesInSettings(withScores, this.state.modelFavorites);
+      const withFavorites = withModelFavoritesInSettings(withScores, this.state.modelFavorites);
+      const merged = withChatTitlesInSettings(withFavorites, this.state.chatTitles);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {
@@ -6231,6 +6247,10 @@ export class Store {
     const releasePendingStart = () => {
       if (this.pendingTurnStarts.get(tabId) === pendingStart) this.pendingTurnStarts.delete(tabId);
     };
+    // The first-message title, which an agent may later replace (Settings ·
+    // Títulos de los chats). Captured now: a rename typed while the send is
+    // in flight must never be what the agent's title replaces.
+    const promptTitle = !chat.titleLocked && display.trim() ? titleFromPrompt(display) : '';
     if (!chat.titleLocked) { chat.title = titleFromPrompt(display) || chat.title; chat.titleLocked = true; }
     this.bumpChat(chat);
 
@@ -6260,6 +6280,7 @@ export class Store {
       }
       return false;
     }
+    if (promptTitle) this.nameChatWithAgent(tabId, durableChatId, display, promptTitle);
 
     // One actor-owned operation performs selection, exact resume/creation, and
     // prompt admission. A separate app-chat:new-session preflight doubled the

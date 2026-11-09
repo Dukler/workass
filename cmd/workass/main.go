@@ -1153,6 +1153,28 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl, providerChats)
 		registerChatDiagnosticsWire(hub, providerChats)
 		count += 24
+		if providerChats != nil {
+			titler := newChatTitler(acpManager, providerChats, state.setting.get, log.Printf)
+			hub.Register("app-chat:auto-title", func(args []any) (any, error) {
+				arg := firstMapArg(args)
+				tabID, chatID := fieldString(arg, "tabId"), fieldString(arg, "chatId")
+				// The exact chat lives here before an agent starts for it.
+				if _, err := providerChats.exactActorFence(tabID, chatID); err != nil {
+					return nil, err
+				}
+				started, reason := titler.Start(chatTitleRequest{
+					TabID: tabID, ChatID: chatID,
+					Text: fieldString(arg, "text"), Expect: fieldString(arg, "expectTitle"),
+					ProviderID: fieldString(arg, "providerId"), Model: fieldString(arg, "model"),
+				})
+				reply := map[string]any{"started": started}
+				if reason != "" {
+					reply["reason"] = reason
+				}
+				return reply, nil
+			})
+			count++
+		}
 	}
 	return count
 }
@@ -2128,6 +2150,7 @@ func daemonStubs() []stubDef {
 		}},
 		{"app-chat:steer", func() any { return map[string]any{"ok": false, "unsupported": true, "error": ""} }},
 		{"app-chat:use-rate-limit-reset", func() any { return map[string]any{"outcome": "noCredit"} }},
+		{"app-chat:auto-title", func() any { return map[string]any{"started": false, "reason": "agent not available"} }},
 		{"spawned-work:list", func() any { return map[string]any{"items": []any{}} }},
 		{"spawned-work:summary", func() any { return map[string]any{"chats": []any{}} }},
 		{"spawned-work:read", func() any { return map[string]any{"ok": false, "error": "ACP unavailable"} }},

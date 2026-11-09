@@ -23,6 +23,7 @@ import {
   normalizeNote, NOTE_MAX, SCORE_DIMENSIONS, SCORE_MAX, SCORE_MIN,
   type ModelScore, type ScoreableModel,
 } from '../model-scores';
+import { CHAT_TITLE_AGENTS } from '../chat-titles';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
   agentes: 'Agentes', modelos: 'Modelos', maquinas: 'Conectar Workass', dispositivos: 'Acceso aprobado', engines: 'Engines',
@@ -206,7 +207,57 @@ function AgentesPanel() {
         <div className="group"><div className="lrow"><div className="body"><span className="empty">El daemon no expone la configuración de agentes (config:get).</span></div></div></div>
       )}
 
+      <ChatTitlesGroup />
     </section>
+  );
+}
+
+// How new chats are named. "Primer mensaje" is the old behavior; "Un agente"
+// also sends the first message once to the chosen agent for a short title
+// (daemon app-chat:auto-title). A rename typed by hand always wins.
+function ChatTitlesGroup() {
+  const app = useApp();
+  const choice = app.chatTitles;
+  if (!has('appChatAutoTitle') || !has('setSettings')) return null;
+  const agent = CHAT_TITLE_AGENTS.find((a) => a.providerId === choice.providerId) ?? CHAT_TITLE_AGENTS[0];
+  const model = agent.models.find((m) => m.id === choice.model);
+  const local = app.providers.find((p) => p.id === agent.providerId);
+  const unavailable = !!local && !local.enabled;
+  const byAgent = choice.mode === 'agent';
+  return (
+    <>
+      <div className="gtitle">Títulos de los chats</div>
+      <div className="group">
+        <div className="set">
+          <div className="lbl">
+            <div className="n">Nombrar chats nuevos</div>
+            <div className="d">{byAgent
+              ? `${agent.name} lee el primer mensaje una sola vez, sin herramientas ni proyecto, y le pone un título corto. Si lo renombrás vos, queda tu nombre.`
+              : 'El título son las primeras palabras del primer mensaje.'}</div>
+          </div>
+          <div className="ctl"><div className="seg">
+            <button className={!byAgent ? 'on' : ''} onClick={() => store.setChatTitles({ ...choice, mode: 'prompt' })}>Primer mensaje</button>
+            <button className={byAgent ? 'on' : ''} onClick={() => store.setChatTitles({ ...choice, mode: 'agent' })}>Un agente</button>
+          </div></div>
+        </div>
+        {byAgent && (
+          <div className="set">
+            <div className="lbl">
+              <div className="n">Modelo</div>
+              <div className="d">{unavailable
+                ? `${agent.name} no está activo en esta computadora: los chats se nombran con el primer mensaje.`
+                : `${agent.name} · ${model ? `${model.name}, ${model.note}` : choice.model}.`}</div>
+            </div>
+            <div className="ctl"><div className="seg">
+              {agent.models.map((m) => (
+                <button key={m.id} className={choice.model === m.id ? 'on' : ''}
+                  onClick={() => store.setChatTitles({ ...choice, providerId: agent.providerId, model: m.id })}>{m.name}</button>
+              ))}
+            </div></div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

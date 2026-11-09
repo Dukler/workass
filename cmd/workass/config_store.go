@@ -440,6 +440,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"prApprover":         "",
 		"modelScores":        acp.ModelScores{},
 		"modelFavorites":     []any{},
+		"chatTitles":         defaultChatTitleSettings(),
 	}
 	if input == nil {
 		return next
@@ -473,6 +474,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	}
 	next["modelScores"] = acp.NormalizeModelScores(input["modelScores"])
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
+	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
 	return next
 }
 

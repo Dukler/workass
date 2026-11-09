@@ -856,6 +856,9 @@ export interface WorkassApi {
     continuationAssistantMessageId?: string,
     boundary?: { assistantMessageId: string; contentOffset: number; resultOffset: number; eventCount: number; queuedMessageId?: string; expectedQueueRevision?: number },
   ) => Promise<{ ok: boolean; live?: boolean; queued?: boolean; daemonQueued?: boolean; interrupted?: boolean; unsupported?: boolean; strategy?: 'receipt-live' | 'generic-live' | 'rejected' | 'unsupported' | 'uncertain' | 'interrupt-queue' | 'queue'; turnId?: string; receipt?: boolean; error?: string; agentQueueRevision?: number; actorRevision?: number }>;
+  // Names a new chat with an agent (Settings: Títulos de los chats). Answers at
+  // once; the title arrives later as an ordinary presentation change.
+  appChatAutoTitle?: (o: { tabId: string; chatId: string; text: string; expectTitle: string; providerId: string; model: string }) => Promise<{ started: boolean; reason?: string }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,

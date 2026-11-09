@@ -50,6 +50,7 @@ const REMOTE_METHODS: Array<[keyof WorkassApi, string, Mapper?, RemoteLane?]> = 
   ['appChatReset', 'app-chat:reset'],
   ['appChatNewSession', 'app-chat:new-session'],
   ['appChatRefreshPlanUsage', 'app-chat:refresh-plan-usage', (a) => [{ providerId: a[0] }]],
+  ['appChatAutoTitle', 'app-chat:auto-title'],
   ['appChatUseRateLimitReset', 'app-chat:use-rate-limit-reset', (a) => [{ providerId: a[0], sessionId: a[1], idempotencyKey: a[2], creditId: a[3] }]],
   ['appChatCloseSession', 'app-chat:close-session'],
   ['appChatFork', 'app-chat:fork', undefined, 'control'],

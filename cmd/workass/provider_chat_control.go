@@ -951,6 +951,69 @@ func (r *providerChatRuntime) RenameChat(tabID, chatID, title string, operationI
 	return nil
 }
 
+// autoTitleOutcome is what AutoTitleChat did with a generated title.
+type autoTitleOutcome int
+
+const (
+	// autoTitleApplied: the chat now has the generated title.
+	autoTitleApplied autoTitleOutcome = iota
+	// autoTitlePending: the chat still has its placeholder name; the app's save
+	// of the first-message title has not landed yet.
+	autoTitlePending
+	// autoTitleKept: the chat has another name, which stays.
+	autoTitleKept
+)
+
+// AutoTitleChat puts a generated title on a chat, but only while the chat
+// still has the title it had when the generation began (the first-message
+// title). A chat the human renamed in the meantime keeps their name.
+func (r *providerChatRuntime) AutoTitleChat(tabID, chatID, expect, title string) (autoTitleOutcome, error) {
+	title = sanitizedChatTitle(title)
+	// Compared as stored: a presentation save sanitizes the title it keeps.
+	expect = strings.TrimSpace(sanitizedChatTitle(expect))
+	if title == "" || expect == "" {
+		return autoTitleKept, errors.New("auto title needs the expected and the new title")
+	}
+	digestRaw, err := json.Marshal(struct {
+		Kind   string `json:"kind"`
+		TabID  string `json:"tabId"`
+		ChatID string `json:"chatId"`
+		Expect string `json:"expect"`
+		Title  string `json:"title"`
+	}{Kind: "chat-auto-title-v1", TabID: strings.TrimSpace(tabID), ChatID: strings.TrimSpace(chatID), Expect: expect, Title: title})
+	if err != nil {
+		return autoTitleKept, err
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(digestRaw))
+	operationID := providercontract.NormalizeOperationID("auto-title-" + digest[:24])
+	actor, err := r.exactActorFence(tabID, chatID)
+	if err != nil {
+		return autoTitleKept, err
+	}
+	actor.mu.Lock()
+	defer actor.mu.Unlock()
+	state := actor.engine.ReadSnapshot()
+	if receipt, exists := state.PresentationMutationReceipts[operationID]; exists {
+		if receipt.Digest == digest {
+			return autoTitleApplied, nil
+		}
+		return autoTitleKept, nil
+	}
+	if current := strings.TrimSpace(sanitizedChatTitle(state.Presentation.Title)); current != expect {
+		if !state.Presentation.TitleLocked {
+			return autoTitlePending, nil
+		}
+		return autoTitleKept, nil
+	}
+	presentation := state.Presentation.Clone()
+	presentation.Title = title
+	presentation.TitleLocked = true
+	if err := actor.engine.Apply(chat.SavePresentation{OperationID: operationID, Digest: digest, Presentation: presentation}); err != nil {
+		return autoTitleKept, err
+	}
+	return autoTitleApplied, nil
+}
+
 // SettleChat is the agent twin of the sidebar Settle/Reactivar action
 // (renderer Store.settleChat): it files the chat into the settled shelf or
 // back into the live list and touches nothing else. A chat already in the
