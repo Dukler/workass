@@ -37,6 +37,22 @@ async function exists(file) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
+// A test can leave a tree it made read-only: the updater seals a staged
+// release (desktop/shell/update-manager.js sealStagedRelease). Give the owner
+// write back and remove it again rather than fail the whole suite's cleanup.
+async function removeFixtureTree(root, execute) {
+  try {
+    await rm(root, { recursive: true, force: true });
+    return;
+  } catch (error) {
+    if (error?.code !== 'EACCES' && error?.code !== 'EPERM') throw error;
+  }
+  // Best effort: entries the first pass already removed make chmod exit
+  // non-zero; only the second removal decides.
+  try { await run('/bin/chmod', ['-R', 'u+w', root], execute); } catch { /* see above */ }
+  await rm(root, { recursive: true, force: true });
+}
+
 export async function createTemporaryFixtureVolume({
   platform = process.platform,
   execute = execFile,
@@ -45,7 +61,7 @@ export async function createTemporaryFixtureVolume({
 } = {}) {
   if (platform !== 'darwin') {
     const root = await mkdtemp(path.join(tempDir, 'workass-test-fixtures-'));
-    return { root, async cleanup() { await rm(root, { recursive: true, force: true }); } };
+    return { root, async cleanup() { await removeFixtureTree(root, execute); } };
   }
 
   let device;
@@ -56,7 +72,7 @@ export async function createTemporaryFixtureVolume({
     if (cleaned) return;
     const errors = [];
     if (root) {
-      try { await rm(root, { recursive: true, force: true }); }
+      try { await removeFixtureTree(root, execute); }
       catch (error) { errors.push(error); }
     }
     if (device) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createTemporaryFixtureVolume } from '../test-fixture-volume.mjs';
@@ -108,4 +108,19 @@ test('non-macOS uses an ordinary temporary directory', async t => {
   assert.ok(fixture.root.startsWith(base + path.sep));
   await fixture.cleanup();
   assert.ok(!(await readdir(base)).includes(path.basename(fixture.root)));
+});
+
+// 2026-11-09: the updater seals a staged release read-only, and an updater test
+// left one behind; the suite's fixture cleanup then failed with EACCES.
+test('cleanup removes a tree a test left read-only', async t => {
+  const { base } = await testDirs(t);
+  const fixture = await createTemporaryFixtureVolume({ platform: 'linux', tempDir: base });
+  const sealed = path.join(fixture.root, 'Applications', '.Workass.app.incoming-test', 'Contents');
+  await mkdir(sealed, { recursive: true });
+  await writeFile(path.join(sealed, 'Info.plist'), 'x');
+  await chmod(path.join(sealed, 'Info.plist'), 0o444);
+  await chmod(sealed, 0o555);
+  await chmod(path.dirname(sealed), 0o555);
+  await fixture.cleanup();
+  await assert.rejects(stat(fixture.root), { code: 'ENOENT' });
 });
