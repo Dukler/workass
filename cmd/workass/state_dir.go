@@ -14,6 +14,11 @@ import (
 // kept beside state (app-config.json, providers.json, run/) live in <root>.
 const testRootEnvVar = "WORKASS_TEST_ROOT"
 
+// updatePreflightEnv marks a daemon the in-app updater started from a staged
+// release to prove it works before anything closes (main.go: loopback only,
+// admission closed, no beacon, fleet links or schedules).
+const updatePreflightEnv = "WORKASS_UPDATE_PREFLIGHT"
+
 // daemonStateDirRequest is what decides a daemon's state directory. It is a value
 // rather than a read of the process so every refusal can be tested without
 // starting a daemon.

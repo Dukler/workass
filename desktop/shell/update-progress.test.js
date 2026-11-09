@@ -63,7 +63,7 @@ test('durable updater receipts fail immediately on a non-transient rename error'
   assert.equal(fs.existsSync(`${file}.incoming-${process.pid}`), false);
 });
 
-function progressFixture() {
+function progressFixture({ platform = 'darwin' } = {}) {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-update-progress-'));
   const updateId = 'update-progress-1234';
   const transactionRoot = path.join(dataRoot, 'updates', 'transactions', updateId);
@@ -72,7 +72,7 @@ function progressFixture() {
   const transaction = {
     schemaVersion: 4,
     updateId,
-    platform: 'darwin',
+    platform,
     currentVersion: '1.1.0',
     targetVersion: '1.2.0',
     workerId: `worker-${'2'.repeat(32)}`,
@@ -85,7 +85,9 @@ function progressFixture() {
     receiptPath: path.join(dataRoot, 'updates', 'receipt.json'),
     journalPath: path.join(transactionRoot, 'journal.json'),
     progressReceiptPath: path.join(transactionRoot, 'progress-receipt.json'),
-    progressExecutable: path.join(incomingTarget, 'Contents', 'MacOS', 'Workass'),
+    progressExecutable: platform === 'win32'
+      ? path.join(incomingTarget, 'Workass.exe')
+      : path.join(incomingTarget, 'Contents', 'MacOS', 'Workass'),
   };
   fs.mkdirSync(transactionRoot, { recursive: true });
   fs.mkdirSync(path.dirname(transaction.progressExecutable), { recursive: true });
@@ -388,14 +390,61 @@ test('the updater uses the native window as its only visual surface', () => {
   assert.doesNotMatch(html, /box-shadow:0 24px 70px/);
 });
 
-test('the progress process becomes ready only after its isolated window is visible', async () => {
+// 2026-11-09 (owner): macOS shows no update window. Its managers never start
+// this process; one of 0.1.274 or older still does, and refuses the handoff
+// without a fresh windowVisible:true heartbeat. The answer opens no window,
+// hides from the Dock, and says windowless:true. REMOVABLE with that manager.
+test('on macOS the progress process opens no window and only answers an older manager', async () => {
   const { transaction, transactionPath } = progressFixture();
+  const timers = fakeTimers();
+  const electron = fakeElectron();
+  const policies = [];
+  let dockHidden = false;
+  electron.app.setActivationPolicy = (policy) => { policies.push(policy); };
+  electron.app.dock = { hide: () => { dockHidden = true; } };
+  let clock = 1000;
+  const controller = await runUpdateProgressProcess({
+    ...electron,
+    transactionPath,
+    platform: 'darwin',
+    executablePath: transaction.progressExecutable,
+    progressId: transaction.progressId,
+    now: () => clock,
+    ...timers,
+  });
+  assert.equal(electron.windows.length, 0, 'no window at all');
+  assert.deepEqual(policies, ['accessory']);
+  assert.equal(dockHidden, true);
+  let receipt = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
+  assert.equal(receipt.phase, 'visible');
+  assert.equal(receipt.windowless, true);
+  assert.equal(receipt.windowVisible, true, 'the one value a 0.1.274 manager accepts');
+  assert.equal(progressReceiptIsLive(receipt, transaction, { now: () => clock, alive: (pid) => pid === process.pid }), true);
+
+  clock = 3000;
+  controller.render();
+  receipt = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
+  assert.equal(receipt.phase, 'watching');
+  assert.equal(receipt.updatedAt, new Date(3000).toISOString(), 'a fresh heartbeat while the update runs');
+  assert.equal(electron.app.quitCalls, 0);
+
+  writeJournal(transaction, { phase: 'healthy', terminal: true, installedVersion: transaction.targetVersion });
+  controller.render();
+  receipt = JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8'));
+  assert.equal(receipt.phase, 'closed');
+  assert.equal(receipt.windowVisible, false);
+  assert.equal(electron.app.quitCalls, 1, 'it leaves as soon as the update is over');
+  assert.equal(timers.handles.some((handle) => handle.active), false);
+});
+
+test('the Windows progress process becomes ready only after its isolated window is visible', async () => {
+  const { transaction, transactionPath } = progressFixture({ platform: 'win32' });
   const timers = fakeTimers();
   const electron = fakeElectron();
   const controller = await runUpdateProgressProcess({
     ...electron,
     transactionPath,
-    platform: 'darwin',
+    platform: 'win32',
     executablePath: transaction.progressExecutable,
     progressId: transaction.progressId,
     now: () => 1000,
@@ -436,39 +485,14 @@ test('the progress process becomes ready only after its isolated window is visib
   assert.equal(JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8')).phase, 'closed');
 });
 
-// "Instalar solo" (2026-11-09): nobody clicked an unattended install, so its
-// progress window is visible, which the handoff requires, but never takes the
-// focus from what the owner is typing into. A clicked one still comes forward.
-test('an unattended install shows its progress window without taking focus', async () => {
-  for (const unattended of [false, true]) {
-    const { transaction, transactionPath } = progressFixture();
-    if (unattended) fs.writeFileSync(transactionPath, `${JSON.stringify({ ...transaction, unattended: true })}\n`);
-    const electron = fakeElectron();
-    await runUpdateProgressProcess({
-      ...electron,
-      transactionPath,
-      platform: 'darwin',
-      executablePath: transaction.progressExecutable,
-      progressId: transaction.progressId,
-      now: () => 1000,
-      ...fakeTimers(),
-    });
-    const [win] = electron.windows;
-    assert.equal(win.visible, true);
-    assert.equal(win.focused === true, !unattended);
-    assert.equal(win.shownInactive === true, unattended);
-    assert.equal(JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8')).windowVisible, true);
-  }
-});
-
 test('pre-visible renderer failure destroys the hidden window and records a lost owner', async () => {
-  const { transaction, transactionPath } = progressFixture();
+  const { transaction, transactionPath } = progressFixture({ platform: 'win32' });
   const timers = fakeTimers();
   const electron = fakeElectron({ loadURL: async () => { throw new Error('renderer did not load'); } });
   await assert.rejects(runUpdateProgressProcess({
     ...electron,
     transactionPath,
-    platform: 'darwin',
+    platform: 'win32',
     executablePath: transaction.progressExecutable,
     progressId: transaction.progressId,
     now: () => 1000,
@@ -484,13 +508,13 @@ test('pre-visible renderer failure destroys the hidden window and records a lost
 });
 
 test('successful progress closes on one bounded timer and releases every handle', async () => {
-  const { transaction, transactionPath } = progressFixture();
+  const { transaction, transactionPath } = progressFixture({ platform: 'win32' });
   const timers = fakeTimers();
   const electron = fakeElectron();
   const controller = await runUpdateProgressProcess({
     ...electron,
     transactionPath,
-    platform: 'darwin',
+    platform: 'win32',
     executablePath: transaction.progressExecutable,
     progressId: transaction.progressId,
     now: () => 1000,
@@ -519,7 +543,7 @@ test('successful progress closes on one bounded timer and releases every handle'
 });
 
 test('render polling is single-flight and coalesces a blocked UI into the newest phase', async () => {
-  const { transaction, transactionPath } = progressFixture();
+  const { transaction, transactionPath } = progressFixture({ platform: 'win32' });
   const timers = fakeTimers();
   let releaseFirst;
   let activeExecutions = 0;
@@ -538,7 +562,7 @@ test('render polling is single-flight and coalesces a blocked UI into the newest
   const starting = runUpdateProgressProcess({
     ...electron,
     transactionPath,
-    platform: 'darwin',
+    platform: 'win32',
     executablePath: transaction.progressExecutable,
     progressId: transaction.progressId,
     now: () => 1000,
@@ -570,7 +594,7 @@ test('render polling is single-flight and coalesces a blocked UI into the newest
 });
 
 test('a hung terminal UI acknowledgement is bounded and releases the progress process', async () => {
-  const { transaction, transactionPath } = progressFixture();
+  const { transaction, transactionPath } = progressFixture({ platform: 'win32' });
   const timers = fakeTimers();
   let executions = 0;
   const never = new Promise(() => {});
@@ -583,7 +607,7 @@ test('a hung terminal UI acknowledgement is bounded and releases the progress pr
   const controller = await runUpdateProgressProcess({
     ...electron,
     transactionPath,
-    platform: 'darwin',
+    platform: 'win32',
     executablePath: transaction.progressExecutable,
     progressId: transaction.progressId,
     terminalAckTimeoutMs: 5000,

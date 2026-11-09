@@ -399,6 +399,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/agent_control_remote.go:callAsControllerFor:MessageHostedSubagent":               {1, "the coordinator's message to a child this machine runs for its chat elsewhere: no chat here to go through, on the word of that machine and of no other"},
 		"cmd/workass/agent_update_wire.go:withRunningJobs:RunningJobSurvival":                         {1, "read-only: which jobs an update would kill"},
 		"cmd/workass/main.go:main:RunningJobSurvival":                                                 {1, "read-only: which jobs an update would kill"},
+		"cmd/workass/main.go:main:BeginUpdateDrain":                                                   {1, "an update preflight daemon (a staged release on a copy of the state) closes admission before any chat actor exists, and never reopens it"},
 		"cmd/workass/fleet_hosted_work.go:settleHostedExit:ApplyHostedWorkState":                      {1, "the row for a job first heard of as finished"},
 		"cmd/workass/fleet_monitors.go:openFleetMonitors:RunningHostedRows":                           {1, "read-only: rows this daemon shows as running on one machine"},
 		"cmd/workass/fleet_hosted_work.go:applyHostedState:ApplyHostedSubagentCall":                   {1, "a hosted child's tool call, into the parent turn"},

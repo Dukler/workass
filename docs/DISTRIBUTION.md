@@ -126,12 +126,55 @@ The updater:
    activation gate fails. A durable receipt under the Workass state directory
    records `healthy`, `rollback_healthy`, or `failed`.
 
-On macOS, steps 1–3 run in the background as soon as discovery finds a new
-release (`stageInBackground`, 2026-11-09): Workass stays open while the release
-downloads, verifies and stages, and the click then only does steps 4–7, the
-handoff, swap and relaunch. A background attempt that fails returns to the
-plain offer and is not retried for that version; the click runs the whole path.
-Windows keeps doing steps 1–3 after the click.
+Steps 5–7 above are Windows (its native installer) and the first update
+driven by a macOS manager of 0.1.274 or older. On macOS from the release after
+it (owner, 2026-11-09), everything that proves a release works happens while
+Workass stays open, and the close is only a restart:
+
+- **Staged in the background.** As soon as discovery finds a new release
+  (`stageInBackground`), steps 1–3 run in the app; the staged app is then
+  sealed read-only (owner write taken away: cheap hygiene, since anyone able to
+  undo it could change the installed app as well, and macOS checks the
+  signature at launch).
+- **Preflight** (`runUpdatePreflight`, `desktop/shell/update-manager.js`). The
+  staged app itself is started, as it will be after the swap, against an APFS
+  clone of the live state (copied again until the database did not move during
+  the copy) in a temporary directory, on two free loopback ports: its shell
+  hidden as an accessory app (no window shown, no Dock icon, no menu bar, never
+  the focus, audio muted) with its own profile, starting its own daemon, which
+  runs any state migration on the copy. With `WORKASS_UPDATE_PREFLIGHT=1` that
+  daemon serves loopback only, closes admission before any chat actor exists
+  (no turn, subagent, job or agent update), fires no schedule, and neither
+  announces itself nor links to the fleet. It must pass the gates the old
+  post-launch check had: daemon version, shell version, the renderer rendered,
+  controller authority, and a model catalog with ready models, within 120 s.
+  Then its daemon and shell are shut down and the temporary data deleted.
+- **A failed preflight** never installs. The release is removed, the failure
+  is written as a `failed` receipt with `step: "preflight"` (shown by the
+  update icon and Ajustes · Actualizaciones, also after a restart), the log of
+  the staged app is kept in `updates/preflight-last.log`, and the installed
+  app is untouched. A newer release is staged and preflighted on its own.
+- **The close.** The click (or "Instalar solo") hands the worker a `closeOnly`
+  transaction: wait for the shell to exit, stop the daemon, put the old app
+  aside and the preflighted one in its place (two renames in the same folder;
+  a failed rename puts back what it moved and restarts the old app), record
+  the update as done, start the new app, then delete the old files and make
+  the new app owner-writable again. No progress window, no verification, no
+  state snapshot, no health gate and no rollback run after the restart: the
+  restart is the end of the update. If the worker dies after the swap, the new
+  app finishes the transaction when it starts.
+- **The first update from 0.1.274.** That manager still starts the incoming
+  release's progress process and refuses its handoff without a fresh
+  `windowVisible: true` heartbeat. The new release answers it from an accessory
+  process with no window (`runWindowlessCompatibilityOwner`, the receipt also
+  says `windowless: true`), and its worker runs the full flow for transactions
+  that are not `closeOnly`. Both are removable once 0.1.274 is no longer the
+  installed version.
+
+Windows is unchanged: steps 1–3 run after the click, its native installer
+replaces the files, and the relaunched app shows its own recovery window
+(`createUpdateBootstrapWindow`) while it starts, the only update UI there. It
+never used the update progress process.
 
 A staged Mac release survives a restart. `staged.json` in its transaction
 directory names it; on launch the shell keeps it out of startup cleanup and
@@ -141,9 +184,9 @@ newer than the running version, and the staged app must still be there. Then
 the platform verification staging ran (signature, mutual designated
 requirement, version, bundled daemon) runs again off the main thread, and the
 worker runtime is copied again from that app and self-tested. Only then is it
-ready; anything that fails is removed and the next check stages again. A
-directory an install began from (it has `transaction.json`) is left to
-recovery. While a release waits staged, discovery keeps running, and a newer
+ready, and on macOS it is preflighted again against the state as it is now;
+anything that fails is removed and the next check stages again. A directory an
+install began from (it has `transaction.json`) is left to recovery. While a release waits staged, discovery keeps running, and a newer
 release replaces it (staged again) rather than the older one installing.
 
 The UI exposes this through the left panel's update icon and Ajustes ·
@@ -156,8 +199,8 @@ shell first reads `POST /workass/update/work` (loopback, changes nothing) and
 asks for the handoff only when it is quiet, and backs off again unless the
 handoff's own counts, taken with admission closed, are all zero. It never
 installs over a turn, subagent, background task, job, agent update or starting
-operation; it waits and asks again a minute later. An unattended install shows
-its progress window and relaunches without taking focus. A release adopted
+operation; it waits and asks again a minute later. An unattended install
+relaunches without taking focus. A release adopted
 after a restart waits for one discovery first, so a newer one can replace it.
 `workass_apply_update` takes the exact machine, the expected versions and a
 stable operation id; Ajustes · Actualizaciones uses the same exact-machine

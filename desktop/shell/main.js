@@ -2,6 +2,13 @@
 // The daemon owns state/agents; the shell-owned loopback view server owns only
 // renderer bytes so Electron can rebuild/restart without touching ACP turns.
 const { app, BrowserWindow, WebContentsView, webContents, session, net, ipcMain, shell, nativeImage, clipboard, dialog, Menu } = require('electron');
+// An update's own processes on macOS (a release under preflight, or the
+// progress mode a 0.1.274-or-older manager starts) are accessory apps: no Dock
+// icon, no menu bar, never the focus. Set before anything else loads, so the
+// regular registration the bundle starts with lasts as little as it can.
+if (process.platform === 'darwin' && (process.env.WORKASS_UPDATE_PREFLIGHT === '1' || process.argv.includes('--workass-update-progress'))) {
+  try { app.setActivationPolicy('accessory'); } catch (err) { console.error(`[shell] accessory policy: ${err.message}`); }
+}
 const fs = require('node:fs');
 const path = require('node:path');
 const { createViewServer } = require('./view-server');
@@ -39,6 +46,9 @@ catch (err) {
 }
 
 if (updateProgressTransaction) {
+  // On macOS this process opens no window and is an accessory app (top of this
+  // file): it only answers a 0.1.274-or-older manager's handoff
+  // (update-progress.js runWindowlessCompatibilityOwner).
   const windowIcon = process.platform === 'win32'
     ? path.join(process.resourcesPath, 'Workass.ico')
     : path.join(process.resourcesPath, 'Workass.icns');
@@ -74,6 +84,12 @@ const UPDATE_RELAUNCH = process.env.WORKASS_UPDATE_RELAUNCH === '1';
 // Relaunched by an unattended install ("Instalar solo"): show, never steal focus.
 const UPDATE_RELAUNCH_QUIET = UPDATE_RELAUNCH && process.env.WORKASS_UPDATE_RELAUNCH_QUIET === '1';
 const UPDATE_RETRY_CHILD = process.env.WORKASS_LOCK_RECOVERY_CHILD === '1';
+// A staged release started by the running app's updater to prove it works
+// before anything closes (update-manager.js preflight): its own scratch data
+// root and ports, a copy of the state, and nothing on screen. An accessory app
+// has no Dock icon and no menu bar and never takes the focus; its window loads
+// the renderer and is never shown; it runs no updater of its own.
+const UPDATE_PREFLIGHT = process.env.WORKASS_UPDATE_PREFLIGHT === '1' && process.platform === 'darwin' && app.isPackaged;
 const WINDOWS_UPDATE_RECOVERY = process.platform === 'win32' && RECOVER_CONTROLLER;
 const WINDOWS_UPDATE_BOOTSTRAP = WINDOWS_UPDATE_RECOVERY && !UPDATE_RETRY_CHILD;
 const APP_VERSION = app.isPackaged ? app.getVersion() : 'development';
@@ -228,7 +244,7 @@ function grantMicrophoneOnly() {
 function createWindow(url, browserReporter, isController) {
   const isUpdateRelaunch = revealUpdateRelaunch;
   revealUpdateRelaunch = false;
-  const showOnCreate = shouldShowWindowOnCreate({ platform: process.platform, updateRelaunch: isUpdateRelaunch });
+  const showOnCreate = !UPDATE_PREFLIGHT && shouldShowWindowOnCreate({ platform: process.platform, updateRelaunch: isUpdateRelaunch });
   const browserHost = resolveBrowserHost({ env: process.env, dataRoot: RUNTIME.dataRoot });
   console.error(`[shell] browser host ${browserHost.host} (${browserHost.source})`);
   const windowIcon = resolveWindowIconPath({
@@ -255,8 +271,18 @@ function createWindow(url, browserReporter, isController) {
       // webview host is selected. will-attach-webview below decides what a
       // guest may be.
       webviewTag: browserHost.host === 'webview',
+      // A preflight window is never shown; Chromium must not throttle the
+      // hidden renderer it is there to prove.
+      ...(UPDATE_PREFLIGHT ? { backgroundThrottling: false } : {}),
     },
   });
+  if (UPDATE_PREFLIGHT) {
+    // Nothing the renderer or a stray event asks for can put it on screen.
+    for (const name of ['show', 'showInactive', 'focus', 'moveTop', 'restore', 'maximize', 'setFullScreen']) {
+      win[name] = () => {};
+    }
+    win.webContents.setAudioMuted(true);
+  }
   browserManager = new BrowserManager({
     win,
     WebContentsView,
@@ -491,6 +517,45 @@ function createWindow(url, browserReporter, isController) {
     fallback.unref?.();
   }
   win.loadURL(url);
+  if (UPDATE_PREFLIGHT) {
+    // The preflight's renderer gate: the app actually rendered, not only that
+    // a page loaded. Asked from the start and bounded per ask: a page whose
+    // load event never fires still says whether it rendered.
+    const startedAt = Date.now();
+    let asked = 0;
+    // What the hidden renderer says goes to the preflight's log, which the
+    // updater keeps when the release fails.
+    win.webContents.on('console-message', (event, legacyLevel, legacyMessage) => {
+      const level = event?.level ?? legacyLevel;
+      const message = event?.message ?? legacyMessage;
+      if (level === 'error' || level === 'warning' || level === 3 || level === 2) {
+        console.error(`[renderer] ${level} ${String(message ?? '').slice(0, 500)}`);
+      }
+    });
+    win.webContents.on('render-process-gone', (_event, details) => console.error(`[renderer] gone ${JSON.stringify(details)}`));
+    win.webContents.on('did-fail-load', (_event, code, description) => console.error(`[renderer] load failed ${code} ${description}`));
+    const probe = async () => {
+      if (win.isDestroyed()) return;
+      let seen = null;
+      try {
+        seen = await Promise.race([
+          win.webContents.executeJavaScript(
+            "(() => { const root = document.getElementById('root'); return { url: location.href, readyState: document.readyState, children: root ? root.childElementCount : -1 }; })()",
+          ),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+        ]);
+      } catch (err) { seen = { error: String(err && err.message || err) }; }
+      if (seen?.children > 0) {
+        viewServer?.reportRendererState?.({ mounted: true });
+        console.error(`[shell] update preflight: renderer rendered after ${Date.now() - startedAt} ms`);
+        return;
+      }
+      asked += 1;
+      if (asked % 20 === 0) console.error(`[shell] update preflight: renderer not rendered yet ${JSON.stringify(seen)}`);
+      if (Date.now() - startedAt < 120_000) setTimeout(() => { void probe(); }, 250);
+    };
+    setTimeout(() => { void probe(); }, 250);
+  }
   win.webContents.on('did-finish-load', async () => {
     if (updateManager) win.webContents.send('workass-updater:state', updateManager.snapshot());
     try {
@@ -732,14 +797,16 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
   } catch (err) {
     console.error(`[shell] local daemon certificate pin unavailable: ${err.message}`);
   }
-  const iconReceipt = applyMacDockIcon({
-    app,
-    nativeImage,
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    repoRoot: REPO_ROOT,
-  });
-  console.error(`[shell] dock icon receipt ${JSON.stringify(iconReceipt)}`);
+  if (!UPDATE_PREFLIGHT) {
+    const iconReceipt = applyMacDockIcon({
+      app,
+      nativeImage,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      repoRoot: REPO_ROOT,
+    });
+    console.error(`[shell] dock icon receipt ${JSON.stringify(iconReceipt)}`);
+  }
   let viewURL = DAEMON_URL;
   try {
     viewServer = await createViewServer({
@@ -765,6 +832,23 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
   }
   const browserReporter = viewServer && viewServer.reportBrowserState;
   const isController = viewServer && viewServer.isController;
+  if (UPDATE_PREFLIGHT) {
+    // A release under preflight never looks for, stages or installs updates:
+    // its updater is never started, and tells the renderer it is unavailable.
+    updateManager = new UpdateManager({
+      app,
+      runtime: RUNTIME,
+      resourcesPath: process.resourcesPath,
+      executablePath: process.execPath,
+      currentVersion: APP_VERSION,
+      platform: process.platform,
+      arch: process.arch,
+      isPackaged: false,
+    });
+    console.error(`[shell] update preflight: daemon ${DAEMON_URL}, view ${viewURL}`);
+    createWindow(viewURL, browserReporter, isController);
+    return;
+  }
   updateManager = new UpdateManager({
     app,
     runtime: RUNTIME,

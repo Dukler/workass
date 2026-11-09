@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
@@ -948,6 +949,292 @@ function postLocalUpdate(daemonURL, action, updateId, timeoutMs = 2500) {
   });
 }
 
+// ---- macOS preflight (owner 2026-11-09) -------------------------------------
+// Everything that proves a release works happens while the running app stays
+// open, so the close is only stop, swap, start, delete. The staged app itself
+// is started, as it will be after the swap, against a copy of this machine's
+// state on its own ports: its shell hidden as an accessory app (no window, no
+// Dock icon, no focus) with its own profile, starting its own daemon, which
+// runs any state migration on the copy. It has to pass the gates the
+// post-launch health check used to: daemon, shell, renderer rendered,
+// controller, and a model catalog. Then it is shut down and its scratch data
+// deleted. A release that does not pass is never installed.
+
+const PREFLIGHT_TIMEOUT_MS = 120_000;
+const PREFLIGHT_POLL_MS = 250;
+const PREFLIGHT_LAUNCHD_LABEL = 'com.workass.daemon.update-preflight';
+const PREFLIGHT_GATES = ['daemon', 'shell', 'renderer', 'controller', 'catalog'];
+const PREFLIGHT_GATE_WORDS = {
+  daemon: 'el servidor no arrancó',
+  shell: 'la app no arrancó',
+  renderer: 'la pantalla no se cargó',
+  controller: 'no tomó el control',
+  catalog: 'ningún agente quedó listo',
+};
+
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+function loopbackJSON(url, { method = 'GET', timeoutMs = 1500 } = {}) {
+  return new Promise((resolve) => {
+    let target;
+    try { target = new URL(url); } catch { resolve(null); return; }
+    if (target.hostname !== '127.0.0.1') { resolve(null); return; }
+    const transport = target.protocol === 'https:' ? https : http;
+    const request = transport.request(target, {
+      method,
+      timeout: timeoutMs,
+      // The preflight daemon's own certificate, on loopback only.
+      rejectUnauthorized: false,
+      headers: method === 'POST' ? { 'content-type': 'application/json', 'content-length': 2 } : {},
+    }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
+      response.on('end', () => {
+        try { resolve({ status: response.statusCode, body: JSON.parse(body || 'null') }); }
+        catch { resolve({ status: response.statusCode, body: null }); }
+      });
+    });
+    request.on('timeout', () => { request.destroy(); resolve(null); });
+    request.on('error', () => resolve(null));
+    request.end(method === 'POST' ? '{}' : undefined);
+  });
+}
+
+// A command run off Electron's main thread: { status, stdout }.
+function runCommandAsync(command, args) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] }); }
+    catch (err) { resolve({ status: null, stdout: '', error: err }); return; }
+    let stdout = '';
+    child.stdout?.setEncoding?.('utf8');
+    child.stdout?.on?.('data', (chunk) => { if (stdout.length < 4 * 1024 * 1024) stdout += chunk; });
+    child.once('error', (error) => resolve({ status: null, stdout, error }));
+    child.once('close', (status) => resolve({ status, stdout }));
+  });
+}
+
+// A consistent copy of the live state while the running daemon may write it:
+// APFS clones of every file, retried until the database and its log did not
+// move during the copy (a copy taken while they move can be a torn pair).
+async function cloneLiveState(source, destination, {
+  run = runCommandAsync,
+  attempts = 20,
+  pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  if (!fs.statSync(source, { throwIfNoEntry: false })?.isDirectory()) {
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    return;
+  }
+  const stamp = () => ['state.db', 'state.db-wal'].map((name) => {
+    const info = fs.statSync(path.join(source, name), { throwIfNoEntry: false, bigint: true });
+    return info ? `${name}:${info.size}:${info.mtimeNs}` : `${name}:absent`;
+  }).join('|');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await fs.promises.rm(destination, { recursive: true, force: true });
+    await fs.promises.mkdir(destination, { recursive: true, mode: 0o700 });
+    const before = stamp();
+    const entries = (await fs.promises.readdir(source)).map((name) => path.join(source, name));
+    if (entries.length) {
+      const cloned = await run('/bin/cp', ['-c', '-R', '-p', ...entries, `${destination}/`]);
+      if (cloned.error || cloned.status !== 0) {
+        // Another volume: an ordinary copy (clones where it can).
+        await fs.promises.rm(destination, { recursive: true, force: true });
+        await fs.promises.mkdir(destination, { recursive: true, mode: 0o700 });
+        for (const entry of entries) {
+          await fs.promises.cp(entry, path.join(destination, path.basename(entry)), {
+            recursive: true, force: false, errorOnExist: true, dereference: false,
+            preserveTimestamps: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE,
+          });
+        }
+      }
+    }
+    if (stamp() === before) return;
+    await pause(250);
+  }
+  throw new Error('the state kept changing while it was copied');
+}
+
+function preflightEnvironment(baseEnv, { dataRoot, logRoot, daemonPort, viewPort }) {
+  const env = {};
+  for (const [key, value] of Object.entries(baseEnv || {})) {
+    if (key.startsWith('WORKASS_') || key.startsWith('ELECTRON_')) continue;
+    env[key] = value;
+  }
+  return {
+    ...env,
+    WORKASS_PROFILE: 'prod',
+    WORKASS_DATA_ROOT: dataRoot,
+    WORKASS_LOG_ROOT: logRoot,
+    WORKASS_DAEMON_PORT: String(daemonPort),
+    WORKASS_VIEW_PORT: String(viewPort),
+    WORKASS_DAEMON_BIND: 'localhost',
+    WORKASS_LAUNCHD_LABEL: PREFLIGHT_LAUNCHD_LABEL,
+    WORKASS_UPDATE_CHANNEL: 'local',
+    WORKASS_BROWSER_CONTROL_FILE: path.join(dataRoot, 'run', 'browser-control.json'),
+    // As after a real update: the new renderer takes the controller lease.
+    WORKASS_CONTROLLER_RECOVERY: '1',
+    WORKASS_UPDATE_PREFLIGHT: '1',
+  };
+}
+
+function preflightGates({ daemon, shell, targetVersion }) {
+  return {
+    daemon: daemon?.status === 200 && daemon.body?.app === 'workass' && daemon.body?.version === targetVersion,
+    shell: shell?.status === 200 && shell.body?.appVersion === targetVersion,
+    renderer: shell?.body?.renderer?.mounted === true,
+    controller: shell?.body?.controller === true,
+    catalog: Number.isSafeInteger(shell?.body?.catalog?.readyModelCount) && shell.body.catalog.readyModelCount > 0,
+  };
+}
+
+async function preflightDaemonPids(appPath, stateDir, { run = runCommandAsync } = {}) {
+  const listed = await run('/bin/ps', ['-axo', 'pid=,command=']);
+  if (listed.error || listed.status !== 0) return [];
+  const executable = path.join(appPath, 'Contents', 'Resources', 'runtime', 'workass');
+  const pids = [];
+  for (const line of String(listed.stdout || '').split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!match) continue;
+    if (match[2].includes(executable) && match[2].includes(`--state-dir ${stateDir}`)) pids.push(Number(match[1]));
+  }
+  return pids;
+}
+
+async function runUpdatePreflight({
+  appPath,
+  targetVersion,
+  scratchRoot,
+  liveStateDir,
+  env = process.env,
+  timeoutMs = PREFLIGHT_TIMEOUT_MS,
+}, {
+  spawnProcess = spawn,
+  run = runCommandAsync,
+  request = loopbackJSON,
+  findPort = freeLoopbackPort,
+  cloneState = cloneLiveState,
+  findDaemonPids = preflightDaemonPids,
+  kill = process.kill,
+  now = Date.now,
+  pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  const startedAt = now();
+  const dataRoot = path.join(scratchRoot, 'data');
+  const logRoot = path.join(scratchRoot, 'logs');
+  const stateDir = path.join(dataRoot, 'state');
+  const gates = {};
+  let child = null;
+  let daemonPort = 0;
+  let result;
+  try {
+    fs.rmSync(scratchRoot, { recursive: true, force: true });
+    fs.mkdirSync(logRoot, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+    try { await cloneState(liveStateDir, stateDir, { run }); }
+    catch (err) {
+      return { passed: false, gates, durationMs: now() - startedAt, reason: `no se pudo copiar el estado (${String(err && err.message || err)})` };
+    }
+    daemonPort = await findPort();
+    let viewPort = await findPort();
+    while (viewPort === daemonPort) viewPort = await findPort();
+    const logFD = fs.openSync(path.join(logRoot, 'shell.log'), 'a', 0o600);
+    try {
+      child = spawnProcess(path.join(appPath, 'Contents', 'MacOS', 'Workass'), [], {
+        cwd: appPath,
+        detached: true,
+        stdio: ['ignore', logFD, logFD],
+        env: preflightEnvironment(env, { dataRoot, logRoot, daemonPort, viewPort }),
+      });
+    } finally {
+      fs.closeSync(logFD);
+    }
+    let exited = null;
+    child.once?.('exit', (code, signal) => { exited = { code, signal }; });
+    child.once?.('error', (err) => { exited = { error: String(err && err.message || err) }; });
+    const deadline = startedAt + timeoutMs;
+    while (now() < deadline) {
+      const [daemon, shell] = await Promise.all([
+        request(`https://127.0.0.1:${daemonPort}/workass/health`),
+        request(`http://127.0.0.1:${viewPort}/__workass-shell/status`),
+      ]);
+      const passed = preflightGates({ daemon, shell, targetVersion });
+      for (const gate of PREFLIGHT_GATES) {
+        if (passed[gate] && !gates[gate]) gates[gate] = now() - startedAt;
+      }
+      if (PREFLIGHT_GATES.every((gate) => passed[gate])) {
+        result = { passed: true, gates, durationMs: now() - startedAt };
+        break;
+      }
+      if (exited) {
+        result = {
+          passed: false, gates, durationMs: now() - startedAt,
+          reason: exited.error ? `la app no pudo arrancar (${exited.error})` : `la app se cerró sola (${exited.signal || exited.code})`,
+        };
+        break;
+      }
+      await pause(PREFLIGHT_POLL_MS);
+    }
+    if (!result) {
+      const missing = PREFLIGHT_GATES.filter((gate) => !gates[gate]).map((gate) => PREFLIGHT_GATE_WORDS[gate]);
+      result = { passed: false, gates, durationMs: now() - startedAt, reason: missing.join(', ') || 'no terminó a tiempo' };
+    }
+    if (!result.passed) {
+      // What the staged app said, kept past its scratch data for diagnostics.
+      const tail = (file) => {
+        try { return redactUpdateDiagnosticText(fs.readFileSync(file, 'utf8'), 8 * 1024); } catch { return ''; }
+      };
+      result.log = `${tail(path.join(logRoot, 'shell.log'))}\n--- daemon ---\n${tail(path.join(logRoot, 'daemon.err.log'))}`;
+    }
+    return result;
+  } finally {
+    // Shut it all down, whatever happened: the daemon by its own loopback
+    // shutdown, the hidden shell's process group, then anything left.
+    if (daemonPort) await request(`https://127.0.0.1:${daemonPort}/workass/recovery/shutdown`, { method: 'POST' });
+    if (child?.pid) {
+      try { kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+    }
+    const stopBy = now() + 15_000;
+    let pids = await findDaemonPids(appPath, stateDir, { run });
+    while (pids.length && now() < stopBy) {
+      await pause(200);
+      pids = await findDaemonPids(appPath, stateDir, { run });
+    }
+    for (const pid of pids) {
+      try { kill(-pid, 'SIGKILL'); } catch { try { kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+    }
+    if (child?.pid) {
+      try { kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    try { await fs.promises.rm(scratchRoot, { recursive: true, force: true }); } catch { /* a temporary directory */ }
+    if (result) result.stoppedMs = now() - startedAt - result.durationMs;
+  }
+}
+
+// A preflighted release stays exactly as it was proven until the swap: owner
+// write is taken away (cheap hygiene; anyone who could undo it could change
+// the installed app as well, and macOS checks the signature at launch).
+async function sealStagedRelease(target, { run = runCommandAsync } = {}) {
+  const result = await run('/bin/chmod', ['-R', 'a-w', target]);
+  if (result.error || result.status !== 0) throw new Error('could not seal the staged release read-only');
+}
+
+async function removeStagedTree(target, { run = runCommandAsync } = {}) {
+  if (!fs.existsSync(target)) return;
+  await run('/bin/chmod', ['-R', 'u+w', target]);
+  await fs.promises.rm(target, { recursive: true, force: true });
+}
+
 function isExactArmedReceipt(receipt, {
   updateId, currentVersion, targetVersion, installationId, installTarget, workerId, workerPID,
 }) {
@@ -1185,11 +1472,18 @@ function prepareUpdateWorkerRuntime({
     const progressModulePath = path.join(transactionRoot, 'update-progress.js');
     const nodePath = path.join(transactionRoot, platform === 'win32' ? 'updater-node.exe' : 'updater-node');
     await fs.promises.mkdir(transactionRoot, { recursive: true, mode: 0o700 });
-    await fs.promises.copyFile(workerSource, workerPath);
-    await fs.promises.copyFile(progressSource, progressModulePath);
-    await fs.promises.copyFile(nodeSource, nodePath);
-    if (platform !== 'win32') await fs.promises.chmod(nodePath, 0o700);
-    await new Promise((resolve, reject) => {
+    // Copied fresh every time: a copy taken from a release sealed read-only
+    // keeps that mode, and a second preparation (after a restart) replaces it.
+    for (const [source, destination] of [[workerSource, workerPath], [progressSource, progressModulePath], [nodeSource, nodePath]]) {
+      await fs.promises.rm(destination, { force: true });
+      await fs.promises.copyFile(source, destination);
+    }
+    if (platform !== 'win32') {
+      await fs.promises.chmod(workerPath, 0o600);
+      await fs.promises.chmod(progressModulePath, 0o600);
+      await fs.promises.chmod(nodePath, 0o700);
+    }
+    const report = await new Promise((resolve, reject) => {
       let child;
       try {
         child = spawnProcess(nodePath, [workerPath, '--self-test', '--transaction-schema', String(TRANSACTION_SCHEMA_VERSION)], {
@@ -1234,7 +1528,7 @@ function prepareUpdateWorkerRuntime({
           reject(new Error('the independent update worker returned an incompatible self-test receipt'));
           return;
         }
-        resolve();
+        resolve(report);
       };
       child.once('error', fail);
       child.stdout?.once?.('error', fail);
@@ -1249,7 +1543,9 @@ function prepareUpdateWorkerRuntime({
       }, selfTestTimeoutMs);
       timeout?.unref?.();
     });
-    return { workerPath, progressModulePath, nodePath };
+    // closeOnly: the worker runs the macOS close-only flow (stop, swap, start,
+    // delete the old files) that a preflighted release is installed with.
+    return { workerPath, progressModulePath, nodePath, closeOnly: report?.closeOnly === true };
   })();
 }
 
@@ -1888,6 +2184,9 @@ class UpdateManager {
       spawnNativeInstaller: (plan) => spawnNativeWindowsInstaller(plan),
       stageAndVerify: runUpdateStageWorker,
       verifyStaged: (request) => runUpdateStageWorker(request, { task: 'verify-staged-update' }),
+      preflight: (request) => runUpdatePreflight(request),
+      sealStaged: (target) => sealStagedRelease(target),
+      removeTree: (target) => removeStagedTree(target),
       schedule: setTimeout,
       cancelSchedule: clearTimeout,
       repeat: setInterval,
@@ -1922,6 +2221,9 @@ class UpdateManager {
     this.stageInBackground = stageInBackground === true;
     this.prestagePromise = null;
     this.prestageFailedVersion = '';
+    // A release whose preflight failed is never installed, and its failure
+    // stays on screen instead of falling back to a quiet offer.
+    this.preflightFailedVersion = '';
     this.autoInstall = autoInstall === true;
     this.autoInstallTimer = null;
     this.autoInstallPromise = null;
@@ -2469,7 +2771,8 @@ class UpdateManager {
     if (fs.existsSync(path.join(transactionRoot, 'transaction.json'))) return;
     const incomingTarget = path.join(path.dirname(this.installTarget), `.Workass.app.incoming-${updateId}`);
     for (const target of [incomingTarget, transactionRoot]) {
-      try { await fs.promises.rm(target, { recursive: true, force: true }); }
+      // The staged app is sealed read-only once verified (sealStagedRelease).
+      try { await this.deps.removeTree(target); }
       catch { /* a later launch retries */ }
     }
   }
@@ -2496,8 +2799,10 @@ class UpdateManager {
         incomingTarget: candidate.incomingTarget,
         targetVersion: release.version,
       });
+      await this.deps.sealStaged(candidate.incomingTarget);
       // The worker runtime is copied again from the app just verified, and
-      // self-tested, exactly as staging does.
+      // self-tested, exactly as staging does; and it is preflighted again
+      // against the state as it is now.
       const targetAppCode = incomingAppCode(candidate.incomingTarget, this.platform);
       const runtime = await this.deps.prepareWorkerRuntime({
         transactionRoot: candidate.transactionRoot,
@@ -2506,6 +2811,7 @@ class UpdateManager {
         nodeSource: incomingNode(candidate.incomingTarget, this.platform, this.arch),
         platform: this.platform,
       });
+      const preflight = await this.preflightStaged({ incomingTarget: candidate.incomingTarget, targetVersion: release.version, runtime });
       if (this.state.phase !== 'staging' || this.prepared || this.activeOperation) {
         throw new Error('the updater moved on while the staged release was verified again');
       }
@@ -2525,6 +2831,7 @@ class UpdateManager {
         progressModulePath: runtime.progressModulePath,
         nodePath: runtime.nodePath,
         progressExecutable: path.join(candidate.incomingTarget, 'Contents', 'MacOS', 'Workass'),
+        preflight,
       };
       this.stagedNeedsDiscovery = true;
       return this.publish({
@@ -2536,8 +2843,11 @@ class UpdateManager {
         notes: String(release.notes || ''),
         size: release.artifacts.update.size,
       });
-    })().catch(async () => {
+    })().catch(async (err) => {
       await this.discardStaged(candidate.updateId);
+      if (err?.code === 'WORKASS_UPDATE_PREFLIGHT_FAILED' && this.state.phase === 'staging' && !this.prepared) {
+        return this.recordPreflightFailure(candidate.updateId, release.version, err);
+      }
       if (this.state.phase === 'staging' && !this.prepared) {
         return this.publish({ phase: before.phase, targetVersion: before.targetVersion, progress: before.progress, error: before.error });
       }
@@ -2733,8 +3043,15 @@ class UpdateManager {
       });
     }
 
+    // A close-only update (macOS) whose worker died after the swap: the new
+    // release is in place, so it is finished here, as the worker would have.
+    const closeOnly = transaction.closeOnly === true;
+    if (closeOnly && journalForTransaction(transaction)?.activated === true) {
+      return this.finishSwappedCloseOnly(transaction);
+    }
+
     const inspectedProgressPids = new Set();
-    for (const receiptPath of [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]) {
+    for (const receiptPath of closeOnly ? [] : [transaction.progressReceiptPath, progressOwnerReceiptPath(transaction)]) {
       const priorProgressReceipt = readJSONFile(receiptPath);
       if (!Number.isInteger(priorProgressReceipt?.pid) || inspectedProgressPids.has(priorProgressReceipt.pid)) continue;
       inspectedProgressPids.add(priorProgressReceipt.pid);
@@ -2764,11 +3081,13 @@ class UpdateManager {
     const progressId = `progress-${crypto.randomBytes(16).toString('hex')}`;
     const stagedProgressExecutable = expectedProgressExecutable(transaction);
     const installedExecutable = installedProgressExecutable(transaction);
-    const progressExecutable = fs.statSync(stagedProgressExecutable, { throwIfNoEntry: false })?.isFile()
-      ? stagedProgressExecutable
-      : this.platform === 'darwin' && fs.statSync(installedExecutable, { throwIfNoEntry: false })?.isFile()
-        ? installedExecutable
-        : '';
+    const progressExecutable = closeOnly
+      ? transaction.progressExecutable
+      : fs.statSync(stagedProgressExecutable, { throwIfNoEntry: false })?.isFile()
+        ? stagedProgressExecutable
+        : this.platform === 'darwin' && fs.statSync(installedExecutable, { throwIfNoEntry: false })?.isFile()
+          ? installedExecutable
+          : '';
     if (!progressExecutable) {
       await this.releasePreparedHandoff(transaction);
       throw new Error('the interrupted update has no verified progress executable');
@@ -2807,7 +3126,7 @@ class UpdateManager {
     try { fs.rmSync(resumed.progressReceiptPath, { force: true }); } catch { /* exact replacement process owns the next receipt */ }
     try { fs.rmSync(progressOwnerReceiptPath(resumed), { force: true }); } catch { /* exact replacement process owns the next receipt */ }
     let progressProcess = null;
-    try {
+    if (!closeOnly) try {
       progressProcess = await this.deps.spawnVisibleProgress({
         command: resumed.progressExecutable,
         args: ['--workass-update-progress', transactionPath],
@@ -2875,8 +3194,8 @@ class UpdateManager {
         blockers: null,
       });
     }
-    const progressReceipt = readJSONFile(resumed.progressReceiptPath);
-    if (!progressReceiptIsLive(progressReceipt, resumed, {
+    const progressReceipt = closeOnly ? null : readJSONFile(resumed.progressReceiptPath);
+    if (!closeOnly && !progressReceiptIsLive(progressReceipt, resumed, {
       alive: (pid) => pid === progressProcess?.pid && progressProcess.exitCode == null && progressProcess.signalCode == null,
     })) {
       const message = 'the recovered update progress window closed before handoff commit';
@@ -2898,6 +3217,25 @@ class UpdateManager {
     this.watchReceipt(transaction.updateId);
     this.deps.schedule(() => this.exitCommittedHandoff(), 100)?.unref?.();
     return this.snapshot();
+  }
+
+  async finishSwappedCloseOnly(transaction) {
+    const journal = journalForTransaction(transaction) || {};
+    atomicJSON(transaction.journalPath, {
+      ...journal,
+      updatedAt: new Date().toISOString(),
+      phase: 'healthy',
+      terminal: true,
+      installedVersion: transaction.targetVersion,
+      activated: true,
+      preflighted: true,
+    });
+    await this.releasePreparedHandoff(transaction);
+    const receipt = terminalReceiptForTransaction(transaction);
+    if (receipt) atomicJSON(this.receiptPath, receipt);
+    try { await this.deps.removeTree(transaction.backupTarget); } catch { /* removed with its transaction later */ }
+    this.pruneTerminalPayload(receipt);
+    return this.publish({ phase: 'healthy', receipt, error: null, blockers: null });
   }
 
   watchReceipt(updateId = this.watchedUpdateId, { targetHandoff = false } = {}) {
@@ -3156,6 +3494,14 @@ class UpdateManager {
     let state;
     try { state = await this.check({ background: true }); }
     catch { return this.snapshot(); }
+    // A failed preflight keeps its release off this machine, not the next
+    // one: a newer release is staged and preflighted like any other.
+    const failedPreflight = state.phase === 'failed' && state.receipt?.step === 'preflight'
+      ? String(state.receipt.targetVersion || '') : '';
+    if (this.stageInBackground && failedPreflight && parseVersion(state.availableVersion) &&
+        compareVersions(state.availableVersion, failedPreflight) > 0 && this.manifest?.version === state.availableVersion) {
+      state = this.publish({ phase: 'available', targetVersion: state.availableVersion, error: null, blockers: null });
+    }
     if (this.stageInBackground && state.phase === 'available') void this.prestage();
     return state;
   }
@@ -3179,7 +3525,14 @@ class UpdateManager {
     };
     const operation = Promise.resolve()
       .then(() => this.download())
-      .then((next) => (next && next.phase === 'failed' ? fallBack() : next), fallBack);
+      .then((next) => {
+        if (!next || next.phase !== 'failed') return next;
+        if (this.preflightFailedVersion === version) {
+          this.prestageFailedVersion = version;
+          return next;
+        }
+        return fallBack();
+      }, fallBack);
     this.prestagePromise = operation;
     void operation.finally(() => {
       if (this.prestagePromise === operation) this.prestagePromise = null;
@@ -3406,6 +3759,9 @@ class UpdateManager {
         installationId: this.installationIdentity.installationId,
       });
       const designatedRequirement = String(staged?.designatedRequirement || '');
+      // From its verification to the swap, the release stays the bytes that
+      // were verified and preflighted: owner write is taken away.
+      if (this.platform === 'darwin') await this.deps.sealStaged(incomingTarget);
       const targetAppCode = incomingAppCode(incomingTarget, this.platform);
       const runtime = this.platform === 'win32' ? {} : await this.deps.prepareWorkerRuntime({
         transactionRoot,
@@ -3414,6 +3770,9 @@ class UpdateManager {
         nodeSource: incomingNode(incomingTarget, this.platform, this.arch),
         platform: this.platform,
       });
+      const preflight = this.platform === 'darwin'
+        ? await this.preflightStaged({ incomingTarget, targetVersion: release.version, runtime })
+        : null;
       this.prepared = {
         updateId, transactionRoot, installTarget, incomingTarget, backupTarget, designatedRequirement,
         installationId: this.installationIdentity.installationId,
@@ -3426,13 +3785,14 @@ class UpdateManager {
         progressExecutable: this.platform === 'darwin'
           ? path.join(incomingTarget, 'Contents', 'MacOS', 'Workass')
           : path.join(incomingTarget, 'Workass.exe'),
+        ...(preflight ? { preflight } : {}),
       };
       if (this.platform === 'darwin') this.rememberStagedRelease(this.prepared);
       return this.publish({ phase: 'ready', targetVersion: release.version, progress: 1, error: null });
     } catch (err) {
       const cleanupErrors = [];
       if (incomingTarget && this.platform === 'darwin') {
-        try { fs.rmSync(incomingTarget, { recursive: true, force: true }); }
+        try { await this.deps.removeTree(incomingTarget); }
         catch (cleanupError) { cleanupErrors.push(String(cleanupError && cleanupError.message || cleanupError)); }
       }
       // Keep the Windows ZIP even when caching or extraction fails. A later
@@ -3444,6 +3804,7 @@ class UpdateManager {
       }
       this.prepared = null;
       const error = String(err && err.message || err);
+      if (err?.code === 'WORKASS_UPDATE_PREFLIGHT_FAILED') return this.recordPreflightFailure(updateId, release.version, err);
       return this.publish({
         phase: 'failed',
         error: cleanupErrors.length > 0 ? `${error}; staging cleanup failed: ${cleanupErrors.join('; ')}` : error,
@@ -3454,6 +3815,64 @@ class UpdateManager {
       if (updateId && this.activeDownloadUpdateId === updateId) this.activeDownloadUpdateId = '';
       this.endOperation('download');
     }
+  }
+
+  // A release that failed its preflight is never installed. Said where the
+  // owner looks (the update icon, Ajustes · Actualizaciones) through the same
+  // failed receipt an interrupted update leaves, so it stays after a restart.
+  recordPreflightFailure(updateId, version, err) {
+    this.preflightFailedVersion = version;
+    this.prestageFailedVersion = version;
+    const error = String(err && err.message || err);
+    const receipt = {
+      schemaVersion: RECEIPT_SCHEMA_VERSION,
+      updateId,
+      phase: 'failed',
+      step: 'preflight',
+      previousVersion: this.currentVersion,
+      targetVersion: version,
+      installedVersion: this.currentVersion,
+      installationId: this.installationIdentity.installationId,
+      installTarget: this.installTarget,
+      activated: false,
+      preflight: err?.preflight || null,
+      updatedAt: new Date().toISOString(),
+      error,
+    };
+    try { atomicJSON(this.receiptPath, receipt); } catch { /* still shown until the app restarts */ }
+    return this.publish({ phase: 'failed', receipt, error, targetVersion: version, availableVersion: null, progress: 0 });
+  }
+
+  // The macOS preflight of a staged release (runUpdatePreflight). Its worker
+  // must be one that installs a preflighted release by stop-swap-start alone.
+  async preflightStaged({ incomingTarget, targetVersion, runtime }) {
+    if (runtime?.closeOnly !== true) {
+      const error = new Error(`Workass ${targetVersion} no se puede instalar con solo reiniciar: su actualizador es de una versión anterior.`);
+      error.code = 'WORKASS_UPDATE_PREFLIGHT_FAILED';
+      throw error;
+    }
+    const scratchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'workass-preflight-'));
+    let result;
+    try {
+      result = await this.deps.preflight({
+        appPath: incomingTarget,
+        targetVersion,
+        scratchRoot,
+        liveStateDir: this.runtime.stateDir,
+      });
+    } finally {
+      await fs.promises.rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
+    }
+    if (result?.passed !== true) {
+      if (result?.log) {
+        try { fs.writeFileSync(path.join(this.updateRoot, 'preflight-last.log'), result.log, { mode: 0o600 }); } catch { /* diagnostics only */ }
+      }
+      const error = new Error(`Workass ${targetVersion} no pasó su prueba antes de instalarse (${result?.reason || 'sin respuesta'}). Sigue instalada ${this.currentVersion}.`);
+      error.code = 'WORKASS_UPDATE_PREFLIGHT_FAILED';
+      error.preflight = { gates: result?.gates || {}, durationMs: result?.durationMs ?? null };
+      throw error;
+    }
+    return { passed: true, at: new Date().toISOString(), gates: result.gates, durationMs: result.durationMs };
   }
 
   // unattended: an "Instalar solo" attempt (autoInstallWhenQuiet). It asks for
@@ -3470,6 +3889,9 @@ class UpdateManager {
       throw new Error('the verified Workass transaction lost its exact release metadata');
     }
     if (this.platform === 'win32') return await this.installWindowsZip(prepared);
+    // macOS installs only a release that passed its preflight, with a worker
+    // that does nothing but stop, swap, start and delete the old files.
+    if (prepared.preflight?.passed !== true) throw new Error('the staged Workass release has not passed its preflight');
     const expectedWorkerPath = path.join(prepared.transactionRoot, 'update-worker.js');
     const expectedNodePath = path.join(prepared.transactionRoot, this.platform === 'win32' ? 'updater-node.exe' : 'updater-node');
     if (prepared.workerPath !== expectedWorkerPath || prepared.nodePath !== expectedNodePath ||
@@ -3515,9 +3937,12 @@ class UpdateManager {
       progressExecutable: prepared.progressExecutable,
       daemonHealthURL: `${this.runtime.daemonURL}/workass/health`,
       shellStatusURL: `http://127.0.0.1:${this.runtime.viewPort}/__workass-shell/status`,
-      requireVisibleWindow: true,
-      // Nobody clicked: the progress window and the relaunched app show
-      // without taking focus from whatever the owner is doing.
+      // The release passed its preflight in the app, so with the app closed
+      // the worker only stops, swaps, starts and deletes the old files: no
+      // window of its own and nothing that waits on the new app.
+      closeOnly: true,
+      // Nobody clicked: the relaunched app shows without taking the focus
+      // from whatever the owner is doing.
       ...(unattended ? { unattended: true } : {}),
       designatedRequirement: prepared.designatedRequirement,
       launchAgentPath: this.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${this.runtime.launchdLabel}.plist`) : '',
@@ -3589,26 +4014,6 @@ class UpdateManager {
       updatedAt: new Date().toISOString(),
     });
 
-    let progressProcess = null;
-    try {
-      progressProcess = await this.deps.spawnVisibleProgress({
-        command: transaction.progressExecutable,
-        args: ['--workass-update-progress', transactionPath],
-        options: {
-          cwd: transaction.incomingTarget,
-          detached: true,
-          windowsHide: false,
-          stdio: 'ignore',
-          env: { ...process.env, WORKASS_UPDATE_PROGRESS_ID: transaction.progressId },
-        },
-        transaction,
-      });
-    } catch (err) {
-      const message = `the verified update progress window could not open: ${String(err && err.message || err)}`;
-      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-
     const logFD = fs.openSync(path.join(prepared.transactionRoot, 'worker.log'), 'a', 0o600);
     let worker;
     try {
@@ -3636,7 +4041,7 @@ class UpdateManager {
     } catch (err) {
       const message = String(err && err.message || err);
       if (err?.workassWorkerFenced !== true) throw err;
-      const receipt = await this.failBeforeActivation(transaction, progressProcess, message);
+      const receipt = await this.failBeforeActivation(transaction, null, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     } finally {
       fs.closeSync(logFD);
@@ -3645,7 +4050,6 @@ class UpdateManager {
     const handoffReceipt = this.exactHandoffReceipt(transaction, worker);
     if (!handoffReceipt) {
       const message = 'the independent update worker handoff receipt changed after arming';
-      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(transaction, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -3661,22 +4065,11 @@ class UpdateManager {
       });
     }
 
-    const progressReceipt = readJSONFile(transaction.progressReceiptPath);
-    if (!progressReceiptIsLive(progressReceipt, transaction, {
-      alive: (pid) => pid === progressProcess?.pid && progressProcess.exitCode == null && progressProcess.signalCode == null,
-    })) {
-      const message = 'the verified update progress window closed before handoff commit';
-      await this.stopProgressOrThrow(progressProcess);
-      const receipt = await this.abortRejectedHandoff(transaction, worker, message);
-      return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
-    }
-
     const committed = daemonUnavailable
       ? { accepted: true, daemonUnavailable: true }
       : await this.commitHandoff(prepared.updateId);
     if (!committed.accepted) {
       const message = 'the daemon did not commit the prepared update handoff';
-      await this.stopProgressOrThrow(progressProcess);
       const receipt = await this.abortRejectedHandoff(transaction, worker, message);
       return this.publish({ phase: 'failed', receipt, error: message, blockers: null });
     }
@@ -3775,6 +4168,12 @@ module.exports = {
   bundledNode,
   cheapWorkerLeaseOwnership,
   cleanupUpdateTransactions,
+  cloneLiveState,
+  preflightEnvironment,
+  preflightGates,
+  removeStagedTree,
+  runUpdatePreflight,
+  sealStagedRelease,
   compareVersions,
   copyLocalArtifact,
   createProgressPublisher,

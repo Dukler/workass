@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
@@ -14,6 +15,7 @@ const {
   atomicJSON,
   cheapWorkerLeaseOwnership,
   cleanupUpdateTransactions,
+  cloneLiveState,
   compareVersions,
   copyLocalArtifact,
   createProgressPublisher,
@@ -28,6 +30,7 @@ const {
   receiptAppliesToInstalledVersion,
   resolveArtifactSource,
   resolveUpdateFeed,
+  runUpdatePreflight,
   runUpdateStageWorker,
   prestageDiskHasHeadroom,
   runUpdateTransactionCleanupWorker,
@@ -378,11 +381,15 @@ function managerFixture({
         const progressModulePath = path.join(transactionRoot, 'update-progress.js');
         const preparedNodePath = path.join(transactionRoot, targetPlatform === 'win32' ? 'updater-node.exe' : 'updater-node');
         await fs.promises.mkdir(transactionRoot, { recursive: true });
-        await fs.promises.copyFile(workerSource, workerPath);
-        await fs.promises.copyFile(progressSource, progressModulePath);
-        await fs.promises.copyFile(nodeSource, preparedNodePath);
-        return { workerPath, progressModulePath, nodePath: preparedNodePath };
+        for (const [source, destination] of [[workerSource, workerPath], [progressSource, progressModulePath], [nodeSource, preparedNodePath]]) {
+          await fs.promises.rm(destination, { force: true });
+          await fs.promises.copyFile(source, destination);
+        }
+        return { workerPath, progressModulePath, nodePath: preparedNodePath, closeOnly: true };
       },
+      // The macOS preflight starts the staged app for real; the fixture's apps
+      // are not apps. Its own tests drive runUpdatePreflight directly.
+      preflight: async () => ({ passed: true, gates: { daemon: 1, shell: 1, renderer: 1, controller: 1, catalog: 1 }, durationMs: 1 }),
       ...dependencyOverrides,
     },
   });
@@ -443,6 +450,7 @@ function managerFixture({
       progressModulePath,
       nodePath: preparedNodePath,
       progressExecutable,
+      ...(platform === 'darwin' ? { preflight: { passed: true, gates: {}, durationMs: 1 } } : {}),
     };
     manager.publish({ phase: 'ready', targetVersion: '1.2.0' });
   }
@@ -1973,21 +1981,33 @@ test('a busy daemon keeps the verified release staged and leaves Workass open', 
   assert.ok(manager.prepared, 'the verified payload remains ready for the next click');
 });
 
-test('a committed transaction has one progress owner and quits the old shell immediately after handoff', async () => {
+// 2026-11-09 (owner): on macOS an update is a restart. The release passed its
+// preflight in the app, so the handoff starts no progress window and hands
+// the worker a close-only transaction: stop, swap, start, delete.
+test('a committed macOS transaction is close-only and quits the old shell with no progress window', async () => {
   const { manager, calls, didQuit } = managerFixture({ replies: [
     { status: 200, body: { ready: true } },
     { status: 202, body: { stopping: true } },
   ] });
   const state = await manager.install();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), true);
   const transaction = JSON.parse(fs.readFileSync(
     path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8',
   ));
   assert.equal(transaction.schemaVersion, 4);
-  assert.equal(transaction.requireVisibleWindow, true);
+  assert.equal(transaction.closeOnly, true);
+  assert.equal(transaction.requireVisibleWindow, undefined, 'nothing waits on a window after the restart');
   assert.equal(JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8')).phase, 'armed');
+});
+
+test('a macOS release that has not passed its preflight is never installed', async () => {
+  const { manager, calls, didQuit } = managerFixture({ replies: [{ status: 200, body: { ready: true } }] });
+  delete manager.prepared.preflight;
+  await assert.rejects(manager.install(), /has not passed its preflight/);
+  assert.deepEqual(calls, []);
+  assert.equal(didQuit(), false);
 });
 
 test('worker ownership transfers only after the exact durable arm receipt', async () => {
@@ -2938,9 +2958,10 @@ test('Instalar solo installs a staged release after a quiet read and a quiet han
   fire(10_000);
   const installed = await manager.autoInstallPromise;
   assert.equal(installed.phase, 'installing');
-  assert.deepEqual(calls, ['work', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['work', 'prepare', 'spawn:update-worker.js', 'commit']);
   const transaction = JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
-  assert.equal(transaction.unattended, true, 'the progress window and the relaunch stay out of the way');
+  assert.equal(transaction.unattended, true, 'the relaunch stays out of the way');
+  assert.equal(transaction.closeOnly, true);
   assert.deepEqual(transaction.interruptedWork, { foregroundTurns: 0, backgroundWork: 0, providerUpdates: 0, admissions: 0 });
   fire(100);
   assert.equal(didQuit(), true);
@@ -3053,7 +3074,7 @@ test('a click during an unattended attempt that backs off still updates, as a cl
   releasePrepare(busyHandoff);
   await attempt;
   await manager.applyPromise;
-  assert.deepEqual(calls, ['work', 'prepare', 'cancel', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['work', 'prepare', 'cancel', 'prepare', 'spawn:update-worker.js', 'commit']);
   assert.equal(manager.snapshot().phase, 'installing');
   manager.dispose();
 });
@@ -3061,6 +3082,12 @@ test('a click during an unattended attempt that backs off still updates, as a cl
 // 2026-11-09 (owner): a release staged in the background survives a restart
 // instead of downloading and verifying again. Nothing on disk is believed as
 // written: it is verified again, and anything that does not hold is removed.
+
+// The staged app is removed off the main thread (chmod, then rm).
+async function waitFor(condition, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+}
 
 // Stages 1.2.0 for real (local feed), as the background check does.
 async function stagedForRestart(replies = []) {
@@ -3144,7 +3171,7 @@ test('a release staged in the background is ready again after a restart, without
   calls.length = 0;
   const state = await manager.apply();
   assert.equal(state.phase, 'installing');
-  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.deepEqual(calls, ['prepare', 'spawn:update-worker.js', 'commit']);
   assert.equal(didQuit(), false, 'the old fixture manager never quits for the relaunched one');
   manager.dispose();
 });
@@ -3182,8 +3209,7 @@ test('a staged record that does not hold is never believed', async () => {
     assert.equal(manager.init().phase, 'idle', name);
     assert.equal(manager.stagedRecoveryPromise, null, name);
     assert.deepEqual(steps, [], `${name}: nothing is verified or installed from it`);
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => !fs.existsSync(staged.incomingTarget));
     assert.equal(fs.existsSync(staged.incomingTarget), false, `${name}: its staged app is removed`);
     manager.dispose();
   }
@@ -3196,7 +3222,7 @@ test('a staged release the app already runs, or one an install began from, is no
   const updated = relaunch(current, { currentVersion: '1.2.0' });
   assert.equal(updated.manager.init().phase, 'idle');
   assert.equal(updated.manager.stagedRecoveryPromise, null);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => !fs.existsSync(stagedCurrent.incomingTarget));
   assert.equal(fs.existsSync(stagedCurrent.incomingTarget), false, 'not newer than what runs: removed');
   updated.manager.dispose();
 
@@ -3261,4 +3287,223 @@ test('the staged-release verification runs in its own worker thread and reports 
     schemaVersion: 1, platform: 'darwin', arch: 'arm64', targetVersion: '1.2.0',
     currentRoot: path.join(root, 'Workass.app'), incomingTarget: path.join(os.tmpdir(), 'Elsewhere.app'),
   }, { task: 'verify-staged-update' }), /must stay beside the installed app/);
+});
+
+// 2026-11-09 (owner, macOS): everything that proves a release works happens
+// while the running app stays open. The staged app is started for real, hidden,
+// against a copy of the state on its own ports, and must pass the gates the
+// post-launch health check used to. A release that does not pass is never
+// installed.
+function preflightHarness({ shellStatus, daemonVersion = '1.2.0', exitAfterPolls = 0 } = {}) {
+  const calls = { spawned: [], requests: [], kills: [], cloned: [] };
+  let clock = 0;
+  let polls = 0;
+  const child = new EventEmitter();
+  child.pid = 5151;
+  const deps = {
+    spawnProcess: (command, args, options) => { calls.spawned.push({ command, args, options }); return child; },
+    request: async (url, options = {}) => {
+      calls.requests.push(`${options.method || 'GET'} ${url}`);
+      if (url.endsWith('/workass/health')) {
+        polls += 1;
+        if (exitAfterPolls && polls === exitAfterPolls) child.emit('exit', 1, null);
+        return { status: 200, body: { app: 'workass', version: daemonVersion } };
+      }
+      if (url.endsWith('/__workass-shell/status')) return { status: 200, body: shellStatus };
+      return { status: 202, body: { stopping: true } };
+    },
+    findPort: (() => { const ports = [41001, 41002]; return async () => ports.shift(); })(),
+    cloneState: async (source, destination) => { calls.cloned.push({ source, destination }); fs.mkdirSync(destination, { recursive: true }); },
+    findDaemonPids: async () => [],
+    kill: (pid, signal) => { calls.kills.push(`${pid}:${signal}`); },
+    now: () => clock,
+    pause: async (ms) => { clock += ms; },
+  };
+  return { calls, deps, child };
+}
+
+const READY_SHELL = { appVersion: '1.2.0', renderer: { mounted: true }, controller: true, catalog: { readyModelCount: 3 } };
+
+test('a staged release passes its preflight only with every gate the post-launch check used to have', async () => {
+  const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-test-'));
+  const appPath = path.join(scratchRoot, '..', 'Applications', '.Workass.app.incoming-upd-test1234');
+  const { calls, deps } = preflightHarness({ shellStatus: READY_SHELL });
+  const result = await runUpdatePreflight({
+    appPath,
+    targetVersion: '1.2.0',
+    scratchRoot,
+    liveStateDir: '/live/state',
+    env: { HOME: '/home/someone', PATH: '/usr/bin', WORKASS_DATA_ROOT: '/live', WORKASS_URL: 'https://127.0.0.1:8788', ELECTRON_RUN_AS_NODE: '1' },
+  }, deps);
+  assert.equal(result.passed, true);
+  assert.deepEqual(Object.keys(result.gates).sort(), ['catalog', 'controller', 'daemon', 'renderer', 'shell']);
+  assert.deepEqual(calls.cloned, [{ source: '/live/state', destination: path.join(scratchRoot, 'data', 'state') }],
+    'it runs on a copy of the state, never the live one');
+  const [launch] = calls.spawned;
+  assert.equal(launch.command, path.join(appPath, 'Contents', 'MacOS', 'Workass'), 'the staged binaries themselves');
+  assert.equal(launch.options.detached, true);
+  const env = launch.options.env;
+  assert.equal(env.WORKASS_UPDATE_PREFLIGHT, '1');
+  assert.equal(env.WORKASS_PROFILE, 'prod');
+  assert.equal(env.WORKASS_DATA_ROOT, path.join(scratchRoot, 'data'));
+  assert.equal(env.WORKASS_DAEMON_PORT, '41001');
+  assert.equal(env.WORKASS_VIEW_PORT, '41002');
+  assert.equal(env.WORKASS_DAEMON_BIND, 'localhost');
+  assert.notEqual(env.WORKASS_LAUNCHD_LABEL, 'com.workass.daemon', 'never the real service label');
+  assert.equal(env.WORKASS_CONTROLLER_RECOVERY, '1', 'it takes the controller lease as a real post-update start does');
+  assert.equal(env.WORKASS_URL, undefined, 'nothing of the running app leaks in');
+  assert.equal(env.ELECTRON_RUN_AS_NODE, undefined);
+  assert.equal(env.HOME, '/home/someone', 'the real agents, as after the restart');
+  assert.ok(calls.requests.includes('POST https://127.0.0.1:41001/workass/recovery/shutdown'), 'its daemon is shut down');
+  assert.ok(calls.kills.includes('-5151:SIGTERM'), 'and its hidden shell');
+  assert.equal(fs.existsSync(scratchRoot), false, 'its scratch data is deleted');
+});
+
+test('a preflight that misses a gate fails, says which, and is shut down all the same', async () => {
+  const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-test-'));
+  const { calls, deps } = preflightHarness({ shellStatus: { ...READY_SHELL, catalog: { readyModelCount: 0 } } });
+  const result = await runUpdatePreflight({
+    appPath: '/Applications/.Workass.app.incoming-upd-test1234', targetVersion: '1.2.0',
+    scratchRoot, liveStateDir: '/live/state', env: {}, timeoutMs: 2000,
+  }, deps);
+  assert.equal(result.passed, false);
+  assert.equal(result.reason, 'ningún agente quedó listo');
+  assert.ok(calls.requests.includes('POST https://127.0.0.1:41001/workass/recovery/shutdown'));
+  assert.equal(fs.existsSync(scratchRoot), false);
+
+  const wrongVersion = preflightHarness({ shellStatus: READY_SHELL, daemonVersion: '1.1.0' });
+  const mismatch = await runUpdatePreflight({
+    appPath: '/Applications/.Workass.app.incoming-upd-test1234', targetVersion: '1.2.0',
+    scratchRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-test-')), liveStateDir: '/live/state', env: {}, timeoutMs: 1000,
+  }, wrongVersion.deps);
+  assert.equal(mismatch.passed, false);
+  assert.equal(mismatch.reason, 'el servidor no arrancó', 'a daemon of another version is not the staged one');
+
+  const crashing = preflightHarness({ shellStatus: {}, exitAfterPolls: 2 });
+  const crashed = await runUpdatePreflight({
+    appPath: '/Applications/.Workass.app.incoming-upd-test1234', targetVersion: '1.2.0',
+    scratchRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-test-')), liveStateDir: '/live/state', env: {},
+  }, crashing.deps);
+  assert.equal(crashed.passed, false);
+  assert.match(crashed.reason, /se cerró sola/);
+});
+
+test('the preflight copies the live state again while the running daemon is writing it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-clone-'));
+  const source = path.join(root, 'state');
+  fs.mkdirSync(path.join(source, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'state.db'), 'db-1');
+  fs.writeFileSync(path.join(source, 'images', 'a.png'), 'image');
+  const destination = path.join(root, 'copy');
+  let copies = 0;
+  const run = async (command, args) => {
+    copies += 1;
+    if (copies === 1) fs.writeFileSync(path.join(source, 'state.db'), 'db-written-during-copy');
+    execFileSync(command, args);
+    return { status: 0, stdout: '' };
+  };
+  await cloneLiveState(source, destination, { run, pause: async () => {} });
+  assert.equal(copies, 2, 'a copy taken while the database moved is taken again');
+  assert.equal(fs.readFileSync(path.join(destination, 'state.db'), 'utf8'), 'db-written-during-copy');
+  assert.equal(fs.readFileSync(path.join(destination, 'images', 'a.png'), 'utf8'), 'image', 'everything, images included');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a staged release is sealed read-only and a failed preflight keeps it from ever installing, on screen', async () => {
+  const fixture = managerFixture({ primeReady: false });
+  const { manager } = fixture;
+  manager.stageInBackground = true;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-feed-'));
+  const artifactName = 'Workass-1.2.0-darwin-arm64.zip';
+  const bytes = Buffer.from('preflight-feed');
+  const release = manifest({ artifacts: { update: { name: artifactName, url: artifactName, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: bytes.length } } });
+  manager.feedURL = path.join(root, 'workass-darwin-arm64-release.json');
+  fs.writeFileSync(manager.feedURL, `${JSON.stringify(release)}\n`);
+  fs.writeFileSync(path.join(root, artifactName), bytes);
+  let incoming = '';
+  let sealedBeforePreflight = false;
+  manager.deps.stageAndVerify = async (request) => {
+    incoming = request.incomingTarget;
+    writeMacUpdaterRuntime(request.incomingTarget);
+    return { designatedRequirement: release.designatedRequirement };
+  };
+  manager.deps.preflight = async (request) => {
+    sealedBeforePreflight = (fs.statSync(path.join(request.appPath, 'Contents')).mode & 0o222) === 0;
+    assert.equal(request.appPath, incoming);
+    assert.equal(request.liveStateDir, manager.runtime.stateDir);
+    return { passed: false, reason: 'ningún agente quedó listo', gates: { daemon: 900 }, durationMs: 120000 };
+  };
+  await manager.autoCheck();
+  const state = await manager.prestagePromise;
+  assert.equal(sealedBeforePreflight, true, 'the bytes preflighted are the bytes that would be installed');
+  assert.equal(state.phase, 'failed', 'shown, not folded back into a quiet offer');
+  assert.match(state.error, /no pasó su prueba antes de instalarse \(ningún agente quedó listo\)\. Sigue instalada 1\.1\.0\./);
+  assert.equal(state.receipt.step, 'preflight');
+  const onDisk = JSON.parse(fs.readFileSync(manager.receiptPath, 'utf8'));
+  assert.equal(onDisk.phase, 'failed');
+  assert.equal(onDisk.installedVersion, '1.1.0', 'the app that stays installed shows it after a restart too');
+  assert.equal(fs.existsSync(incoming), false, 'the release that failed is removed');
+  assert.equal(manager.prepared, null);
+  await manager.autoCheck();
+  assert.equal(manager.prestagePromise, null, 'not downloaded again every 30 seconds');
+  assert.equal(manager.snapshot().phase, 'failed');
+  manager.dispose();
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a release staged before a restart is preflighted again before it is ready', async () => {
+  const { manager: before } = await stagedForRestart();
+  const staged = before.prepared;
+  assert.equal((fs.statSync(path.join(staged.incomingTarget, 'Contents')).mode & 0o222), 0, 'staged sealed read-only');
+  before.dispose();
+  const preflights = [];
+  const { manager } = relaunch(before, {
+    deps: { preflight: async (request) => { preflights.push(request.appPath); return { passed: false, reason: 'la pantalla no se cargó', gates: {} }; } },
+  });
+  manager.init();
+  const state = await manager.stagedRecoveryPromise;
+  assert.deepEqual(preflights, [staged.incomingTarget]);
+  assert.equal(state.phase, 'failed');
+  assert.equal(state.receipt.step, 'preflight');
+  assert.match(state.error, /la pantalla no se cargó/);
+  assert.equal(fs.existsSync(staged.incomingTarget), false);
+  manager.dispose();
+});
+
+test('a close-only update whose worker died after the swap is finished by the new app itself', async () => {
+  const { manager } = managerFixture({ replies: [
+    { status: 200, body: { ready: true } },
+    { status: 202, body: { stopping: true } },
+  ] });
+  await manager.install();
+  const transaction = manager.transactionForUpdateId(manager.prepared.updateId);
+  assert.equal(transaction.closeOnly, true);
+  const journal = JSON.parse(fs.readFileSync(transaction.journalPath, 'utf8'));
+  fs.writeFileSync(transaction.journalPath, `${JSON.stringify({ ...journal, phase: 'activated', activated: true, shellStopped: true, daemonStopped: true })}\n`);
+  fs.mkdirSync(path.join(transaction.backupTarget, 'Contents'), { recursive: true });
+  execFileSync('/bin/chmod', ['-R', 'a-w', transaction.backupTarget]);
+  const state = await manager.resumeTransaction(transaction);
+  assert.equal(state.phase, 'healthy');
+  assert.equal(state.receipt.phase, 'healthy');
+  assert.equal(state.receipt.installedVersion, transaction.targetVersion);
+  assert.equal(fs.existsSync(transaction.backupTarget), false, 'the old files are deleted');
+  manager.dispose();
+});
+
+test('a preflight shell shows nothing, runs no updater, and proves its renderer rendered', () => {
+  const main = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const viewServer = fs.readFileSync(path.join(__dirname, 'view-server.js'), 'utf8');
+  assert.match(main, /const UPDATE_PREFLIGHT = process\.env\.WORKASS_UPDATE_PREFLIGHT === '1' && process\.platform === 'darwin' && app\.isPackaged;/);
+  const accessory = main.indexOf("if (process.platform === 'darwin' && (process.env.WORKASS_UPDATE_PREFLIGHT === '1' || process.argv.includes('--workass-update-progress'))) {\n  try { app.setActivationPolicy('accessory');");
+  assert.ok(accessory > 0 && accessory < main.indexOf("const fs = require('node:fs');"),
+    'no Dock icon, no menu bar, no focus: set before anything else loads');
+  assert.match(main, /const showOnCreate = !UPDATE_PREFLIGHT && shouldShowWindowOnCreate/);
+  assert.match(main, /for \(const name of \['show', 'showInactive', 'focus', 'moveTop', 'restore', 'maximize', 'setFullScreen'\]\) \{\s*win\[name\] = \(\) => \{\};/);
+  assert.match(main, /win\.webContents\.setAudioMuted\(true\)/);
+  const preflightBranch = main.slice(main.indexOf('  if (UPDATE_PREFLIGHT) {\n    // A release under preflight'), main.indexOf('  updateManager = new UpdateManager({\n    app,\n    runtime: RUNTIME,\n    resourcesPath: process.resourcesPath,\n    executablePath: process.execPath,\n    currentVersion: APP_VERSION,\n    platform: process.platform,\n    arch: process.arch,\n    isPackaged: app.isPackaged,'));
+  assert.match(preflightBranch, /isPackaged: false,/, 'its updater is never started and says it is unavailable');
+  assert.doesNotMatch(preflightBranch, /\.init\(\)|startAutoChecks/, 'a release under preflight never looks for, stages or installs updates');
+  assert.match(preflightBranch, /createWindow\(viewURL, browserReporter, isController\);\s*return;/);
+  assert.match(main, /viewServer\?\.reportRendererState\?\.\(\{ mounted: true \}\)/);
+  assert.match(viewServer, /renderer: shellStatus\.renderer,/);
 });

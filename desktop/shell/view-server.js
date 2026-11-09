@@ -245,7 +245,7 @@ function createViewServer({
     return Promise.reject(new Error(`renderer build missing: ${indexPath}`));
   }
 
-  const shellStatus = { controller: null, reportedAt: null, catalog: null, browser: null, window: null };
+  const shellStatus = { controller: null, reportedAt: null, catalog: null, browser: null, window: null, renderer: null };
   // Dev screenshot hook (2026-07-12): the shell registers a capture fn (the real
   // main-window webContents.capturePage) so the build workflow / an agent can GET
   // a PNG of exactly what the user sees — no more iterating on the UI blind.
@@ -370,6 +370,7 @@ function createViewServer({
         browser: shellStatus.browser,
         windowVisible: shellStatus.window?.visible === true,
         window: shellStatus.window,
+        renderer: shellStatus.renderer,
         electronVersion: runtimeVersion,
         appVersion,
         installationId,
@@ -496,6 +497,10 @@ function createViewServer({
             focused: raw.focused === true,
             reportedAt: new Date().toISOString(),
           };
+        },
+        // The update preflight's renderer gate (main.js): the app rendered.
+        reportRendererState: (state) => {
+          shellStatus.renderer = { mounted: state?.mounted === true, reportedAt: new Date().toISOString() };
         },
         isController: () => shellStatus.controller === true,
         // Registered by main.js once the window exists: () => Promise<Buffer PNG>.
