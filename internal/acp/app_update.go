@@ -24,7 +24,28 @@ type AppUpdateReadiness struct {
 func (m *Manager) BeginUpdateDrain() AppUpdateReadiness {
 	m.updateGateMu.Lock()
 	m.updateDraining = true
-	result := AppUpdateReadiness{Ready: true, Admissions: m.updateAdmissions}
+	result := m.countUpdateWorkLocked()
+	result.Ready = true
+	m.updateGateMu.Unlock()
+	return result
+}
+
+// UpdateWorkCounts is BeginUpdateDrain's count without the drain: it never
+// closes admission, so it can be read as often as needed. An unattended install
+// ("Instalar solo") reads it before it asks for a handoff, and only asks while
+// every count is zero; the handoff's own count, taken with admission closed,
+// then decides. The counts are the same ones, so a quiet read is never followed
+// by a handoff that finds work this read could not see.
+func (m *Manager) UpdateWorkCounts() AppUpdateReadiness {
+	m.updateGateMu.Lock()
+	defer m.updateGateMu.Unlock()
+	return m.countUpdateWorkLocked()
+}
+
+// countUpdateWorkLocked counts what an update would stop. The caller holds
+// updateGateMu.
+func (m *Manager) countUpdateWorkLocked() AppUpdateReadiness {
+	result := AppUpdateReadiness{Admissions: m.updateAdmissions}
 
 	m.mu.Lock()
 	for _, job := range m.jobs {
@@ -62,8 +83,6 @@ func (m *Manager) BeginUpdateDrain() AppUpdateReadiness {
 		}
 	}
 	m.updateMu.Unlock()
-
-	m.updateGateMu.Unlock()
 	return result
 }
 

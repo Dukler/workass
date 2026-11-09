@@ -376,6 +376,7 @@ test('the target app profile replaces stale runtime settings inherited from the 
     WORKASS_BROWSER_CONTROL_FILE: '/old/browser-control.json',
     WORKASS_CONTROLLER_RECOVERY: '1',
     WORKASS_UPDATE_RELAUNCH: '1',
+    WORKASS_UPDATE_RELAUNCH_QUIET: '1',
     WORKASS_LOCK_RECOVERY_CHILD: '1',
     VENDOR_SETTING: 'preserved',
   });
@@ -390,6 +391,7 @@ test('the target app profile replaces stale runtime settings inherited from the 
   assert.equal(env.WORKASS_BROWSER_CONTROL_FILE, undefined);
   assert.equal(env.WORKASS_CONTROLLER_RECOVERY, undefined);
   assert.equal(env.WORKASS_UPDATE_RELAUNCH, undefined);
+  assert.equal(env.WORKASS_UPDATE_RELAUNCH_QUIET, undefined);
   assert.equal(env.WORKASS_LOCK_RECOVERY_CHILD, undefined);
 });
 
@@ -1439,6 +1441,24 @@ test('Windows target relaunch advertises recovery while rollback keeps older ins
   await macDisk.launchInstalled();
   assert.equal(macLaunches[0].options.windowsHide, true);
   assert.equal(macLaunches[0].options.env.WORKASS_UPDATE_RELAUNCH, '1');
+  assert.equal(macLaunches[0].options.env.WORKASS_UPDATE_RELAUNCH_QUIET, undefined, 'a clicked update brings Workass forward');
+
+  // "Instalar solo": nobody clicked, so the relaunch must not take focus.
+  const quietDisk = defaultOperations({ ...macTx, unattended: true }, {
+    spawnProcess: (command, args, options) => {
+      macLaunches.push({ command, args, options });
+      const child = new EventEmitter();
+      child.pid = 9014;
+      child.unref = () => {};
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    },
+  });
+  await quietDisk.launchInstalled();
+  assert.equal(macLaunches[1].options.env.WORKASS_UPDATE_RELAUNCH, '1');
+  assert.equal(macLaunches[1].options.env.WORKASS_UPDATE_RELAUNCH_QUIET, '1');
+  await quietDisk.launchInstalled({ updateRelaunch: false });
+  assert.equal(macLaunches[2].options.env.WORKASS_UPDATE_RELAUNCH_QUIET, undefined, 'a rollback launch keeps its own behavior');
 });
 
 test('runtime prestart rejects a profile outside the prepared update transaction', async () => {
@@ -1480,6 +1500,9 @@ test('the update relaunch keeps macOS hidden-until-ready and makes Windows visib
   assert.match(main, /win\.once\('ready-to-show', reveal\)/);
   assert.match(main, /focusPrimaryWindow\(\(\) => \[win\]/);
   assert.match(main, /createUpdateBootstrapWindow/);
+  // An unattended install ("Instalar solo") reveals the window without focus.
+  assert.match(main, /UPDATE_RELAUNCH_QUIET = UPDATE_RELAUNCH && process\.env\.WORKASS_UPDATE_RELAUNCH_QUIET === '1'/);
+  assert.match(main, /if \(UPDATE_RELAUNCH_QUIET\) \{\s*if \(!win\.isVisible\(\)\) win\.showInactive\(\);\s*\} else \{\s*focusPrimaryWindow/);
 });
 
 test('progress loss before destructive work relaunches once and fails without an ownerless health wait', async () => {

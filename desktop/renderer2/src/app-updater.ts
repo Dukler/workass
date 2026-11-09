@@ -50,6 +50,17 @@ export interface AppUpdaterState {
   receipt: AppUpdaterReceipt | null;
   notes?: string;
   size?: number | null;
+  // "Instalar solo" (Mac shell). Absent from a shell that predates it.
+  autoInstall?: AppUpdaterAutoInstall;
+}
+
+export interface AppUpdaterAutoInstall {
+  /** The shell can install a staged release by itself (it stages in the background). */
+  supported: boolean;
+  /** The owner's setting, as the shell last received it. */
+  enabled: boolean;
+  /** The last unattended attempt found work running and is waiting for it. */
+  waiting: boolean;
 }
 
 export interface AppUpdaterDiagnostics {
@@ -80,6 +91,7 @@ interface WorkassUpdaterApi {
     replayed?: boolean;
   }>;
   onState(callback: (state: AppUpdaterState) => void): () => void;
+  setAutoInstall?(enabled: boolean): Promise<AppUpdaterState | null>;
 }
 
 declare global {

@@ -39,6 +39,7 @@ const {
   validateArchiveLinksBeforeExtraction,
   validateExtractedTree,
   validateReleaseManifest,
+  verifyStagedRelease,
   verifyWindowsRelease,
   workerProcessOwnership,
 } = require('./update-manager');
@@ -1648,6 +1649,8 @@ test('the Windows manager stages both release trees inside the external update t
   assert.equal(manager.prepared.incomingTarget, path.join(manager.prepared.transactionRoot, 'incoming-release'));
   assert.equal(manager.prepared.backupTarget, path.join(manager.prepared.transactionRoot, 'installed-before-activation'));
   assert.notEqual(path.dirname(manager.prepared.incomingTarget), path.dirname(manager.prepared.installTarget));
+  assert.equal(fs.existsSync(path.join(manager.prepared.transactionRoot, 'staged.json')), false,
+    'Windows keeps its click-time path: nothing staged is carried over a restart');
 });
 
 test('staging failure removes extracted payloads and retains the reusable Windows ZIP', async () => {
@@ -2877,4 +2880,385 @@ test('a click during the background download waits for it, then installs once', 
   await clicked;
   assert.deepEqual(steps, ['download', 'install']);
   manager.dispose();
+});
+
+// 2026-11-09 (owner, Ajustes · Actualizaciones): "Instalar solo". A staged
+// release installs by itself only while nothing would be cut; otherwise it
+// waits and asks again. It never installs over work.
+const QUIET = { status: 200, body: { quiet: true, foregroundTurns: 0, backgroundWork: 0, providerUpdates: 0, admissions: 0 } };
+const QUIET_HANDOFF = { status: 200, body: { ready: true, foregroundTurns: 0, backgroundWork: 0, providerUpdates: 0, admissions: 0 } };
+
+function autoInstallFixture(replies) {
+  const timers = [];
+  const fixture = managerFixture({
+    replies,
+    dependencyOverrides: {
+      schedule: (fn, ms) => {
+        const timer = { fn, ms, cancelled: false, ran: false, unref() { return timer; } };
+        timers.push(timer);
+        return timer;
+      },
+      cancelSchedule: (timer) => { if (timer) timer.cancelled = true; },
+    },
+  });
+  fixture.manager.stageInBackground = true;
+  const due = (ms) => timers.filter((timer) => !timer.cancelled && !timer.ran && (ms === undefined || timer.ms === ms));
+  const fire = (ms) => {
+    const [timer] = due(ms);
+    assert.ok(timer, `a timer of ${ms} ms is due`);
+    timer.ran = true;
+    return timer.fn();
+  };
+  const transactionFiles = () => ['transaction.json', 'journal.json', 'handoff.json']
+    .filter((name) => fs.existsSync(path.join(fixture.manager.prepared.transactionRoot, name)));
+  return { ...fixture, timers, due, fire, transactionFiles };
+}
+
+test('Instalar solo is off by default and only supported where releases stage in the background', async () => {
+  const { manager, calls, due } = autoInstallFixture([]);
+  assert.deepEqual(manager.snapshot().autoInstall, { supported: false, enabled: false, waiting: false });
+  manager.publishAutoInstall();
+  assert.deepEqual(manager.snapshot().autoInstall, { supported: true, enabled: false, waiting: false });
+  assert.deepEqual(due(), [], 'nothing is scheduled while the setting is off');
+  await manager.autoInstallWhenQuiet();
+  assert.deepEqual(calls, [], 'an attempt with the setting off never asks the daemon');
+
+  const windows = managerFixture({ platform: 'win32', primeReady: false });
+  windows.manager.stageInBackground = true;
+  windows.manager.setAutoInstall(true);
+  assert.equal(windows.manager.snapshot().autoInstall.supported, false);
+  manager.dispose();
+  windows.manager.dispose();
+});
+
+test('Instalar solo installs a staged release after a quiet read and a quiet handoff, without taking focus', async () => {
+  const { manager, calls, fire, didQuit } = autoInstallFixture([QUIET, QUIET_HANDOFF, { status: 202, body: { stopping: true } }]);
+  const state = manager.setAutoInstall(true);
+  assert.deepEqual(state.autoInstall, { supported: true, enabled: true, waiting: false });
+  fire(10_000);
+  const installed = await manager.autoInstallPromise;
+  assert.equal(installed.phase, 'installing');
+  assert.deepEqual(calls, ['work', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  const transaction = JSON.parse(fs.readFileSync(path.join(manager.prepared.transactionRoot, 'transaction.json'), 'utf8'));
+  assert.equal(transaction.unattended, true, 'the progress window and the relaunch stay out of the way');
+  assert.deepEqual(transaction.interruptedWork, { foregroundTurns: 0, backgroundWork: 0, providerUpdates: 0, admissions: 0 });
+  fire(100);
+  assert.equal(didQuit(), true);
+  manager.dispose();
+});
+
+test('Instalar solo waits while work runs and never fences a busy daemon to find out', async () => {
+  const { manager, calls, fire, due, transactionFiles } = autoInstallFixture([
+    { status: 200, body: { quiet: false, foregroundTurns: 1, backgroundWork: 0, providerUpdates: 0, admissions: 0 } },
+    { status: 404, body: {} },
+  ]);
+  manager.setAutoInstall(true);
+  fire(10_000);
+  let state = await manager.autoInstallPromise;
+  assert.deepEqual(calls, ['work'], 'a busy read is never followed by a handoff');
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.autoInstall.waiting, true);
+  assert.deepEqual(transactionFiles(), []);
+  assert.equal(fs.existsSync(manager.receiptPath), false);
+  assert.equal(due(60_000).length, 1, 'it asks again later');
+
+  // A daemon that cannot answer the read (an older one) is never assumed idle.
+  fire(60_000);
+  state = await manager.autoInstallPromise;
+  assert.deepEqual(calls, ['work', 'work']);
+  assert.equal(state.phase, 'ready');
+  assert.ok(manager.prepared, 'the verified release stays staged');
+  manager.dispose();
+});
+
+test('a handoff that finds work gives admission back and leaves nothing that could resume the update', async () => {
+  for (const handoff of [
+    { status: 200, body: { ready: true, foregroundTurns: 0, backgroundWork: 1, providerUpdates: 0, admissions: 0 } },
+    { status: 200, body: { ready: true, foregroundTurns: 0, backgroundWork: 0, providerUpdates: 0, admissions: 1 } },
+    // A repeated prepare does not restate the counts: not knowing is not quiet.
+    { status: 200, body: { ready: true, prepared: true } },
+  ]) {
+    const { manager, calls, fire, due, didQuit, transactionFiles } = autoInstallFixture([
+      QUIET, handoff, { status: 200, body: { cancelled: true } },
+    ]);
+    manager.setAutoInstall(true);
+    fire(10_000);
+    const state = await manager.autoInstallPromise;
+    assert.deepEqual(calls, ['work', 'prepare', 'cancel'], JSON.stringify(handoff.body));
+    assert.equal(state.phase, 'ready');
+    assert.equal(state.autoInstall.waiting, true);
+    assert.equal(didQuit(), false);
+    assert.deepEqual(transactionFiles(), [], 'no journal or handoff file is left for recovery to resume');
+    assert.equal(fs.existsSync(manager.receiptPath), false, 'no preparing receipt is left behind');
+    assert.ok(manager.prepared);
+    assert.equal(due(60_000).length, 1);
+    manager.dispose();
+  }
+});
+
+test('a handoff refused for another update is left alone and retried later', async () => {
+  const { manager, calls, fire, due } = autoInstallFixture([
+    QUIET, { status: 409, body: { ready: false, reason: 'another update is prepared' } },
+  ]);
+  manager.setAutoInstall(true);
+  fire(10_000);
+  const state = await manager.autoInstallPromise;
+  assert.deepEqual(calls, ['work', 'prepare'], 'nothing of ours holds the daemon, so nothing is cancelled');
+  assert.equal(state.phase, 'ready');
+  assert.equal(due(60_000).length, 1);
+  manager.dispose();
+});
+
+test('turning Instalar solo off cancels the attempt it had scheduled', () => {
+  const { manager, due } = autoInstallFixture([]);
+  manager.setAutoInstall(true);
+  assert.equal(due(10_000).length, 1);
+  const state = manager.setAutoInstall(false);
+  assert.deepEqual(due(), []);
+  assert.deepEqual(state.autoInstall, { supported: true, enabled: false, waiting: false });
+  manager.dispose();
+});
+
+test('a release staged in the background schedules the unattended attempt only with the setting on', async () => {
+  for (const enabled of [false, true]) {
+    const { manager } = stagingFixture();
+    const scheduled = [];
+    manager.deps.schedule = (_fn, ms) => { scheduled.push(ms); return { unref() {} }; };
+    manager.download = async () => manager.publish({ phase: 'ready', targetVersion: '1.2.0', progress: 1 });
+    if (enabled) manager.setAutoInstall(true);
+    scheduled.length = 0;
+    await manager.autoCheck();
+    await manager.prestagePromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(scheduled, enabled ? [10_000] : []);
+    manager.dispose();
+  }
+});
+
+test('a click during an unattended attempt that backs off still updates, as a click always does', async () => {
+  let releasePrepare;
+  const busyHandoff = { status: 200, body: { ready: true, foregroundTurns: 1, backgroundWork: 0, providerUpdates: 0, admissions: 0 } };
+  const { manager, calls, fire } = autoInstallFixture([
+    QUIET,
+    new Promise((resolve) => { releasePrepare = resolve; }),
+    { status: 200, body: { cancelled: true } },
+    busyHandoff,
+    { status: 202, body: { stopping: true } },
+  ]);
+  manager.setAutoInstall(true);
+  fire(10_000);
+  const attempt = manager.autoInstallPromise;
+  while (!calls.includes('prepare')) await new Promise((resolve) => setImmediate(resolve));
+  manager.startApply();
+  releasePrepare(busyHandoff);
+  await attempt;
+  await manager.applyPromise;
+  assert.deepEqual(calls, ['work', 'prepare', 'cancel', 'prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.equal(manager.snapshot().phase, 'installing');
+  manager.dispose();
+});
+
+// 2026-11-09 (owner): a release staged in the background survives a restart
+// instead of downloading and verifying again. Nothing on disk is believed as
+// written: it is verified again, and anything that does not hold is removed.
+
+// Stages 1.2.0 for real (local feed), as the background check does.
+async function stagedForRestart(replies = []) {
+  const fixture = managerFixture({ primeReady: false, replies });
+  const { manager } = fixture;
+  manager.stageInBackground = true;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-staged-feed-'));
+  const artifactName = 'Workass-1.2.0-darwin-arm64.zip';
+  const bytes = Buffer.from('staged-across-restart');
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  const release = manifest({ artifacts: { update: { name: artifactName, url: artifactName, sha256, size: bytes.length } } });
+  manager.feedURL = path.join(root, 'workass-darwin-arm64-release.json');
+  fs.writeFileSync(manager.feedURL, `${JSON.stringify(release)}\n`);
+  fs.writeFileSync(path.join(root, artifactName), bytes);
+  manager.deps.stageAndVerify = async (request) => {
+    writeMacUpdaterRuntime(request.incomingTarget);
+    return { designatedRequirement: release.designatedRequirement };
+  };
+  assert.equal((await manager.check()).phase, 'available');
+  assert.equal((await manager.download()).phase, 'ready');
+  return { ...fixture, release };
+}
+
+// The next launch of the same installation: same data root, same app.
+function relaunch(previous, { currentVersion = '1.1.0', deps = {} } = {}) {
+  const steps = [];
+  const cleanups = [];
+  const manager = new UpdateManager({
+    app: { getVersion: () => currentVersion },
+    runtime: previous.runtime,
+    resourcesPath: previous.resourcesPath,
+    executablePath: previous.executablePath,
+    platform: previous.platform,
+    arch: previous.arch,
+    isPackaged: true,
+    stageInBackground: true,
+    quit: () => {},
+    deps: {
+      ...previous.deps,
+      fetchManifest: async () => { steps.push('fetch'); return manifest({ version: '1.2.0' }); },
+      downloadArtifact: async () => { steps.push('download'); throw new Error('a staged release is never downloaded again'); },
+      stageAndVerify: async () => { steps.push('stage'); throw new Error('a staged release is never extracted again'); },
+      verifyStaged: async (request) => { steps.push(['verify', request]); return { designatedRequirement: 'requirement' }; },
+      cleanupUpdateTransactions: async (request) => { cleanups.push(request); return { removed: 0, pruned: 0, retained: 0 }; },
+      schedule: () => ({ unref() {} }),
+      ...deps,
+    },
+  });
+  return { manager, steps, cleanups };
+}
+
+test('a release staged in the background is ready again after a restart, without downloading it again', async () => {
+  const replies = [];
+  const { manager: before, calls, didQuit } = await stagedForRestart(replies);
+  const staged = before.prepared;
+  const record = JSON.parse(fs.readFileSync(path.join(staged.transactionRoot, 'staged.json'), 'utf8'));
+  assert.equal(record.targetVersion, '1.2.0');
+  assert.equal(record.updateId, staged.updateId);
+  before.dispose();
+
+  const { manager, steps, cleanups } = relaunch(before);
+  const booted = manager.init();
+  assert.equal(booted.phase, 'staging', 'it says it is verifying, not that nothing is there');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(cleanups[0].protectedUpdateIds.includes(staged.updateId), 'startup cleanup leaves it alone');
+  const adopted = await manager.stagedRecoveryPromise;
+  assert.equal(adopted.phase, 'ready');
+  assert.equal(adopted.targetVersion, '1.2.0');
+  assert.deepEqual(steps, [['verify', {
+    schemaVersion: 1, platform: 'darwin', arch: 'arm64',
+    currentRoot: staged.installTarget, incomingTarget: staged.incomingTarget, targetVersion: '1.2.0',
+  }]], 'verified again on disk, never downloaded or extracted again');
+  assert.equal(manager.prepared.updateId, staged.updateId);
+  assert.equal(manager.prepared.incomingTarget, staged.incomingTarget);
+  assert.equal(Object.isFrozen(manager.prepared.release), true);
+
+  // It waits for its click (or "Instalar solo", only after a discovery).
+  manager.setAutoInstall(true);
+  assert.equal(manager.autoInstallMayStart(), false, 'a newer release gets its chance to replace it first');
+  replies.push({ status: 200, body: { ready: true } }, { status: 202, body: { stopping: true } });
+  calls.length = 0;
+  const state = await manager.apply();
+  assert.equal(state.phase, 'installing');
+  assert.deepEqual(calls, ['prepare', 'spawn:update-progress', 'spawn:update-worker.js', 'commit']);
+  assert.equal(didQuit(), false, 'the old fixture manager never quits for the relaunched one');
+  manager.dispose();
+});
+
+test('a staged release that no longer verifies is removed and staged again by discovery', async () => {
+  const { manager: before } = await stagedForRestart();
+  const staged = before.prepared;
+  before.dispose();
+  const { manager, steps } = relaunch(before, {
+    deps: { verifyStaged: async () => { steps.push('verify'); throw new Error('incoming app signature verification failed'); } },
+  });
+  manager.init();
+  const state = await manager.stagedRecoveryPromise;
+  assert.equal(state.phase, 'idle');
+  assert.equal(manager.prepared, null);
+  assert.equal(fs.existsSync(staged.incomingTarget), false, 'the staged app beside the installed one is removed');
+  assert.equal(fs.existsSync(staged.transactionRoot), false);
+  manager.dispose();
+});
+
+test('a staged record that does not hold is never believed', async () => {
+  const cases = {
+    'edited manifest': (record) => ({ ...record, manifest: { ...record.manifest, version: '1.9.0' }, targetVersion: '1.9.0' }),
+    'another installation': (record) => ({ ...record, installationId: `install-${'f'.repeat(32)}` }),
+    'another app': (record) => ({ ...record, installTarget: '/Applications/Other.app' }),
+    'another directory': (record) => ({ ...record, updateId: 'upd-someone-else' }),
+  };
+  for (const [name, edit] of Object.entries(cases)) {
+    const { manager: before } = await stagedForRestart();
+    const staged = before.prepared;
+    before.dispose();
+    const file = path.join(staged.transactionRoot, 'staged.json');
+    fs.writeFileSync(file, `${JSON.stringify(edit(JSON.parse(fs.readFileSync(file, 'utf8'))))}\n`);
+    const { manager, steps } = relaunch(before);
+    assert.equal(manager.init().phase, 'idle', name);
+    assert.equal(manager.stagedRecoveryPromise, null, name);
+    assert.deepEqual(steps, [], `${name}: nothing is verified or installed from it`);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(fs.existsSync(staged.incomingTarget), false, `${name}: its staged app is removed`);
+    manager.dispose();
+  }
+});
+
+test('a staged release the app already runs, or one an install began from, is not adopted', async () => {
+  const { manager: current } = await stagedForRestart();
+  const stagedCurrent = current.prepared;
+  current.dispose();
+  const updated = relaunch(current, { currentVersion: '1.2.0' });
+  assert.equal(updated.manager.init().phase, 'idle');
+  assert.equal(updated.manager.stagedRecoveryPromise, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(fs.existsSync(stagedCurrent.incomingTarget), false, 'not newer than what runs: removed');
+  updated.manager.dispose();
+
+  const { manager: began } = await stagedForRestart();
+  const stagedBegan = began.prepared;
+  began.dispose();
+  fs.writeFileSync(path.join(stagedBegan.transactionRoot, 'transaction.json'), '{}\n');
+  const resumed = relaunch(began);
+  resumed.manager.init();
+  assert.equal(resumed.manager.stagedRecoveryPromise, null, 'an install that began belongs to recovery');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(fs.existsSync(stagedBegan.incomingTarget), true, 'and is never removed from under it');
+  resumed.manager.dispose();
+});
+
+test('a newer release replaces the staged one instead of an old one installing', async () => {
+  const { manager } = await stagedForRestart();
+  const staged = manager.prepared;
+  manager.deps.fetchManifest = async () => manifest({ version: '1.3.0' });
+  const downloads = [];
+  manager.download = async () => {
+    downloads.push(manager.snapshot().targetVersion);
+    return manager.publish({ phase: 'ready', targetVersion: '1.3.0', progress: 1 });
+  };
+  await manager.autoCheck();
+  await manager.prestagePromise;
+  assert.deepEqual(downloads, ['1.3.0']);
+  assert.equal(manager.snapshot().phase, 'ready');
+  assert.equal(fs.existsSync(staged.incomingTarget), false, 'the older staged app is removed');
+  assert.equal(fs.existsSync(staged.transactionRoot), false);
+
+  // The same release found again leaves the staged one alone.
+  const { manager: same } = await stagedForRestart();
+  const kept = same.prepared;
+  same.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  const state = await same.autoCheck();
+  assert.equal(state.phase, 'ready');
+  assert.equal(same.prepared, kept);
+  assert.equal(fs.existsSync(kept.incomingTarget), true);
+  manager.dispose();
+  same.dispose();
+});
+
+test('the staged-release verification runs the platform check on the exact app beside the installed one', () => {
+  const root = path.join(os.tmpdir(), 'workass-staged-verify', 'Applications');
+  const request = {
+    schemaVersion: 1, platform: 'darwin', arch: 'arm64', targetVersion: '1.2.0',
+    currentRoot: path.join(root, 'Workass.app'), incomingTarget: path.join(root, '.Workass.app.incoming-upd-1234abcd'),
+  };
+  const seen = [];
+  const verify = (...args) => { seen.push(args); return 'requirement'; };
+  assert.deepEqual(verifyStagedRelease(request, { verify }), { designatedRequirement: 'requirement' });
+  assert.deepEqual(seen, [[request.currentRoot, request.incomingTarget, '1.2.0', 'darwin', 'arm64']]);
+  assert.throws(() => verifyStagedRelease({ ...request, incomingTarget: path.join(os.tmpdir(), '.Workass.app.incoming-x') }, { verify }), /beside the installed app/);
+  assert.throws(() => verifyStagedRelease({ ...request, incomingTarget: path.join(root, 'Elsewhere.app') }, { verify }), /beside the installed app/);
+  assert.throws(() => verifyStagedRelease({ ...request, platform: 'win32' }, { verify }), /invalid staged update/);
+});
+
+test('the staged-release verification runs in its own worker thread and reports across it', async () => {
+  const root = path.join(os.tmpdir(), 'workass-staged-thread', 'Applications');
+  await assert.rejects(runUpdateStageWorker({
+    schemaVersion: 1, platform: 'darwin', arch: 'arm64', targetVersion: '1.2.0',
+    currentRoot: path.join(root, 'Workass.app'), incomingTarget: path.join(os.tmpdir(), 'Elsewhere.app'),
+  }, { task: 'verify-staged-update' }), /must stay beside the installed app/);
 });

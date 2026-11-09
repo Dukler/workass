@@ -70,6 +70,8 @@ app.setName(RUNTIME.appName);
 if (process.platform === 'win32') app.setAppUserModelId(RUNTIME.bundleId);
 const RECOVER_CONTROLLER = process.env.WORKASS_CONTROLLER_RECOVERY === '1';
 const UPDATE_RELAUNCH = process.env.WORKASS_UPDATE_RELAUNCH === '1';
+// Relaunched by an unattended install ("Instalar solo"): show, never steal focus.
+const UPDATE_RELAUNCH_QUIET = UPDATE_RELAUNCH && process.env.WORKASS_UPDATE_RELAUNCH_QUIET === '1';
 const UPDATE_RETRY_CHILD = process.env.WORKASS_LOCK_RECOVERY_CHILD === '1';
 const WINDOWS_UPDATE_RECOVERY = process.platform === 'win32' && RECOVER_CONTROLLER;
 const WINDOWS_UPDATE_BOOTSTRAP = WINDOWS_UPDATE_RECOVERY && !UPDATE_RETRY_CHILD;
@@ -413,6 +415,9 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
   ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
   ipcMain.handle('workass-updater:apply-authorized', async (event, payload) => own(event) ? updateManager?.startAuthorizedApply(payload) || null : null);
+  // "Instalar solo": the renderer mirrors the owner's setting from the daemon's
+  // settings blob here, on every load and every change.
+  ipcMain.handle('workass-updater:set-auto-install', (event, enabled) => own(event) ? updateManager?.setAutoInstall(enabled === true) || null : null);
   win.on('closed', () => {
     viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
@@ -438,7 +443,7 @@ function createWindow(url, browserReporter, isController) {
 		try { ipcMain.removeAllListeners('workass-machines:trust-endpoint'); } catch { /* ignore */ }
     try { ipcMain.removeAllListeners('workass-render-frames:guard'); } catch { /* ignore */ }
 		try { ipcMain.removeHandler('workass-recovery:restart-daemon'); } catch { /* ignore */ }
-    for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized']) {
+    for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized', 'set-auto-install']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
   });
@@ -461,7 +466,11 @@ function createWindow(url, browserReporter, isController) {
       if (revealed || win.isDestroyed()) return;
       revealed = true;
       if (fallback) clearTimeout(fallback);
-      focusPrimaryWindow(() => [win], process.platform === 'darwin' ? app : null);
+      if (UPDATE_RELAUNCH_QUIET) {
+        if (!win.isVisible()) win.showInactive();
+      } else {
+        focusPrimaryWindow(() => [win], process.platform === 'darwin' ? app : null);
+      }
       reportWindowState();
     };
     win.once('ready-to-show', reveal);

@@ -147,10 +147,12 @@ func TestServeDaemonHTTPStopsAcceptingAndRunsCleanup(t *testing.T) {
 
 type fakeAppUpdateGate struct {
 	readiness acp.AppUpdateReadiness
+	work      acp.AppUpdateReadiness
 	cancelled bool
 }
 
 func (gate *fakeAppUpdateGate) BeginUpdateDrain() acp.AppUpdateReadiness { return gate.readiness }
+func (gate *fakeAppUpdateGate) UpdateWorkCounts() acp.AppUpdateReadiness { return gate.work }
 func (gate *fakeAppUpdateGate) CancelUpdateDrain()                       { gate.cancelled = true }
 
 func updateControlRequest(t *testing.T, handler http.HandlerFunc, remoteAddr, updateID string) *httptest.ResponseRecorder {
@@ -218,6 +220,54 @@ func TestLocalUpdateControlRecordsActiveWorkAndExactCommit(t *testing.T) {
 	recoveredAgain := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-ready-1234")
 	if recoveredAgain.Code != http.StatusOK || !strings.Contains(recoveredAgain.Body.String(), `"alreadyCancelled":true`) {
 		t.Fatalf("idempotent committed cancel = %d %s", recoveredAgain.Code, recoveredAgain.Body.String())
+	}
+}
+
+// The unattended install reads this before it asks for a handoff: quiet only
+// when nothing would be cut and no update holds the handoff, and reading it
+// never prepares anything.
+func TestLocalUpdateControlWorkIsQuietOnlyWithNothingToCut(t *testing.T) {
+	gate := &fakeAppUpdateGate{readiness: acp.AppUpdateReadiness{Ready: true}}
+	control := newLocalUpdateControl(gate, func() {})
+	read := func(remote string) (int, map[string]any) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "https://127.0.0.1:8788/workass/update/work", strings.NewReader(`{}`))
+		request.RemoteAddr = remote
+		recorder := httptest.NewRecorder()
+		control.work(recorder, request)
+		body := map[string]any{}
+		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+		return recorder.Code, body
+	}
+	if code, _ := read("192.168.1.44:41000"); code != http.StatusForbidden {
+		t.Fatalf("remote work read = %d", code)
+	}
+	if code, body := read("127.0.0.1:41000"); code != http.StatusOK || body["quiet"] != true {
+		t.Fatalf("idle work read = %d %#v", code, body)
+	}
+	for name, counts := range map[string]acp.AppUpdateReadiness{
+		"turn":            {ForegroundTurns: 1},
+		"background":      {BackgroundWork: 1},
+		"provider update": {ProviderUpdates: 1},
+		"admission":       {Admissions: 1},
+	} {
+		gate.work = counts
+		if _, body := read("127.0.0.1:41000"); body["quiet"] != false {
+			t.Fatalf("%s: work read = %#v, want not quiet", name, body)
+		}
+	}
+	gate.work = acp.AppUpdateReadiness{}
+	if prepared := updateControlRequest(t, control.prepare, "127.0.0.1:41000", "update-held-1234"); prepared.Code != http.StatusOK {
+		t.Fatalf("prepare = %d", prepared.Code)
+	}
+	if _, body := read("127.0.0.1:41000"); body["quiet"] != false || body["handoff"] != true {
+		t.Fatalf("a prepared handoff read as quiet: %#v", body)
+	}
+	if cancelled := updateControlRequest(t, control.cancel, "127.0.0.1:41000", "update-held-1234"); cancelled.Code != http.StatusOK {
+		t.Fatalf("cancel = %d", cancelled.Code)
+	}
+	if _, body := read("127.0.0.1:41000"); body["quiet"] != true {
+		t.Fatalf("after cancel = %#v", body)
 	}
 }
 

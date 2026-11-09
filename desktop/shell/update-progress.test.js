@@ -177,6 +177,7 @@ function fakeElectron({ executeJavaScript = null, loadURL = null } = {}) {
       if (loadURL) return loadURL(url);
     }
     show() { this.visible = true; }
+    showInactive() { this.visible = true; this.shownInactive = true; }
     focus() { this.focused = true; }
     isVisible() { return this.visible; }
     isDestroyed() { return this.destroyed; }
@@ -433,6 +434,31 @@ test('the progress process becomes ready only after its isolated window is visib
   assert.equal(electron.app.quitCalls, 1);
   assert.equal(timers.handles.some((handle) => handle.active), false);
   assert.equal(JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8')).phase, 'closed');
+});
+
+// "Instalar solo" (2026-11-09): nobody clicked an unattended install, so its
+// progress window is visible, which the handoff requires, but never takes the
+// focus from what the owner is typing into. A clicked one still comes forward.
+test('an unattended install shows its progress window without taking focus', async () => {
+  for (const unattended of [false, true]) {
+    const { transaction, transactionPath } = progressFixture();
+    if (unattended) fs.writeFileSync(transactionPath, `${JSON.stringify({ ...transaction, unattended: true })}\n`);
+    const electron = fakeElectron();
+    await runUpdateProgressProcess({
+      ...electron,
+      transactionPath,
+      platform: 'darwin',
+      executablePath: transaction.progressExecutable,
+      progressId: transaction.progressId,
+      now: () => 1000,
+      ...fakeTimers(),
+    });
+    const [win] = electron.windows;
+    assert.equal(win.visible, true);
+    assert.equal(win.focused === true, !unattended);
+    assert.equal(win.shownInactive === true, unattended);
+    assert.equal(JSON.parse(fs.readFileSync(transaction.progressReceiptPath, 'utf8')).windowVisible, true);
+  }
 });
 
 test('pre-visible renderer failure destroys the hidden window and records a lost owner', async () => {

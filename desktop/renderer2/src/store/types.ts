@@ -394,6 +394,9 @@ export interface AppState {
   // How new chats are named: from the first message, or by an agent that
   // reads it once (daemon app settings key "chatTitles").
   chatTitles: ChatTitleSettings;
+  // "Instalar solo": the Mac shell installs a staged Workass release by itself
+  // while nothing would be cut (daemon app settings key "autoInstallUpdates").
+  autoInstallUpdates: boolean;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.

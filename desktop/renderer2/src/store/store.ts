@@ -8,7 +8,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 
 import { useSyncExternalStore } from 'react';
 import type { AppState, BrowserPresentation, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
-import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
+import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, AppUpdateWork, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
@@ -53,6 +53,7 @@ import {
   DEFAULT_CHAT_TITLES, chatTitleAgents, chatTitlesFromSettings, resolveChatTitleChoice, withChatTitlesInSettings,
   type ChatTitleSettings,
 } from '../chat-titles';
+import { autoInstallUpdatesFromSettings, pushAutoInstallToShell, withAutoInstallUpdatesInSettings } from '../update-settings';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1341,7 +1342,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, autoInstallUpdates: false, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -3962,6 +3963,34 @@ export class Store {
     return await link.invoke<Record<string, unknown>>('app:update-apply', params);
   }
 
+  // Ajustes · Actualizaciones, "Tus otras máquinas": another fleet machine's
+  // Workass updater, read and applied over the same exact-machine route the
+  // agent tools (workass_get_update_status, workass_apply_update) use. The
+  // apply is a click by the owner, so the sentence the route requires is built
+  // from the exact versions the status just showed.
+  async machineUpdateStatus(machineId: string): Promise<Record<string, unknown>> {
+    return this.agentUpdateStatus({ machine_id: machineId }, false);
+  }
+  /** What an update would stop on that machine right now; null when it does not say. */
+  async machineUpdateWork(machineId: string): Promise<AppUpdateWork | null> {
+    const link = this.machines?.linkFor(machineId);
+    if (!link) return null;
+    try { return await link.invoke<AppUpdateWork>('app-update:work'); }
+    catch { return null; }
+  }
+  async applyMachineUpdate(machineId: string, currentVersion: string, targetVersion: string): Promise<Record<string, unknown>> {
+    const nonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    return this.agentUpdateApply({
+      machine_id: machineId,
+      operation_id: `settings-update-${nonce}`,
+      expected_current_version: currentVersion,
+      expected_target_version: targetVersion,
+      authorization: `update ${machineId} from ${currentVersion} to ${targetVersion}`,
+    }, false);
+  }
+
   private agentRemoteChatList(): Array<Record<string, unknown>> {
     return this.state.chats.flatMap((chat) => {
       const machineId = ownerMachineId(chat);
@@ -4673,6 +4702,13 @@ export class Store {
     this.state.chatTitles = { ...next };
     this.commitModelPreferences();
   }
+  // "Instalar solo" (Ajustes · Actualizaciones): saved in the daemon blob and
+  // handed to this machine's shell, which is what acts on it.
+  setAutoInstallUpdates(enabled: boolean) {
+    this.state.autoInstallUpdates = enabled === true;
+    pushAutoInstallToShell(this.state.autoInstallUpdates);
+    this.commitModelPreferences();
+  }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
   private commitModelPreferences() {
@@ -4693,6 +4729,8 @@ export class Store {
     if (this.settingsSaveTimer) return;
     this.state.modelFavorites = modelFavoritesFromSettings(reply);
     this.state.chatTitles = chatTitlesFromSettings(reply);
+    this.state.autoInstallUpdates = autoInstallUpdatesFromSettings(reply);
+    pushAutoInstallToShell(this.state.autoInstallUpdates);
     this.bumpApp(false);
   }
   private scheduleModelPreferencesSave() {
@@ -4714,7 +4752,8 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
-      const merged = withChatTitlesInSettings(withFavorites, this.state.chatTitles);
+      const merged = withAutoInstallUpdatesInSettings(
+        withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.autoInstallUpdates);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {

@@ -95,3 +95,36 @@ func TestUpdateWorkCountsWhatAnUpdateStopsWithoutDraining(t *testing.T) {
 		t.Fatal("a read-only count must never close admission")
 	}
 }
+
+// "Instalar solo" reads these counts before it asks for a handoff. They have to
+// be exactly the handoff's counts, or a quiet read would be followed by a
+// handoff that finds work (and back off), or the other way round.
+func TestUpdateWorkCountsMatchTheDrainWithoutClosingAdmission(t *testing.T) {
+	m := updateTestManager()
+	quiet := m.UpdateWorkCounts()
+	if quiet != (AppUpdateReadiness{}) {
+		t.Fatalf("an idle daemon counts work: %#v", quiet)
+	}
+	m.jobs["turn"] = &Job{ID: "turn", Kind: "app-chat", Status: "running"}
+	m.subagents["child"] = &SubagentRun{ID: "child", Status: "running"}
+	m.spawnedWork["lane"] = &spawnedWorkRecord{Item: SpawnedWorkItem{ID: "lane", Kind: "external", Status: "running"}}
+	m.spawnedWork["server"] = &spawnedWorkRecord{Item: SpawnedWorkItem{ID: "server", Kind: "background", Status: "running", Role: spawnedWorkRoleService}}
+	m.updateGateMu.Lock()
+	m.updateAdmissions = 1
+	m.updateGateMu.Unlock()
+
+	read := m.UpdateWorkCounts()
+	if read.Ready || read.ForegroundTurns != 1 || read.BackgroundWork != 2 || read.Admissions != 1 {
+		t.Fatalf("counts = %#v, want 1 turn, 2 background (subagent + external lane, never the service), 1 admission", read)
+	}
+	if err := m.beginWorkAdmission(); err != nil {
+		t.Fatalf("a read-only count closed admission: %v", err)
+	}
+	m.endWorkAdmission()
+
+	drained := m.BeginUpdateDrain()
+	drained.Ready = false
+	if drained != read {
+		t.Fatalf("drain counted %#v, the read counted %#v", drained, read)
+	}
+}

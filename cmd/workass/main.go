@@ -548,6 +548,7 @@ func main() {
 	mux.HandleFunc("/workass/update/prepare", updateControl.prepare)
 	mux.HandleFunc("/workass/update/commit", updateControl.commit)
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
+	mux.HandleFunc("/workass/update/work", updateControl.work)
 	mux.Handle(toolsPath, newWorkassToolHandler(acpManager, agentControl, defaultBrowserControlFile(stateDir), providerChats))
 	// Retired Workass MCP routes are intentionally unavailable, including to old clients.
 	mux.HandleFunc("/workass/mcp/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
@@ -689,6 +690,7 @@ func localRecoveryShutdownHandler(requestShutdown context.CancelFunc) http.Handl
 
 type appUpdateDrainGate interface {
 	BeginUpdateDrain() acp.AppUpdateReadiness
+	UpdateWorkCounts() acp.AppUpdateReadiness
 	CancelUpdateDrain()
 }
 
@@ -784,6 +786,40 @@ func (control *localUpdateControl) prepare(w http.ResponseWriter, r *http.Reques
 	control.preparedID = id
 	control.cancelledID = ""
 	_ = json.NewEncoder(w).Encode(readiness)
+}
+
+// work answers whether an update would cut anything right now, without
+// closing admission. Only the shell's unattended install ("Instalar solo")
+// asks: it requests a handoff only after a quiet answer, and backs off again if
+// the handoff's own count is not zero. A prepared or committed update is never
+// quiet. It changes nothing, so the update id in the body is not required.
+func (control *localUpdateControl) work(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(host).IsLoopback() || !wire.LocalControlRequestAllowed(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	control.mu.Lock()
+	handoff := control.preparedID != "" || control.committedID != ""
+	control.mu.Unlock()
+	counts := control.gate.UpdateWorkCounts()
+	quiet := !handoff && counts.ForegroundTurns == 0 && counts.BackgroundWork == 0 &&
+		counts.ProviderUpdates == 0 && counts.Admissions == 0
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"quiet":           quiet,
+		"handoff":         handoff,
+		"foregroundTurns": counts.ForegroundTurns,
+		"backgroundWork":  counts.BackgroundWork,
+		"providerUpdates": counts.ProviderUpdates,
+		"admissions":      counts.Admissions,
+	})
 }
 
 func (control *localUpdateControl) cancel(w http.ResponseWriter, r *http.Request) {

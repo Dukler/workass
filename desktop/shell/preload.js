@@ -109,6 +109,7 @@ contextBridge.exposeInMainWorld('workassUpdater', {
   check: () => ipcRenderer.invoke('workass-updater:check'),
   apply: () => ipcRenderer.invoke('workass-updater:apply'),
   applyAuthorized: (payload) => ipcRenderer.invoke('workass-updater:apply-authorized', payload),
+  setAutoInstall: (enabled) => ipcRenderer.invoke('workass-updater:set-auto-install', enabled === true),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('workass-updater:state', listener);

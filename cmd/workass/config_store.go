@@ -439,6 +439,10 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"prApprover":         "",
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
+		// Ajustes · Actualizaciones "Instalar solo": the Mac shell installs a
+		// staged Workass release by itself only while nothing would be cut. Off
+		// unless the owner turns it on.
+		"autoInstallUpdates": false,
 	}
 	if input == nil {
 		return next
@@ -472,6 +476,9 @@ func normalizeSettings(input map[string]any) map[string]any {
 	}
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
+	if v, ok := input["autoInstallUpdates"].(bool); ok {
+		next["autoInstallUpdates"] = v
+	}
 	return next
 }
 

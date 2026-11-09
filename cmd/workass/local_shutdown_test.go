@@ -62,6 +62,9 @@ func TestLocalControlRoutesRefuseForeignHostAndOrigin(t *testing.T) {
 		{"update commit", http.MethodPost, updateBody, http.StatusConflict, func() http.Handler {
 			return http.HandlerFunc(newLocalUpdateControl(&fakeAppUpdateGate{}, stopped).commit)
 		}},
+		{"update work", http.MethodPost, "", http.StatusOK, func() http.Handler {
+			return http.HandlerFunc(newLocalUpdateControl(&fakeAppUpdateGate{}, stopped).work)
+		}},
 		{"fleet code", http.MethodGet, "", http.StatusOK, func() http.Handler { return newFleetQRHandler(keys, 8788, "lan", nil) }},
 	}
 	send := func(r route, target, host string, headers map[string]string) int {

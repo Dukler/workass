@@ -84,7 +84,7 @@ const STALE_RUNTIME_ENV_KEYS = new Set([
   'WORKASS_LOG_ROOT', 'WORKASS_UPDATE_CHANNEL', 'WORKASS_URL',
   'WORKASS_BROWSER_CONTROL_FILE', 'WORKASS_REPO_ROOT',
   'WORKASS_TEST_ROOT', 'WORKASS_PROD',
-  'WORKASS_CONTROLLER_RECOVERY', 'WORKASS_UPDATE_RELAUNCH',
+  'WORKASS_CONTROLLER_RECOVERY', 'WORKASS_UPDATE_RELAUNCH', 'WORKASS_UPDATE_RELAUNCH_QUIET',
   'WORKASS_LOCK_RECOVERY_CHILD', 'WORKASS_UPDATE_PROGRESS_ID',
 ]);
 
@@ -1181,6 +1181,9 @@ function defaultOperations(transaction, dependencies = {}) {
           // before daemon/provider hydration. Rollback launches omit it on
           // Windows because older builds interpreted it as "stay hidden".
           ...(updateRelaunch ? { WORKASS_UPDATE_RELAUNCH: '1' } : {}),
+          // An unattended install ("Instalar solo") brings the window back
+          // without taking focus from the app the owner is using.
+          ...(updateRelaunch && transaction.unattended === true ? { WORKASS_UPDATE_RELAUNCH_QUIET: '1' } : {}),
         },
       }, { spawnProcess });
       if (child.pid) {
