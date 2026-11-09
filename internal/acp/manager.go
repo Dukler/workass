@@ -139,6 +139,7 @@ type Manager struct {
 	planUsageRefreshes           map[string]*planUsageRefreshRun
 	planUsageRefreshWG           sync.WaitGroup
 	accountResets                accountResetState
+	planUsageGate                planUsageGateState
 	receiptMu                    sync.Mutex
 	subagentCompletionObserverMu sync.RWMutex
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
@@ -435,6 +436,7 @@ func NewManager(opts Options) *Manager {
 	m.initializePersistedProviderAuthenticationState()
 	m.emitMockAppUpdateFromEnv()
 	m.loadSpawnedWorkSnapshots()
+	m.loadPersistedPlanUsage()
 	m.loadChatToolTokens()
 	m.loadRunTokens()
 	m.pruneToolBootstrap()

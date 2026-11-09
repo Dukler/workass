@@ -207,9 +207,23 @@ export interface RateLimitResetCreditsSummary {
   // details and found no available detail rows. The count remains authoritative.
   credits: RateLimitResetCredit[] | null;
   // 'account' when read from the provider's account API with the owner's
-  // consented login (accounts:resets-refresh).
+  // consented login (accounts:resets-refresh); readAt dates that read, since
+  // the daemon serves it from cache.
   source?: string;
   cooldownUntil?: string;
+  readAt?: string;
+}
+// accounts:resets-refresh reply. readAt dates the cached resets; while the
+// daemon waits before asking again, retryAt says until when and reason why:
+// 'rate-limited' | 'unavailable' (it retries on its own) or 'no-login' |
+// 'expired' | 'keychain' | 'auth' (the owner must act; message says how).
+export interface AccountResetsAnswer {
+  ok: boolean;
+  providerId: string;
+  readAt?: string;
+  retryAt?: string;
+  reason?: string;
+  message?: string;
 }
 export interface RateLimitResetCredit {
   id?: string;
@@ -948,9 +962,10 @@ export interface WorkassApi {
     idempotencyKey: string,
     creditId?: string,
   ) => Promise<{ outcome: RateLimitResetOutcome; planUsage?: PlanUsageSnapshot; refilled?: string[]; remaining?: number; message?: string }>;
-  // Cuentas: reads one provider's resets from its account API with the
-  // owner's consented login; the snapshot arrives on chat:plan-usage.
-  accountsResetsRefresh?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
+  // Cuentas: one provider's resets from its account API with the owner's
+  // consented login, through the daemon's cache; the snapshot arrives on
+  // chat:plan-usage. force is the owner's retry (never skips a 429's wait).
+  accountsResetsRefresh?: (providerId: string, force?: boolean) => Promise<AccountResetsAnswer>;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
   spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;

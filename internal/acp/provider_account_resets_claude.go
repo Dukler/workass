@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -105,14 +106,14 @@ func (s *claudeAccountResetSource) ConsentNote() string {
 }
 
 func (s *claudeAccountResetSource) Status(ctx context.Context) (accountResetStatus, error) {
-	code, body, err := s.call(ctx, http.MethodGet, claudeResetStatusPath, nil)
+	reply, err := s.call(ctx, http.MethodGet, claudeResetStatusPath, nil)
 	if err != nil {
 		return accountResetStatus{}, err
 	}
-	if err := claudeAccountHTTPError(code); err != nil {
+	if err := claudeAccountHTTPError(reply, s.clock()); err != nil {
 		return accountResetStatus{}, err
 	}
-	payload, err := decodeClaudeAccountBody(body)
+	payload, err := decodeClaudeAccountBody(reply.body)
 	if err != nil {
 		return accountResetStatus{}, err
 	}
@@ -143,23 +144,29 @@ func (s *claudeAccountResetSource) Claim(ctx context.Context, creditID, requestI
 		return accountResetClaim{}, err
 	}
 	path := "/api/organizations/" + url.PathEscape(organization) + "/reset_rate_limits"
-	code, body, err := s.call(ctx, http.MethodPost, path, payload)
+	reply, err := s.call(ctx, http.MethodPost, path, payload)
 	if err != nil {
 		return accountResetClaim{}, err
 	}
-	if err := claudeAccountHTTPError(code); err != nil {
+	if err := claudeAccountHTTPError(reply, s.clock()); err != nil {
 		return accountResetClaim{}, err
 	}
-	answer, err := decodeClaudeAccountBody(body)
+	answer, err := decodeClaudeAccountBody(reply.body)
 	if err != nil {
 		return accountResetClaim{}, err
 	}
 	return claudeAccountResetClaimFrom(answer)
 }
 
+type claudeAccountReply struct {
+	code   int
+	body   []byte
+	header http.Header
+}
+
 // call sends one request with the stored token. A 401 re-reads the stored
 // login once, in case Claude Code renewed it since; it never renews it.
-func (s *claudeAccountResetSource) call(ctx context.Context, method, path string, payload []byte) (int, []byte, error) {
+func (s *claudeAccountResetSource) call(ctx context.Context, method, path string, payload []byte) (claudeAccountReply, error) {
 	base := strings.TrimRight(firstNonEmpty(s.baseURL, claudeOAuthAPIBase), "/")
 	client := s.client
 	if client == nil {
@@ -167,7 +174,7 @@ func (s *claudeAccountResetSource) call(ctx context.Context, method, path string
 	}
 	credential, err := s.credential(ctx, false)
 	if err != nil {
-		return 0, nil, err
+		return claudeAccountReply{}, err
 	}
 	for attempt := 0; ; attempt++ {
 		var body io.Reader
@@ -176,7 +183,7 @@ func (s *claudeAccountResetSource) call(ctx context.Context, method, path string
 		}
 		request, err := http.NewRequestWithContext(ctx, method, base+path, body)
 		if err != nil {
-			return 0, nil, err
+			return claudeAccountReply{}, err
 		}
 		request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
 		request.Header.Set("anthropic-beta", claudeOAuthBetaHeader)
@@ -187,25 +194,26 @@ func (s *claudeAccountResetSource) call(ctx context.Context, method, path string
 		response, err := client.Do(request)
 		if err != nil {
 			if ctx.Err() != nil {
-				return 0, nil, newAccountResetError(accountResetUnavailable, "Claude tardó demasiado en responder. Probá de nuevo.")
+				return claudeAccountReply{}, newAccountResetError(accountResetUnavailable, "Claude tardó demasiado en responder.")
 			}
-			return 0, nil, newAccountResetError(accountResetUnavailable, "No se pudo conectar con Claude. Revisá tu conexión.")
+			return claudeAccountReply{}, newAccountResetError(accountResetUnavailable, "No se pudo conectar con Claude.")
 		}
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, claudeAccountResponseLimit))
 		response.Body.Close()
 		if readErr != nil {
-			return 0, nil, newAccountResetError(accountResetUnavailable, "La respuesta de Claude se cortó. Probá de nuevo.")
+			return claudeAccountReply{}, newAccountResetError(accountResetUnavailable, "La respuesta de Claude se cortó.")
 		}
+		reply := claudeAccountReply{code: response.StatusCode, body: data, header: response.Header}
 		if response.StatusCode != http.StatusUnauthorized || attempt > 0 {
-			return response.StatusCode, data, nil
+			return reply, nil
 		}
 		s.forgetCredential()
 		renewed, err := s.credential(ctx, true)
 		if err != nil {
-			return 0, nil, err
+			return claudeAccountReply{}, err
 		}
 		if renewed.AccessToken == credential.AccessToken {
-			return response.StatusCode, data, nil
+			return reply, nil
 		}
 		credential = renewed
 	}
@@ -294,10 +302,10 @@ func readClaudeKeychainCredential(ctx context.Context) ([]byte, error) {
 			case claudeKeychainItemMissingCode:
 				return nil, errClaudeKeychainItemMissing
 			case claudeKeychainLockedCode:
-				return nil, newAccountResetError(accountResetAuth, "El llavero de macOS está bloqueado. Desbloquealo y probá de nuevo.")
+				return nil, newAccountResetError(accountResetKeychain, "El llavero de macOS está bloqueado. Desbloquealo y probá de nuevo.")
 			}
 		}
-		return nil, newAccountResetError(accountResetAuth, "macOS no dejó leer tu login de Claude Code.")
+		return nil, newAccountResetError(accountResetKeychain, "macOS no dejó leer tu login de Claude Code.")
 	}
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
@@ -377,17 +385,40 @@ func readClaudeOrganizationUUID() (string, error) {
 	return "", newAccountResetError(accountResetNoLogin, "No encontré tu organización de Claude. Abrí Claude Code e iniciá sesión.")
 }
 
-func claudeAccountHTTPError(code int) error {
-	switch {
+func claudeAccountHTTPError(reply claudeAccountReply, now time.Time) error {
+	switch code := reply.code; {
 	case code >= 200 && code < 300:
 		return nil
 	case code == http.StatusTooManyRequests:
-		return newAccountResetError(accountResetRateLimited, "Claude está limitando los pedidos. Probá de nuevo en un minuto.")
+		return &accountResetError{
+			code:       accountResetRateLimited,
+			message:    "Claude está limitando los pedidos.",
+			retryAfter: parseRetryAfter(reply.header.Get("Retry-After"), now),
+		}
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return newAccountResetError(accountResetAuth, "Claude no aceptó tu sesión. Abrí Claude Code para renovar la sesión.")
 	default:
-		return newAccountResetError(accountResetUnavailable, fmt.Sprintf("Claude respondió con un error (HTTP %d). Probá de nuevo más tarde.", code))
+		return newAccountResetError(accountResetUnavailable, fmt.Sprintf("Claude respondió con un error (HTTP %d).", code))
 	}
+}
+
+// parseRetryAfter reads Retry-After as seconds or as an HTTP date; zero when
+// it is absent or unreadable.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func decodeClaudeAccountBody(body []byte) (map[string]any, error) {

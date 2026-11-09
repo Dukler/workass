@@ -64,15 +64,20 @@ func accountResetConsentGiven(settings map[string]any, providerID string) bool {
 }
 
 // registerAccountResetHandlers hands the manager the stored consent and adds
-// accounts:resets-refresh, which reads one provider's account resets into its
-// plan-usage snapshot. Claims go through app-chat:use-rate-limit-reset.
+// accounts:resets-refresh, which brings one provider's account resets into
+// its plan-usage snapshot through the daemon's cache: {providerId, force}
+// replies {ok, providerId, readAt, retryAt, reason, message}; force is the
+// owner's retry and never skips a 429's wait. Claims go through
+// app-chat:use-rate-limit-reset.
 func registerAccountResetHandlers(hub *wire.Hub, manager *acp.Manager, settings *appSettingsStore) int {
 	manager.SetAccountResetConsent(func(providerID string) bool {
 		return accountResetConsentGiven(settings.get(), providerID)
 	})
 	hub.Register("accounts:resets-refresh", func(args []any) (any, error) {
-		providerID := strings.ToLower(strings.TrimSpace(fieldString(firstMapArg(args), "providerId")))
-		return manager.RefreshAccountResets(context.Background(), providerID)
+		arg := firstMapArg(args)
+		providerID := strings.ToLower(strings.TrimSpace(fieldString(arg, "providerId")))
+		force, _ := boolField(arg, "force")
+		return manager.RefreshAccountResets(context.Background(), providerID, force)
 	})
 	return 1
 }

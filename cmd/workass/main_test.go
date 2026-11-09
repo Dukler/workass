@@ -2863,6 +2863,9 @@ func TestWireClientReadyAndSessionSaveDoNotCreatePlanUsageSessionOrRaceRealAttac
 		RSSSampleInterval:           time.Hour,
 		ProviderUpdateInterval:      time.Hour,
 		ProviderUpdateRetryBackoffs: []time.Duration{},
+		// This test counts the read each boundary asks for; the spacing that
+		// folds them is tested in internal/acp.
+		PlanUsageMinInterval: -1,
 	})
 	providerChats := newProviderChatRuntime(manager, sessionState, stateDir)
 	t.Cleanup(func() {

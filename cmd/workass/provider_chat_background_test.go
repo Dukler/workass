@@ -103,6 +103,9 @@ func TestNativeCodexBackgroundLifecycleIsOwnedByChatActor(t *testing.T) {
 	}
 	manager := acp.NewManager(acp.Options{
 		RootDir: root, StateDir: stateDir, RuntimeProfile: "dev", DefaultProviderID: "codex", InitTimeout: 10 * time.Second, RSSSampleInterval: time.Hour,
+		// The fixture releases the late child from inside a rate-limits read,
+		// which this test asks for right after the turn's own read.
+		PlanUsageMinInterval: -1,
 		Provider: acp.ProviderConfig{ID: "codex", Command: "node", Args: []string{filepath.Join(root, "scripts", "codex-native-host.mjs")}, CWD: root, Enabled: true,
 			Env: map[string]string{"WORKASS_CODEX_EXECUTABLE": "node", "WORKASS_CODEX_APP_SERVER_ARGS": string(args), "WORKASS_CODEX_FIXTURE_THREAD_ID": "actor-background-parent", "WORKASS_CODEX_FIXTURE_CHILD_RELEASE_FILE": releaseFile}},
 	})

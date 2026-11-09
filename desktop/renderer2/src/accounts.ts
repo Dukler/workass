@@ -4,7 +4,7 @@
 // and provider records (accountUsage, accountResetConsent, localEndpoint).
 // Nothing branches on a provider id.
 
-import type { PlanUsageEntry, PlanUsageExtraUsage, PlanUsageSnapshot, ProviderRecord, RateLimitResetCredit, RateLimitResetCreditsSummary } from './wire/types';
+import type { AccountResetsAnswer, PlanUsageEntry, PlanUsageExtraUsage, PlanUsageSnapshot, ProviderRecord, RateLimitResetCredit, RateLimitResetCreditsSummary } from './wire/types';
 import { availableRateLimitReset, clampPlanUsagePercent, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, rateLimitLabel, relativePlanReset } from './plan-usage.ts';
 
 const MINUTE_MS = 60_000;
@@ -327,6 +327,74 @@ export function resetResultToast(result: ResetResult | undefined, row: AccountRe
     default:
       throw new Error('El proveedor no devolvió un resultado de reset reconocido.');
   }
+}
+
+// ---- what is shown, and how old it is -----------------------------------
+
+// Under this age what the page shows reads as current and carries no date.
+export const STALE_AFTER_MS = 3 * 60_000;
+
+/** "hace 12 min", "hace 3 h", "hace 2 d"; '' while still current. */
+export function staleAgo(iso: string | undefined, now: number = Date.now()): string {
+  const t = Date.parse(iso ?? '');
+  if (!Number.isFinite(t) || now - t < STALE_AFTER_MS) return '';
+  const min = Math.floor((now - t) / MINUTE_MS);
+  if (min < 60) return `hace ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `hace ${h} h`;
+  return `hace ${Math.floor(h / 24)} d`;
+}
+
+/** "a las 14:05" today, else "mañana a las 09:00" / "el lunes a las 09:00". */
+function retryPhrase(iso: string, now: number): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  return dayOffset(t, now) === 0 ? `a las ${clock(new Date(t))}` : momentPhrase(t, now);
+}
+
+// The daemon retries these on its own; they never need the owner.
+const WAITING_REASONS = new Set(['rate-limited', 'unavailable']);
+
+export interface ResetsLine {
+  text: string;
+  // An orange block (the owner must act and nothing is cached), else a quiet line.
+  error: boolean;
+  // Offer the owner's retry.
+  retry: boolean;
+}
+
+/**
+ * The one line under an account's resets. With resets cached: their age,
+ * plus what the owner must do when that is why they are old; a pause the
+ * provider asked for shows nothing more. Without a cache: when the daemon
+ * asks again, quietly, or what the owner must do.
+ */
+export function resetsLine(answer: Partial<AccountResetsAnswer> | null | undefined, cachedReadAt: string | undefined, name: string, now: number = Date.now()): ResetsLine | null {
+  const reason = answer?.reason ?? '';
+  const actionable = !!reason && !WAITING_REASONS.has(reason);
+  if (cachedReadAt) {
+    const parts: string[] = [];
+    const age = staleAgo(cachedReadAt, now);
+    if (age) parts.push(`Actualizado ${age}`);
+    if (actionable && answer?.message) parts.push(answer.message);
+    return parts.length ? { text: parts.join(' · '), error: false, retry: actionable } : null;
+  }
+  if (!reason) return null;
+  if (!actionable) {
+    const at = answer?.retryAt ? retryPhrase(answer.retryAt, now) : '';
+    const why = reason === 'rate-limited' ? `${name} pidió una pausa.` : 'No se pudo consultar.';
+    return { text: at ? `${why} Se vuelve a consultar ${at}.` : why, error: false, retry: false };
+  }
+  return { text: answer?.message || 'No se pudieron leer los resets.', error: true, retry: true };
+}
+
+/** How long until a waiting read is due again, for the page to ask then;
+ *  null when there is nothing to wait for (or it is over an hour away). */
+export function retryDelayMs(answer: Partial<AccountResetsAnswer> | null | undefined, now: number = Date.now()): number | null {
+  if (!answer?.retryAt || !WAITING_REASONS.has(answer.reason ?? '')) return null;
+  const delay = Date.parse(answer.retryAt) - now;
+  if (!Number.isFinite(delay) || delay > 60 * MINUTE_MS) return null;
+  return Math.max(0, delay) + 1500;
 }
 
 // ---- spend -------------------------------------------------------------

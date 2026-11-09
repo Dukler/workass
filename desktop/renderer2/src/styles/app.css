@@ -2836,6 +2836,9 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .acct-link { padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .acct-none .acct-link { display: block; margin-top: 4px; }
 .acct-link:hover:not(:disabled) { color: var(--ink); }
+/* One quiet line under the resets: their age, or when the daemon asks again. */
+.acct-age { margin: 6px 0 0 10px; font-size: 11px; color: var(--muted); }
+.acct-age .acct-link { margin-left: 8px; font-size: 11px; }
 .acct-cred { margin: 14px 0 0 26px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 12px; color: var(--muted); }
 .acct-cred b { font-weight: 600; color: var(--ink); }
 .acct-cred a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
