@@ -112,6 +112,46 @@ test('an agent row says its installed version and the newer one', async (t) => {
   assert.equal(h.agentUpdateDetail({ ...update, latest: '1.9.0', updateAvailable: false }), '1.9.0 · al día.');
   assert.equal(h.agentUpdateDetail(update, { providerId: 'agent-a', status: 'running', startedAt: '', tail: '' }), '1.9.0 · actualizando a 1.9.2…');
   assert.equal(h.agentUpdateDetail({ ...update, lastError: 'exit 1' }), '1.9.0 · no se pudo actualizar a 1.9.2. A mano: agent-a update');
+  assert.equal(h.agentUpdateDetail(update, undefined, true), '1.9.0 · 1.9.2 se instala solo apenas este agente no tenga un turno en curso.');
+  assert.equal(h.agentUpdateDetail({ ...update, latest: '1.9.0', updateAvailable: false }, undefined, true), '1.9.0 · al día.');
+});
+
+test('Actualizar agentes solos is its own key, saved with every other key and never handed to the shell', async (t) => {
+  const previousWindow = (globalThis as any).window;
+  const shellCalls: boolean[] = [];
+  const saved: Array<Record<string, unknown>> = [];
+  let blob: Record<string, unknown> = { autoInstallUpdates: true, autoUpdateProviders: false, prApprover: 'someone' };
+  (globalThis as any).window = {
+    api: {
+      getSettings: async () => ({ settings: blob }),
+      setSettings: async (next: Record<string, unknown>) => { saved.push(next); blob = next; return { settings: next }; },
+    },
+    workassUpdater: { setAutoInstall: async (enabled: boolean) => { shellCalls.push(enabled); return null; } },
+  };
+  t.after(() => {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  });
+  const server = await vite(t);
+  const module = await server.ssrLoadModule('/src/store/store.ts') as {
+    store: { clearToastTimers(): void };
+    Store: new () => { state: Record<string, any>; clearToastTimers(): void; setAutoUpdateProviders(enabled: boolean): void };
+  };
+  const subject = new module.Store();
+  t.after(() => { subject.clearToastTimers(); module.store.clearToastTimers(); });
+
+  await (subject as any).hydrateSettings();
+  assert.equal(subject.state.autoUpdateProviders, false);
+  assert.equal(subject.state.autoInstallUpdates, true);
+
+  subject.setAutoUpdateProviders(true);
+  clearTimeout((subject as any).settingsSaveTimer);
+  await (subject as any).flushModelPreferences();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].autoUpdateProviders, true);
+  assert.equal(saved[0].autoInstallUpdates, true, 'the Workass switch is untouched');
+  assert.equal(saved[0].prApprover, 'someone');
+  assert.deepEqual(shellCalls, [true], 'the shell only ever hears about the Workass switch');
 });
 
 test('Instalar solo is saved in the settings blob with every other key, and handed to the shell', async (t) => {

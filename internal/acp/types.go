@@ -17,18 +17,21 @@ import (
 const (
 	ProtocolVersion = 1
 
-	defaultInitTimeout              = 60 * time.Second
-	defaultContextReadbackTimeout   = 5 * time.Second
-	defaultStdoutFlush              = 16 * time.Millisecond
-	defaultThoughtFlush             = 24 * time.Millisecond
-	defaultStderrTailBytes          = 16 * 1024
-	defaultHibernateTTL             = 20 * time.Minute
-	defaultRSSSampleInterval        = 30 * time.Second
-	defaultEngineMaxAge             = 12 * time.Hour
-	defaultEngineMaxRSSKB           = 4 * 1024 * 1024
-	defaultSpareTTL                 = 5 * time.Minute
-	defaultSpareCheck               = 2500 * time.Millisecond
-	defaultProviderUpdateInterval   = time.Hour
+	defaultInitTimeout            = 60 * time.Second
+	defaultContextReadbackTimeout = 5 * time.Second
+	defaultStdoutFlush            = 16 * time.Millisecond
+	defaultThoughtFlush           = 24 * time.Millisecond
+	defaultStderrTailBytes        = 16 * 1024
+	defaultHibernateTTL           = 20 * time.Minute
+	defaultRSSSampleInterval      = 30 * time.Second
+	defaultEngineMaxAge           = 12 * time.Hour
+	defaultEngineMaxRSSKB         = 4 * 1024 * 1024
+	defaultSpareTTL               = 5 * time.Minute
+	defaultSpareCheck             = 2500 * time.Millisecond
+	defaultProviderUpdateInterval = time.Hour
+	// How often a pending agent update waiting for its agent to go quiet is
+	// looked at again (provider_auto_update.go).
+	defaultProviderAutoUpdatePoll   = time.Minute
 	defaultPlanUsageRefreshInterval = 5 * time.Minute
 	// Options.PlanUsageMinInterval spaces two native plan-usage reads of one
 	// provider, since each asks the provider's account API (plan_usage.go);
@@ -134,6 +137,7 @@ type Options struct {
 	SpareTTL                     time.Duration
 	SpareCheckInterval           time.Duration
 	ProviderUpdateInterval       time.Duration
+	ProviderAutoUpdatePoll       time.Duration
 	PlanUsageRefreshInterval     time.Duration
 	PlanUsageMinInterval         time.Duration
 	SpawnedWorkReconcileInterval time.Duration
@@ -225,6 +229,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ProviderUpdateInterval <= 0 {
 		o.ProviderUpdateInterval = defaultProviderUpdateInterval
+	}
+	if o.ProviderAutoUpdatePoll <= 0 {
+		o.ProviderAutoUpdatePoll = defaultProviderAutoUpdatePoll
 	}
 	if o.PlanUsageRefreshInterval <= 0 {
 		o.PlanUsageRefreshInterval = defaultPlanUsageRefreshInterval

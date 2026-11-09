@@ -176,12 +176,18 @@ export function machineUpdateWarning(name: string, work: AppUpdateWork | null, w
 
 // ---- agents ---------------------------------------------------------------
 
-export function agentUpdateDetail(update: ProviderUpdate, progress?: ProviderUpdateProgress): string {
+export const AUTO_UPDATE_PROVIDERS_DESCRIPTION = 'Cuando sale una versión de un agente, la instala apenas ese agente no tenga un turno en curso. Si no, espera.';
+
+/** One agent's row. With "Actualizar agentes solos" on (auto), a pending
+ *  version says it installs by itself instead of only that it exists; one that
+ *  already failed is left to the button. */
+export function agentUpdateDetail(update: ProviderUpdate, progress?: ProviderUpdateProgress, auto = false): string {
   const installed = update.installed || '—';
   if (progress?.status === 'running') return `${installed} · actualizando a ${update.latest}…`;
   if (update.updateAvailable && (progress?.status === 'failed' || update.lastError)) {
     return `${installed} · no se pudo actualizar a ${update.latest}.${update.hint ? ` A mano: ${update.hint}` : ''}`;
   }
+  if (update.updateAvailable && auto) return `${installed} · ${update.latest} se instala solo apenas este agente no tenga un turno en curso.`;
   if (update.updateAvailable) return `${installed} · hay ${update.latest}.`;
   return `${installed} · al día.`;
 }

@@ -8,6 +8,9 @@
 //  - Other machines: each paired machine's own updater, through the
 //    exact-machine route of workass_get_update_status / workass_apply_update.
 //  - Agents: providers:updates, updated through providers:update.
+//  - Actualizar agentes solos: the agents' own switch, separate from the
+//    Workass one; the daemon installs a pending agent update by itself once
+//    that agent has no turn running (internal/acp/provider_auto_update.go).
 
 import { useEffect, useState } from 'react';
 import { appUpdaterBlockerText, appUpdateWorkWarning, UPDATE_ARM_MS, useAppUpdater } from '../../app-updater';
@@ -15,7 +18,7 @@ import { store, useApp } from '../../store/store';
 import type { MachineView } from '../../store/types';
 import { call, has } from '../../wire/api';
 import {
-  agentUpdateDetail, agoText, autoInstallDetail, localMachineLabel, machineUpdateDetail, machineUpdateView,
+  agentUpdateDetail, agoText, AUTO_UPDATE_PROVIDERS_DESCRIPTION, autoInstallDetail, localMachineLabel, machineUpdateDetail, machineUpdateView,
   machineUpdateWarning, selfUpdateAction, selfUpdateDetail, type MachineUpdateView,
 } from './updates';
 
@@ -91,12 +94,12 @@ function AutoInstallRow({ updater }: { updater: ReturnType<typeof useAppUpdater>
   return (
     <div className="set">
       <div className="lbl">
-        <div className="n">Instalar solo</div>
+        <div className="n">Actualizar Workass solo</div>
         <div className="d">{autoInstallDetail(updater.state)}</div>
       </div>
       <div className="ctl">
         <button type="button" className={`toggle ${on ? 'on' : ''}`} role="switch" aria-checked={on}
-          aria-label="Instalar solo" onClick={() => store.setAutoInstallUpdates(!on)}>
+          aria-label="Actualizar Workass solo" onClick={() => store.setAutoInstallUpdates(!on)}>
           <span className="knob" />
         </button>
       </div>
@@ -218,13 +221,29 @@ function AgentRows({ now }: { now: number }) {
   const app = useApp();
   const enabled = new Set(app.providers.filter((p) => p.enabled && !p.disabledByUser).map((p) => p.id));
   const rows = app.providersUpdates.filter((u) => enabled.has(u.providerId) || u.updateAvailable);
-  if (!rows.length) return null;
+  const canSave = has('setSettings');
+  if (!rows.length && !canSave) return null;
   const canUpdate = has('providersUpdate') && app.connection === 'connected';
+  const auto = canSave && app.autoUpdateProviders;
   const checked = agoText(app.providersCheckedAt, now);
   return (
     <>
       <div className="gtitle">Agentes{checked && <span className="gtag">revisado {checked}</span>}</div>
       <div className="group">
+        {canSave && (
+          <div className="set">
+            <div className="lbl">
+              <div className="n">Actualizar agentes solos</div>
+              <div className="d">{AUTO_UPDATE_PROVIDERS_DESCRIPTION}</div>
+            </div>
+            <div className="ctl">
+              <button type="button" className={`toggle ${auto ? 'on' : ''}`} role="switch" aria-checked={auto}
+                aria-label="Actualizar agentes solos" onClick={() => store.setAutoUpdateProviders(!auto)}>
+                <span className="knob" />
+              </button>
+            </div>
+          </div>
+        )}
         {rows.map((u) => {
           const progress = app.updateProgress[u.providerId];
           const running = progress?.status === 'running';
@@ -232,7 +251,7 @@ function AgentRows({ now }: { now: number }) {
             <div className="set" key={u.providerId}>
               <div className="lbl">
                 <div className="n">{store.providerName(u.providerId) || u.cli}</div>
-                <div className="d" title={u.lastError || progress?.error || undefined}>{agentUpdateDetail(u, progress)}</div>
+                <div className="d" title={u.lastError || progress?.error || undefined}>{agentUpdateDetail(u, progress, auto && !u.lastError)}</div>
               </div>
               {u.updateAvailable && !running && canUpdate && (
                 <div className="ctl">

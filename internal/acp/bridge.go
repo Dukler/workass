@@ -54,12 +54,15 @@ type Bridge struct {
 	rssKb             int
 	recycleAtIdle     bool
 	recycleReason     string
-	spare             bool
-	procID            string
-	tabID             string
-	chatID            string
-	cwd               string
-	agentOwnerKey     string
+	// cliStamp is the provider CLI this process was started from
+	// (provider_cli_stamp.go); a replaced CLI recycles the process at idle.
+	cliStamp      *providerCLIStamp
+	spare         bool
+	procID        string
+	tabID         string
+	chatID        string
+	cwd           string
+	agentOwnerKey string
 
 	// Subagent labeling: toolCallId → title, remembered so any typed child-tool
 	// lineage event can be labeled with the spawning call's title.
@@ -355,6 +358,7 @@ func (b *Bridge) start() error {
 		return err
 	}
 
+	cliStamp := b.manager.currentProviderCLIStamp(b.providerID)
 	cmd := managedCommand(provider.Command, provider.Args...)
 	cmd.Dir = provider.CWD
 	env := provider.Env
@@ -419,6 +423,7 @@ func (b *Bridge) start() error {
 	b.rssKb = 0
 	b.recycleAtIdle = false
 	b.recycleReason = ""
+	b.cliStamp = cliStamp
 	b.mu.Unlock()
 	go b.readStdout(stdout)
 	stderrDrained := make(chan struct{})

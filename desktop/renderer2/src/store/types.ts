@@ -406,6 +406,10 @@ export interface AppState {
   // "Instalar solo": the Mac shell installs a staged Workass release by itself
   // while nothing would be cut (daemon app settings key "autoInstallUpdates").
   autoInstallUpdates: boolean;
+  // "Actualizar agentes solos": the daemon installs an agent CLI's update by
+  // itself once that agent has no turn running (daemon app settings key
+  // "autoUpdateProviders"). Separate from the Workass switch above.
+  autoUpdateProviders: boolean;
   // When the sidebar files quiet chats away by itself (daemon app settings key
   // "chatLifecycle", chat-lifecycle.ts).
   chatLifecycle: ChatLifecycle;

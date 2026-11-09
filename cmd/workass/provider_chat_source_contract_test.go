@@ -271,6 +271,10 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// setting handed over at boot and on settings:set. It touches no chat actor
 	// and never moves a row's own silence mark.
 	"SetProcessSilenceNoticeAfter": {},
+	// The owner's "Actualizar agentes solos" switch (Ajustes · Actualizaciones),
+	// handed over the same way. It touches no chat actor: an installed CLI only
+	// reaches a chat through the engine's own recycle at idle.
+	"SetAutoUpdateProviders": {},
 	// Two reads beside them, for a supervised job started from another machine
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.

@@ -1174,6 +1174,7 @@ func (m *Manager) checkProviderUpdates(ctx context.Context) (ProviderUpdatesPayl
 	// a provider CLI was uninstalled or is absent on this machine; suppressing
 	// the event would leave the renderer replaying an obsolete card forever.
 	m.emit("providers:updates", payload)
+	m.kickProviderAutoUpdate()
 	return payload, hasCandidates, hasFailures
 }
 

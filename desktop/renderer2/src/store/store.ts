@@ -61,7 +61,10 @@ import { finishedBackgroundWork, finishedWorkText, freshEnding, playNoticeChime 
 import {
   DEFAULT_AGENT_PERMISSIONS, agentPermissionsFromSettings, withAgentPermissionsInSettings, type AgentPermissionSettings,
 } from '../agent-permissions';
-import { autoInstallUpdatesFromSettings, pushAutoInstallToShell, withAutoInstallUpdatesInSettings } from '../update-settings';
+import {
+  autoInstallUpdatesFromSettings, autoUpdateProvidersFromSettings, pushAutoInstallToShell, withAutoInstallUpdatesInSettings,
+  withAutoUpdateProvidersInSettings,
+} from '../update-settings';
 import {
   DEFAULT_CHAT_LIFECYCLE, archiveAfterMs, chatLifecycleFromSettings, sameChatLifecycle, settleAfterMs, withChatLifecycleInSettings,
   type ChatLifecycle,
@@ -1354,7 +1357,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), agentPermissions: { ...DEFAULT_AGENT_PERMISSIONS }, autoInstallUpdates: false, chatLifecycle: { ...DEFAULT_CHAT_LIFECYCLE }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), agentPermissions: { ...DEFAULT_AGENT_PERMISSIONS }, autoInstallUpdates: false, autoUpdateProviders: false, chatLifecycle: { ...DEFAULT_CHAT_LIFECYCLE }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -4746,6 +4749,11 @@ export class Store {
     pushAutoInstallToShell(this.state.autoInstallUpdates);
     this.commitModelPreferences();
   }
+  // "Actualizar agentes solos": saved in the daemon blob; the daemon acts on it.
+  setAutoUpdateProviders(enabled: boolean) {
+    this.state.autoUpdateProviders = enabled === true;
+    this.commitModelPreferences();
+  }
   // Ajustes · Mantenimiento: when quiet chats file themselves away. Saved in
   // the daemon settings blob like the title choice; the sidebar re-files at
   // once, and chats a paged shell left on the daemon are read again.
@@ -4785,6 +4793,7 @@ export class Store {
     this.state.agentPermissions = agentPermissionsFromSettings(reply);
     this.state.autoInstallUpdates = autoInstallUpdatesFromSettings(reply);
     pushAutoInstallToShell(this.state.autoInstallUpdates);
+    this.state.autoUpdateProviders = autoUpdateProvidersFromSettings(reply);
     const lifecycle = chatLifecycleFromSettings(reply);
     const lifecycleChanged = !sameChatLifecycle(this.state.chatLifecycle, lifecycle);
     this.state.chatLifecycle = lifecycle;
@@ -4810,10 +4819,10 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
-      const merged = withChatLifecycleInSettings(withAutoInstallUpdatesInSettings(withAgentPermissionsInSettings(
+      const merged = withAutoUpdateProvidersInSettings(withChatLifecycleInSettings(withAutoInstallUpdatesInSettings(withAgentPermissionsInSettings(
         withGeneralSettingsInSettings(withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.general),
         this.state.agentPermissions,
-      ), this.state.autoInstallUpdates), this.state.chatLifecycle);
+      ), this.state.autoInstallUpdates), this.state.chatLifecycle), this.state.autoUpdateProviders);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {

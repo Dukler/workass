@@ -20,3 +20,21 @@ func TestAutoInstallUpdatesSettingIsOffByDefaultAndSurvivesASave(t *testing.T) {
 		t.Fatalf("a normalized blob lost the setting: %#v", again)
 	}
 }
+
+// The agents' switch is its own key, separate from the Workass one.
+func TestAutoUpdateProvidersSettingIsSeparateFromWorkass(t *testing.T) {
+	if got := normalizeSettings(nil)[autoUpdateProvidersKey]; got != false {
+		t.Fatalf("default %s = %#v, want false", autoUpdateProvidersKey, got)
+	}
+	saved := normalizeSettings(map[string]any{autoUpdateProvidersKey: true})
+	if saved[autoUpdateProvidersKey] != true || saved["autoInstallUpdates"] != false {
+		t.Fatalf("agents on alone = %#v / %#v", saved[autoUpdateProvidersKey], saved["autoInstallUpdates"])
+	}
+	saved = normalizeSettings(map[string]any{"autoInstallUpdates": true})
+	if saved[autoUpdateProvidersKey] != false || saved["autoInstallUpdates"] != true {
+		t.Fatalf("Workass on alone = %#v / %#v", saved[autoUpdateProvidersKey], saved["autoInstallUpdates"])
+	}
+	if again := normalizeSettings(normalizeSettings(map[string]any{autoUpdateProvidersKey: true})); again[autoUpdateProvidersKey] != true {
+		t.Fatal("the agents' switch did not survive a second normalize")
+	}
+}

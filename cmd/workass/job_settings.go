@@ -43,7 +43,8 @@ func normalizeJobSettings(value any) map[string]any {
 	return out
 }
 
-// applyJobSettings hands the stored choice to the manager, at boot and after
+// applyJobSettings hands the stored choices the manager acts on (job notices,
+// the agents' auto-update switch) to it, at boot and after
 // every settings:set.
 func applyJobSettings(manager *acp.Manager, settings map[string]any) {
 	if manager == nil {
@@ -51,7 +52,12 @@ func applyJobSettings(manager *acp.Manager, settings map[string]any) {
 	}
 	minutes, _ := intFieldOK(normalizeJobSettings(settings[jobSettingsKey]), jobSilenceNoticeAfterMinKey)
 	manager.SetProcessSilenceNoticeAfter(time.Duration(minutes) * time.Minute)
+	enabled, _ := settings[autoUpdateProvidersKey].(bool)
+	manager.SetAutoUpdateProviders(enabled)
 }
+
+// autoUpdateProvidersKey is the agents' auto-update switch in the settings blob.
+const autoUpdateProvidersKey = "autoUpdateProviders"
 
 // resourceHolderView is the job holding a resource.
 type resourceHolderView struct {

@@ -221,6 +221,10 @@ type Manager struct {
 	// processSilenceNoticeAfterNs is the owner's notice delay for a silent
 	// supervisor (SetProcessSilenceNoticeAfter); zero tells at the mark.
 	processSilenceNoticeAfterNs atomic.Int64
+	// autoUpdateProviders is the owner's "Actualizar agentes solos" choice
+	// (provider_auto_update.go); autoUpdateKick asks its loop to look now.
+	autoUpdateProviders atomic.Bool
+	autoUpdateKick      chan struct{}
 }
 
 type spareRecord struct {
@@ -422,6 +426,7 @@ func NewManager(opts Options) *Manager {
 		commandCatalogs:         make(map[string]*commandCatalogEntry),
 		chatGoals:               make(map[string]*chatGoalEntry),
 		loopStop:                make(chan struct{}),
+		autoUpdateKick:          make(chan struct{}, 1),
 		envBySession:            make(map[string]*chatEnvTracker),
 		envByChatID:             make(map[string]*chatEnvTracker),
 		envByTabID:              make(map[string]*chatEnvTracker),
@@ -443,6 +448,7 @@ func NewManager(opts Options) *Manager {
 	m.startManagerLoop(m.lifecycleLoop)
 	m.startManagerLoop(m.rssLoop)
 	m.startManagerLoop(m.providerUpdateLoop)
+	m.startManagerLoop(m.providerAutoUpdateLoop)
 	m.startManagerLoop(m.planUsageLoop)
 	m.startManagerLoop(m.spawnedWorkLoop)
 	m.startManagerLoop(m.mcpFanoutLoop)

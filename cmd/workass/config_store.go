@@ -464,7 +464,12 @@ func normalizeSettings(input map[string]any) map[string]any {
 		// staged Workass release by itself only while nothing would be cut. Off
 		// unless the owner turns it on.
 		"autoInstallUpdates": false,
-		"chatLifecycle":      defaultChatLifecycleSettings(),
+		// Ajustes · Actualizaciones "Actualizar agentes solos": the daemon
+		// installs an agent CLI's update by itself once that agent has no turn
+		// running (internal/acp/provider_auto_update.go). Separate from the
+		// Workass switch above. Off unless the owner turns it on.
+		autoUpdateProvidersKey: false,
+		"chatLifecycle":        defaultChatLifecycleSettings(),
 		// Cuentas: providers whose stored login the owner let Workass use
 		// for account resets (account_resets.go).
 		accountResetConsentKey: []any{},
@@ -508,6 +513,9 @@ func normalizeSettings(input map[string]any) map[string]any {
 	next[agentPermissionsSettingsKey] = normalizeAgentPermissions(input[agentPermissionsSettingsKey])
 	if v, ok := input["autoInstallUpdates"].(bool); ok {
 		next["autoInstallUpdates"] = v
+	}
+	if v, ok := input[autoUpdateProvidersKey].(bool); ok {
+		next[autoUpdateProvidersKey] = v
 	}
 	next["chatLifecycle"] = normalizeChatLifecycle(input["chatLifecycle"])
 	next[accountResetConsentKey] = normalizeAccountResetConsent(input[accountResetConsentKey])

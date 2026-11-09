@@ -17,6 +17,21 @@ export function withAutoInstallUpdatesInSettings(current: Record<string, unknown
   return { ...(current ?? {}), [AUTO_INSTALL_UPDATES_KEY]: enabled === true };
 }
 
+// "Actualizar agentes solos": the agents' own switch. The daemon acts on it
+// (internal/acp/provider_auto_update.go), so it only needs saving.
+export const AUTO_UPDATE_PROVIDERS_KEY = 'autoUpdateProviders';
+
+export function autoUpdateProvidersFromSettings(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const settings = (raw as Record<string, unknown>).settings;
+  if (!settings || typeof settings !== 'object') return false;
+  return (settings as Record<string, unknown>)[AUTO_UPDATE_PROVIDERS_KEY] === true;
+}
+
+export function withAutoUpdateProvidersInSettings(current: Record<string, unknown> | null | undefined, enabled: boolean): Record<string, unknown> {
+  return { ...(current ?? {}), [AUTO_UPDATE_PROVIDERS_KEY]: enabled === true };
+}
+
 /** Hands the setting to this machine's shell. A browser client has no shell and
  *  an older shell has no setter: both simply do not install by themselves. */
 export function pushAutoInstallToShell(enabled: boolean): void {

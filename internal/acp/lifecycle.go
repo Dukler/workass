@@ -14,6 +14,7 @@ const (
 	hibernateReasonSpareTTL = "spare-ttl"
 	recycleReasonAge        = "recycle-age"
 	recycleReasonRSS        = "recycle-rss"
+	recycleReasonCLIUpdate  = "recycle-cli-update"
 )
 
 type hibernateCandidate struct {
@@ -67,6 +68,7 @@ func (m *Manager) spareLoop() {
 
 func (m *Manager) SweepLifecycle() {
 	now := time.Now()
+	m.markBridgesOnReplacedCLI()
 	for _, bridge := range m.allBridges() {
 		if candidate, ok := m.hibernateCandidate(bridge, now); ok {
 			m.hibernateBridgeIfEligible(candidate.bridge, candidate.reason, candidate.ttl, candidate.lastActivity, candidate.now, nil)
@@ -102,6 +104,11 @@ func (m *Manager) hibernateCandidate(b *Bridge, now time.Time) (hibernateCandida
 		return hibernateCandidate{}, false
 	}
 	if spare {
+		// A spare started from a CLI that has since been replaced would hand
+		// the old version to the next new chat; let it go now.
+		if recycleAtIdle && state == StateIdle {
+			return hibernateCandidate{bridge: b, reason: firstNonEmpty(recycleReason, "recycle"), lastActivity: lastActivity, now: now}, true
+		}
 		if m.opts.SpareTTL > 0 && now.Sub(lastActivity) >= m.opts.SpareTTL {
 			return hibernateCandidate{bridge: b, reason: hibernateReasonSpareTTL, ttl: m.opts.SpareTTL, lastActivity: lastActivity, now: now}, true
 		}
