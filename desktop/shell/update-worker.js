@@ -85,7 +85,7 @@ const STALE_RUNTIME_ENV_KEYS = new Set([
   'WORKASS_BROWSER_CONTROL_FILE', 'WORKASS_REPO_ROOT',
   'WORKASS_TEST_ROOT', 'WORKASS_PROD',
   'WORKASS_CONTROLLER_RECOVERY', 'WORKASS_UPDATE_RELAUNCH', 'WORKASS_UPDATE_RELAUNCH_QUIET',
-  'WORKASS_LOCK_RECOVERY_CHILD', 'WORKASS_UPDATE_PROGRESS_ID',
+  'WORKASS_LOCK_RECOVERY_CHILD', 'WORKASS_UPDATE_PROGRESS_ID', 'WORKASS_UPDATE_PREFLIGHT',
 ]);
 
 function targetRuntimeEnv(source = process.env) {
@@ -468,6 +468,15 @@ exit 3
   return false;
 }
 
+// A release is sealed read-only between its preflight and the swap
+// (update-manager.js sealStagedRelease). Deleting such a tree, or leaving the
+// installed app read-only for whoever replaces it next, needs owner write back.
+function makeTreeWritable(target, { run = spawnSync } = {}) {
+  if (!fs.existsSync(target)) return;
+  const result = run('/bin/chmod', ['-R', 'u+w', target], { stdio: 'ignore' });
+  if (result.error || result.status !== 0) throw new Error(`could not make ${path.basename(target)} writable again`);
+}
+
 async function renamePathWithRetry(source, destination, {
   rename = fs.renameSync,
   pause = delay,
@@ -754,7 +763,14 @@ function validateTransaction(transaction) {
   if (!validWorkerId(transaction.workerId)) throw new Error('update transaction has an invalid worker identity');
   if (!validInterruptedWork(transaction.interruptedWork)) throw new Error('update transaction has invalid interrupted-work counts');
   if (!/^progress-[a-f0-9]{32}$/.test(String(transaction.progressId || ''))) throw new Error('update transaction has an invalid progress identity');
-  if (transaction.requireVisibleWindow !== true) throw new Error('update transaction must require a visible shell window');
+  // A close-only update (macOS, preflighted in the app) has no gate after the
+  // relaunch, so it requires no window. Every other transaction still does.
+  if (transaction.closeOnly !== true && transaction.requireVisibleWindow !== true) {
+    throw new Error('update transaction must require a visible shell window');
+  }
+  if (transaction.closeOnly === true && transaction.platform !== 'darwin') {
+    throw new Error('a close-only update transaction exists only on macOS');
+  }
   for (const field of [
     'updateId', 'platform', 'currentVersion', 'targetVersion',
     'transactionRoot', 'installTarget', 'incomingTarget', 'backupTarget',
@@ -1153,6 +1169,40 @@ function defaultOperations(transaction, dependencies = {}) {
         throw err;
       }
     },
+    // Close-only (macOS): the old app aside and the preflighted one in its
+    // place, two renames in the same folder. Nothing is checked here: what
+    // proves the release ran in the app, before anything closed. A rename
+    // that fails puts back what it moved, so the old app stays installed.
+    swap: async () => {
+      const { installTarget, incomingTarget, backupTarget } = transaction;
+      if (fs.existsSync(backupTarget)) {
+        // Resumed after the first rename.
+        if (!fs.existsSync(installTarget)) await renamePathWithRetry(incomingTarget, installTarget);
+        else if (fs.existsSync(incomingTarget)) throw new Error('the installed app and the staged release are both in place after an interrupted swap');
+        return;
+      }
+      if (!fs.statSync(incomingTarget, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new Error('the staged release is no longer beside the installed app');
+      }
+      await renamePathWithRetry(installTarget, backupTarget);
+      try {
+        await renamePathWithRetry(incomingTarget, installTarget);
+      } catch (err) {
+        if (!fs.existsSync(installTarget)) {
+          try { await renamePathWithRetry(backupTarget, installTarget); } catch { /* reported with the swap error */ }
+        }
+        throw err;
+      }
+    },
+    // After the new app started: the old files go, and the new app is made
+    // owner-writable again like any installed app (it was sealed read-only
+    // from its preflight until the swap).
+    removeOld: async () => {
+      const run = dependencies.runCommand || spawnSync;
+      makeTreeWritable(transaction.backupTarget, { run });
+      fs.rmSync(transaction.backupTarget, { recursive: true, force: true });
+      makeTreeWritable(transaction.installTarget, { run });
+    },
     startRuntime: async () => {
       const receipt = await startInstalledRuntime(transaction);
       expectedDaemonBind = String(receipt?.runtime?.daemonBind || '');
@@ -1363,6 +1413,14 @@ async function runTransaction(rawTransaction, operations) {
   const lease = operations ? null : startWorkerLease(transaction);
   let terminal = false;
   let journal = readJournal(transaction);
+  // macOS, owner 2026-11-09: everything that proves a release works runs in
+  // the app before anything closes (update-manager.js preflight). With the app
+  // closed a close-only update only stops, swaps the old files for the new,
+  // starts the new app and deletes the old files: no progress window, no
+  // verification, no state snapshot, no health gates and no rollback after
+  // the restart. Every other transaction (Windows, and the macOS ones a
+  // 0.1.274-or-older manager writes) keeps the full flow below.
+  const closeOnly = transaction.closeOnly === true;
   const progressVisible = typeof ops.progressVisible === 'function' ? ops.progressVisible : async () => true;
   const progressReady = async () => {
     if (await progressVisible()) return true;
@@ -1560,8 +1618,10 @@ async function runTransaction(rawTransaction, operations) {
       save('shell_stopped', { shellStopped: true, oldShellForced });
     }
 
-    try { await requireProgress(); }
-    catch (progressError) { return await failBeforeDestructiveWork(progressError); }
+    if (!closeOnly) {
+      try { await requireProgress(); }
+      catch (progressError) { return await failBeforeDestructiveWork(progressError); }
+    }
 
     if (!journal.daemonStopped) {
       try {
@@ -1620,6 +1680,60 @@ async function runTransaction(rawTransaction, operations) {
       save('daemon_stopped', { daemonStopped: true });
     }
 
+    if (closeOnly) {
+      if (!journal.activated) {
+        if (!journal.activationStarted) save('activating', { activationStarted: true });
+        try {
+          await ops.swap();
+        } catch (swapError) {
+          // Nothing new is in place: the swap put back what it moved. The old
+          // app starts again and says why the update did not happen.
+          const error = `the new Workass files could not be put in place: ${String(swapError && swapError.message || swapError)}`;
+          try {
+            const recovered = await launchUntilHealthy(ops, transaction.currentVersion, { updateRelaunch: true });
+            return finish(recovered ? 'rollback_healthy' : 'failed', {
+              activated: false, rolledBack: false, error, step: 'swap',
+              ...(recovered ? {} : { rollbackError: 'previous release did not recover' }),
+            });
+          } catch (relaunchError) {
+            return finish('failed', {
+              activated: false, rolledBack: false, error, step: 'swap',
+              rollbackError: String(relaunchError && relaunchError.message || relaunchError),
+            });
+          }
+        }
+        save('activated', { activated: true });
+      }
+      // The restart is the end of the update: it passed every gate in its
+      // preflight, so it is recorded as done before the new app starts, and
+      // nothing waits on the new app afterwards.
+      const receipt = finish('healthy', { activated: true, preflighted: true });
+      const note = (patch) => {
+        journal = checkpoint(transaction, journal, 'healthy', {
+          ...patch,
+          timings: { ...journal?.timings, ...patch.timings },
+        });
+      };
+      try {
+        await ops.launchInstalled({ updateRelaunch: true });
+        note({ timings: { launched: new Date().toISOString() } });
+      } catch (launchError) {
+        note({ launchError: String(launchError && launchError.message || launchError) });
+      }
+      try {
+        await ops.removeOld();
+        note({ timings: { old_removed: new Date().toISOString() } });
+      } catch (cleanupError) {
+        note({ cleanupWarning: String(cleanupError && cleanupError.message || cleanupError) });
+      }
+      return receipt;
+    }
+
+    // ---- Full flow: Windows, and macOS updates driven by a 0.1.274-or-older
+    // manager. The macOS part (requireProgress, verifyIncoming, the state
+    // snapshot, health gates, rollback) is REMOVABLE once 0.1.274 is no longer
+    // the installed version anywhere: every newer macOS manager writes
+    // closeOnly transactions.
     const recoverActivation = async (activationError) => {
       const error = String(activationError && activationError.message || activationError || journal.error || 'update activation failed');
       let recoveryPhase;
@@ -1758,6 +1872,9 @@ function workerSelfTestReport(argv) {
     component: 'update-worker',
     supportedTransactionSchemas: [TRANSACTION_SCHEMA_VERSION],
     progressReceiptSchemaVersion: PROGRESS_RECEIPT_SCHEMA_VERSION,
+    // Understands closeOnly transactions: stop, swap, start, delete the old
+    // files. A manager hands one only to a worker that says so.
+    closeOnly: true,
   };
 }
 

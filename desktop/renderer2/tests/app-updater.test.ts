@@ -117,6 +117,16 @@ test('provider updates keep the left footer card as their only renderer surface'
   assert.doesNotMatch(providerCard, /addToast|fireNotify|<Toasts/);
 });
 
+// A shell with no updater (a release under its update preflight) answers null.
+// Rendering from that took the whole window down; the hook keeps its
+// "unavailable" state instead.
+test('a null updater state from the shell is never adopted', () => {
+  assert.match(updaterSource, /const adopt = \(next: AppUpdaterState \| null \| undefined\) => \{ if \(mounted && next\) setState\(next\); \};/);
+  assert.match(updaterSource, /void bridge\.getState\(\)\.then\(adopt\)/);
+  assert.match(updaterSource, /bridge\.onState\(adopt\)/);
+  assert.match(updaterSource, /if \(!next\) return state;/);
+});
+
 test('native ZIP installation has a completed state without claiming provider health or rollback', () => {
   assert.equal(appUpdaterCardTitle(state('installed')), 'Listo');
   assert.match(appUpdaterPhaseText(state('installed')), /1\.1\.0 quedó actualizado/);

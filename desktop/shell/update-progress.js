@@ -229,6 +229,11 @@ async function runUpdateProgressProcess({
   fs.mkdirSync(progressProfile, { recursive: true, mode: 0o700 });
   app.setPath('userData', progressProfile);
   app.setName('Workass Update');
+  if (platform === 'darwin') {
+    return runWindowlessCompatibilityOwner({
+      app, transaction, transactionPath, executablePath, repeat, cancelRepeat, now,
+    });
+  }
   await app.whenReady();
 
   const win = new BrowserWindow({
@@ -403,6 +408,75 @@ async function runUpdateProgressProcess({
   render();
   await ready;
   return { transaction, window: win, dispose, render };
+}
+
+// macOS shows no update window (owner 2026-11-09): an update there is a
+// restart, and its manager never starts this process. Only a manager of
+// 0.1.274 or older still does, for the release it installs, and it refuses the
+// handoff unless this receipt says windowVisible:true with a fresh heartbeat;
+// the full worker flow such a manager starts keeps reading that heartbeat.
+// This compatibility owner answers that one update with no window, no Dock
+// icon and no focus change. windowVisible:true is written only because those
+// managers accept nothing else; windowless:true says what is true.
+// REMOVABLE once 0.1.274 is no longer the installed version.
+async function runWindowlessCompatibilityOwner({
+  app,
+  transaction,
+  transactionPath,
+  executablePath,
+  repeat = setInterval,
+  cancelRepeat = clearInterval,
+  now = Date.now,
+}) {
+  try { app.setActivationPolicy?.('accessory'); } catch { /* set again by main.js before ready */ }
+  await app.whenReady();
+  try { app.dock?.hide?.(); } catch { /* no Dock on this build */ }
+  let timer = null;
+  let disposed = false;
+  let displayedPhase = 'preparing';
+  const write = (phase, patch = {}) => atomicJSON(transaction.progressReceiptPath, {
+    schemaVersion: PROGRESS_RECEIPT_SCHEMA_VERSION,
+    updateId: transaction.updateId,
+    installationId: transaction.installationId,
+    workerId: transaction.workerId,
+    progressId: transaction.progressId,
+    pid: process.pid,
+    executablePath: path.resolve(executablePath),
+    transactionPath,
+    phase,
+    displayedPhase,
+    windowVisible: ACTIVE_PROGRESS_PHASES.has(phase),
+    windowless: true,
+    updatedAt: new Date(now()).toISOString(),
+    ...patch,
+  });
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (timer) cancelRepeat(timer);
+    timer = null;
+  };
+  const render = () => {
+    if (disposed) return null;
+    const journal = exactJournal(transaction, readJSON(transaction.journalPath));
+    const receipt = exactUpdateReceipt(transaction, readJSON(transaction.receiptPath));
+    const view = phaseView(transaction, journal, receipt);
+    displayedPhase = view.phase;
+    if (view.terminal) {
+      dispose();
+      write('terminal', { result: view.phase });
+      write('closed');
+      app.quit();
+      return view;
+    }
+    write('watching');
+    return view;
+  };
+  app.on('before-quit', dispose);
+  write('visible');
+  timer = repeat(render, 1000);
+  timer?.unref?.();
+  return { transaction, window: null, dispose, render };
 }
 
 function progressReceiptMatches(receipt, transaction) {

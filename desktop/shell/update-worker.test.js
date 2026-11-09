@@ -74,6 +74,7 @@ test('the worker self-test reports the one exact transaction schema supported by
     component: 'update-worker',
     supportedTransactionSchemas: [4],
     progressReceiptSchemaVersion: 1,
+    closeOnly: true,
   });
   assert.throws(() => workerSelfTestReport(['--self-test', '--transaction-schema', '3']), /schema is unsupported/);
   assert.throws(() => workerSelfTestReport(['--self-test']), /schema is unsupported/);
@@ -1983,4 +1984,106 @@ test('closing an older Windows shell without committed update authority never in
     },
   }), /not committed/);
   assert.deepEqual(calls, ['abort']);
+});
+
+// 2026-11-09 (owner, macOS): every check runs in the app before anything
+// closes (the preflight). With the app closed a close-only update stops,
+// swaps the old files for the new, starts the new app and deletes the old
+// files. It is done when the new app starts: nothing waits on it afterwards.
+function closeOnlyFixture() {
+  const tx = transactionFixture();
+  delete tx.requireVisibleWindow;
+  return { ...tx, closeOnly: true };
+}
+
+test('a close-only transaction needs no window, and exists only on macOS', () => {
+  assert.doesNotThrow(() => validateTransaction(closeOnlyFixture()));
+  assert.throws(() => validateTransaction({ ...windowsTransactionFixture(), closeOnly: true }), /only on macOS/);
+  const legacy = transactionFixture();
+  delete legacy.requireVisibleWindow;
+  assert.throws(() => validateTransaction(legacy), /visible shell window/, 'every other transaction still requires one');
+  assert.equal(workerSelfTestReport(['--self-test', '--transaction-schema', '4']).closeOnly, true);
+  assert.deepEqual(workerSelfTestReport(['--self-test', '--transaction-schema', '4']).supportedTransactionSchemas, [4],
+    'still schema 4, so a 0.1.274 manager accepts this worker');
+});
+
+test('with the app closed a close-only update only stops, swaps, starts and deletes the old files', async () => {
+  const tx = closeOnlyFixture();
+  const order = [];
+  const ops = operations({
+    progressVisible: async () => { order.push('progress'); return false; },
+    stopDaemonService: async () => { order.push('stop-daemon'); },
+    swap: async () => { order.push('swap'); },
+    launchInstalled: async (options) => {
+      const receipt = JSON.parse(fs.readFileSync(tx.receiptPath, 'utf8'));
+      order.push(`launch:${receipt.phase}:${options.updateRelaunch}`);
+    },
+    removeOld: async () => { order.push('remove-old'); },
+    verifyIncoming: async () => { order.push('verify'); },
+    snapshotMutableState: async () => { order.push('snapshot'); },
+    activate: async () => { order.push('activate'); },
+    startRuntime: async () => { order.push('start-runtime'); },
+    healthy: async () => { order.push('healthy'); return true; },
+    cleanup: async () => { order.push('cleanup'); },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'healthy');
+  assert.equal(receipt.installedVersion, tx.targetVersion);
+  assert.equal(receipt.preflighted, true);
+  assert.deepEqual(order, ['stop-daemon', 'swap', 'launch:healthy:true', 'remove-old'],
+    'the receipt is final before the new app starts; no progress, check, snapshot, health gate or rollback');
+  const journal = JSON.parse(fs.readFileSync(tx.journalPath, 'utf8'));
+  assert.equal(journal.terminal, true);
+  assert.equal(journal.phase, 'healthy');
+  for (const step of ['shell_stopped', 'daemon_stopped', 'activated', 'healthy', 'launched', 'old_removed']) {
+    assert.ok(journal.timings[step], `the journal times ${step}`);
+  }
+});
+
+test('a close-only swap that fails puts the old app back and starts it, and says so', async () => {
+  const tx = closeOnlyFixture();
+  const ops = operations({
+    swap: async () => { throw new Error('rename refused'); },
+    healthy: async (version) => { ops.calls.push(`healthy:${version}`); return version === tx.currentVersion; },
+  });
+  const receipt = await runTransaction(tx, ops);
+  assert.equal(receipt.phase, 'rollback_healthy');
+  assert.equal(receipt.activated, false);
+  assert.equal(receipt.step, 'swap');
+  assert.match(receipt.error, /could not be put in place: rename refused/);
+  assert.ok(ops.calls.includes('launch'));
+  assert.ok(ops.calls.includes(`healthy:${tx.currentVersion}`));
+});
+
+test('the close-only swap moves the old app aside, puts the sealed release in place and deletes the old files', async () => {
+  const tx = closeOnlyFixture();
+  fs.mkdirSync(path.join(tx.installTarget, 'Contents'), { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'Contents', 'release.txt'), 'old-release');
+  fs.mkdirSync(path.join(tx.incomingTarget, 'Contents'), { recursive: true });
+  fs.writeFileSync(path.join(tx.incomingTarget, 'Contents', 'release.txt'), 'new-release');
+  execFileSync('/bin/chmod', ['-R', 'a-w', tx.incomingTarget]);
+  const ops = defaultOperations(tx);
+  await ops.swap();
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'Contents', 'release.txt'), 'utf8'), 'new-release');
+  assert.equal(fs.readFileSync(path.join(tx.backupTarget, 'Contents', 'release.txt'), 'utf8'), 'old-release');
+  assert.equal(fs.existsSync(tx.incomingTarget), false);
+  await ops.swap();
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'Contents', 'release.txt'), 'utf8'), 'new-release', 'a resumed swap changes nothing');
+  await ops.removeOld();
+  assert.equal(fs.existsSync(tx.backupTarget), false);
+  assert.ok((fs.statSync(path.join(tx.installTarget, 'Contents')).mode & 0o200) !== 0, 'the installed app is owner-writable again');
+});
+
+test('a close-only swap with no staged release leaves the old app installed', async () => {
+  const tx = closeOnlyFixture();
+  fs.mkdirSync(tx.installTarget, { recursive: true });
+  fs.writeFileSync(path.join(tx.installTarget, 'release.txt'), 'old-release');
+  const ops = defaultOperations(tx);
+  await assert.rejects(ops.swap(), /no longer beside the installed app/);
+  assert.equal(fs.readFileSync(path.join(tx.installTarget, 'release.txt'), 'utf8'), 'old-release');
+  assert.equal(fs.existsSync(tx.backupTarget), false);
+});
+
+test('the update preflight flag never reaches a relaunched app', () => {
+  assert.equal(targetRuntimeEnv({ HOME: '/home/someone', WORKASS_UPDATE_PREFLIGHT: '1' }).WORKASS_UPDATE_PREFLIGHT, undefined);
 });

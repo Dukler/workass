@@ -160,6 +160,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--install-service requires --headless")
 		os.Exit(2)
 	}
+	// An update preflight (desktop/shell/update-manager.js) boots a staged
+	// release against a copy of this machine's state, on its own ports, to prove
+	// it starts before anything closes. Such a daemon must never act as this
+	// machine: loopback only, no beacon, no fleet links, nothing scheduled fires,
+	// and no turn, subagent, job or agent update is ever admitted.
+	updatePreflight := os.Getenv(updatePreflightEnv) == "1"
+	if updatePreflight {
+		if *bind != "localhost" {
+			fmt.Fprintln(os.Stderr, "workass: an update preflight daemon serves loopback only (--bind localhost)")
+			os.Exit(2)
+		}
+		*beacon = false
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -358,6 +371,11 @@ func main() {
 			logger.Printf("[acp] %s %s", message, data)
 		},
 	})
+	if updatePreflight {
+		// Closed before anything can be admitted, and never reopened.
+		acpManager.BeginUpdateDrain()
+		logger.Printf("[workass] update preflight: admission closed, no beacon, fleet links or schedules")
+	}
 	providerChats := newProviderChatRuntimeBeforeProviderStartupWithBackend(acpManager, sessionState, stateDir, chatActors, hub.Broadcast)
 	if err := providerChats.StartupError(); err != nil {
 		acpManager.Reset()
@@ -619,7 +637,7 @@ func main() {
 		logger.Printf("[workass] release provider startup after tool listener readiness: %v", err)
 		os.Exit(1)
 	}
-	if scheduledMessages != nil {
+	if scheduledMessages != nil && !updatePreflight {
 		scheduledCtx, cancelScheduled := context.WithCancel(signalCtx)
 		stopScheduled = cancelScheduled
 		scheduledRun.Add(1)
@@ -638,18 +656,23 @@ func main() {
 		defer imageStoreRun.Done()
 		imageStore.run(imageStoreCtx)
 	}()
-	if linked := fleetMesh.Start(signalCtx); linked > 0 {
+	if updatePreflight {
+		// No peer link and no presence: a preflight has this machine's id and
+		// must never be seen as it.
+	} else if linked := fleetMesh.Start(signalCtx); linked > 0 {
 		logger.Printf("[workass] fleet mesh supervising %d peer link(s)", linked)
 	}
-	startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
-		Bind:      *bind,
-		Port:      *port,
-		Beacon:    *beacon,
-		Discovery: discovery,
-		// Discovery is what already exists: every book refresh is also when a
-		// newly-sighted machine of this fleet becomes a peer with a heartbeat.
-		OnBook: fleetMesh.SyncFromBook,
-	}, logger)
+	if !updatePreflight {
+		startMachinePresence(signalCtx, machineBook, hub, identity, machinePresenceOptions{
+			Bind:      *bind,
+			Port:      *port,
+			Beacon:    *beacon,
+			Discovery: discovery,
+			// Discovery is what already exists: every book refresh is also when a
+			// newly-sighted machine of this fleet becomes a peer with a heartbeat.
+			OnBook: fleetMesh.SyncFromBook,
+		}, logger)
+	}
 	if err := serveDaemonHTTPWithServeError(signalCtx, server, listener, cleanup, serveErr); err != nil {
 		cleanup()
 		logger.Printf("[workass] server stopped: %v", err)

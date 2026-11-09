@@ -213,14 +213,18 @@ export function useAppUpdater() {
   useEffect(() => {
     if (!bridge) return undefined;
     let mounted = true;
-    void bridge.getState().then((next) => { if (mounted) setState(next); }).catch(() => undefined);
-    const unsubscribe = bridge.onState((next) => { if (mounted) setState(next); });
+    // A shell without an updater answers null: keep the "unavailable" state
+    // rather than render from nothing (it took the whole window down).
+    const adopt = (next: AppUpdaterState | null | undefined) => { if (mounted && next) setState(next); };
+    void bridge.getState().then(adopt).catch(() => undefined);
+    const unsubscribe = bridge.onState(adopt);
     return () => { mounted = false; unsubscribe?.(); };
   }, [bridge]);
 
   const run = useCallback(async (action: 'check' | 'apply') => {
     if (!bridge) return state;
     const next = await bridge[action]();
+    if (!next) return state;
     setState(next);
     return next;
   }, [bridge, state]);
