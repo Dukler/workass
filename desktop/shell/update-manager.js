@@ -1787,6 +1787,9 @@ class UpdateManager {
     app,
     runtime,
     resourcesPath,
+    // Stage a discovered release in the background (prestage), so a click
+    // only hands off, swaps and relaunches. Off unless the app turns it on.
+    stageInBackground = false,
     executablePath = process.execPath,
     currentVersion = '',
     platform = process.platform,
@@ -1863,6 +1866,9 @@ class UpdateManager {
     this.receiptTimer = null;
     this.initialCheckTimer = null;
     this.periodicCheckTimer = null;
+    this.stageInBackground = stageInBackground === true;
+    this.prestagePromise = null;
+    this.prestageFailedVersion = '';
     this.activeOperation = null;
     this.discoveryPromise = null;
     this.applyPromise = null;
@@ -2879,8 +2885,38 @@ class UpdateManager {
     // A plain offer has no downloaded payload and may advance to a newer
     // release. Once download/staging begins, that exact transaction is pinned.
     if (!['idle', 'current', 'available', 'healthy', 'installed', 'check_failed', 'failed', 'rollback_healthy'].includes(this.state.phase)) return this.snapshot();
-    try { return await this.check({ background: true }); }
+    let state;
+    try { state = await this.check({ background: true }); }
     catch { return this.snapshot(); }
+    if (this.stageInBackground && state.phase === 'available') void this.prestage();
+    return state;
+  }
+
+  // The offered release is downloaded, verified and staged while Workass keeps
+  // running, so the click only hands off, swaps (the independent worker) and
+  // relaunches (owner 2026-11-09). Nothing installs on its own: install() runs
+  // only from apply(), on a click. A background attempt that fails returns to
+  // the plain offer and is not retried for that version; the click then runs
+  // the whole path and reports what went wrong.
+  prestage() {
+    const state = this.snapshot();
+    if (this.prestagePromise) return this.prestagePromise;
+    if (!this.state.supported || state.phase !== 'available' || this.activeOperation || this.applyPromise) return Promise.resolve(state);
+    const version = state.targetVersion || '';
+    if (!version || this.prestageFailedVersion === version) return Promise.resolve(state);
+    const fallBack = () => {
+      this.prestageFailedVersion = version;
+      if (this.applyPromise) return this.snapshot();
+      return this.publish({ phase: 'available', targetVersion: version, progress: 0, error: null });
+    };
+    const operation = Promise.resolve()
+      .then(() => this.download())
+      .then((next) => (next && next.phase === 'failed' ? fallBack() : next), fallBack);
+    this.prestagePromise = operation;
+    void operation.finally(() => {
+      if (this.prestagePromise === operation) this.prestagePromise = null;
+    });
+    return operation;
   }
 
   startAutoChecks({
@@ -3252,6 +3288,9 @@ class UpdateManager {
   // user to click once to stage and again to activate the same verified release.
   async apply() {
     if (this.discoveryPromise) await this.discoveryPromise;
+    // A click while the release is still downloading in the background waits
+    // for that download instead of starting a second one, then installs it.
+    if (this.prestagePromise) await this.prestagePromise;
     let state = this.snapshot();
     if (state.phase === 'check_failed' || state.phase === 'failed' || state.phase === 'rollback_healthy') {
       if (state.phase !== 'check_failed' && this.manifest && state.targetVersion === this.manifest.version &&

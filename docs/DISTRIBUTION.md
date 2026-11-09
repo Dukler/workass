@@ -126,9 +126,17 @@ The updater:
    activation gate fails. A durable receipt under the Workass state directory
    records `healthy`, `rollback_healthy`, or `failed`.
 
+On macOS, steps 1–3 run in the background as soon as discovery finds a new
+release (`stageInBackground`, 2026-11-09): Workass stays open while the release
+downloads, verifies and stages, and the click then only does steps 4–7, the
+handoff, swap and relaunch. A background attempt that fails returns to the
+plain offer and is not retried for that version; the click runs the whole path.
+The staged release lives in memory, so a restart before the click stages it
+again. Windows keeps doing steps 1–3 after the click.
+
 The UI exposes this through the same compact sidebar update card used for
 provider updates; it does not add a separate Settings section. Workass never
-enters or schedules an update on its own. A user click updates immediately
+installs or schedules an install on its own. A user click updates immediately
 regardless of running work. `workass_apply_update` takes the exact machine, the
 expected versions and a stable operation id.
 

@@ -2811,3 +2811,70 @@ test('an unavailable old daemon does not block a native install, whose file-lock
   assert.deepEqual(calls, ['prepare', 'prepare', 'commit']);
   assert.equal(didQuit(), true);
 });
+
+// 2026-11-09 (owner): the download, verification and staging happen while
+// Workass stays open; the click only hands off, swaps and relaunches.
+function stagingFixture() {
+  const { manager } = managerFixture({ primeReady: false });
+  manager.stageInBackground = true;
+  manager.deps.fetchManifest = async () => manifest({ version: '1.2.0' });
+  const steps = [];
+  manager.install = async () => { steps.push('install'); return manager.publish({ phase: 'installing' }); };
+  return { manager, steps };
+}
+
+test('a background check stages a new release and never installs it', async () => {
+  const { manager, steps } = stagingFixture();
+  manager.download = async () => { steps.push('download'); return manager.publish({ phase: 'ready', targetVersion: '1.2.0', progress: 1 }); };
+  const offered = await manager.autoCheck();
+  assert.equal(offered.phase, 'available');
+  await manager.prestagePromise;
+  assert.deepEqual(steps, ['download']);
+  assert.equal(manager.snapshot().phase, 'ready');
+  // The click now only installs what is already staged.
+  await manager.apply();
+  assert.deepEqual(steps, ['download', 'install']);
+  manager.dispose();
+});
+
+test('without background staging a check only offers the release', async () => {
+  const { manager, steps } = stagingFixture();
+  manager.stageInBackground = false;
+  manager.download = async () => { steps.push('download'); return manager.snapshot(); };
+  const offered = await manager.autoCheck();
+  assert.equal(offered.phase, 'available');
+  assert.equal(manager.prestagePromise, null);
+  assert.deepEqual(steps, []);
+  manager.dispose();
+});
+
+test('a failed background stage returns to the offer and is not retried for that version', async () => {
+  const { manager, steps } = stagingFixture();
+  manager.download = async () => { steps.push('download'); return manager.publish({ phase: 'failed', error: 'disk full' }); };
+  await manager.autoCheck();
+  await manager.prestagePromise;
+  assert.equal(manager.snapshot().phase, 'available');
+  assert.equal(manager.snapshot().error, null, 'a background attempt shows no failure card');
+  await manager.autoCheck();
+  assert.equal(manager.prestagePromise, null);
+  assert.deepEqual(steps, ['download'], 'the same version is not downloaded every 30 seconds');
+  manager.dispose();
+});
+
+test('a click during the background download waits for it, then installs once', async () => {
+  const { manager, steps } = stagingFixture();
+  let finish;
+  manager.download = () => {
+    steps.push('download');
+    manager.publish({ phase: 'downloading', progress: 0.3 });
+    return new Promise((resolve) => { finish = () => resolve(manager.publish({ phase: 'ready', targetVersion: '1.2.0', progress: 1 })); });
+  };
+  await manager.autoCheck();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.snapshot().phase, 'downloading');
+  const clicked = manager.apply();
+  finish();
+  await clicked;
+  assert.deepEqual(steps, ['download', 'install']);
+  manager.dispose();
+});

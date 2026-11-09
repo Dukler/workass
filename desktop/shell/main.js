@@ -755,6 +755,9 @@ if (runsPrimaryRuntime) app.whenReady().then(async () => {
     platform: process.platform,
     arch: process.arch,
     isPackaged: app.isPackaged,
+    // Mac: download, verify and stage a new release in the background so the
+    // click only swaps and relaunches. Windows keeps the click-time path.
+    stageInBackground: process.platform === 'darwin',
     feedURL: resolveUpdateFeed({
       channel: RUNTIME.updateChannel,
       dataRoot: RUNTIME.dataRoot,

@@ -144,7 +144,9 @@ export function appUpdaterPhaseText(state: AppUpdaterState): string {
     case 'available': return `Workass ${state.targetVersion || ''} está disponible.`.trim();
     case 'downloading': return `Descargando la versión verificada… ${Math.round(state.progress * 100)}%`;
     case 'staging': return 'Verificando checksum, plataforma y daemon incluido…';
-    case 'ready': return `Workass ${state.targetVersion || ''} está verificado y listo.`.trim();
+    case 'ready': return state.targetVersion
+      ? `Workass ${state.targetVersion} ya está descargado y verificado: actualizar solo reinicia Workass.`
+      : 'La actualización ya está descargada y verificada: actualizar solo reinicia Workass.';
     case 'busy': return appUpdaterBlockerText(state.blockers);
     case 'installing': return `Instalando Workass ${state.targetVersion || ''} de forma segura…`.trim();
     case 'healthy':
