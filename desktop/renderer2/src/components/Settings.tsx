@@ -167,10 +167,6 @@ function AgentesPanel() {
 
   return (
     <section className="stgs-panel">
-      <div className="phead agent-phead">
-        <h2>Agentes</h2>
-        <p>Elegí qué agentes aparecen en cada computadora. Cada CLI conserva allí su propia sesión y autenticación.</p>
-      </div>
 
       {hasProviderRegistry ? (
         <div className="agent-provider-group" role="list" aria-label="Agentes por ubicación">
@@ -310,7 +306,7 @@ function DispositivosPanel() {
   if (!app.hasDeviceChannels) {
     return (
       <section className="stgs-panel">
-        <div className="phead"><h2>Acceso aprobado</h2><p>Clientes que ya pueden abrir esta Workass.</p></div>
+        
         <div className="group"><div className="lrow"><div className="body"><span className="empty">Este bridge no expone los canales de dispositivos (lan:devices).</span></div></div></div>
       </section>
     );
@@ -318,10 +314,6 @@ function DispositivosPanel() {
   const { devices } = app;
   return (
     <section className="stgs-panel">
-      <div className="phead">
-        <h2>Acceso aprobado</h2>
-        <p>Clientes que ya pueden abrir esta Workass. Las solicitudes nuevas se aceptan desde <b>Conectar Workass</b>; acá solo administrás quién conserva acceso.</p>
-      </div>
 
       <div className="gtitle">Clientes con acceso</div>
       <div className="group">
@@ -349,10 +341,6 @@ function EnginesPanel() {
   const fleet = fleetLabel(app.processes);
   return (
     <section className="stgs-panel">
-      <div className="phead">
-        <h2>Engines</h2>
-        <p>Ciclo de vida de los motores ACP: hibernación de chats inactivos, y reciclado por memoria. Las sesiones arrancan bajo demanda.</p>
-      </div>
 
       <div className="gtitle">Flota</div>
       <div className="group">
@@ -384,10 +372,6 @@ function AparienciaPanel() {
   const hex = accentHex();
   return (
     <section className="stgs-panel">
-      <div className="phead">
-        <h2>Apariencia</h2>
-        <p>Tema, densidad y acento. workass sigue el lenguaje visual moderno-minimal de las apps de Claude Code y Codex.</p>
-      </div>
 
       <div className="gtitle">Tema</div>
       <div className="group">
@@ -453,10 +437,6 @@ function Kb({ desc, keys }: { desc: string; keys: string[] }) {
 function AtajosPanel() {
   return (
     <section className="stgs-panel">
-      <div className="phead">
-        <h2>Atajos</h2>
-        <p>Teclas rápidas de workass. Se muestran junto a sus acciones en toda la interfaz.</p>
-      </div>
       <div className="gtitle">Teclado</div>
       <div className="group">
         <Kb desc="Enviar prompt al agente" keys={['↵']} />
@@ -505,7 +485,7 @@ function MaquinasPanel() {
   if (!app.hasMachineChannels) {
     return (
       <section className="stgs-panel">
-        <div className="phead"><h2>Conectar Workass</h2><p>Tus daemons, en una sola lista de conversaciones.</p></div>
+        
         <div className="group"><div className="lrow"><div className="body">
           <span className="empty">Este daemon todavía no tiene libreta de máquinas (machines:list).</span>
         </div></div></div>
@@ -515,10 +495,6 @@ function MaquinasPanel() {
 
   return (
     <section className="stgs-panel">
-      <div className="phead">
-        <h2>Conectar Workass</h2>
-        <p>Workass descubre otras computadoras en la red. Para vincular tu teléfono, escaneá el QR desde Workass Mobile.</p>
-      </div>
 
       <div className="group phone-pairing">
         <div className="lrow">
@@ -712,10 +688,9 @@ export function Settings() {
 
       <main className="stgs-main">
         <div className="tbar">
-          <span className="crumb">Ajustes / <b>{SECTION_NAME[sec]}</b></span>
+          <span className="crumb"><b>{SECTION_NAME[sec]}</b></span>
           <span className="sp" />
-          <span className="tclose">Cerrar <kbd>Esc</kbd></span>
-          <button className="tico" title="Volver a los chats" onClick={() => store.closeSettings()}>
+          <button className="tico" title="Cerrar · Esc" aria-label="Cerrar" onClick={() => store.closeSettings()}>
             <Svg><path d="M4 4l8 8M12 4l-8 8" /></Svg>
           </button>
         </div>

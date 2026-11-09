@@ -10,7 +10,6 @@ import { configuredModelUnavailable, modelContextQualifier, resolveModelSelectio
 import { favoriteCatalogModels, isModelFavorite } from '../model-favorites';
 import { attachmentWorkBoundary, clipboardImageFiles, createDraftImages, draftImagePayloads, withoutDraftImages } from '../image-drafts';
 import { QueueList } from './QueueList';
-import { ResetCreditRows, useAvailableResets } from './ResetCredits';
 import { QuestionDock, usePendingQuestion } from './QuestionDock';
 import { liveSteeringSupported, stopAndSendSupported } from '../steering';
 import { composerButtonAction, composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
@@ -478,9 +477,6 @@ function ContextRing({ usage, planBound, planProvider, planUsage, planUsageLoadi
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  // A free reset waiting for any provider: a green dot on the ring, and its
-  // row at the end of the popover (it used to sit in the sidebar's account menu).
-  const resetWaiting = useAvailableResets().length > 0;
   useEffect(() => {
     if (!open) return;
     const down = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
@@ -499,17 +495,15 @@ function ContextRing({ usage, planBound, planProvider, planUsage, planUsageLoadi
   const title = pct != null && usage
     ? `Uso del contexto: ${compactContextTokens(usage.used)} / ${compactContextTokens(usage.size)} (${pct}%)`
     : 'Uso del contexto: sin datos todavía';
-  const ringTitle = resetWaiting ? `${title} · Tenés un reset gratis` : title;
   return (
     <div className="ctxring-wrap" ref={ref} style={{ position: 'relative' }}>
-      <button className="ctxring" onClick={() => setOpen((v) => { if (!v) onOpen?.(); return !v; })} title={ringTitle}
-        aria-label={ringTitle} aria-haspopup="dialog" aria-expanded={open}>
+      <button className="ctxring" onClick={() => setOpen((v) => { if (!v) onOpen?.(); return !v; })} title={title}
+        aria-label={title} aria-haspopup="dialog" aria-expanded={open}>
         <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden>
           <circle cx="8" cy="8" r={R} fill="none" stroke="var(--line2)" strokeWidth="2" />
           <circle cx="8" cy="8" r={R} fill="none" stroke={arc} strokeWidth="2" strokeLinecap="round"
             strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 8 8)" />
         </svg>
-        {resetWaiting && <span className="ctxdot" aria-hidden="true" />}
       </button>
       {open && (
         <div className="pop pop-ctx" style={{ bottom: '150%', right: 0 }} role="dialog" aria-label="Detalles de uso de contexto">
@@ -525,7 +519,6 @@ function ContextRing({ usage, planBound, planProvider, planUsage, planUsageLoadi
             <div className="ctxempty">Sin datos de contexto todavía.</div>
           )}
           {planBound && <PlanSection providerLabel={planProvider ?? null} snapshot={planUsage} loading={planUsageLoading} />}
-          <ResetCreditRows />
         </div>
       )}
     </div>
@@ -1044,7 +1037,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
             planProvider={chat?.providerName ?? chat?.providerId ?? null}
             planUsage={chat?.providerId ? app.planUsageByProvider[chat.providerId] : undefined}
             planUsageLoading={chat?.providerId ? app.planUsageLoadingByProvider[chat.providerId] : false}
-            onOpen={() => { if (chat) store.requestPlanUsage(chat.id); store.ensureAccountResetSnapshots(); }} />
+            onOpen={() => { if (chat) store.requestPlanUsage(chat.id); }} />
         </div>
       </div>
     </div>

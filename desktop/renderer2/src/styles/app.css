@@ -1201,19 +1201,6 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 /* Session context stays a compact passive ring; exact values live in its
    click-open popover and do not add text or width to the controls row. */
 .ctxring { display: inline-flex; width: 20px; justify-content: center; background: transparent; border: 0; padding: 0; margin: 0; cursor: pointer; line-height: 0; }
-/* A free reset is waiting (ResetCredits): a dot on the ring, its row in the popover. */
-.ctxring { position: relative; }
-.ctxdot { position: absolute; top: -1px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--bg); }
-.pop-ctx .rstrow { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 9px 10px; border-radius: 9px; background: color-mix(in srgb, var(--acc) 9%, transparent); }
-.pop-ctx .rstmark { width: 16px; height: 16px; display: grid; place-items: center; flex: none; }
-.pop-ctx .rstmark svg { width: 14px; height: 14px; }
-.pop-ctx .rsttx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.pop-ctx .rstt { font-size: 12px; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pop-ctx .rstn { color: var(--muted); font: 600 10.5px/1 ui-monospace, Menlo, monospace; }
-.pop-ctx .rsts { font-size: 11px; line-height: 1.35; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.pop-ctx .rstuse { flex: none; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--acc) 50%, transparent); border-radius: 7px; background: transparent; color: var(--acc); font-family: inherit; font-size: 11.5px; font-weight: 650; cursor: pointer; }
-.pop-ctx .rstuse:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 14%, transparent); }
-.pop-ctx .rstuse:disabled { opacity: .5; cursor: default; }
 .ctxring svg { display: block; flex: none; }
 /* Fixed, comfortable width so every row aligns; the label is the only elastic
    element (it truncates), so no value/reset string can ever spill outside the
@@ -1885,17 +1872,14 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs-main .tbar { border-bottom: 1px solid var(--line); }
 .stgs-main .crumb { color: var(--faint); font-size: 13px; }
 .stgs-main .crumb b { color: var(--ink); font-weight: 600; }
-.stgs-main .tclose { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; padding-right: 2px; }
-.stgs-main .tclose kbd { font-size: 10.5px; }
-.stgs-wrap { max-width: 660px; margin: 0 auto; padding: 26px 32px 60px; }
+/* No wasted room (owner 2026-11-08): the section name is the title bar, no
+   page heading or lead paragraph, tighter groups and rows. */
+.stgs-wrap { max-width: 700px; margin: 0 auto; padding: 12px 28px 40px; }
 
 .stgs-panel { animation: stgs-fade .18s ease; }
 @keyframes stgs-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.stgs .phead { margin-bottom: 22px; }
-.stgs .phead h2 { font-size: 19px; font-weight: 600; letter-spacing: -.015em; }
-.stgs .phead p { color: var(--muted); font-size: 13px; margin-top: 3px; max-width: 60ch; }
-.stgs .gtitle { display: flex; align-items: center; gap: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .09em; color: var(--faint); text-transform: uppercase; margin: 24px 2px 8px; }
-.stgs .gtitle:first-of-type { margin-top: 6px; }
+.stgs .gtitle { display: flex; align-items: center; gap: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .09em; color: var(--faint); text-transform: uppercase; margin: 18px 2px 7px; }
+.stgs .gtitle:first-of-type { margin-top: 2px; }
 .stgs .gtag { font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
 .stgs .ghint { color: var(--muted); font-size: 12px; margin: 8px 2px 0; max-width: 62ch; }
 .stgs .ghint code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11px; color: var(--ink2); }
@@ -1921,7 +1905,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .phone-qr-error { min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--del); font-size: 12px; }
 
 .stgs .group { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg, 11px); padding: 0 16px; }
-.stgs .set { display: flex; align-items: center; gap: 16px; padding: 13px 0; border-top: 1px solid var(--line); min-height: 52px; }
+.stgs .set { display: flex; align-items: center; gap: 16px; padding: 10px 0; border-top: 1px solid var(--line); min-height: 44px; }
 .stgs .set:first-child { border-top: 0; }
 .stgs .set .lbl { flex: 1; min-width: 0; }
 .stgs .set .n { font-size: 13px; color: var(--ink); font-weight: 550; }
@@ -1962,7 +1946,6 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .lrow .mt { font-size: 11.5px; color: var(--muted); margin-top: 1px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stgs .lrow .act { flex: none; display: flex; align-items: center; gap: 10px; }
 .stgs .lrow .empty { color: var(--faint); font-size: 12.5px; }
-.stgs .agent-phead { margin-bottom: 18px; }
 .stgs .agent-provider-group { padding: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; }
 .stgs .agent-provider-empty { min-height: 48px; display: flex; align-items: center; padding: 0 2px; color: var(--faint); font-size: 11.5px; }
 .stgs .agent-provider-row { min-height: 58px; padding: 10px 2px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; transition: opacity .15s ease; }

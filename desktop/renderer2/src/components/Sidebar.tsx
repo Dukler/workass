@@ -684,10 +684,10 @@ export function FooterUpdateCards() {
 
 // The left panel's foot (owner 2026-11-08): two icons, Ajustes and
 // Actualizaciones. It replaced an account menu that held a fixed name,
-// Ajustes and, rarely, a free reset; the reset now lives with plan usage in
-// the composer (ResetCredits). Updates no longer slide in as cards on their
-// own: the update icon carries a green dot, and its popover holds the same
-// cards (FooterUpdateCards, whole lifecycle) and the installed versions.
+// Ajustes and, rarely, a free reset; resets get their own Cuentas page.
+// Updates no longer slide in as cards on their own: the update icon carries a
+// green dot, and its popover holds the same cards (FooterUpdateCards, whole
+// lifecycle) and the installed versions.
 export function FooterBar() {
   const app = useApp();
   const updater = useAppUpdater();
