@@ -703,7 +703,9 @@ async function handleRequest(message) {
         loadSession: sessionCapability === 'both' || sessionCapability === 'load',
         sessionSteer: liveSteer,
         steerNotification: liveSteer,
-        promptCapabilities: { image: false, audio: false, embeddedContext: false },
+        // WORKASS_MOCK_ACP_IMAGE_INPUT=1 accepts image turns (the mock still reads
+        // only their text), so a turn carrying an image can run.
+        promptCapabilities: { image: process.env.WORKASS_MOCK_ACP_IMAGE_INPUT === '1', audio: false, embeddedContext: false },
         mcpCapabilities: { http: false, sse: false },
       },
       authMethods: [],

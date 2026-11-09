@@ -63,6 +63,8 @@ The mock supports:
   `WORKASS_MOCK_ACP_SESSION_STORE` points to a durable fixture file; select
   `resume`, `load`, `both`, or `none` with
   `WORKASS_MOCK_ACP_SESSION_CAPABILITY`
+- image turns when `WORKASS_MOCK_ACP_IMAGE_INPUT=1` (`promptCapabilities.image`;
+  the mock reads only the text), so a turn carrying an image can run
 - plan updates
 - thought chunks
 - tool-call start and completion updates
