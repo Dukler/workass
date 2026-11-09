@@ -91,10 +91,11 @@ test('Workass updater uses the existing footer update-card lifecycle and never a
 
 test('provider updates keep the left footer card as their only renderer surface', () => {
   const providerStart = sidebar.indexOf('{showProvider && (');
-  const providerEnd = sidebar.indexOf('// Account menu', providerStart);
+  const providerEnd = sidebar.indexOf("// The left panel's foot", providerStart);
   assert.ok(providerStart >= 0 && providerEnd > providerStart);
   const providerCard = sidebar.slice(providerStart, providerEnd);
-  assert.match(sidebar, /<div className="foot">[\s\S]*<FooterUpdateCards \/>/);
+  assert.match(sidebar, /<div className="foot">[\s\S]*<FooterBar \/>/);
+  assert.match(sidebar, /className="footpop"[\s\S]*<FooterUpdateCards \/>/, 'the cards live in the update icon\'s popover');
   assert.match(providerCard, /className=\{`updslot/);
   assert.match(providerCard, /className=\{`updcard/);
   assert.doesNotMatch(providerCard, /addToast|fireNotify|<Toasts/);

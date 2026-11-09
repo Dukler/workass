@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
 import { call, has } from '../wire/api';
 import { IcSearch, IcAssist, IcChats, IcPlus, IcActivity, IcGear, IcFolder, ModelIcon } from '../icons';
 import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
 import { nextUpdatePhase, brandForProvider, updateFailureTitle, updateFailureReason, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
-import { availableRateLimitReset, prepareRateLimitResetAttempt, rateLimitResetExpiry, type RateLimitResetAttempt } from '../plan-usage';
 import { chatHasLiveActivity } from '../chat-activity';
-import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, useAppUpdater } from '../app-updater';
+import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, updatesNeedAttention, useAppUpdater } from '../app-updater';
+import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
@@ -335,11 +335,10 @@ export function Sidebar() {
         );
       })}
 
-      {/* Session-count fleet row removed by user request (2026-07-11) — the
-          footer is the update cards (when present) + the account menu. */}
+      {/* Session-count fleet row removed by user request (2026-07-11); the
+          foot is the Ajustes and Actualizaciones icons (FooterBar). */}
       <div className="foot">
-        <FooterUpdateCards />
-        <AccountMenu />
+        <FooterBar />
       </div>
 
       {/* Portals to document.body, so collapsing the sidebar (⌘B) cannot hide it. */}
@@ -352,10 +351,11 @@ export function Sidebar() {
 // account row (Claude-Code footer pattern). Data is passive: `app:update`
 // (mocked self-update) + `providers:updates` (real installed-vs-latest CLI
 // versions), both replayed to fresh clients so a reload repaints with no turn.
-// Cards use the .acctpop panel family (hairline, 11px radius); NO green fill,
-// icon muted, hover lifts like .acct. Both Workass and provider updates use the
-// same resting → running ring → sealed success / inline retry lifecycle. Renders
-// nothing when neither updater has work to show.
+// Cards are hairline panels (11px radius); NO green fill, icon muted, hover
+// swaps the background. Both Workass and provider updates use the same
+// resting → running ring → sealed success / inline retry lifecycle. They render
+// inside the foot's update popover (FooterBar), and nothing when neither
+// updater has work to show.
 function IcDownload() {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
@@ -682,120 +682,69 @@ export function FooterUpdateCards() {
   );
 }
 
-// Account menu (Claude-Code style): the bottom account row is a button that
-// opens a small popup anchored ABOVE it. `items` is a flat array so adding
-// future rows is a one-line change. Click-outside and Esc close it; the global
-// ⌘, shortcut (App.tsx) still opens Settings directly.
-type MenuItem = { key: string; icon: ReactNode; label: string; kbd?: string; onSelect: () => void };
-
-export function AccountMenu() {
+// The left panel's foot (owner 2026-11-08): two icons, Ajustes and
+// Actualizaciones. It replaced an account menu that held a fixed name,
+// Ajustes and, rarely, a free reset; the reset now lives with plan usage in
+// the composer (ResetCredits). Updates no longer slide in as cards on their
+// own: the update icon carries a green dot, and its popover holds the same
+// cards (FooterUpdateCards, whole lifecycle) and the installed versions.
+export function FooterBar() {
   const app = useApp();
+  const updater = useAppUpdater();
+  const self = updater.state;
   const [open, setOpen] = useState(false);
-  const [resetBusy, setResetBusy] = useState(false);
-  const resetAttempt = useRef<RateLimitResetAttempt | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!open) return;
-    // Cold account snapshot so the earned-reset row appears even when no chat
-    // for that provider is open. Read-only; never sends a prompt or a reset.
-    store.ensureAccountResetSnapshots();
+    if (!open) return undefined;
     const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    // Capture Esc so the menu closes before App.tsx's layered Esc handler runs.
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); setOpen(false); } };
     document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey, true);
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey, true); };
+    const pop = pushEscapeLayer(() => setOpen(false));
+    return () => { document.removeEventListener('mousedown', onDown); pop(); };
   }, [open]);
 
-  const label = 'workass';
-  const resetEntry = Object.values(app.planUsageByProvider)
-    .map((snapshot) => ({ snapshot, reset: availableRateLimitReset(snapshot.rateLimitResetCredits) }))
-    .find((entry) => entry.reset != null);
-  const reset = resetEntry?.reset ?? null;
-  const resetProviderId = resetEntry?.snapshot.providerId ?? '';
-  const resetProviderName = store.providerName(resetProviderId) ?? resetProviderId;
-  const resetProviderBrand = store.providerBrand(resetProviderId);
-  const active = app.chats.find((chat) => chat.id === app.activeId);
-  const resetSessionId = active?.providerId === resetProviderId ? active.sessionId : undefined;
-  const canUseReset = has('appChatUseRateLimitReset');
-  const useEarnedReset = async () => {
-    if (!reset || resetBusy || !canUseReset) return;
-    const creditId = reset.credit?.id;
-    resetAttempt.current = prepareRateLimitResetAttempt(resetAttempt.current, reset, () => (
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `workass-reset-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    ));
-    setResetBusy(true);
-    try {
-      const result = await store.useRateLimitReset(resetProviderId, resetSessionId || undefined, resetAttempt.current.idempotencyKey, creditId);
-      switch (result?.outcome) {
-        case 'reset':
-        case 'alreadyRedeemed':
-          resetAttempt.current = null;
-          store.addToast('Reset aplicado', `${resetProviderName || 'El proveedor'} actualizó tus límites.`);
-          break;
-        case 'nothingToReset':
-          resetAttempt.current = null;
-          store.addToast('Reset guardado', 'Todavía no hay una ventana elegible para reiniciar.');
-          break;
-        case 'noCredit':
-          resetAttempt.current = null;
-          store.addToast('Reset no disponible', 'El proveedor ya no encuentra ese reset gratis.');
-          break;
-        default:
-          throw new Error('El proveedor no devolvió un resultado de reset reconocido.');
-      }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error || 'Error desconocido');
-      store.addToast('No se pudo confirmar el reset', `${detail} Podés reintentar sin gastar dos créditos.`);
-    } finally {
-      setResetBusy(false);
-    }
-  };
-  const items: MenuItem[] = [
-    { key: 'settings', icon: <IcGear />, label: 'Ajustes', kbd: '⌘,', onSelect: () => { setOpen(false); store.openSettings(); } },
+  const attention = updatesNeedAttention(self, app.providersUpdates, !!store.runningUpdate(), app.updateChain);
+  const title = attention ? 'Actualizaciones' : 'Todo al día';
+  // The agents you have on (or one with an update waiting), by their own name.
+  const enabled = new Set(app.providers.filter((p) => p.enabled && !p.disabledByUser).map((p) => p.id));
+  const versions = [
+    ...(self.supported && self.currentVersion ? [{ key: 'workass', name: 'Workass', brand: '', installed: self.currentVersion, latest: '' }] : []),
+    ...app.providersUpdates
+      .filter((u) => enabled.has(u.providerId) || u.updateAvailable)
+      .map((u) => ({
+        key: u.providerId, name: store.providerName(u.providerId) || u.cli,
+        brand: brandForProvider(u.providerId, app.providers, app.groups) ?? '',
+        installed: u.installed, latest: u.updateAvailable ? u.latest : '',
+      })),
   ];
 
   return (
-    <div className="acctmenu" ref={ref}>
+    <div className="footbar" ref={ref}>
+      <button type="button" className="footbtn" title="Ajustes  ⌘," aria-label="Ajustes" onClick={() => store.openSettings()}>
+        <IcGear />
+      </button>
+      <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}
+        aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <IcDownload />
+        {attention && <span className="footdot" aria-hidden="true" />}
+      </button>
       {open && (
-        <div className="acctpop" role="menu" aria-label="Menú de cuenta">
-          <div className="acctpop-head">Martin · {label}</div>
-          {reset && (
-            <div className="acctcredit" role="group" aria-label={`${reset.count} reset gratis disponible`}>
-              <div className="acctcredit-top">
-                <span className="acctcredit-mark" aria-hidden>{resetProviderBrand && <ModelIcon provider={resetProviderBrand} />}</span>
-                <span className="acctcredit-title">{resetProviderName || 'Proveedor'} reset</span>
-                <span className="acctcredit-count">×{reset.count}</span>
-              </div>
-              <div className="acctcredit-copy">
-                {reset.credit?.description || 'Crédito disponible para reiniciar tus límites.'}
-              </div>
-              <div className="acctcredit-foot">
-                <span className="acctcredit-expiry">{rateLimitResetExpiry(reset.credit?.expiresAt)}</span>
-                <button className="acctcredit-use" disabled={!canUseReset || resetBusy} onClick={() => { void useEarnedReset(); }}>
-                  {resetBusy ? 'Aplicando…' : 'Usar reset'}
-                </button>
-              </div>
-            </div>
+        <div className="footpop" role="dialog" aria-label="Actualizaciones">
+          <div className="footpop-head">{title}</div>
+          <FooterUpdateCards />
+          {versions.length > 0 && (
+            <ul className="footvers">
+              {versions.map((v) => (
+                <li key={v.key}>
+                  <span className="fvi" aria-hidden="true">{v.brand ? <ModelIcon provider={v.brand} /> : <IcDownload />}</span>
+                  <span className="fvn">{v.name}</span>
+                  <span className="fvv">{v.installed || '—'}{v.latest ? <span className="fvl"> → {v.latest}</span> : null}</span>
+                </li>
+              ))}
+            </ul>
           )}
-          <div className="acctpop-div" />
-          {items.map((it) => (
-            <button key={it.key} className="acctpop-item" role="menuitem" onClick={it.onSelect}>
-              <span className="ai">{it.icon}</span>
-              <span className="al">{it.label}</span>
-              {it.kbd && <span className="ak">{it.kbd}</span>}
-            </button>
-          ))}
         </div>
       )}
-      <button className={`acct ${open ? 'on' : ''}`} onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>
-        <span className="ava" aria-hidden="true" />
-        <span className="acct-name">{label}</span>
-        <span className="chev">▾</span>
-      </button>
     </div>
   );
 }

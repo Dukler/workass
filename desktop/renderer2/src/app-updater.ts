@@ -182,6 +182,24 @@ export function appUpdaterReceiptIsRecent(receipt: AppUpdaterReceipt | null, now
   return age >= 0 && age <= maxAgeMs;
 }
 
+// The phases the left panel's update icon marks with its dot: something to
+// install, an install under way, or one that failed and can be retried. The
+// same set shows a card inside its popover; a quiet background check does not.
+const ATTENTION_PHASES: ReadonlySet<AppUpdaterPhase> = new Set<AppUpdaterPhase>([
+  'available', 'ready', 'busy', 'downloading', 'staging', 'installing', 'failed', 'rollback_healthy', 'check_failed',
+]);
+
+/** Whether the update icon carries its dot. */
+export function updatesNeedAttention(
+  self: Pick<AppUpdaterState, 'supported' | 'phase'>,
+  providers: ReadonlyArray<{ updateAvailable: boolean }>,
+  providerRunning: boolean,
+  chain: unknown,
+): boolean {
+  if (providerRunning || !!chain || providers.some((u) => u.updateAvailable)) return true;
+  return self.supported && ATTENTION_PHASES.has(self.phase);
+}
+
 export function useAppUpdater() {
   const [state, setState] = useState<AppUpdaterState>(INITIAL);
   const bridge = typeof window === 'undefined' ? undefined : window.workassUpdater;

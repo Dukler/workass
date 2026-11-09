@@ -199,42 +199,28 @@ aside.side {
 
 .side .foot { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 9px 2px; }
 /* (sidebar fleet row removed by user request 2026-07-11; .stgs-nav .fleet below is a separate surface) */
-/* account row — now a button that opens the account menu (anchored above) */
-.acctmenu { position: relative; }
-.acct { display: flex; align-items: center; gap: 9px; width: calc(100% + 12px); box-sizing: border-box; margin: 0 -6px; padding: 5px 6px; color: var(--ink2); font-size: 13px; border: 0; background: transparent; font-family: inherit; text-align: left; border-radius: 8px; cursor: pointer; transition: background .15s ease, color .15s ease; }
-.acct:hover, .acct.on { background: var(--line); color: var(--ink); }
-.acct .ava { width: 22px; height: 22px; border-radius: 6px; background: url('../../../assets/workass-macos.png') center / cover no-repeat; flex: none; }
-.acct .acct-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acct .chev { margin-left: auto; color: var(--faint); flex: none; }
-
-/* Claude-Code-style account popup: rounded --panel card, hairline border, subtle shadow */
-.acctpop { position: absolute; bottom: 100%; left: -2px; right: -2px; margin-bottom: 8px; z-index: 30; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; padding: 5px; box-shadow: 0 10px 34px rgba(0,0,0,.4); }
-.acctpop-head { font-size: 11.5px; color: var(--muted); padding: 7px 9px 6px; }
-.acctcredit { padding: 7px 9px 9px; }
-.acctcredit-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.acctcredit-mark { width: 16px; height: 16px; display: grid; place-items: center; color: var(--acc); flex: none; }
-.acctcredit-mark svg { width: 14px; height: 14px; stroke-width: 1.25; }
-.acctcredit-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 12.5px; font-weight: 600; }
-.acctcredit-count { color: var(--muted); font: 600 10.5px/1 ui-monospace, Menlo, monospace; flex: none; }
-.acctcredit-copy { margin: 4px 0 0 23px; color: var(--muted); font-size: 11px; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-.acctcredit-foot { display: flex; align-items: center; gap: 8px; min-height: 25px; margin: 7px 0 0 23px; }
-.acctcredit-expiry { min-width: 0; flex: 1; color: var(--faint); font-size: 10.5px; white-space: nowrap; }
-.acctcredit-use { flex: none; padding: 4px 8px; border: 1px solid var(--acc); border-radius: 7px; background: var(--acc); color: var(--bg); font-family: inherit; font-size: 11px; font-weight: 650; line-height: 1.2; cursor: pointer; }
-.acctcredit-use:hover:not(:disabled) { border-color: color-mix(in srgb, var(--acc) 82%, white); background: color-mix(in srgb, var(--acc) 86%, white); color: var(--bg); }
-.acctcredit-use:disabled { border-color: var(--line2); background: transparent; color: var(--muted); opacity: .45; cursor: default; }
-.acctpop-div { height: 1px; background: var(--line); margin: 1px 4px 4px; }
-.acctpop-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 9px; border: 0; background: transparent; border-radius: 7px; font-family: inherit; font-size: 13px; color: var(--ink2); cursor: pointer; text-align: left; }
-.acctpop-item:hover { background: var(--line); color: var(--ink); }
-.acctpop-item .ai { display: grid; place-items: center; color: var(--muted); flex: none; }
-.acctpop-item .ai svg { width: 15px; height: 15px; stroke-width: 1.3; }
-.acctpop-item:hover .ai { color: var(--ink); }
-.acctpop-item .al { flex: 1; }
-.acctpop-item .ak { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; }
+/* The foot (owner 2026-11-08): Ajustes and Actualizaciones as icons. The
+   update icon's dot means something to install, running or to retry; its
+   popover holds the update cards and the installed versions. */
+.footbar { position: relative; display: flex; align-items: center; gap: 2px; margin: 0 -4px; }
+.footbtn { position: relative; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; transition: background .15s ease, color .15s ease; }
+.footbtn:hover, .footbtn.on { background: var(--line); color: var(--ink); }
+.footbtn svg { width: 16px; height: 16px; stroke-width: 1.3; }
+.footdot { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--side); }
+.footpop { position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 8px; z-index: 30; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; padding: 6px; box-shadow: 0 10px 34px rgba(0,0,0,.4); }
+.footpop-head { font-size: 11.5px; color: var(--muted); padding: 5px 8px 6px; }
+.footpop .updcards { margin: 0 0 6px; }
+.footvers { list-style: none; margin: 0; padding: 2px 0 0; }
+.footvers li { display: flex; align-items: baseline; gap: 10px; padding: 5px 8px; font-size: 12px; color: var(--ink2); }
+.footvers .fvi { width: 16px; height: 16px; display: grid; place-items: center; flex: none; color: var(--muted); align-self: center; }
+.footvers .fvi svg { width: 14px; height: 14px; }
+.footvers .fvn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.footvers .fvv { flex: none; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+.footvers .fvl { color: var(--acc); }
 .side-empty { color: var(--faint); font-size: 12px; padding: 6px 9px; }
 
-/* Footer update-notification cards (above the account row). Same panel family as
-   .acctpop — hairline, 11px radius; NO green fill; icon muted; hover lifts like
-   .acct (background swap, no translate). */
+/* Update cards, inside the foot's update popover. Hairline, 11px radius; NO
+   green fill; icon muted; hover swaps the background, no translate. */
 .updcards { display: flex; flex-direction: column; gap: 6px; margin: 0 -2px 8px; }
 .updcard { display: flex; align-items: center; gap: 9px; width: 100%; box-sizing: border-box; padding: 7px 9px; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; color: var(--ink2); font-family: inherit; font-size: inherit; text-align: left; cursor: pointer; transition: background .15s ease, color .15s ease; }
 .updcard:hover { background: var(--line); color: var(--ink); }
@@ -1215,6 +1201,19 @@ table.mdtable th { background: var(--field); font-weight: 600; }
 /* Session context stays a compact passive ring; exact values live in its
    click-open popover and do not add text or width to the controls row. */
 .ctxring { display: inline-flex; width: 20px; justify-content: center; background: transparent; border: 0; padding: 0; margin: 0; cursor: pointer; line-height: 0; }
+/* A free reset is waiting (ResetCredits): a dot on the ring, its row in the popover. */
+.ctxring { position: relative; }
+.ctxdot { position: absolute; top: -1px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--bg); }
+.pop-ctx .rstrow { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 9px 10px; border-radius: 9px; background: color-mix(in srgb, var(--acc) 9%, transparent); }
+.pop-ctx .rstmark { width: 16px; height: 16px; display: grid; place-items: center; flex: none; }
+.pop-ctx .rstmark svg { width: 14px; height: 14px; }
+.pop-ctx .rsttx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pop-ctx .rstt { font-size: 12px; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop-ctx .rstn { color: var(--muted); font: 600 10.5px/1 ui-monospace, Menlo, monospace; }
+.pop-ctx .rsts { font-size: 11px; line-height: 1.35; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.pop-ctx .rstuse { flex: none; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--acc) 50%, transparent); border-radius: 7px; background: transparent; color: var(--acc); font-family: inherit; font-size: 11.5px; font-weight: 650; cursor: pointer; }
+.pop-ctx .rstuse:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 14%, transparent); }
+.pop-ctx .rstuse:disabled { opacity: .5; cursor: default; }
 .ctxring svg { display: block; flex: none; }
 /* Fixed, comfortable width so every row aligns; the label is the only elastic
    element (it truncates), so no value/reset string can ever spill outside the

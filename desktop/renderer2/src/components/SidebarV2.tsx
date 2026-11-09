@@ -8,7 +8,7 @@ import { chatHasLiveActivity, isServiceWork } from '../chat-activity';
 import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { ProjectIcon } from './ProjectIcon';
-import { ModesSwitch, FooterUpdateCards, AccountMenu } from './Sidebar';
+import { ModesSwitch, FooterBar } from './Sidebar';
 import { ForkKidsToggle, ForkNest } from './ForkSidebar';
 import { ForgeIcon } from './ForgeIcon';
 import { forkStore, useForks } from '../store/forks';
@@ -903,10 +903,9 @@ export function SidebarV2() {
         </ul>
       </div>
 
-      {/* T3's footer minus its settings button (user exclusion). */}
+      {/* Ajustes and Actualizaciones as icons (owner 2026-11-08). */}
       <div className="foot">
-        <FooterUpdateCards />
-        <AccountMenu />
+        <FooterBar />
       </div>
 
       {tip && !ctx && <RowTooltip tip={tip} />}
