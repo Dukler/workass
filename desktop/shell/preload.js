@@ -103,6 +103,13 @@ contextBridge.exposeInMainWorld('workassMachines', {
 	releaseEndpoint: (payload) => ipcRenderer.send('workass-machines:release-endpoint', payload),
 });
 
+// Ajustes · Mantenimiento: this profile's data folder and log folder. Only
+// the folder's name crosses; main.js owns both paths.
+contextBridge.exposeInMainWorld('workassMaintenance', {
+  showDataFolder: () => ipcRenderer.invoke('workass-maintenance:show-folder', 'data'),
+  openLogsFolder: () => ipcRenderer.invoke('workass-maintenance:show-folder', 'logs'),
+});
+
 contextBridge.exposeInMainWorld('workassUpdater', {
   getState: () => ipcRenderer.invoke('workass-updater:get-state'),
   diagnostics: () => ipcRenderer.invoke('workass-updater:diagnostics'),

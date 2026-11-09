@@ -2,6 +2,7 @@ import type { PermissionContext } from '../permission-explain';
 import type { ProcessSummary, LanDevice, AccessRequest, DaemonConfig, CatalogGroup, ChatCheckpoint, ChatEnvRepo, ChatEnvPayload, ChatDiffResult, ChatGoal, CommandCatalog, PlanUsageSnapshot, PermissionQuestion, ProviderRecord, ProviderUpdate, ProviderUpdateProgress, AppUpdate, SpawnedWorkItem, DeliveryCapabilities } from '../wire/types';
 import type { ModelFavorite } from '../model-favorites';
 import type { ChatTitleSettings } from '../chat-titles';
+import type { ChatLifecycle } from '../chat-lifecycle';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
 import type { WorkassRuntimeProfile } from '../model-catalog';
@@ -394,6 +395,9 @@ export interface AppState {
   // How new chats are named: from the first message, or by an agent that
   // reads it once (daemon app settings key "chatTitles").
   chatTitles: ChatTitleSettings;
+  // When the sidebar files quiet chats away by itself (daemon app settings key
+  // "chatLifecycle", chat-lifecycle.ts).
+  chatLifecycle: ChatLifecycle;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.

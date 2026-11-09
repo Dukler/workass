@@ -241,6 +241,9 @@ const LANBridgeJS = `(() => {
     artifactOpen: (o) => artifactInvoke('artifact:open', o), artifactRead: (o) => artifactInvoke('artifact:read', o), artifactClose: (o) => artifactInvoke('artifact:close', o),
     refresh: () => invoke('teams:refresh'), jiraSync: () => invoke('jira:sync'), deployAuth: (o) => invoke('deploy:auth', o), startJob: (o) => invoke('job:start', o), cancelJob: (id) => invoke('job:cancel', id), killTerminal: (t) => invoke('chat:kill-terminal', t),
     procList: () => invoke('proc:list'), procRead: (id) => invoke('proc:read', id), procKill: (id, tree) => invoke('proc:kill', { id, tree }), procKillAll: () => invoke('proc:kill-all'),
+    // Ajustes · Mantenimiento (additive reads): the state directory's size
+    // by part, and a redacted diagnostic report to save.
+    storageUsage: () => invoke('storage:usage'), diagnosticsExport: () => invoke('diagnostics:export'),
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),

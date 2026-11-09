@@ -28,6 +28,7 @@ const {
 } = require('./update-progress');
 const { CertificatePins, certificateVerificationSessions, trustCertificatePEM } = require('./certificate-pins');
 const { installRenderFrameGuard, hasRenderFrameGuard } = require('./render-frame-guard');
+const { showMaintenanceFolder } = require('./maintenance-folders');
 
 const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
 let updateProgressTransaction = '';
@@ -413,6 +414,11 @@ function createWindow(url, browserReporter, isController) {
   ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
   ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
   ipcMain.handle('workass-updater:apply-authorized', async (event, payload) => own(event) ? updateManager?.startAuthorizedApply(payload) || null : null);
+  // Ajustes · Mantenimiento: show this profile's data or log folder. The page
+  // names which one; the path is always the shell's own.
+  ipcMain.handle('workass-maintenance:show-folder', (event, kind) => own(event)
+    ? showMaintenanceFolder(kind, { runtime: RUNTIME, shell, fs })
+    : { ok: false, error: 'untrusted renderer' });
   win.on('closed', () => {
     viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
@@ -441,6 +447,7 @@ function createWindow(url, browserReporter, isController) {
     for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
+    try { ipcMain.removeHandler('workass-maintenance:show-folder'); } catch { /* ignore */ }
   });
   const reportWindowState = () => {
     if (win.isDestroyed()) return;

@@ -439,6 +439,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"prApprover":         "",
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
+		"chatLifecycle":      defaultChatLifecycleSettings(),
 	}
 	if input == nil {
 		return next
@@ -472,6 +473,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	}
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
+	next["chatLifecycle"] = normalizeChatLifecycle(input["chatLifecycle"])
 	return next
 }
 

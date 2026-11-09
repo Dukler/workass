@@ -87,6 +87,7 @@ test('clean-Mac bootstrap starts the bundled server directly without login start
   assert.equal(invocation[2].detached, true);
   assert.equal(invocation[2].env.HOME, home);
   assert.equal(invocation[2].env.WORKASS_DATA_ROOT, runtime.dataRoot);
+  assert.equal(invocation[2].env.WORKASS_LOG_ROOT, runtime.logRoot, 'the daemon knows where its own logs go');
   assert.equal(invocation[2].env.WORKASS_PROFILE, 'prod');
   assert.ok(invocation[2].env.PATH.startsWith(path.join(resourcesPath, 'runtime', 'node', 'darwin-arm64', 'bin')));
   assert.equal(fs.existsSync(path.join(home, 'Library', 'LaunchAgents')), false);

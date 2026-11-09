@@ -5,6 +5,7 @@ import { IcSearch, IcPlus, IcFolder, IcChevron, IcClose, ModelIcon } from '../ic
 import { buildWorkspaceGroups, deferredSearchLabels, lastProject, newChatTarget, normalizeWorkspacePath, workspaceLabelForChat, type WorkspaceGroup } from '../workspaces';
 import { ARCHIVE_AFTER_SETTLED_MS as SHARED_ARCHIVE_AFTER_SETTLED_MS, SIDEBAR_LIFECYCLE_TICK_MS } from '../store/session-page';
 import { chatHasLiveActivity, isServiceWork } from '../chat-activity';
+import { DEFAULT_CHAT_LIFECYCLE, archiveAfterMs, settleAfterMs, type ChatLifecycle } from '../chat-lifecycle';
 import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { ProjectIcon } from './ProjectIcon';
@@ -35,13 +36,11 @@ import {
 // Deliberately NOT ported: T3's footer settings button (excluded by the user)
 // and its nightly-stage header backdrop (branding).
 
-// T3's sidebarAutoSettleAfterDays, whose default is 3. Age files a quiet chat
-// away on its own; the row action and the menu do it on demand.
-// User law 2026-09-21: age-based auto-settle is DISABLED (kept, not removed).
-// Active chats never file by age; only explicitly settled chats settle, and
-// those still archive via ARCHIVE_AFTER_SETTLED_MS below.
-const AUTO_SETTLE_MS = 3 * 24 * 60 * 60 * 1000;
-const AUTO_SETTLE_BY_AGE_ENABLED = false;
+// T3's sidebarAutoSettleAfterDays. Age files a quiet chat away on its own; the
+// row action and the menu do it on demand. User law 2026-09-21: nothing files
+// by age unless the owner turns it on, so the default policy
+// (chat-lifecycle.ts, Ajustes · Mantenimiento) has it off; only explicitly
+// settled chats settle, and those archive after the policy's archive days.
 // Shared with the store, which asks the daemon to leave exactly this archive
 // out of a paged session shell (store/session-page.ts).
 export const ARCHIVE_AFTER_SETTLED_MS = SHARED_ARCHIVE_AFTER_SETTLED_MS;
@@ -243,7 +242,7 @@ type Row = {
 // must not pull it out of the settled shelf; only real new work clears settled
 // state in the store/actor. Terminal attention is different: it is news the
 // user can explicitly acknowledge, but it never auto-files by age.
-export function resolveSettled(chat: Chat, status: Status, _active: boolean, now: number, touched: number): boolean {
+export function resolveSettled(chat: Chat, status: Status, _active: boolean, now: number, touched: number, policy: ChatLifecycle = DEFAULT_CHAT_LIFECYCLE): boolean {
   if (chat.unread || status === 'approval' || status === 'working' || status === 'parked') return false;
   if (chat.settled === 'settled') return true;
   if (chat.settled === 'active') return false;
@@ -252,14 +251,15 @@ export function resolveSettled(chat: Chat, status: Status, _active: boolean, now
   // with no messages has a zero timestamp, and treating that as "last touched
   // in 1970" would drop every freshly created chat straight onto the shelf.
   if (!touched) return false;
-  // Age rule disabled by user law 2026-09-21 (kept for re-enable): without an
-  // explicit 'settled' override nothing files by age.
-  if (!AUTO_SETTLE_BY_AGE_ENABLED) return false;
-  return now - touched >= AUTO_SETTLE_MS;
+  // The age rule, off unless «Poner en reposo los chats sin actividad» is on:
+  // without an explicit 'settled' override nothing else files by age.
+  const after = settleAfterMs(policy);
+  if (!after) return false;
+  return now - touched >= after;
 }
 
-function settledSince(chat: Chat, status: Status, now: number, touched: number): number {
-  if (!resolveSettled(chat, status, false, now, touched)) return 0;
+function settledSince(chat: Chat, status: Status, now: number, touched: number, policy: ChatLifecycle): number {
+  if (!resolveSettled(chat, status, false, now, touched, policy)) return 0;
   if (chat.settled === 'settled') {
     const explicit = Number(chat.settledAt);
     if (Number.isFinite(explicit) && explicit > 0) return explicit;
@@ -268,12 +268,14 @@ function settledSince(chat: Chat, status: Status, now: number, touched: number):
     // predates the shelf timestamp contract, so it belongs in the archive too.
     return touched || 1;
   }
-  return touched ? touched + AUTO_SETTLE_MS : 0;
+  return touched ? touched + settleAfterMs(policy) : 0;
 }
 
-export function resolveArchived(chat: Chat, status: Status, now: number, touched: number): boolean {
-  const since = settledSince(chat, status, now, touched);
-  return since > 0 && now - since >= ARCHIVE_AFTER_SETTLED_MS;
+export function resolveArchived(chat: Chat, status: Status, now: number, touched: number, policy: ChatLifecycle = DEFAULT_CHAT_LIFECYCLE): boolean {
+  const after = archiveAfterMs(policy);
+  if (!after) return false;
+  const since = settledSince(chat, status, now, touched, policy);
+  return since > 0 && now - since >= after;
 }
 
 export function isFullSizeSidebarRow(settled: boolean, archived: boolean): boolean {
@@ -743,8 +745,8 @@ export function SidebarV2() {
         const touched = lastTouchedAt(chat);
         const status = resolveStatus(chat, live, active, store.obligation(chat));
         const failing = status === 'failed' ? lastOf(chat.messages, (m) => m.role === 'assistant') : undefined;
-        const settled = resolveSettled(chat, status, active, now, touched);
-        const archived = resolveArchived(chat, status, now, touched);
+        const settled = resolveSettled(chat, status, active, now, touched, app.chatLifecycle);
+        const archived = resolveArchived(chat, status, now, touched, app.chatLifecycle);
         out.push({
           chat, project, touched, status, settled, archived,
           since: status === 'working' ? (workingSince(chat, work) || forkRuns?.since || touched) : 0,
@@ -758,7 +760,7 @@ export function SidebarV2() {
       }
     }
     return out;
-  }, [groups, scope, query, app.activeId, app.chats, lifecycleNow, forkVersion]);
+  }, [groups, scope, query, app.activeId, app.chats, app.chatLifecycle, lifecycleNow, forkVersion]);
 
   const searching = query.trim().length > 0;
   // Machine ownership is presentation metadata, never a grouping boundary.

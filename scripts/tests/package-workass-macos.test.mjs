@@ -27,6 +27,30 @@ test('macOS package includes every standalone shell safety module without rerunn
   assert.match(script, /node --test scripts\/tests\/package-workass-macos\.test\.mjs/);
 });
 
+// A module main.js or preload.js requires but the package leaves out starts
+// nothing at all: the shell throws before it opens a window.
+test('both shell packages carry every local module the shell requires', () => {
+  const windows = fs.readFileSync(path.join(repoRoot, 'scripts', 'stage-windows-portable.sh'), 'utf8');
+  const listed = (text) => new Set((text.match(/for shell_file in ([^;\n]+);/) || ['', ''])[1].trim().split(/\s+/));
+  const mac = listed(script);
+  const win = listed(windows);
+  const shellDir = path.join(repoRoot, 'desktop', 'shell');
+  const seen = new Set();
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = fs.readFileSync(path.join(shellDir, file), 'utf8');
+    for (const match of source.matchAll(/require\('\.\/([^'/]+?)(?:\.js)?'\)/g)) visit(`${match[1]}.js`);
+  };
+  visit('main.js');
+  visit('preload.js');
+  assert.ok(seen.has('maintenance-folders.js'));
+  for (const file of seen) {
+    assert.ok(mac.has(file), `scripts/package-workass-macos.sh does not package desktop/shell/${file}`);
+    assert.ok(win.has(file), `scripts/stage-windows-portable.sh does not package desktop/shell/${file}`);
+  }
+});
+
 test('an explicit package activation carries one controller recovery attempt', () => {
   assert.match(installer, /open -na "\$installed"[^\n]*\\\n[\s\S]*WORKASS_CONTROLLER_RECOVERY=1/);
 });

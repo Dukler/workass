@@ -408,6 +408,8 @@ event/reply/proc RSS counts are printed.
 - ACP engine RSS is sampled with `ps -o rss= -p <pid>` on macOS/Linux and `tasklist /FI "PID eq N" /FO CSV /NH` on Windows at `--rss-sample-interval`.
 - `proc:changed` and `proc:list` include the existing process fields plus additive `state` and `rssKb` fields for ACP engines.
 - Engines crossing `--engine-max-age` or `--engine-max-rss-kb` are marked for recycle and hibernate only at the next idle moment.
+- `storage:usage` (concurrent read) answers the state directory's size as `{computedAt, totalBytes, parts:{chats, images, jobs, other}}`. One background walk measures it and is kept for five minutes; while the first walk runs the answer is `{pending:true}`.
+- `diagnostics:export` (concurrent read) answers one redacted report: the daemon, its effective engine settings, providers, processes, storage, and the last 256 KB of up to six `*.log` files in `WORKASS_LOG_ROOT`, which the shell sets for the daemon it starts. Secret-named fields and secret-shaped text are replaced with `[redacted]`.
 - `--spare-sessions` is accepted but inert in the daemon (logged at startup): every chat is actor-owned and opens its provider lane with an explicit cwd, which a pre-warmed spare can never satisfy. Sessions start on demand, as in Claude Code. The ACP manager's spare pool (`--spare-ttl`) remains for direct manager use.
 - Other non-shell-local wire handlers remain P2 stubs returning documented empty/default result shapes.
 

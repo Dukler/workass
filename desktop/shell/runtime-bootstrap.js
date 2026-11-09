@@ -138,6 +138,9 @@ function spawnPortableDaemon({ runtime, executable, platform = process.platform,
         ...env,
         WORKASS_PROFILE: runtime.profile,
         WORKASS_DATA_ROOT: runtime.dataRoot,
+        // Where this daemon's stdout and stderr go (below), so its diagnostic
+        // export can include the end of them (diagnostics:export).
+        WORKASS_LOG_ROOT: runtime.logRoot,
         WORKASS_BROWSER_CONTROL_FILE: runtime.browserControlFile,
         ...(runtime.profile === 'prod' ? { WORKASS_PROD: '1' } : {}),
       },
