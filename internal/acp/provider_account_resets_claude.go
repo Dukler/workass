@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,35 @@ const (
 	claudeKeychainItemMissingCode = 44
 	claudeKeychainLockedCode      = 36
 )
+
+// The account API decides who may see and use resets by the client it is
+// talking to: a request that does not say it is Claude Code is answered
+// eligible:false, ineligible_reason "surface", with no grants at all (owner
+// 2026-11-09: two Fable resets on claude.ai, none in Cuentas). So every call
+// sends Claude Code's own User-Agent, with the version the manager last
+// detected (ObserveCLIVersion), or this one before it has.
+const claudeCLIVersionFallback = "2.1.319"
+
+var claudeCLIVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$`)
+
+// ObserveCLIVersion keeps the installed Claude Code version for the
+// User-Agent (cliVersionObserver, updates.go).
+func (s *claudeAccountResetSource) ObserveCLIVersion(version string) {
+	version = strings.TrimSpace(version)
+	if s == nil || !claudeCLIVersionPattern.MatchString(version) {
+		return
+	}
+	s.cliVersion.Store(&version)
+}
+
+// userAgent is the User-Agent Claude Code itself sends.
+func (s *claudeAccountResetSource) userAgent() string {
+	version := claudeCLIVersionFallback
+	if seen := s.cliVersion.Load(); seen != nil {
+		version = *seen
+	}
+	return "claude-cli/" + version + " (external, cli)"
+}
 
 var (
 	// The same shapes Claude Code checks before it sends a claim.
@@ -78,6 +108,8 @@ type claudeAccountResetSource struct {
 
 	mu     sync.Mutex
 	cached *claudeOAuthCredential
+	// cliVersion is the installed Claude Code version (ObserveCLIVersion).
+	cliVersion atomic.Pointer[string]
 }
 
 func newClaudeAccountResetSource() *claudeAccountResetSource {
@@ -188,6 +220,7 @@ func (s *claudeAccountResetSource) call(ctx context.Context, method, path string
 		request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
 		request.Header.Set("anthropic-beta", claudeOAuthBetaHeader)
 		request.Header.Set("Accept", "application/json")
+		request.Header.Set("User-Agent", s.userAgent())
 		if payload != nil {
 			request.Header.Set("Content-Type", "application/json")
 		}

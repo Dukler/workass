@@ -847,6 +847,11 @@ func (m *Manager) setProviderCLIVersion(providerID string, version *CLIVersion) 
 		return false
 	}
 	providerID = normalizeProviderID(providerID)
+	// A source that answers as the provider's CLI (Claude's account resets)
+	// learns which version is installed.
+	if observer, ok := providerAdapterForID(providerID).accountResets.(cliVersionObserver); ok {
+		observer.ObserveCLIVersion(version.Version)
+	}
 	refresh := false
 	previousStatus := providerStatusInactive
 	previousError := ""

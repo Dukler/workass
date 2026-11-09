@@ -51,6 +51,12 @@ const (
 	accountResetActionBackoff = 10 * time.Minute
 )
 
+// cliVersionObserver is an account reset source that wants the installed CLI
+// version, told whenever the manager detects it.
+type cliVersionObserver interface {
+	ObserveCLIVersion(version string)
+}
+
 type accountResetSource interface {
 	// ConsentNote is the one line shown under the consent button: what the
 	// operating system will ask, if anything.
