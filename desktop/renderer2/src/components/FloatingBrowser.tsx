@@ -8,6 +8,7 @@ import {
 import { presentBrowserPage, slotRect, SURFACE_Z_FLOAT, SURFACE_Z_FULL, withdrawBrowserPage } from '../browser-surface';
 import { store, useApp } from '../store/store';
 import { chatPane } from '../store/right-pane';
+import { pushEscapeLayer } from '../markdown/html-frames';
 import type { Chat } from '../store/types';
 import { IcClose, IcFullscreen, IcFullscreenExit, IcGrip, IcPopOut, IcRail } from '../icons';
 import {
@@ -235,12 +236,11 @@ function FloatingBrowserView({ api, chat, mode }: { api: WorkassBrowserApi; chat
   // The page follows the frame when it is re-placed or the chat area changes.
   useLayoutEffect(() => { sync.current(); }, [live, placement, width, container]);
 
-  // Esc leaves full screen while the app has focus.
+  // Esc leaves full screen while the app has focus, and only that: it must
+  // never also reach the app's Esc, which cancels a running turn.
   useEffect(() => {
     if (!full) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') store.toggleBrowserFullscreen(); };
-    addEventListener('keydown', onKey);
-    return () => removeEventListener('keydown', onKey);
+    return pushEscapeLayer(() => store.toggleBrowserFullscreen());
   }, [full]);
 
   const canPopOut = typeof api.popOut === 'function';

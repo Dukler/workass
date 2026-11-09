@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { store, useApp } from '../store/store';
 import { IcClose } from '../icons';
+import { pushEscapeLayer } from '../markdown/html-frames';
 
 // Full-size image viewer. One instance mounted at the app root; opens when
 // store.imageLightbox is set (click any chat image). Backdrop click, Esc, or the
@@ -10,11 +11,11 @@ import { IcClose } from '../icons';
 export function ImageLightbox() {
   const app = useApp();
   const box = app.imageLightbox;
+  // Esc belongs to the viewer while it is open: closing it must never also
+  // reach the app's Esc, which cancels a running turn.
   useEffect(() => {
     if (!box) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') store.closeImageLightbox(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    return pushEscapeLayer(() => store.closeImageLightbox());
   }, [box]);
   if (!box) return null;
   return createPortal(
