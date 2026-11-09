@@ -10,6 +10,7 @@ import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, 
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll, transcriptReaderLeftUnannounced } from '../transcript-scroll';
 import { syncFlowBlocks } from '../flow-window';
+import { blockFlipFrames, flipBlocks, registerColumnSlideView, type BlockBox } from '../transcript-flip';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
@@ -298,7 +299,12 @@ function lastBox(parent: Element): Element | null {
   return null;
 }
 
-function measureUnits(doc: Element): MeasuredUnit[] {
+// `shift` is how far a box is drawn from where it is laid out: nonzero only
+// while the right pane's rewrap glides (glideShift in Transcript).
+type Shift = (node: Element) => number;
+const noShift: Shift = () => 0;
+
+function measureUnits(doc: Element, shift: Shift = noShift): MeasuredUnit[] {
   const units: MeasuredUnit[] = [];
   for (const node of doc.children) {
     const key = (node as HTMLElement).dataset?.vunit;
@@ -306,14 +312,14 @@ function measureUnits(doc: Element): MeasuredUnit[] {
     const first = firstBox(node);
     const last = lastBox(node);
     if (!first || !last) continue;
-    units.push({ key, top: first.getBoundingClientRect().top, bottom: last.getBoundingClientRect().bottom });
+    units.push({ key, top: first.getBoundingClientRect().top - shift(first), bottom: last.getBoundingClientRect().bottom - shift(last) });
   }
   return units;
 }
 
 // Reading position is anchored on a message, not a unit: a turn block can grow
 // at its top when an older page completes it, and its key changes with it.
-function measureMessages(doc: Element): MeasuredUnit[] {
+function measureMessages(doc: Element, shift: Shift = noShift): MeasuredUnit[] {
   const messages: MeasuredUnit[] = [];
   for (const node of doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')) {
     const key = node.dataset.chatFindMessage;
@@ -321,7 +327,7 @@ function measureMessages(doc: Element): MeasuredUnit[] {
     const first = boxed ? node : firstBox(node);
     const last = boxed ? node : lastBox(node);
     if (!key || !first || !last) continue;
-    messages.push({ key, top: first.getBoundingClientRect().top, bottom: last.getBoundingClientRect().bottom });
+    messages.push({ key, top: first.getBoundingClientRect().top - shift(first), bottom: last.getBoundingClientRect().bottom - shift(last) });
   }
   return messages;
 }
@@ -553,6 +559,24 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // still holds the viewport's top edge. Between picks, the held element
   // keeps its own baseline (holdAnchor moves it with every correction).
   const nodePick = useRef<number | null>(null);
+  // While the right pane's rewrap glides (captureColumnSlide below), the
+  // blocks on screen carry a transform, so their rects are where they are
+  // drawn, not where they are laid out. Everything that holds the reader
+  // subtracts it and keeps working through the glide: the window re-cut that
+  // the new width causes lands during it, and with the anchor paused that
+  // threw a reader ~1100 px.
+  const glided = useRef(new Set<Element>());
+  const flipGen = useRef(0);
+  const glideShift: Shift = (node) => {
+    if (glided.current.size === 0) return 0;
+    const doc = docRef.current;
+    for (let el: Element | null = node; el && el !== doc; el = el.parentElement) {
+      if (!glided.current.has(el)) continue;
+      const transform = getComputedStyle(el).transform;
+      return transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0;
+    }
+    return 0;
+  };
   const pickAnchorNode = () => {
     nodePick.current = null;
     const el = scrollRef.current;
@@ -570,8 +594,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const held = anchorNode.current;
     if (held && held.node.isConnected && doc.contains(held.node)) {
       const box = held.node.getBoundingClientRect();
-      if (box.top <= line + ANCHOR_HOLD_SLACK_PX && box.bottom > line && box.height <= viewport.height) {
-        held.contentTop = box.top - viewport.top + el.scrollTop;
+      const shift = glideShift(held.node);
+      if (box.top - shift <= line + ANCHOR_HOLD_SLACK_PX && box.bottom - shift > line && box.height <= viewport.height) {
+        held.contentTop = box.top - shift - viewport.top + el.scrollTop;
         return;
       }
     }
@@ -581,7 +606,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const node = hit && hit !== doc && doc.contains(hit) && !hit.classList.contains('vpad')
       ? anchorBlockAt(hit, line, isInlineBox)
       : null;
-    anchorNode.current = node ? { node, contentTop: node.getBoundingClientRect().top - viewport.top + el.scrollTop } : null;
+    anchorNode.current = node ? { node, contentTop: node.getBoundingClientRect().top - glideShift(node) - viewport.top + el.scrollTop } : null;
   };
   const recordAnchor = () => {
     const el = scrollRef.current;
@@ -590,7 +615,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     // here is what replaced a-00094 with the first mounted row (a-00073).
     if (!el || !doc || restoring.current) return;
     const viewport = el.getBoundingClientRect();
-    const next = transcriptAnchorAt(measureMessages(doc), viewport.top);
+    const next = transcriptAnchorAt(measureMessages(doc, glideShift), viewport.top);
     if (next) {
       anchor.current = next;
       anchorContentTop.current = next.offset + el.scrollTop;
@@ -654,14 +679,14 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     let delta: number | null = null;
     const exact = anchorNode.current;
     if (exact && exact.node.isConnected && doc.contains(exact.node)) {
-      delta = exact.node.getBoundingClientRect().top - viewportTop + el.scrollTop - exact.contentTop;
+      delta = exact.node.getBoundingClientRect().top - glideShift(exact.node) - viewportTop + el.scrollTop - exact.contentTop;
       // The element moved by delta in the content; that is its new baseline.
       exact.contentTop += delta;
     } else if (anchorContentTop.current !== null) {
       const node = [...doc.querySelectorAll<HTMLElement>('[data-vunit] [data-chat-find-message]')]
         .find((candidate) => candidate.dataset.chatFindMessage === held.key);
       const box = node && (node.getClientRects().length > 0 ? node : firstBox(node));
-      if (box) delta = box.getBoundingClientRect().top - viewportTop + el.scrollTop - anchorContentTop.current;
+      if (box) delta = box.getBoundingClientRect().top - glideShift(box) - viewportTop + el.scrollTop - anchorContentTop.current;
     }
     if (delta !== null && Math.abs(delta) >= 0.5) setScrollTop(el, el.scrollTop + delta);
   };
@@ -711,6 +736,71 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const clamped = Math.max(0, Math.min(top, el.scrollHeight - el.clientHeight));
     if (Math.abs(el.scrollTop - clamped) >= 1) el.scrollTop = clamped;
     lastScrollTop.current = el.scrollTop;
+  };
+
+  // The right pane opening or closing rewraps this column once (App,
+  // slidePane). Before it does, note where each block on screen is drawn.
+  // Once this transcript has laid itself out at the new width and applied its
+  // own rule (a followed reader keeps the bottom, owner: the chat must never
+  // leave it; anyone else keeps the reading line), every block that moved
+  // glides from where it was (transcript-flip.ts) over the slide's 220 ms,
+  // instead of landing in one frame (owner 2026-11-09: "the text jumps up").
+  // That point is the resize observer below: it runs after this frame's
+  // layout effects (unit heights re-measured, the window re-cut, the anchor
+  // held), so the starting offsets are exact. Measured any earlier, the window
+  // re-cut still moved the text 12 px after the glide had started.
+  const pendingGlide = useRef<{ before: Map<HTMLElement, BlockBox>; timing: KeyframeAnimationOptions } | null>(null);
+  const glideAnims = useRef<Animation[]>([]);
+  const captureColumnSlide = useRef<(timing: KeyframeAnimationOptions) => void>(() => {});
+  captureColumnSlide.current = (timing) => {
+    pendingGlide.current = null;
+    const el = scrollRef.current;
+    const doc = docRef.current;
+    if (!el || !doc || restoring.current) return;
+    const viewport = el.getBoundingClientRect();
+    // Blocks just off screen may glide into view, so look past both edges.
+    const reach = viewport.height * 0.6;
+    const before = new Map<HTMLElement, BlockBox>();
+    for (const block of flipBlocks(doc, viewport.top - reach, viewport.bottom + reach)) {
+      const box = block.getBoundingClientRect();
+      before.set(block, { top: box.top - viewport.top, height: box.height });
+    }
+    // A glide still running (the pane toggled back mid-slide) ends here; the
+    // new one starts from where its blocks were drawn, read just above.
+    for (const anim of glideAnims.current) anim.cancel();
+    glideAnims.current = [];
+    glided.current.clear();
+    flipGen.current += 1;
+    const pending = { before, timing };
+    pendingGlide.current = pending;
+    // A slide that rewraps nothing resizes nothing, so the note expires.
+    requestAnimationFrame(() => requestAnimationFrame(() => { if (pendingGlide.current === pending) pendingGlide.current = null; }));
+  };
+  useLayoutEffect(() => registerColumnSlideView({ capture: (timing) => captureColumnSlide.current(timing) }), []);
+  const glideFromCapture = () => {
+    const pending = pendingGlide.current;
+    const el = scrollRef.current;
+    if (!pending || !el) return;
+    pendingGlide.current = null;
+    const now = el.getBoundingClientRect();
+    const onScreen = (b: BlockBox) => b.top + b.height > 0 && b.top < now.height;
+    const anims: Animation[] = [];
+    for (const [block, was] of pending.before) {
+      if (!block.isConnected) continue;
+      const box = block.getBoundingClientRect();
+      const is = { top: box.top - now.top, height: box.height };
+      if (!onScreen(was) && !onScreen(is)) continue;
+      const frames = blockFlipFrames(was, is);
+      if (frames) { anims.push(block.animate(frames, pending.timing)); glided.current.add(block); }
+    }
+    glideAnims.current = anims;
+    if (anims.length === 0) return;
+    const gen = flipGen.current;
+    void Promise.allSettled(anims.map((anim) => anim.finished)).then(() => {
+      if (flipGen.current !== gen) return; // a newer slide owns the glide
+      glideAnims.current = [];
+      glided.current.clear();
+    });
   };
 
   const loadCompleteHistory = useCallback(async () => {
@@ -960,7 +1050,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   });
   const commitLayout = (doc: HTMLDivElement) => {
     mountedWindow.current = win;
-    recordUnitHeights(heights.current, measureUnits(doc));
+    recordUnitHeights(heights.current, measureUnits(doc, glideShift));
     if (!virtual) { recordAnchor(); return; }
     if (restoring.current) {
       // Arriving at a chat that was left mid-read: its row goes back exactly
@@ -1094,7 +1184,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
           heldHeight.current = 0;
           doc.style.removeProperty('min-height');
         }
-        const height = doc.offsetHeight;
+        // The exact height: offsetHeight is rounded, and a min-height a
+        // fraction of a px taller than the page grew it inside this observer
+        // (a "ResizeObserver loop" error every 700 ms while followed).
+        const height = doc.getBoundingClientRect().height;
         if (height > heldHeight.current) {
           heldHeight.current = height;
           doc.style.minHeight = `${height}px`;
@@ -1105,10 +1198,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       if (!stick.current) {
         holdAnchor();
         recordAnchor();
-        return;
+      } else if (pendingGlide.current) {
+        // The pane's rewrap lands on the bottom at once; its glide is the motion.
+        scheduler.dispose();
+        spring.stop();
+        setScrollTop(el, el.scrollHeight);
+      } else {
+        scheduler.dispose();
+        follow();
       }
-      scheduler.dispose();
-      follow();
+      glideFromCapture();
     };
     const mo = new MutationObserver(scheduler.schedule);
     mo.observe(doc, { childList: true, subtree: true, characterData: true });

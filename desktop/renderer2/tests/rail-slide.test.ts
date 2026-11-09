@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { columnSlideFrames, PANE_SLIDE_MS, railSlides, READ_MAX, readingWidth } from '../src/store/right-pane.ts';
+import * as rightPane from '../src/store/right-pane.ts';
+import { columnSlideFrames, railSlides } from '../src/store/right-pane.ts';
+import { blockFlipFrames, flipBlocks, type BlockBox } from '../src/transcript-flip.ts';
 import { anchorBlockAt, type AnchorBox } from '../src/transcript-window.ts';
 
 // 2026-11-08: opening the right pane rewrapped the whole transcript in one
@@ -76,7 +78,7 @@ test('a followed transcript holds its height only at the width it was measured a
   const transcript = readFileSync(new URL('../src/components/Transcript.tsx', import.meta.url), 'utf8');
   const onResize = transcript.slice(transcript.indexOf('const onResize = () => {'), transcript.indexOf('const mo = new MutationObserver'));
   assert.match(onResize, /if \(width !== heldWidth\.current\) \{\s*heldWidth\.current = width;\s*heldHeight\.current = 0;\s*doc\.style\.removeProperty\('min-height'\);/);
-  assert.ok(onResize.indexOf('heldWidth.current') < onResize.indexOf('const height = doc.offsetHeight;'), 'the new width is settled before the height is read');
+  assert.ok(onResize.indexOf('heldWidth.current') < onResize.indexOf('const height = doc.getBoundingClientRect().height;'), 'the new width is settled before the height is read');
 });
 
 test('the closing rail is never unmounted for a frame', () => {
@@ -112,26 +114,112 @@ test('the anchor pick undoes a layout shift before it re-reads the held element'
   assert.match(pick, /anchorBlockAt\(hit, line, isInlineBox\)/);
 });
 
-// 2026-11-09 (owner, option 1 of .dev/mocks/rightpane-v1.html): opening the
-// pane still made the text jump up once, because the narrower column rewrapped
-// and a reader at the bottom kept the bottom. The column now always has the
-// width it has with the pane open, so the pane only slides it sideways.
-test('the reading column keeps the width it has with the right pane open', () => {
-  const base = { side: true, sideW: 288, railW: 312, minMain: 600 };
-  // A 14-inch window: 1512 - 288 - 312 = 912 beside the pane, less the composer's 48.
-  assert.equal(readingWidth({ ...base, winW: 1512 }), 864);
-  // Wide enough that the full measure fits beside the pane: unchanged.
-  assert.equal(readingWidth({ ...base, winW: 1920 }), READ_MAX);
-  // Hiding the sidebar gives the column the room back.
-  assert.equal(readingWidth({ ...base, winW: 1512, side: false }), 1040);
-  // A wider pane narrows it the same way open or shut.
-  assert.equal(readingWidth({ ...base, winW: 1512, railW: 470 }), 706);
-  // At or under 1180px the CSS drops the rail; too little room beside it keeps the old measure.
-  assert.equal(readingWidth({ ...base, winW: 1180 }), READ_MAX);
-  assert.equal(readingWidth({ ...base, winW: 1190, railW: 320 }), READ_MAX);
+// 2026-11-09 (owner): a column fixed at the width it has beside the pane
+// ("option 1") cost ~270 px of text with the pane closed. The column fills the
+// window again, up to 1040 px; the one rewrap glides instead of jumping.
+test('the reading column is never narrowed to make room for the pane', () => {
   const app = readFileSync(new URL('../src/components/App.tsx', import.meta.url), 'utf8');
-  const layout = app.slice(app.indexOf('function applyRootLayout('));
-  assert.match(layout, /root\.style\.setProperty\('--read', `\$\{readingWidth\(\{ winW, side: app\.panes\.side, sideW: app\.panes\.sideW, railW: railEff, minMain: MIN_MAIN \}\)\}px`\);/);
-  // Set whether or not the pane is open: before the class that opens it.
-  assert.ok(layout.indexOf("'--read'") < layout.indexOf("cls.push('no-rail')"));
+  assert.doesNotMatch(app, /setProperty\('--read'/);
+  assert.equal('readingWidth' in rightPane, false);
+  const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+  assert.match(css, /--read: 1040px;/);
+  assert.match(css, /\.doc \{ max-width: var\(--read\); margin: 0 auto;/);
+});
+
+const ease = (() => {
+  // The slide's curve, cubic-bezier(.2, .7, .3, 1).
+  const cx = 0.6, bx = 3 * (0.3 - 0.2) - cx, ax = 1 - cx - bx, cy = 2.1, by = 3 * (1 - 0.7) - cy, ay = 1 - cy - by;
+  const x = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const y = (t: number) => ((ay * t + by) * t + cy) * t;
+  return (p: number) => { let lo = 0, hi = 1; for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (x(m) < p) lo = m; else hi = m; } return y((lo + hi) / 2); };
+})();
+const translateOf = (frame: Keyframe) => Number(/translateY\((-?[\d.]+)px\)/.exec(String(frame.transform))![1]);
+const clipOf = (frame: Keyframe) => (frame.clipPath ? Number(/inset\(0px -100vw (-?[\d.]+)px -100vw\)/.exec(String(frame.clipPath))![1]) : 0);
+
+test('every block starts where it was drawn and glides to its new place', () => {
+  assert.equal(blockFlipFrames({ top: 40, height: 66 }, { top: 40, height: 66 }), null, 'nothing moved');
+  assert.equal(blockFlipFrames({ top: 40, height: 66 }, { top: 40.3, height: 60 }), null, 'a shrink in place needs no glide');
+  // Moved up 129 px by the rewrap below it (a followed reader opening the pane at 1280 px).
+  const moved = blockFlipFrames({ top: 160, height: 22 }, { top: 31, height: 22 })!;
+  assert.deepEqual(moved, [{ transform: 'translateY(129px)' }, { transform: 'translateY(0px)' }]);
+  // Grew from 3 lines to 4: drawn at its old height first, its new last line uncovered as it goes.
+  const grown = blockFlipFrames({ top: 300, height: 65 }, { top: 250, height: 87 })!;
+  assert.equal(translateOf(grown[0]), 50);
+  assert.equal(clipOf(grown[0]), 22);
+  assert.equal(translateOf(grown[1]), 0);
+  assert.equal(clipOf(grown[1]), 0);
+});
+
+test('two blocks gliding never draw over each other, and the gap between them is the new one', () => {
+  // Old layout: A at 100 (3 lines), B right under it after a 12 px gap.
+  // The column narrowed: A grew a line and everything moved up (bottom kept).
+  const gap = 12;
+  const was: BlockBox[] = [{ top: 100, height: 65 }, { top: 177, height: 43 }];
+  const is: BlockBox[] = [{ top: 20, height: 87 }, { top: 119, height: 65 }];
+  const frames = was.map((w, i) => blockFlipFrames(w, is[i])!);
+  for (let step = 0; step <= 22; step++) {
+    const left = 1 - ease(step / 22);
+    const drawn = frames.map((f, i) => {
+      const top = is[i].top + translateOf(f[0]) * left;
+      return { top, bottom: top + is[i].height - clipOf(f[0]) * left };
+    });
+    assert.ok(Math.abs(drawn[1].top - drawn[0].bottom - gap) < 1e-6, `gap at ${step}/22`);
+  }
+});
+
+test('the glide moves the innermost blocks that draw something, never one inside another', () => {
+  type Fake = { name: string; style: Partial<CSSStyleDeclaration>; box: { top: number; bottom: number; height: number }; children: Fake[]; text?: string };
+  const plain = { display: 'block', position: 'static', overflowX: 'visible', overflowY: 'visible', backgroundColor: 'rgba(0, 0, 0, 0)', backgroundImage: 'none', boxShadow: 'none', borderTopWidth: '0px', borderBottomWidth: '0px', borderLeftWidth: '0px', borderRightWidth: '0px' };
+  const node = (name: string, style: Partial<CSSStyleDeclaration>, top: number, bottom: number, children: Fake[] = [], text?: string): Fake => ({ name, style: { ...plain, ...style }, box: { top, bottom, height: bottom - top }, children, text });
+  const toElement = (fake: Fake): Element => {
+    const kids = fake.children.map(toElement);
+    const textNodes = fake.text ? [{ nodeType: 3, textContent: fake.text }] : [];
+    return {
+      name: fake.name, offsetParent: null, children: kids, childNodes: [...textNodes, ...kids.map((k) => Object.assign(k, { nodeType: 1 }))],
+      firstChild: kids[0] ?? textNodes[0] ?? null, getBoundingClientRect: () => fake.box, style: fake.style,
+    } as unknown as Element;
+  };
+  const tree = toElement(node('doc', {}, 0, 2000, [
+    node('vunit', { display: 'contents' }, 0, 0, [
+      node('amsg', {}, 0, 900, [
+        node('p1', {}, 0, 60, [], 'text'),
+        node('list', {}, 70, 140, [node('li1', { display: 'list-item' }, 70, 100, [], 'one'), node('li2', { display: 'list-item' }, 100, 140, [], 'two')]),
+        node('codebox', { backgroundColor: 'rgb(30, 30, 30)' }, 150, 260, [node('pre', {}, 160, 250, [], 'code')]),
+        node('tablewrap', { overflowX: 'auto', overflowY: 'auto' }, 270, 400, [node('table', { display: 'table' }, 270, 400, [], 'cells')]),
+        node('far', {}, 1500, 1600, [], 'off screen'),
+      ]),
+    ]),
+    node('userpill', { display: 'flex' }, 910, 960, [node('bubble', {}, 910, 960, [], 'hi')]),
+  ]));
+  const styleOf = (el: Element) => (el as unknown as { style: CSSStyleDeclaration }).style;
+  const names = flipBlocks(tree, -100, 1000, styleOf).map((el) => (el as unknown as { name: string }).name);
+  assert.deepEqual(names, ['p1', 'li1', 'li2', 'codebox', 'tablewrap', 'userpill']);
+});
+
+test('the glide is measured before the commit and started after the transcript has settled', () => {
+  const app = readFileSync(new URL('../src/components/App.tsx', import.meta.url), 'utf8');
+  // getSnapshotBeforeUpdate runs before React changes any DOM; read from an
+  // effect, the transcript's own window re-cut had already moved the text.
+  const snapshot = app.slice(app.indexOf('class RailSlideSnapshot'), app.indexOf('export function App()'));
+  assert.match(snapshot, /getSnapshotBeforeUpdate\(prev[^)]*\) \{\s*if \(prev\.chatId === this\.props\.chatId && railSlides\(prev\.pane, this\.props\.pane\)\) \{/);
+  assert.match(snapshot, /duration: PANE_SLIDE_MS, easing: PANE_SLIDE_EASING/);
+  assert.match(snapshot, /for \(const view of columnSlideViews\(\)\) view\.capture\(timing\);/);
+  assert.match(app, /<RailSlideSnapshot chatId=\{chat\?\.id \?\? null\} pane=\{activePane\} \/>/);
+  const transcript = readFileSync(new URL('../src/components/Transcript.tsx', import.meta.url), 'utf8');
+  const onResize = transcript.slice(transcript.indexOf('const onResize = () => {'), transcript.indexOf('const mo = new MutationObserver'));
+  // After the hold or the pin, in the resize observer: after this frame's layout effects, before paint.
+  assert.ok(onResize.indexOf('holdAnchor();') < onResize.indexOf('glideFromCapture();'));
+  assert.match(onResize, /\} else if \(pendingGlide\.current\) \{\s*\/\/[^\n]*\n\s*scheduler\.dispose\(\);\s*spring\.stop\(\);\s*setScrollTop\(el, el\.scrollHeight\);/, 'a followed reader lands on the bottom at once; the glide is the motion');
+});
+
+test('the reader stays held while blocks glide: positions are read where they are laid out', () => {
+  const transcript = readFileSync(new URL('../src/components/Transcript.tsx', import.meta.url), 'utf8');
+  // Pausing the anchor during the glide let the window re-cut throw a
+  // scrolled-up reader ~1100 px (rig, first slide after a reload).
+  assert.doesNotMatch(transcript, /gliding\(\)/);
+  const hold = transcript.slice(transcript.indexOf('const holdAnchor = () => {'), transcript.indexOf('// Cut the window again'));
+  assert.match(hold, /exact\.node\.getBoundingClientRect\(\)\.top - glideShift\(exact\.node\)/);
+  assert.match(hold, /box\.getBoundingClientRect\(\)\.top - glideShift\(box\)/);
+  assert.match(transcript, /measureMessages\(doc, glideShift\)/);
+  assert.match(transcript, /measureUnits\(doc, glideShift\)/);
 });
