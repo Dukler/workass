@@ -1817,6 +1817,59 @@ func TestProviderChatStartChangedImageRetryDoesNotPersistSidecar(t *testing.T) {
 	}
 }
 
+// A turn another client sent (the phone's, seen on the desktop) reaches a
+// window only as the broadcast start receipt, which is all that window builds
+// the user row from. The receipt names the turn's images by reference, the
+// shape of a deferred archive read, and never carries their bytes.
+func TestStartReceiptCarriesUserImagesByReferenceOnly(t *testing.T) {
+	runtime, _, _, _, info := newSteerRegressionFixture(t)
+	data := sizedPNGBase64(t, 40, 30)
+	admission, err := runtime.AdmitStart(context.Background(), map[string]any{
+		"kind": "app-chat", "title": "Steer regression", "tabId": "steer-regression-tab", "chatId": "steer-regression-chat",
+		"providerId": "mock", "sessionId": info.SessionID, "prompt": "look at this",
+		"operationId": "phone-image-turn", "userMessageId": "phone-image-user", "assistantMessageId": "phone-image-assistant",
+		"images": []any{map[string]any{"mimeType": "image/png", "name": "pegada.png", "data": data}},
+	}, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := admission.Receipt
+	admission.Dispatch()
+	defer waitProviderChatIdle(t, runtime, "steer-regression-chat", 5*time.Second)
+	images := anySlice(receipt["userImages"])
+	if len(images) != 1 {
+		t.Fatalf("receipt userImages = %#v", receipt["userImages"])
+	}
+	image := mapFromAnyMain(images[0])
+	if ref := fieldString(image, "deferredImageRef"); ref != sessionImageDirname+"/"+sessionImageName(data) {
+		t.Fatalf("receipt image ref = %q", ref)
+	}
+	if fieldString(image, "mimeType") != "image/png" || fieldString(image, "name") != "pegada.png" ||
+		intValue(image["width"]) != 40 || intValue(image["height"]) != 30 {
+		t.Fatalf("receipt image = %#v", image)
+	}
+	if inline, ok := image["data"].(string); !ok || inline != "" {
+		t.Fatalf("receipt image carries data %#v", image["data"])
+	}
+	if _, leaked := image[sessionImageDataRefField]; leaked {
+		t.Fatalf("receipt leaked the internal ref field: %#v", image)
+	}
+	if _, ok := receipt["images"]; ok {
+		t.Fatalf("user images landed on the assistant media field: %#v", receipt["images"])
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), data) {
+		t.Fatal("the broadcast receipt carries the image bytes")
+	}
+	// A turn without images keeps the receipt it always had.
+	if plain := actorJobReceipt(chat.State{}, chat.QueueEntry{OperationID: "plain"}, "tab", "chat"); plain["userImages"] != nil {
+		t.Fatalf("image-less receipt gained userImages: %#v", plain["userImages"])
+	}
+}
+
 func TestReplaceStagedQueueStaleRevisionDoesNotPersistAttachmentSidecar(t *testing.T) {
 	runtime, _, _, stateDir, _ := newSteerRegressionFixture(t)
 	_, err := runtime.ReplaceStagedQueue(

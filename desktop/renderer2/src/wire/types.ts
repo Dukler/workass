@@ -130,6 +130,10 @@ export interface PublicJob {
   // Provider-neutral assistant media. Structured ACP image blocks omit source;
   // workspace-local Markdown imports retain their target for exact rendering.
   images?: Array<{ mimeType: string; data: string; name?: string; source?: string }>;
+  // The user turn's own images, by reference only (data is ''), on the start
+  // receipt. A window that did not send the turn (another device's) draws the
+  // user row from it. Additive; older daemons omit it.
+  userImages?: Array<{ mimeType: string; data: string; name?: string; deferredImageRef?: string; source?: string; width?: number; height?: number }>;
 }
 
 export type JobEvent =

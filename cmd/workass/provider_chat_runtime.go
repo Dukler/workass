@@ -2344,7 +2344,7 @@ func actorJobReceipt(state chat.State, input chat.QueueEntry, tabID, chatID stri
 		providerID = string(lane.Identity.Realm.ProviderID)
 		delivery = lane.Delivery
 	}
-	return map[string]any{
+	receipt := map[string]any{
 		"id": providercontract.DeriveJobID(chatID, input.OperationID), "kind": "app-chat", "key": nil,
 		"title":  firstNonEmptyString(strings.TrimSpace(input.Presentation.Title), "Chat · ACP"),
 		"status": "running", "startedAt": startedAt, "finishedAt": nil, "code": nil,
@@ -2355,6 +2355,34 @@ func actorJobReceipt(state chat.State, input chat.QueueEntry, tabID, chatID stri
 		"consumedSteerIds": []string{}, "userMessageId": input.Presentation.UserMessageID,
 		"assistantMessageId": input.Presentation.AssistantMessageID, "promptText": input.Presentation.PromptText,
 	}
+	// The user turn's own images, by reference only, so a client that did not
+	// send this turn (the phone's turn seen on the desktop) draws the user row
+	// it builds from this receipt with its images. Never bytes: the receipt is
+	// broadcast to every client. "images" stays the job's assistant media.
+	if images := actorReceiptUserImages(input.Attachments); len(images) > 0 {
+		receipt["userImages"] = images
+	}
+	return receipt
+}
+
+// actorReceiptUserImages projects a turn's attachments exactly as a deferred
+// archive read does: {mimeType, name, data:"", deferredImageRef, width, height}.
+// An attachment without a durable session reference is left out rather than
+// failing the receipt of an already admitted turn.
+func actorReceiptUserImages(attachments []providercontract.Attachment) []any {
+	out := make([]any, 0, len(attachments))
+	for _, attachment := range attachments {
+		images, err := projectionAttachments([]providercontract.Attachment{attachment})
+		if err != nil {
+			continue
+		}
+		out = append(out, images...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	deferArchiveMessageImages([]any{map[string]any{"images": out}})
+	return out
 }
 
 func nullableActorString(value string) any {

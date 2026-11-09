@@ -105,6 +105,71 @@ test('an unanchored job:start synthesizes canonical rows and streams into the as
   assert.equal(owner.messages[1].status, 'running');
 });
 
+// The phone's turn reaches the desktop only as the start receipt; its images
+// ride it by reference (u-mw9p0o4o-1 showed text alone until a cold reopen).
+const phoneImage = {
+  mimeType: 'image/jpeg', data: '', name: 'pegada.jpg',
+  deferredImageRef: 'images/4dbb386c98dae6af057589148cc15c0f8f2c2dd551cdab670e2ccb91638c07bd', width: 1290, height: 2796,
+};
+
+test('a turn another device sent shows its images from the start receipt', () => {
+  const { subject, owner } = subjectWithChat();
+
+  (subject as any).onJobEvent({ type: 'start', job: job({ userImages: [phoneImage] }) });
+  const user = owner.messages.find((message) => message.id === 'user-canonical');
+  assert.equal(user?.content, 'canonical prompt');
+  assert.deepEqual(user?.images, [phoneImage]);
+  const assistant = owner.messages.find((message) => message.id === 'assistant-canonical');
+  assert.equal(assistant?.images, undefined);
+
+  // A row that already exists without images gains them; one with its own
+  // (the window that sent the turn) is left as it is.
+  const { subject: other, owner: existing } = subjectWithChat();
+  existing.messages = [{ id: 'user-canonical', role: 'user', content: 'canonical prompt', status: 'done', at: null, events: [] } as Msg];
+  (other as any).onJobEvent({ type: 'start', job: job({ userImages: [phoneImage] }) });
+  assert.deepEqual(existing.messages[0].images, [phoneImage]);
+  const { subject: sender, owner: sent } = subjectWithChat();
+  const own = [{ mimeType: 'image/png', data: 'aGVsbG8=', name: 'own.png' }];
+  sent.messages = [{ id: 'user-canonical', role: 'user', content: 'canonical prompt', status: 'done', at: null, events: [], images: own } as Msg];
+  (sender as any).onJobEvent({ type: 'start', job: job({ userImages: [phoneImage] }) });
+  assert.deepEqual(sent.messages[0].images, own);
+});
+
+test('a readback during a live turn keeps the by-reference images the live row lacks', () => {
+  for (const userImages of [undefined, [phoneImage]]) {
+    const { subject, owner } = subjectWithChat();
+    (subject as any).onJobEvent({ type: 'start', job: job({ userImages }) });
+    (subject as any).onJobEvent({ type: 'end', job: job({ status: 'done', code: 0, finishedAt: '2026-07-24T12:00:02Z', result: 'ok' }) });
+    const restored: Chat = {
+      ...chat(),
+      messages: [
+        { id: 'user-canonical', role: 'user', content: 'canonical prompt', status: 'done', at: '2026-07-24T12:00:00Z', events: [], jobId: 'job-1', images: [phoneImage] } as Msg,
+        { id: 'assistant-canonical', role: 'assistant', content: '', result: 'ok', status: 'done', at: '2026-07-24T12:00:02Z', events: [], jobId: 'job-1' } as Msg,
+      ],
+    };
+    // The end event is newer than the snapshot: its fence replays the live rows.
+    (subject as any).preserveLiveTurnEvents([owner], [restored], 0);
+    const user = restored.messages.find((message) => message.id === 'user-canonical');
+    assert.deepEqual(user?.images, [phoneImage], `live userImages=${JSON.stringify(userImages)}`);
+  }
+
+  // Live inline bytes still merge over the snapshot as before.
+  const { subject, owner } = subjectWithChat();
+  (subject as any).onJobEvent({ type: 'start', job: job() });
+  const inline = { mimeType: 'image/png', data: 'aGVsbG8=', name: 'own.png' };
+  owner.messages[0].images = [inline];
+  (subject as any).onJobEvent({ type: 'end', job: job({ status: 'done', code: 0, finishedAt: '2026-07-24T12:00:02Z', result: 'ok' }) });
+  const restored: Chat = {
+    ...chat(),
+    messages: [
+      { id: 'user-canonical', role: 'user', content: 'canonical prompt', status: 'done', at: null, events: [], jobId: 'job-1' } as Msg,
+      { id: 'assistant-canonical', role: 'assistant', content: '', result: 'ok', status: 'done', at: null, events: [], jobId: 'job-1' } as Msg,
+    ],
+  };
+  (subject as any).preserveLiveTurnEvents([owner], [restored], 0);
+  assert.deepEqual(restored.messages[0].images, [inline]);
+});
+
 test('an unanchored job:end paints a terminal canonical row from the public job', () => {
   const { subject, owner } = subjectWithChat();
   const terminal = job({

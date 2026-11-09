@@ -7,7 +7,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, BrowserPresentation, Chat, Msg, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
+import type { AppState, BrowserPresentation, Chat, Msg, MessageImage, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, AppUpdateWork, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
@@ -376,7 +376,14 @@ function mergeLiveTurnMessage(
     next.content = monotonicTurnText(next.content, live.content) ?? '';
     next.result = monotonicTurnText(next.result, live.result);
   }
-  if (mediaAfter || endAfter) next.images = mergeMessageImages(next.images, live.images);
+  // mergeMessageImages keeps only inline bytes. A live row without bytes of its
+  // own (another device's user turn, drawn by reference from its start
+  // receipt) must never erase the by-reference images an authoritative read
+  // returned; it fills them only when that read had none.
+  if (mediaAfter || endAfter) {
+    if (live.images?.some((image) => !!image.data)) next.images = mergeMessageImages(next.images, live.images);
+    else if (!next.images?.length && live.images?.length) next.images = live.images;
+  }
   if (acpAfter || planAfter || endAfter) {
     next.events = mergeLiveTimelineEvents(next.events, live.events, planAfter || endAfter);
   }
@@ -6749,6 +6756,9 @@ export class Store {
     const startedAt = job.startedAt || new Date().toISOString();
     let user = chat.messages.find((message) => message.id === userID);
     let assistant = chat.messages.find((message) => message.id === assistantID);
+    // A turn another device sent arrives only as this receipt: without its
+    // images the bubble showed the text alone until the chat was reopened.
+    const userImages = jobUserImages(job);
     if (!user) {
       user = {
         id: userID,
@@ -6757,11 +6767,14 @@ export class Store {
         status: 'done',
         at: startedAt,
         events: [],
+        ...(userImages ? { images: userImages } : {}),
         ...(job.notice ? { notice: job.notice } : {}),
       };
       const assistantIndex = assistant ? chat.messages.indexOf(assistant) : -1;
       if (assistantIndex >= 0) chat.messages.splice(assistantIndex, 0, user);
       else chat.messages.push(user);
+    } else if (userImages && user.role === 'user' && !user.images?.length) {
+      user.images = userImages;
     }
     if (!assistant) {
       assistant = {
@@ -8139,6 +8152,23 @@ function applyDensity(density: Density) {
 }
 function isTerminalMessage(message: Pick<Msg, 'status'>): boolean {
   return message.status === 'done' || message.status === 'failed' || message.status === 'cancelled';
+}
+// The start receipt's user images, by reference ({data: '', deferredImageRef}).
+// MessageImage loads each one through the chat's own image channel.
+function jobUserImages(job: PublicJob): MessageImage[] | undefined {
+  if (!Array.isArray(job.userImages)) return undefined;
+  const images = job.userImages
+    .filter((image) => !!image && typeof image.mimeType === 'string' && image.mimeType.startsWith('image/')
+      && typeof image.deferredImageRef === 'string' && image.deferredImageRef !== '')
+    .map((image) => ({
+      mimeType: image.mimeType,
+      data: '',
+      deferredImageRef: image.deferredImageRef,
+      ...(image.name ? { name: image.name } : {}),
+      ...(image.source ? { source: image.source } : {}),
+      ...(image.width && image.height ? { width: image.width, height: image.height } : {}),
+    }));
+  return images.length ? images : undefined;
 }
 function terminalMessageStatus(job: PublicJob): Msg['status'] {
   if (job.code === 130 || job.stopReason === 'cancelled') return 'cancelled';
