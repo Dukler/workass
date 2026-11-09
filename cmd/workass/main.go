@@ -1179,6 +1179,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	registerConfigSettingsHandlers(hub, state, acpManager)
 	count += 4
 	count += registerAgentToolsHandlers(hub, state, acpManager, sessionState, providerChats)
+	count += registerMaintenanceHandlers(hub, state, acpManager)
 	registerVoiceHandlers(hub, state.setting.get)
 	count += 2
 	_, changesChannels := registerChangesHandlers(hub, acpManager, providerChats)

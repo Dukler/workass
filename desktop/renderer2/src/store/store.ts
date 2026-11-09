@@ -13,7 +13,7 @@ import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
 import { ConnectionMonitor, type ConnStatus } from '../wire/connection';
 import { LEAN_SESSION_SAVE_MODE, loadMirror, saveMirror, type Mirror, type MirrorMsg } from './persistence';
 import { isUnchangedReply, parseWireCache, readWireCache, writeWireCache, type WireCacheEntry } from './wire-cache';
-import { applyShellDelta, isShellDelta, pageSettledBefore, parseDeferredChats, type SessionPageRequest } from './session-page';
+import { applyShellDelta, isShellDelta, pageIdleBefore, pageSettledBefore, parseDeferredChats, type SessionPageRequest } from './session-page';
 import { browserApi, localBrowserOwnsChat, type WorkassBrowserOpenRequest } from '../browser';
 import {
   afterQueuedAcceptance, appendDraftImages, attachmentWorkBoundary, draftImagePayloads, mergeMessageImages, messageImages,
@@ -62,6 +62,10 @@ import {
   DEFAULT_AGENT_PERMISSIONS, agentPermissionsFromSettings, withAgentPermissionsInSettings, type AgentPermissionSettings,
 } from '../agent-permissions';
 import { autoInstallUpdatesFromSettings, pushAutoInstallToShell, withAutoInstallUpdatesInSettings } from '../update-settings';
+import {
+  DEFAULT_CHAT_LIFECYCLE, archiveAfterMs, chatLifecycleFromSettings, sameChatLifecycle, settleAfterMs, withChatLifecycleInSettings,
+  type ChatLifecycle,
+} from '../chat-lifecycle';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1350,7 +1354,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), agentPermissions: { ...DEFAULT_AGENT_PERMISSIONS }, autoInstallUpdates: false, planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), agentPermissions: { ...DEFAULT_AGENT_PERMISSIONS }, autoInstallUpdates: false, chatLifecycle: { ...DEFAULT_CHAT_LIFECYCLE }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -2652,7 +2656,11 @@ export class Store {
     const include = new Set<string>(this.pageIncludes);
     if (this.state?.activeId) include.add(this.state.activeId);
     if (this.pendingAgentFocus?.tabId) include.add(this.pendingAgentFocus.tabId);
-    const request: SessionPageRequest = { settledBefore: pageSettledBefore(), include: [...include].filter((id) => !machineOf(id)) };
+    const now = Date.now();
+    const lifecycle = this.state?.chatLifecycle ?? DEFAULT_CHAT_LIFECYCLE;
+    const request: SessionPageRequest = { settledBefore: pageSettledBefore(now, archiveAfterMs(lifecycle)), include: [...include].filter((id) => !machineOf(id)) };
+    const idleBefore = pageIdleBefore(now, settleAfterMs(lifecycle), archiveAfterMs(lifecycle));
+    if (idleBefore > 0) request.idleBefore = idleBefore;
     if (this.pageSearch) {
       request.search = this.pageSearch.needle;
       request.labels = this.pageSearch.labels;
@@ -4738,6 +4746,21 @@ export class Store {
     pushAutoInstallToShell(this.state.autoInstallUpdates);
     this.commitModelPreferences();
   }
+  // Ajustes · Mantenimiento: when quiet chats file themselves away. Saved in
+  // the daemon settings blob like the title choice; the sidebar re-files at
+  // once, and chats a paged shell left on the daemon are read again.
+  setChatLifecycle(next: ChatLifecycle) {
+    const changed = !sameChatLifecycle(this.state.chatLifecycle, next);
+    this.state.chatLifecycle = { ...next };
+    this.commitModelPreferences();
+    if (changed) this.refreshFiledChats();
+  }
+  // A paged shell holds only what the old policy showed; with chats left on
+  // the daemon, read the page again under the new one.
+  private refreshFiledChats() {
+    if (!this.state.deferredChats?.count || !has('getSession')) return;
+    this.queueAgentRefresh('chat lifecycle', async () => { await this.refreshPagedSession('lifecycle session:get'); });
+  }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
   private commitModelPreferences() {
@@ -4762,7 +4785,11 @@ export class Store {
     this.state.agentPermissions = agentPermissionsFromSettings(reply);
     this.state.autoInstallUpdates = autoInstallUpdatesFromSettings(reply);
     pushAutoInstallToShell(this.state.autoInstallUpdates);
+    const lifecycle = chatLifecycleFromSettings(reply);
+    const lifecycleChanged = !sameChatLifecycle(this.state.chatLifecycle, lifecycle);
+    this.state.chatLifecycle = lifecycle;
     this.bumpApp(false);
+    if (lifecycleChanged) this.refreshFiledChats();
   }
   private scheduleModelPreferencesSave() {
     if (!has('setSettings')) return;   // no write channel → in-memory only, no persistence
@@ -4783,10 +4810,10 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
-      const merged = withAutoInstallUpdatesInSettings(withAgentPermissionsInSettings(
+      const merged = withChatLifecycleInSettings(withAutoInstallUpdatesInSettings(withAgentPermissionsInSettings(
         withGeneralSettingsInSettings(withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.general),
         this.state.agentPermissions,
-      ), this.state.autoInstallUpdates);
+      ), this.state.autoInstallUpdates), this.state.chatLifecycle);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {

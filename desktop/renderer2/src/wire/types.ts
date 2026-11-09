@@ -550,6 +550,8 @@ export interface DaemonConfig {
   acp?: { provider?: string; command?: string; args?: unknown[]; env?: Record<string, unknown>; probeTimeoutMs?: number };
   chat?: { spareSessions?: number; defaultModel?: string; defaultMode?: string; autoCompact?: boolean };
   ui?: { density?: string; theme?: string };
+  // The engine lifecycle the daemon runs with (config_store.go publicMap).
+  engine?: { hibernateTtlMs?: number; maxRssKb?: number; rssSampleIntervalMs?: number };
   [k: string]: unknown;
 }
 
@@ -932,6 +934,9 @@ export interface WorkassApi {
   procList?: () => Promise<ProcChanged>;
   resourcesList?: () => Promise<ResourcesList>;
   procKill?: (id: string, tree: boolean) => Promise<{ ok: boolean; error?: string; already?: boolean }>;
+  // Ajustes · Mantenimiento (additive reads; an older daemon lacks them).
+  storageUsage?: () => Promise<StorageUsage>;
+  diagnosticsExport?: () => Promise<Record<string, unknown>>;
   // P3b LAN devices/access (controller-only mutations; feature-detected).
   lanDevices?: () => Promise<LanDevices>;
   lanRevoke?: (deviceId: string) => Promise<unknown>;
@@ -1051,6 +1056,23 @@ export interface WorkassWindowApi {
   platform: string;
 }
 
+/** Electron shell (preload.js): this profile's data and log folders. */
+export interface WorkassMaintenanceApi {
+  showDataFolder?: () => Promise<{ ok: boolean; error?: string }>;
+  openLogsFolder?: () => Promise<{ ok: boolean; error?: string }>;
+}
+
+/**
+ * storage:usage — the daemon's state directory by part, in bytes, or
+ * {pending: true} while its first measurement is still running.
+ */
+export interface StorageUsage {
+  pending?: boolean;
+  computedAt?: string;
+  totalBytes?: number;
+  parts?: { chats?: number; images?: number; jobs?: number; other?: number };
+}
+
 /** What the injected bridge sees of its socket (additive; older bridges lack it). */
 export interface WireState {
   open: boolean; ready: boolean; lastMessageAt: number; pending: number;
@@ -1064,6 +1086,7 @@ declare global {
   interface Window {
     api?: WorkassApi;
     workassWindow?: WorkassWindowApi;
+    workassMaintenance?: WorkassMaintenanceApi;
     __workassSocketGen?: number;
     __workassWireState?: () => WireState;
   }

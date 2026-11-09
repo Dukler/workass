@@ -4,6 +4,7 @@ import type { ModelFavorite } from '../model-favorites';
 import type { ChatTitleSettings } from '../chat-titles';
 import type { GeneralSettings } from '../general-settings';
 import type { AgentPermissionSettings } from '../agent-permissions';
+import type { ChatLifecycle } from '../chat-lifecycle';
 import type { ConnStatus } from '../wire/connection';
 import type { ModelControlMemory } from '../model-controls';
 import type { WorkassRuntimeProfile } from '../model-catalog';
@@ -405,6 +406,9 @@ export interface AppState {
   // "Instalar solo": the Mac shell installs a staged Workass release by itself
   // while nothing would be cut (daemon app settings key "autoInstallUpdates").
   autoInstallUpdates: boolean;
+  // When the sidebar files quiet chats away by itself (daemon app settings key
+  // "chatLifecycle", chat-lifecycle.ts).
+  chatLifecycle: ChatLifecycle;
   // Latest plan-usage snapshot per providerId (chat:plan-usage event + additive
   // planUsage on usage job events). The composer's context popover renders only
   // the ACTIVE CHAT'S provider snapshot. Transient — never persisted.

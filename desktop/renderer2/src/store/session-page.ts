@@ -26,13 +26,27 @@ export interface DeferredChats {
 
 export interface SessionPageRequest {
   settledBefore: number;
+  /** Additive: chats never settled by hand with no activity since before this
+   *  are filed by age (chatLifecycle.settleAfterDays); absent when that is off. */
+  idleBefore?: number;
   include: string[];
   search?: string;
   labels?: [string, string][];
 }
 
-export function pageSettledBefore(now = Date.now()): number {
-  return now - ARCHIVE_AFTER_SETTLED_MS - PAGE_ARCHIVE_MARGIN_MS;
+/** The settle instant before which a settled chat is in the archive; 0 (no
+ *  chat) when the archive is off. */
+export function pageSettledBefore(now = Date.now(), archiveAfterMs = ARCHIVE_AFTER_SETTLED_MS): number {
+  if (archiveAfterMs <= 0) return 0;
+  return now - archiveAfterMs - PAGE_ARCHIVE_MARGIN_MS;
+}
+
+/** The last activity before which a chat filed by age is in the archive: it
+ *  settled settleAfterMs after that activity and has been settled
+ *  archiveAfterMs since. 0 when either is off. */
+export function pageIdleBefore(now: number, settleAfterMs: number, archiveAfterMs: number): number {
+  if (settleAfterMs <= 0 || archiveAfterMs <= 0) return 0;
+  return now - settleAfterMs - archiveAfterMs - PAGE_ARCHIVE_MARGIN_MS;
 }
 
 export function parseDeferredChats(raw: unknown): DeferredChats | null {

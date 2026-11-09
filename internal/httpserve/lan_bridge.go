@@ -243,6 +243,9 @@ const LANBridgeJS = `(() => {
     procList: () => invoke('proc:list'), procRead: (id) => invoke('proc:read', id), procKill: (id, tree) => invoke('proc:kill', { id, tree }), procKillAll: () => invoke('proc:kill-all'),
     // Ajustes · Trabajos: this machine's job resources, who holds each and how many wait.
     resourcesList: () => invoke('resources:list'),
+    // Ajustes · Mantenimiento (additive reads): the state directory's size
+    // by part, and a redacted diagnostic report to save.
+    storageUsage: () => invoke('storage:usage'), diagnosticsExport: () => invoke('diagnostics:export'),
     clearActivity: (id) => invoke('activity:clear', id), appChatReset: () => invoke('app-chat:reset'), appChatNewSession: (o) => invoke('app-chat:new-session', o), appChatRefreshPlanUsage: (providerId) => invoke('app-chat:refresh-plan-usage', { providerId }),
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),

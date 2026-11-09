@@ -28,6 +28,7 @@ const {
 } = require('./update-progress');
 const { CertificatePins, certificateVerificationSessions, trustCertificatePEM } = require('./certificate-pins');
 const { installRenderFrameGuard, hasRenderFrameGuard } = require('./render-frame-guard');
+const { showMaintenanceFolder } = require('./maintenance-folders');
 
 const updateProgressRequested = process.argv.includes(PROGRESS_ARGUMENT);
 let updateProgressTransaction = '';
@@ -421,6 +422,11 @@ function createWindow(url, browserReporter, isController) {
   // "Instalar solo": the renderer mirrors the owner's setting from the daemon's
   // settings blob here, on every load and every change.
   ipcMain.handle('workass-updater:set-auto-install', (event, enabled) => own(event) ? updateManager?.setAutoInstall(enabled === true) || null : null);
+  // Ajustes · Mantenimiento: show this profile's data or log folder. The page
+  // names which one; the path is always the shell's own.
+  ipcMain.handle('workass-maintenance:show-folder', (event, kind) => own(event)
+    ? showMaintenanceFolder(kind, { runtime: RUNTIME, shell, fs })
+    : { ok: false, error: 'untrusted renderer' });
   win.on('closed', () => {
     viewServer?.reportWindowState?.({ visible: false, minimized: false, focused: false });
     removeImageCopyMenu();
@@ -449,6 +455,7 @@ function createWindow(url, browserReporter, isController) {
     for (const channel of ['get-state', 'diagnostics', 'check', 'apply', 'apply-authorized', 'set-auto-install']) {
       try { ipcMain.removeHandler(`workass-updater:${channel}`); } catch { /* ignore */ }
     }
+    try { ipcMain.removeHandler('workass-maintenance:show-folder'); } catch { /* ignore */ }
   });
   const reportWindowState = () => {
     if (win.isDestroyed()) return;

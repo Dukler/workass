@@ -464,6 +464,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		// staged Workass release by itself only while nothing would be cut. Off
 		// unless the owner turns it on.
 		"autoInstallUpdates": false,
+		"chatLifecycle":      defaultChatLifecycleSettings(),
 	}
 	next[agentToolGroupsOffKey] = []any{}
 	applyGeneralSettings(next, input)
@@ -505,6 +506,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	if v, ok := input["autoInstallUpdates"].(bool); ok {
 		next["autoInstallUpdates"] = v
 	}
+	next["chatLifecycle"] = normalizeChatLifecycle(input["chatLifecycle"])
 	return next
 }
 

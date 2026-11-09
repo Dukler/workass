@@ -31,15 +31,22 @@ import (
 // The selection is the same for all three channels, so a digest row exists
 // exactly for each listed chat and an unchanged page is still one etag. A
 // read without {page} is answered exactly as before.
+//
+// idleBefore (additive, 2026-11-09) is the same boundary for a chat the
+// sidebar files by age (the «Poner en reposo» setting, chatLifecycle in the
+// app settings): never settled by hand nor reactivated, and with no activity
+// since before it. A renderer without that setting sends none and an older
+// daemon ignores it; either way such chats are simply listed.
 type sessionPage struct {
 	settledBefore int64
+	idleBefore    int64
 	include       map[string]struct{}
 	needle        string
 	labels        map[string]string
 }
 
-// sessionPageFrom reads {page: {settledBefore, include, search, labels}}; nil
-// when the option is absent.
+// sessionPageFrom reads {page: {settledBefore, idleBefore, include, search,
+// labels}}; nil when the option is absent.
 func sessionPageFrom(options map[string]any) *sessionPage {
 	raw, ok := options["page"].(map[string]any)
 	if !ok {
@@ -47,6 +54,7 @@ func sessionPageFrom(options map[string]any) *sessionPage {
 	}
 	page := &sessionPage{
 		settledBefore: int64(max(0, intValue(raw["settledBefore"]))),
+		idleBefore:    int64(max(0, intValue(raw["idleBefore"]))),
 		include:       map[string]struct{}{},
 		needle:        strings.ToLower(strings.TrimSpace(fieldString(raw, "search"))),
 		labels:        map[string]string{},
@@ -104,20 +112,34 @@ func (p *sessionPage) lists(facts chat.PageFacts) bool {
 	if _, named := p.include[facts.TabID]; named {
 		return true
 	}
-	if facts.Settled != "settled" || facts.Unread || facts.Foreground || facts.PendingPermissions ||
+	if facts.Unread || facts.Foreground || facts.PendingPermissions ||
 		facts.Queued || facts.RunningBackground || facts.ObligationState == "parked" {
 		return true
 	}
-	// The renderer's settledSince: the explicit settle instant, else the
-	// last activity, else "always" (a row predating the timestamp contract).
-	since := facts.SettledAt
-	if since <= 0 {
-		since = facts.LastActivityAt
-	}
-	if since <= 0 {
-		since = 1
-	}
-	if since >= p.settledBefore {
+	switch facts.Settled {
+	case "settled":
+		// The renderer's settledSince: the explicit settle instant, else the
+		// last activity, else "always" (a row predating the timestamp contract).
+		since := facts.SettledAt
+		if since <= 0 {
+			since = facts.LastActivityAt
+		}
+		if since <= 0 {
+			since = 1
+		}
+		if since >= p.settledBefore {
+			return true
+		}
+	case "":
+		// Filed by age, as the renderer's resolveSettled files a "ready" row:
+		// a chat asking for an answer is "attention", never ready, and one with
+		// no activity at all is never filed.
+		if p.idleBefore <= 0 || facts.LastActivityAt <= 0 || facts.LastActivityAt >= p.idleBefore ||
+			facts.ObligationState == "needs_input" || facts.ObligationState == "stalled" {
+			return true
+		}
+	default:
+		// "active": reactivated by hand, which no age files away again.
 		return true
 	}
 	return p.matches(facts)
