@@ -103,6 +103,9 @@ var mutatingChannels = map[string]struct{}{
 	"external:open":      {},
 	"review:open":        {},
 	"browser:set-active": {},
+	// Cuentas: reads the owner's stored provider login and calls the
+	// provider's account API, like app-chat:refresh-plan-usage.
+	"accounts:resets-refresh": {},
 }
 
 var auxiliaryControlChannels = map[string]struct{}{

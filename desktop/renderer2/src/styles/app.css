@@ -2771,3 +2771,77 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .rofoot .btn { flex: none; padding: 3px 11px; line-height: 18px; }
 .rofoot .btn:disabled { opacity: .55; cursor: default; }
 .rofoot .rokept { flex: none; padding: 3px 6px; font-size: 12px; line-height: 18px; color: var(--muted); }
+
+/* ============ Cuentas (AccountsPage.tsx, mock cuentas-v3) ============
+   One page over the chat area, opened from the person icon at the foot of the
+   left panel. No cards: accounts are separated by hairlines; green is only the
+   accent on the reset that can be used now and the connected dot. */
+.acct-page { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; background: var(--bg); outline: none; }
+.acct-head { display: flex; align-items: center; height: 40px; flex: none; padding: 0 12px 0 24px; border-bottom: 1px solid var(--line); font-size: 13.5px; font-weight: 600; color: var(--ink); }
+#root.no-side .acct-head { padding-left: calc(var(--side-toggle-x) + 30px + 8px); }
+:root.electron:not(.electron-windows) .acct-head { -webkit-app-region: drag; }
+:root.electron .acct-head button { -webkit-app-region: no-drag; }
+.acct-x { margin-left: auto; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.acct-x:hover { background: var(--line); color: var(--ink); }
+.acct-x svg { width: 15px; height: 15px; }
+.acct-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 28px 24px; font-size: 13px; color: var(--ink2); }
+.acct { border-top: 1px solid var(--line); padding: 16px 0 18px; max-width: var(--read); }
+.acct-body > .acct:first-child { border-top: 0; padding-top: 12px; }
+.acct-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 12px; min-width: 0; }
+.acct-mark { display: grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.acct-mark svg { width: 16px; height: 16px; }
+.acct-nm { font-size: 14px; font-weight: 650; color: var(--ink); }
+.acct-plan { font-size: 11px; line-height: 17px; border: 1px solid var(--line2); border-radius: 5px; padding: 0 6px; color: var(--ink); }
+.acct-who { font-size: 12px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-st { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.acct-sd { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; }
+.acct-sd.off { background: var(--line2); }
+.acct-pace { margin: 0 0 12px 26px; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acct-pace.bad { color: var(--amber); }
+.acct-pace small { display: block; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--muted); }
+.acct-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 26px; padding-left: 26px; }
+.acct-u { min-width: 0; }
+.acct-top { display: flex; gap: 10px; font-size: 12px; }
+.acct-l { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-v { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.acct-v.hot { color: var(--amber); }
+.acct-ub { margin-top: 6px; height: 4px; border-radius: 3px; background: var(--line2); overflow: hidden; }
+.acct-ub i { display: block; height: 100%; border-radius: 3px; background: var(--muted); transition: width .4s ease; }
+.acct-ub i.hot { background: var(--amber); }
+.acct-sub { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.acct-rs { margin: 14px 0 0 26px; display: flex; flex-direction: column; gap: 2px; }
+.acct-rrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; }
+.acct-rrow.go { background: color-mix(in srgb, var(--acc) 8%, transparent); }
+.acct-ri { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.acct-rrow.go .acct-ri { color: var(--acc); }
+.acct-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.acct-tt { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.acct-ts { margin-top: 1px; font-size: 11px; color: var(--muted); }
+.acct-why { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.acct-use { flex: none; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--acc) 45%, transparent); border-radius: 7px; background: transparent; color: var(--acc); font: inherit; font-size: 12px; font-weight: 650; white-space: nowrap; cursor: pointer; }
+.acct-use:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 12%, transparent); }
+.acct-use:disabled { opacity: .55; cursor: default; }
+.acct-confirm { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.acct-q { font-size: 11.5px; color: var(--ink); }
+.acct-no { padding: 5px 8px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.acct-no:hover:not(:disabled) { color: var(--ink); }
+.acct-none { margin: 4px 0 0 10px; font-size: 12px; color: var(--muted); }
+.acct-none b { display: block; margin-bottom: 1px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.acct-err b { color: var(--amber); }
+.acct-consent { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding: 4px 0 0 10px; }
+.acct-note { font-size: 11px; color: var(--muted); }
+.acct-link { padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.acct-none .acct-link { display: block; margin-top: 4px; }
+.acct-link:hover:not(:disabled) { color: var(--ink); }
+.acct-cred { margin: 14px 0 0 26px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.acct-cred b { font-weight: 600; color: var(--ink); }
+.acct-cred a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+.acct-cred a:hover { color: var(--ink); }
+.acct-sec { margin: 18px 0 8px; font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.acct-api { max-width: var(--read); }
+.acct-api-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink); }
+.acct-api-mark { display: grid; place-items: center; width: 14px; height: 14px; flex: none; }
+.acct-api-mark svg { width: 14px; height: 14px; }
+.acct-api-k { min-width: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-api-m { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+/* ============ end Cuentas ============ */

@@ -1654,7 +1654,15 @@ async function handleWorkassRequest(message) {
 	}
   if (method === 'session/set_config_option') { respond(id, session.setConfig(String(params.configId || ''), params.value)); return; }
   if (method === '_workass/codex/steer') { respond(id, await session.steer(params.prompt, String(params.clientUserMessageId || ''))); return; }
-  if (method === '_workass/codex/rate-limits') { await ensureInitialized(); respond(id, await app.request('account/rateLimits/read', {})); return; }
+  if (method === '_workass/codex/rate-limits') {
+    await ensureInitialized();
+    const limits = await app.request('account/rateLimits/read', {});
+    // The login behind these limits (Cuentas page). An older app-server
+    // without account/read keeps the limits alone; refreshToken stays false.
+    const account = await app.request('account/read', { refreshToken: false }).catch(() => null);
+    respond(id, account && limits && typeof limits === 'object' ? { ...limits, workassAccount: account } : limits);
+    return;
+  }
   if (method === '_workass/codex/rate-limit-reset/consume') {
     await ensureInitialized();
     const outcome = await app.request('account/rateLimitResetCredit/consume', {

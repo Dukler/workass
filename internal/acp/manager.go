@@ -138,6 +138,7 @@ type Manager struct {
 	planUsageRefreshMu           sync.Mutex
 	planUsageRefreshes           map[string]*planUsageRefreshRun
 	planUsageRefreshWG           sync.WaitGroup
+	accountResets                accountResetState
 	receiptMu                    sync.Mutex
 	subagentCompletionObserverMu sync.RWMutex
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error

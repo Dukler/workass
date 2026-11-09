@@ -19,6 +19,7 @@ import { localBrowserOwnsChat } from '../browser';
 import { ForkChildView } from './ForkChildView';
 import { forkStore, useForks } from '../store/forks';
 import { forkSelectionVisible } from '../fork-sidebar';
+import { AccountsPage, closeAccounts, useAccountsOpen } from './AccountsPage';
 
 function AssistStub() {
   return (
@@ -69,6 +70,9 @@ export function App() {
   const app = useApp();
   useForks();
   const chat = store.active();
+  // Cuentas covers the chat area; going to another chat or mode leaves it.
+  const accountsOpen = useAccountsOpen();
+  useEffect(() => { closeAccounts(); }, [app.activeId, app.mode]);
   // A selected fork child replaces the transcript and composer of its parent.
   const forkChild = !!chat && app.mode !== 'assist' && forkSelectionVisible(forkStore.selected, app.activeId);
   // The right column's occupant is per-chat: read the ACTIVE chat's choice.
@@ -191,6 +195,7 @@ export function App() {
           : <Transcript key={`transcript:${chat?.id ?? 'none'}`} chat={chat} />}
         {app.mode !== 'assist' && <ConnectionBanner />}
         {app.mode !== 'assist' && !forkChild && <Composer key={`composer:${chat?.id ?? 'none'}`} chat={chat} />}
+        {accountsOpen && <AccountsPage />}
       </main>
       <RightRail key={`rail:${chat?.id ?? 'none'}`} chat={chat} />
       {/* One shared resize handle for the right column — drives --rail-w whether

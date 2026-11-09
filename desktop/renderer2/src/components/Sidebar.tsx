@@ -10,6 +10,7 @@ import { chatHasLiveActivity } from '../chat-activity';
 import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, updatesNeedAttention, useAppUpdater } from '../app-updater';
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
+import { AccountsFootButton } from './AccountsPage';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
 // thread or the workspace path for a folder. Drag state lives in <Sidebar> and
@@ -682,9 +683,9 @@ export function FooterUpdateCards() {
   );
 }
 
-// The left panel's foot (owner 2026-11-08): two icons, Ajustes and
-// Actualizaciones. It replaced an account menu that held a fixed name,
-// Ajustes and, rarely, a free reset; resets get their own Cuentas page.
+// The left panel's foot (owner 2026-11-08): Ajustes, Cuentas (2026-11-09,
+// AccountsPage.tsx) and Actualizaciones. It replaced an account menu that
+// held a fixed name, Ajustes and, rarely, a free reset; resets live on Cuentas.
 // Updates no longer slide in as cards on their own: the update icon carries a
 // green dot, and its popover holds the same cards (FooterUpdateCards, whole
 // lifecycle) and the installed versions.
@@ -723,6 +724,7 @@ export function FooterBar() {
       <button type="button" className="footbtn" title="Ajustes" aria-label="Ajustes" onClick={() => store.openSettings()}>
         <IcGear />
       </button>
+      <AccountsFootButton />
       <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}
         aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <IcDownload />

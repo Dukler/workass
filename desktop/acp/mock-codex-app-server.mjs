@@ -672,6 +672,10 @@ async function handle(message) {
     return respond(id, { rateLimits: { planType: 'plus', primary: { usedPercent: 17, resetsAt: 1, windowDurationMins: 300 } } });
   }
   if (method === 'account/rateLimitResetCredit/consume') return respond(id, { consumed: true });
+  if (method === 'account/read') {
+    if (params?.refreshToken !== false) return write({ id, error: { code: -32602, message: 'fixture refuses a token refresh' } });
+    return respond(id, { account: { type: 'chatgpt', email: 'vos@ejemplo.com', planType: 'pro', workspaceName: null }, requiresOpenaiAuth: true });
+  }
   if (method === 'thread/unsubscribe') return respond(id, {});
   write({ id, error: { code: -32601, message: `fixture method not found: ${method}` } });
 }

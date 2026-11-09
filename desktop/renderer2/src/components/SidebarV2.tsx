@@ -10,6 +10,7 @@ import { machineWhere, remoteMachineBadge } from '../machine-label';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { ProjectIcon } from './ProjectIcon';
 import { ModesSwitch, FooterBar } from './Sidebar';
+import { closeAccounts } from './AccountsPage';
 import { ForkKidsToggle, ForkNest } from './ForkSidebar';
 import { ForgeIcon } from './ForgeIcon';
 import { forkStore, useForks } from '../store/forks';
@@ -451,7 +452,7 @@ function SidebarV2Row({ row, active, forkOpen = false, drag, setDrag, onDropBefo
         draggable={!editing}
         onMouseEnter={openTip}
         onMouseLeave={closeTip}
-        onClick={() => { if (!editing) { closeTip(); forkStore.clearSelection(); store.switchChat(chat.id); } }}
+        onClick={() => { if (!editing) { closeTip(); closeAccounts(); forkStore.clearSelection(); store.switchChat(chat.id); } }}
         onDoubleClick={() => { closeTip(); setValue(chat.title); setEditing(true); }}
         onContextMenu={(e) => { e.preventDefault(); closeTip(); onMenu(row, e.clientX, e.clientY); }}
         onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', chat.id); setDrag({ id: chat.id, section }); closeTip(); }}

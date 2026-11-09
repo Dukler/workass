@@ -77,6 +77,18 @@ function opaqueRealmScope(kind, value) {
   return `${kind}-${createHash('sha256').update(normalized).digest('hex').slice(0, 32)}`;
 }
 
+// AccountInfo's display fields only (who, which plan, how it is paid); no
+// token or secret is ever part of it.
+function accountSummary(account) {
+  if (!account || typeof account !== 'object') return null;
+  const out = {};
+  for (const key of ['email', 'organization', 'subscriptionType', 'apiKeySource', 'tokenSource', 'apiProvider']) {
+    const value = account[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim().slice(0, 200);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function diagnostic(label, error) {
   process.stderr.write(`${label}: ${safeErrorText(error)}\n`);
 }
@@ -722,6 +734,7 @@ class ClaudeSession {
       installScope: opaqueRealmScope('install', executable),
       verified: Boolean(accountIdentity),
     };
+    this.account = accountSummary(initialized?.account);
     this.models = modelRows(initialized?.models);
     if (!this.currentModel && this.models.length) this.currentModel = this.models[0].value;
     if (initialized && typeof initialized === 'object') {
@@ -1801,11 +1814,16 @@ class ClaudeSession {
   }
 
   async usage() {
+    let usage = {};
     if (typeof this.query?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET === 'function') {
-      return this.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+      usage = await this.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+    } else if (typeof this.query?.getContextUsage === 'function') {
+      usage = await this.query.getContextUsage();
     }
-    if (typeof this.query?.getContextUsage === 'function') return this.query.getContextUsage();
-    return {};
+    // The login behind these limits (Cuentas page): the SDK's AccountInfo
+    // from initialize, reduced to its display fields.
+    if (!this.account || !usage || typeof usage !== 'object' || Array.isArray(usage)) return usage ?? {};
+    return { ...usage, workassAccount: this.account };
   }
 
   async interrupt() {

@@ -465,6 +465,9 @@ func normalizeSettings(input map[string]any) map[string]any {
 		// unless the owner turns it on.
 		"autoInstallUpdates": false,
 		"chatLifecycle":      defaultChatLifecycleSettings(),
+		// Cuentas: providers whose stored login the owner let Workass use
+		// for account resets (account_resets.go).
+		accountResetConsentKey: []any{},
 	}
 	next[agentToolGroupsOffKey] = []any{}
 	applyGeneralSettings(next, input)
@@ -507,6 +510,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		next["autoInstallUpdates"] = v
 	}
 	next["chatLifecycle"] = normalizeChatLifecycle(input["chatLifecycle"])
+	next[accountResetConsentKey] = normalizeAccountResetConsent(input[accountResetConsentKey])
 	return next
 }
 
