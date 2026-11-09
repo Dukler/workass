@@ -1075,6 +1075,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		opts = options[0]
 	}
 	state := newDaemonState(cwd, opts)
+	applyJobSettings(acpManager, state.setting.get())
 	count := 0
 	hub.RegisterOutOfBandRead("app:meta", func(args []any) (any, error) {
 		return appMeta(cwd), nil
@@ -1150,6 +1151,8 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		registerAcpHandlers(hub, acpManager, state.stateDir, sessionState, chatControl, providerChats)
 		registerChatDiagnosticsWire(hub, providerChats)
 		count += 24
+		registerJobResourceHandler(hub, acpManager)
+		count++
 		if providerChats != nil {
 			titler := newChatTitler(acpManager, providerChats, state.setting.get, log.Printf)
 			hub.Register("app-chat:auto-title", func(args []any) (any, error) {
@@ -1479,6 +1482,7 @@ func registerConfigSettingsHandlers(hub *wire.Hub, state *daemonState, manager *
 		if err != nil {
 			return nil, err
 		}
+		applyJobSettings(manager, saved)
 		hub.Broadcast("settings:changed", saved)
 		return saved, nil
 	})

@@ -265,6 +265,10 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"ListProcessChildren": {},
 	"ResourceQueues":      {},
 	"ReadProcessChild":    {},
+	// The owner's notice delay for a silent supervisor (Ajustes · Trabajos), a
+	// setting handed over at boot and on settings:set. It touches no chat actor
+	// and never moves a row's own silence mark.
+	"SetProcessSilenceNoticeAfter": {},
 	// Two reads beside them, for a supervised job started from another machine
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.

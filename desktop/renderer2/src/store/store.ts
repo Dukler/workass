@@ -3121,6 +3121,13 @@ export class Store {
     }
   }
 
+  /** A read-only channel on one paired machine's own daemon, over its link.
+   *  Undefined while that machine has no open link; a refusal throws. */
+  async readOnMachine(machineId: string, channel: string): Promise<unknown> {
+    const link = this.machines?.linkFor(machineId);
+    return link ? link.invoke(channel) : undefined;
+  }
+
   /**
    * Mount every machine in the book (remote-plan E3).
    *
