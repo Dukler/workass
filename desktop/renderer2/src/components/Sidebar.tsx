@@ -7,7 +7,7 @@ import { IcSearch, IcAssist, IcChats, IcPlus, IcActivity, IcGear, IcFolder, Mode
 import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
 import { nextUpdatePhase, brandForProvider, updateFailureTitle, updateFailureReason, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
 import { chatHasLiveActivity } from '../chat-activity';
-import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, updatesNeedAttention, useAppUpdater } from '../app-updater';
+import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, updatesNeedAttention, useAppUpdater } from '../app-updater';
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { AccountsFootButton, closeAccounts } from './AccountsPage';
@@ -458,19 +458,22 @@ export function FooterUpdateCards() {
     return () => clearTimeout(timer);
   }, [selfArmed]);
 
-  // Mirror the provider card's one-element lifecycle. A fresh terminal receipt
-  // may seal after the updater restarts Electron; an old receipt stays hidden so
-  // reopening Workass never replays a stale success animation.
+  // Mirror the provider card's one-element lifecycle. "Listo" seals only an
+  // install this window watched run. After the updater restarts Workass the
+  // receipt says "healthy" for a while, and replaying it as a "Listo" card
+  // (owner 2026-11-09: "always shows the listo notification after an update")
+  // was noise: every state push from the shell sealed it again. The restart
+  // itself is the news; the versions list below says what is installed.
   useEffect(() => {
     if (selfCheckFailed || selfFailed) { setSelfPhase('hidden'); return; }
     if (selfActive) { setSelfPhase('running'); return; }
     if (selfUpdate.phase === 'healthy' || selfUpdate.phase === 'installed') {
-      setSelfPhase((prev) => prev === 'running' || appUpdaterReceiptIsRecent(selfUpdate.receipt) ? 'done' : 'hidden');
+      setSelfPhase((prev) => (prev === 'running' ? 'done' : prev === 'done' || prev === 'exiting' ? prev : 'hidden'));
       return;
     }
     if (selfPending) { setSelfPhase('resting'); return; }
     setSelfPhase('hidden');
-  }, [selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate.phase, selfUpdate.receipt]);
+  }, [selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate.phase]);
 
   useEffect(() => {
     if (selfPhase === 'done') {

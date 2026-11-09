@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, type AppUpdaterState } from '../src/app-updater.ts';
+import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, type AppUpdaterState } from '../src/app-updater.ts';
 
 const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
 const updaterSource = readFileSync(new URL('../src/app-updater.ts', import.meta.url), 'utf8');
@@ -65,11 +65,16 @@ test('availability-check failure is distinct from an attempted update failure', 
   assert.equal(appUpdaterCardTitle(unavailable), 'No se pudo buscar actualizaciones');
 });
 
-test('only a fresh terminal receipt can replay the success seal after an app restart', () => {
-  const now = Date.parse('2026-08-06T20:00:00.000Z');
-  assert.equal(appUpdaterReceiptIsRecent({ updatedAt: '2026-08-06T19:59:30.000Z' }, now), true);
-  assert.equal(appUpdaterReceiptIsRecent({ updatedAt: '2026-08-06T19:55:00.000Z' }, now), false);
-  assert.equal(appUpdaterReceiptIsRecent({ updatedAt: 'invalid' }, now), false);
+// 2026-11-09 (owner): "the updater status button always shows the listo
+// notification after a workass update". After the restart the receipt reads
+// "healthy" for a while and every state push sealed a "Listo" card again.
+// "Listo" now seals only an install this window watched run.
+test('a Workass update never replays its "Listo" card after the restart', () => {
+  const effect = sidebar.slice(sidebar.indexOf("if (selfUpdate.phase === 'healthy' || selfUpdate.phase === 'installed') {"));
+  assert.match(effect.slice(0, 260), /setSelfPhase\(\(prev\) => \(prev === 'running' \? 'done' : prev === 'done' \|\| prev === 'exiting' \? prev : 'hidden'\)\);/);
+  assert.doesNotMatch(sidebar, /appUpdaterReceiptIsRecent/);
+  // The receipt object changes on every push; it must not re-run the seal.
+  assert.match(sidebar, /\}, \[selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate\.phase\]\);/);
 });
 
 // 2026-11-09: the owner approved Ajustes · Actualizaciones (mock page 8), so the

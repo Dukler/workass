@@ -188,14 +188,6 @@ export function appUpdaterCardTitle(state: AppUpdaterState): string {
   }
 }
 
-export function appUpdaterReceiptIsRecent(receipt: AppUpdaterReceipt | null, now = Date.now(), maxAgeMs = 120_000): boolean {
-  if (!receipt?.updatedAt) return false;
-  const updatedAt = Date.parse(receipt.updatedAt);
-  if (!Number.isFinite(updatedAt)) return false;
-  const age = now - updatedAt;
-  return age >= 0 && age <= maxAgeMs;
-}
-
 // The phases the left panel's update icon marks with its dot: something to
 // install, an install under way, or one that failed and can be retried. The
 // same set shows a card inside its popover; a quiet background check does not.
