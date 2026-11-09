@@ -1948,7 +1948,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .lrow .empty { color: var(--faint); font-size: 12.5px; }
 .stgs .agent-provider-group { padding: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; }
 .stgs .agent-provider-empty { min-height: 48px; display: flex; align-items: center; padding: 0 2px; color: var(--faint); font-size: 11.5px; }
-.stgs .agent-provider-row { min-height: 58px; padding: 10px 2px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; transition: opacity .15s ease; }
+.stgs .agent-provider-row { min-height: 42px; padding: 7px 2px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; transition: opacity .15s ease; }
 .stgs .agent-provider-row:first-child { border-top: 0; }
 .stgs .agent-provider-row.disabled { opacity: .48; }
 .stgs .agent-provider-icon-wrap { position: relative; flex: none; }
@@ -1961,7 +1961,9 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .agent-status-dot.error { background: var(--del); }
 .stgs .agent-status-dot.off { background: var(--faint); }
 .stgs .agent-status-dot.legacy { position: static; display: inline-block; box-sizing: border-box; border-width: 0; }
-.stgs .agent-provider-location { min-width: 0; margin-top: 3px; display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10.5px; line-height: 1.25; }
+.stgs .agent-provider-line { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.stgs .agent-provider-line .nm { flex: none; }
+.stgs .agent-provider-location { min-width: 0; display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10.5px; line-height: 1.25; }
 .stgs .agent-provider-location.remote { color: var(--acc); }
 .stgs .agent-provider-location-icon { width: 12px; height: 12px; display: inline-grid; place-items: center; flex: none; }
 .stgs .agent-provider-location-icon svg { width: 12px; height: 12px; stroke-width: 1.6; }

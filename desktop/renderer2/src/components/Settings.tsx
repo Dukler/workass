@@ -111,6 +111,9 @@ function AgentProviderRow({ provider, machine }: { provider: ProviderRecord; mac
         <span className={`agent-status-dot ${statusClass}`} aria-hidden="true" />
       </div>
       <div className="body">
+        {/* Name and location share one line (owner 2026-11-08: no wasted
+            room); a second line appears only for a problem. */}
+        <div className="agent-provider-line">
         <div className="nm">{label}</div>
         <div
           className={`agent-provider-location ${machine.remote ? 'remote' : 'local'}`}
@@ -125,6 +128,7 @@ function AgentProviderRow({ provider, machine }: { provider: ProviderRecord; mac
           <span className="agent-provider-location-separator" aria-hidden="true">·</span>
           <span className="agent-provider-location-machine">{machine.name}</span>
           {!machine.connected && <span className="agent-provider-location-offline">sin conexión</span>}
+        </div>
         </div>
         {issue && <div className={`agent-provider-issue ${provider.status === 'error' ? 'error' : ''}`}>{issue}</div>}
       </div>
