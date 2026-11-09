@@ -24,7 +24,7 @@ export const NEW_CHAT_FOLDER_ACTIVE = 'active';
 
 export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   newChat: { providerId: '', model: '', effort: '', modeId: '', folder: NEW_CHAT_FOLDER_LAST },
-  whileWorking: 'queue',
+  whileWorking: 'steer',
   notices: { needsYou: true, turnEnded: true, jobs: true, sound: false },
   dictation: { lang: 'es' },
 };
@@ -67,7 +67,7 @@ export function parseGeneralSettings(raw: unknown): GeneralSettings {
   const lang = typeof obj(value.dictation).lang === 'string' ? (obj(value.dictation).lang as string).trim().toLowerCase() : '';
   return {
     newChat: parseNewChatDefaults(value.newChat),
-    whileWorking: value.whileWorking === 'steer' ? 'steer' : 'queue',
+    whileWorking: value.whileWorking === 'queue' ? 'queue' : 'steer',
     notices: { needsYou: flag('needsYou'), turnEnded: flag('turnEnded'), jobs: flag('jobs'), sound: flag('sound') },
     dictation: { lang: lang === 'auto' || /^[a-z]{2,3}$/.test(lang) ? lang : DEFAULT_GENERAL_SETTINGS.dictation.lang },
   };

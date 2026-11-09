@@ -85,11 +85,15 @@ func settingID(value any) string {
 	return id
 }
 
+// normalizeWhileWorking: a message sent while a turn runs steers that turn
+// unless the owner chose the queue (owner 2026-11-09: "agents messages should
+// be default steered with a queued message option"). The other one stays on
+// ⌘/Ctrl+Enter either way.
 func normalizeWhileWorking(value any) string {
-	if strings.TrimSpace(toString(value)) == whileWorkingSteer {
-		return whileWorkingSteer
+	if strings.TrimSpace(toString(value)) == whileWorkingQueue {
+		return whileWorkingQueue
 	}
-	return whileWorkingQueue
+	return whileWorkingSteer
 }
 
 func defaultNoticeSettings() map[string]any {

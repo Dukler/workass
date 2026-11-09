@@ -16,7 +16,7 @@ func TestGeneralSettingsDefaults(t *testing.T) {
 	settings := normalizeSettings(nil)
 	want := map[string]any{
 		"newChat":      map[string]any{"providerId": "", "model": "", "effort": "", "modeId": "", "folder": "last"},
-		"whileWorking": "queue",
+		"whileWorking": "steer",
 		"notices":      map[string]any{"needsYou": true, "turnEnded": true, "jobs": true, "sound": false},
 		"dictation":    map[string]any{"lang": "es"},
 	}
@@ -66,7 +66,7 @@ func TestGeneralSettingsSurviveAWriteAndRejectJunk(t *testing.T) {
 	if got, want := junk["newChat"], map[string]any{"providerId": "", "model": "", "effort": "", "modeId": "", "folder": "last"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("without an agent nothing else is kept: %#v", got)
 	}
-	if junk["whileWorking"] != "queue" || dictationLanguage(junk) != "es" {
+	if junk["whileWorking"] != "steer" || dictationLanguage(junk) != "es" {
 		t.Errorf("junk whileWorking=%#v dictation=%#v", junk["whileWorking"], junk["dictation"])
 	}
 	effortless := normalizeNewChatSettings(map[string]any{"providerId": "agent-a", "effort": "high", "folder": "active"})
