@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { chatPane, PANE_SLIDE_MS } from '../store/right-pane';
@@ -15,21 +15,22 @@ import { RAIL_TABS, railTab, setRailTab, type RailTab } from '../rail-view';
 export function RightRail({ chat }: { chat: Chat | null }) {
   const app = useApp();
   const pane = chatPane(chat);
-  // Closing the rail slides its column shut (App: #root.pane-anim), so the
-  // rail stays drawn while it slides out instead of leaving an empty band.
+  // Closing the rail slides its column shut (App: slidePane), so the rail
+  // stays drawn while it slides out instead of leaving an empty band. Decided
+  // while rendering, so the rail is never unmounted and mounted again in the
+  // slide's first frame (its tab, scroll and subscriptions all restarted).
   // This component is keyed per chat, so a chat switch never holds it.
-  const lastPane = useRef(pane);
+  const [shownPane, setShownPane] = useState(pane);
   const [sliding, setSliding] = useState(false);
-  useLayoutEffect(() => {
-    const was = lastPane.current;
-    lastPane.current = pane;
-    if (was === 'rail' && pane === null) {
-      setSliding(true);
-      const timer = setTimeout(() => setSliding(false), PANE_SLIDE_MS);
-      return () => clearTimeout(timer);
-    }
-    setSliding(false);
-  }, [pane]);
+  if (shownPane !== pane) {
+    setShownPane(pane);
+    setSliding(shownPane === 'rail' && pane === null);
+  }
+  useEffect(() => {
+    if (!sliding) return;
+    const timer = setTimeout(() => setSliding(false), PANE_SLIDE_MS);
+    return () => clearTimeout(timer);
+  }, [sliding]);
 
   // A closed per-chat pane owns no hidden work. Keeping the rail mounted behind
   // CSS left its activity subscription, tool sorting and one-second timers live

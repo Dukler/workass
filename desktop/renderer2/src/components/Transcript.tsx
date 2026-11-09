@@ -492,6 +492,15 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // thrown a screen up and stayed there (user 2026-11-07). Layout, not motion:
   // it holds under Reduce Motion too.
   const heldHeight = useRef(0);
+  // The width that height was held at. A held height only means something at
+  // the width it was measured at: a column that widened (the right pane
+  // closing, a wider window) is legitimately shorter, and holding the old
+  // height left a band of nothing under the last line, so the text slid up
+  // while the pane closed and dropped back ~150 px when the hold let go 700 ms
+  // later (user 2026-11-09: "the text bounces"). App's slidePane drops the
+  // min-height itself before it rewraps the column, because in a slide's first
+  // frame the doc resizes alone and dropping it here would be an observer loop.
+  const heldWidth = useRef(0);
 
   // Provider receipts remain canonical in state. The presentation projection
   // keeps live directions in the composer tray and settles them after their
@@ -1017,6 +1026,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // re-layout cannot drop the page under a followed reader.
   useLayoutEffect(() => {
     heldHeight.current = 0;
+    heldWidth.current = 0;
     docRef.current?.style.removeProperty('min-height');
   }, [chat?.id]);
 
@@ -1074,6 +1084,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     };
     const onResize = () => {
       if (stick.current && doc) {
+        // A new width starts a new hold. Dropping the old one here, before
+        // paint, lets the pin below land on the real end of the text. The
+        // scroller resized with the column, so the doc's own resize from this
+        // is delivered again in this same frame, not as an observer loop.
+        const width = doc.offsetWidth;
+        if (width !== heldWidth.current) {
+          heldWidth.current = width;
+          heldHeight.current = 0;
+          doc.style.removeProperty('min-height');
+        }
         const height = doc.offsetHeight;
         if (height > heldHeight.current) {
           heldHeight.current = height;

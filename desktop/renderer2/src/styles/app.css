@@ -41,14 +41,17 @@ body {
    dead space into one band on the closed side (user 2026-07-12). */
 #root.no-side { grid-template-columns: 1fr var(--rail-w, 312px); }
 /* A closed rail keeps a 0px track, so opening and closing it can slide
-   (#root.pane-anim, PANE_SLIDE_MS in store/right-pane.ts): snapping rewrapped
+   (App.tsx slidePane, PANE_SLIDE_MS in store/right-pane.ts): snapping rewrapped
    the whole transcript in one frame, which read as the text changing size and
-   jumping (user 2026-11-08). While it slides, the rail keeps its own width and
-   is uncovered from the window's right edge; only the transcript rewraps. */
+   jumping (user 2026-11-08). While it slides (#root.pane-anim), the rail keeps
+   its own width and is uncovered from the window's right edge. The transcript
+   column is not narrowed frame by frame (every line rewrapped ~13 times and
+   bounced, user 2026-11-09): it takes its final width at once and only its
+   left edge travels, so the scroller clips what the rail still covers. */
 #root.no-rail { grid-template-columns: var(--side-w, 288px) 1fr 0px; }
 #root.no-side.no-rail { grid-template-columns: 1fr 0px; }
-#root.pane-anim { transition: grid-template-columns .22s cubic-bezier(.2, .7, .3, 1); }
 #root.pane-anim aside.rail { width: var(--rail-w, 312px); justify-self: start; }
+#root.pane-anim main .scroll { overflow-x: hidden; }
 #root.rail-wide { grid-template-columns: var(--side-w, 288px) 1fr var(--rail-w, 470px); }
 #root.no-side.rail-wide { grid-template-columns: 1fr var(--rail-w, 470px); }
 /* Browser mode reuses the SAME shared right-column width as the info rail

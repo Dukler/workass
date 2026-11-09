@@ -1,7 +1,7 @@
 import { useEffect, useInsertionEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
-import { chatPane, PANE_SLIDE_MS, railSlides } from '../store/right-pane';
+import { chatPane, columnSlideFrames, PANE_SLIDE_EASING, PANE_SLIDE_MS, railSlides } from '../store/right-pane';
 import { SidebarV2 } from './SidebarV2';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -65,6 +65,39 @@ function SidebarToggle({ expanded }: { expanded: boolean }) {
   );
 }
 
+/**
+ * Slide the info rail open or shut (user 2026-11-09: "the text bounces"). The
+ * grid's columns travel from where they are to where `apply` puts them; each
+ * transcript column takes its final width at once (one rewrap, its reader's
+ * line held by the transcript before that frame paints) and only its left edge
+ * travels with the rail. A toggle mid-slide starts from where the slide is.
+ */
+function slidePane(root: HTMLElement, apply: () => void, running: Animation[]): Animation[] {
+  const columns = [...root.querySelectorAll<HTMLElement>('main .scroll > .doc')].filter((doc) => doc.getClientRects().length > 0);
+  const beforeColumns = getComputedStyle(root).gridTemplateColumns;
+  const before = columns.map((doc) => { const box = doc.getBoundingClientRect(); return { x: box.x, width: box.width }; });
+  for (const anim of running) anim.cancel();
+  // A followed transcript holds its tallest height as min-height (Transcript,
+  // heldHeight). That height belongs to the old width; held across the
+  // rewrap it left a band under the last line that closed 700 ms later.
+  for (const doc of columns) doc.style.removeProperty('min-height');
+  apply();
+  // One layout at the final columns: the rewrap the slide costs, done once.
+  // Read everything here, before any animation puts the old columns back.
+  const afterColumns = getComputedStyle(root).gridTemplateColumns;
+  const frames = columns.map((doc, i) => {
+    const box = doc.getBoundingClientRect();
+    return columnSlideFrames(before[i], { x: box.x, width: box.width, marginLeft: parseFloat(getComputedStyle(doc).marginLeft) || 0 });
+  });
+  const timing: KeyframeAnimationOptions = { duration: PANE_SLIDE_MS, easing: PANE_SLIDE_EASING };
+  const anims: Animation[] = [];
+  if (beforeColumns !== afterColumns) {
+    anims.push(root.animate([{ gridTemplateColumns: beforeColumns }, { gridTemplateColumns: afterColumns }], timing));
+  }
+  columns.forEach((doc, i) => { const docFrames = frames[i]; if (docFrames) anims.push(doc.animate(docFrames, timing)); });
+  return anims;
+}
+
 export function App() {
   const app = useApp();
   useForks();
@@ -91,25 +124,35 @@ export function App() {
   // a passive effect leaves the old chat's columns in place for that first read.
   // Custom drag widths drive CSS vars the grid templates consume; rail-wide folds
   // into the effective rail width so ⤢ composes with a custom width.
-  // The info rail slides open and shut in the same chat (#root.pane-anim);
-  // a chat switch, a drag, a window resize and the browser stay instant.
-  const paneSlide = useRef<{ chatId: string | null; pane: typeof activePane; until: number; timer: ReturnType<typeof setTimeout> | null }>({
-    chatId: null, pane: null, until: 0, timer: null,
-  });
+  // The info rail slides open and shut in the same chat (slidePane, with
+  // #root.pane-anim for the rail itself); a chat switch, a drag, a window
+  // resize and the browser stay instant.
+  const paneSlide = useRef<{
+    chatId: string | null; pane: typeof activePane; until: number; timer: ReturnType<typeof setTimeout> | null; anims: Animation[];
+  }>({ chatId: null, pane: null, until: 0, timer: null, anims: [] });
   useInsertionEffect(() => {
     const root = document.getElementById('root');
     if (!root) return;
     const slide = paneSlide.current;
     const chatId = chat?.id ?? null;
-    if (slide.chatId === chatId && railSlides(slide.pane, activePane)) {
+    const slides = slide.chatId === chatId && railSlides(slide.pane, activePane) && !app.settingsOpen;
+    if (slides) {
       slide.until = performance.now() + PANE_SLIDE_MS;
       if (slide.timer) clearTimeout(slide.timer);
       slide.timer = setTimeout(() => { slide.timer = null; root.classList.remove('pane-anim'); }, PANE_SLIDE_MS + 30);
-    } else if (slide.chatId !== chatId) {
-      slide.until = 0;
+    } else {
+      // Anything else that moves the columns lands at once, mid-slide too.
+      for (const anim of slide.anims) anim.cancel();
+      slide.anims = [];
+      if (slide.chatId !== chatId) slide.until = 0;
     }
     slide.chatId = chatId;
     slide.pane = activePane;
+    const apply = () => applyRootLayout(root, slide.until);
+    if (slides && typeof root.animate === 'function') slide.anims = slidePane(root, apply, slide.anims);
+    else apply();
+  }, [app.panes.side, app.panes.railWide, app.panes.sideW, app.panes.railW, app.settingsOpen, activePane, winW, chat?.id]);
+  function applyRootLayout(root: HTMLElement, slideUntil: number) {
     root.style.setProperty('--side-w', `${app.panes.sideW}px`);
     const railBase = app.panes.railWide ? Math.max(app.panes.railW, 470) : app.panes.railW;
     // Never let the (shared, drag-persisted) right pane grow so wide it shoves the
@@ -130,9 +173,9 @@ export function App() {
     } else {
       cls.push('no-rail');
     }
-    if (performance.now() < slide.until) cls.push('pane-anim');
+    if (performance.now() < slideUntil) cls.push('pane-anim');
     root.className = cls.join(' ');
-  }, [app.panes.side, app.panes.railWide, app.panes.sideW, app.panes.railW, app.settingsOpen, activePane, winW, chat?.id]);
+  }
 
   // ⌘, opens the command box (user, 2026-07-26 — after a promotion left the app
   // running but not the controller with no in-app way out). Ajustes moved into
