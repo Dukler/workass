@@ -507,6 +507,10 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // min-height itself before it rewraps the column, because in a slide's first
   // frame the doc resizes alone and dropping it here would be an observer loop.
   const heldWidth = useRef(0);
+  // The width the transcript last laid itself out at (its resize observer). A
+  // different width now means the column rewrapped and the observer has not run
+  // yet: a scroll in between is the rewrap's, never the reader leaving.
+  const laidOutWidth = useRef(0);
 
   // Provider receipts remain canonical in state. The presentation projection
   // keeps live directions in the composer tray and settles them after their
@@ -944,7 +948,9 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     if (restoring.current) { lastScrollTop.current = el.scrollTop; return; }
     const intentSeen = performance.now() <= userScrollUntil.current;
     const unwritten = el.scrollTop - lastScrollTop.current;
-    const userInitiated = intentSeen || transcriptReaderLeftUnannounced(stick.current, el, unwritten);
+    const doc = docRef.current;
+    const rewrapPending = !!doc && laidOutWidth.current > 0 && Math.abs(doc.offsetWidth - laidOutWidth.current) >= 1;
+    const userInitiated = intentSeen || transcriptReaderLeftUnannounced(stick.current, el, unwritten, rewrapPending);
     const delta = (intentSeen && userScrollDelta.current) || unwritten;
     lastScrollTop.current = el.scrollTop;
     const atBottom = transcriptPinnedAfterScroll(stick.current, userInitiated, el, delta);
@@ -1117,6 +1123,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   useLayoutEffect(() => {
     heldHeight.current = 0;
     heldWidth.current = 0;
+    laidOutWidth.current = 0;
     docRef.current?.style.removeProperty('min-height');
   }, [chat?.id]);
 
@@ -1173,6 +1180,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       }, HELD_HEIGHT_RELEASE_MS);
     };
     const onResize = () => {
+      if (doc) laidOutWidth.current = doc.offsetWidth;
       if (stick.current && doc) {
         // A new width starts a new hold. Dropping the old one here, before
         // paint, lets the pin below land on the real end of the text. The

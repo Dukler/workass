@@ -73,6 +73,14 @@ test('an unwritten move that stays at the bottom or goes down keeps following', 
   assert.equal(transcriptReaderLeftUnannounced(true, farFromBottom, 0), false);
 });
 
+test('a clamp from a rewrap the transcript has not laid out yet keeps following', () => {
+  // The right pane closing: the wider column is briefly shorter, the browser
+  // clamps the scroll up, and its event arrives before the bottom is pinned.
+  const clampedShort = { scrollHeight: 4092, scrollTop: 3170, clientHeight: 770 };
+  assert.equal(transcriptReaderLeftUnannounced(true, clampedShort, -414), true, 'without the rewrap it reads as leaving');
+  assert.equal(transcriptReaderLeftUnannounced(true, clampedShort, -414, true), false);
+});
+
 test('a reader who already left is not re-decided by an unwritten move', () => {
   assert.equal(transcriptReaderLeftUnannounced(false, farFromBottom, -730), false);
 });

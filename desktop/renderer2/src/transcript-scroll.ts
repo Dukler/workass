@@ -60,12 +60,22 @@ export function transcriptPinnedAfterScroll(
 // every write records where it left the scroll, the spring only closes on the
 // bottom, a shrink clamps to it, and the browser's own anchoring is off. A move
 // nobody wrote that ends above the bottom is therefore the reader's.
+//
+// Except while the column has rewrapped and the transcript has not laid itself
+// out at the new width yet (rewrapPending). The right pane closing widens the
+// column; the page is briefly shorter than it settles at, the browser clamps
+// the scroll up to fit, and that clamp's scroll event can arrive before the
+// resize observer pins the bottom again. Read as the reader's, it stopped
+// following and the text stayed up there (user 2026-11-09: "the text scrolls up
+// when the right pane opens and closes"). A wheel, touch or scrollbar is still
+// the reader's: that is announced intent, not this rule.
 export function transcriptReaderLeftUnannounced(
   pinned: boolean,
   metrics: TranscriptScrollMetrics,
   unwrittenDelta: number,
+  rewrapPending = false,
 ): boolean {
-  return pinned && unwrittenDelta < 0 && !transcriptIsAtBottom(metrics);
+  return pinned && !rewrapPending && unwrittenDelta < 0 && !transcriptIsAtBottom(metrics);
 }
 
 export const TRANSCRIPT_BACKGROUND_PIN_DELAY_MS = 100;
