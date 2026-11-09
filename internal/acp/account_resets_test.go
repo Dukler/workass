@@ -739,6 +739,35 @@ func TestClaudeAccountResetClaimSendsTheProgramAndMapsResults(t *testing.T) {
 	}
 }
 
+// The account API answers resets only to Claude Code: without its User-Agent
+// the reply is eligible:false, "surface", with no grants (owner 2026-11-09).
+func TestClaudeAccountRequestsSayTheyAreClaudeCode(t *testing.T) {
+	var agents []string
+	source, _ := newTestAccountSource(t, func(w http.ResponseWriter, r *http.Request) {
+		agents = append(agents, r.Header.Get("User-Agent"))
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"result": "reset", "resets_left": 0}`)
+			return
+		}
+		_, _ = io.WriteString(w, testAccountUsageBody)
+	}, validCredential("token-a"))
+	if _, err := source.Status(context.Background()); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	noteClaudeCLIVersion("2.1.400")
+	t.Cleanup(func() { claudeCLIVersionSeen.Store(nil) })
+	noteClaudeCLIVersion("not a version")
+	if _, err := source.Claim(context.Background(), "five_hour_weekly", "6f1c2a8e-0000-4000-8000-000000000001"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(agents) != 2 || !strings.HasPrefix(agents[0], "claude-cli/") || !strings.HasSuffix(agents[0], " (external, cli)") {
+		t.Fatalf("user agents = %q", agents)
+	}
+	if agents[1] != "claude-cli/2.1.400 (external, cli)" {
+		t.Fatalf("claim user agent = %q, want the detected version", agents[1])
+	}
+}
+
 func TestClaudeAccountCredentialKeepsOnlyTheAccessToken(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt","expiresAt":1794231600000,"scopes":["user:profile"]}}`)

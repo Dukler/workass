@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,34 @@ const (
 	claudeKeychainItemMissingCode = 44
 	claudeKeychainLockedCode      = 36
 )
+
+// claudeCLIVersionSeen is the Claude Code version the manager last detected
+// (setProviderCLIVersion). The account API decides who may see and use resets
+// by the client it is talking to: a request that does not say it is Claude
+// Code is answered eligible:false, ineligible_reason "surface", with no grants
+// at all (owner 2026-11-09: two Fable resets on claude.ai, none in Cuentas).
+var claudeCLIVersionSeen atomic.Pointer[string]
+
+// claudeCLIVersionFallback names a version that offers resets, for the
+// moments before the installed one is detected.
+const claudeCLIVersionFallback = "2.1.319"
+
+func noteClaudeCLIVersion(version string) {
+	version = strings.TrimSpace(version)
+	if version == "" || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$`).MatchString(version) {
+		return
+	}
+	claudeCLIVersionSeen.Store(&version)
+}
+
+// claudeAccountUserAgent is the User-Agent Claude Code itself sends.
+func claudeAccountUserAgent() string {
+	version := claudeCLIVersionFallback
+	if seen := claudeCLIVersionSeen.Load(); seen != nil {
+		version = *seen
+	}
+	return "claude-cli/" + version + " (external, cli)"
+}
 
 var (
 	// The same shapes Claude Code checks before it sends a claim.
@@ -188,6 +217,7 @@ func (s *claudeAccountResetSource) call(ctx context.Context, method, path string
 		request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
 		request.Header.Set("anthropic-beta", claudeOAuthBetaHeader)
 		request.Header.Set("Accept", "application/json")
+		request.Header.Set("User-Agent", claudeAccountUserAgent())
 		if payload != nil {
 			request.Header.Set("Content-Type", "application/json")
 		}

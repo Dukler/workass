@@ -847,6 +847,9 @@ func (m *Manager) setProviderCLIVersion(providerID string, version *CLIVersion) 
 		return false
 	}
 	providerID = normalizeProviderID(providerID)
+	if providerID == "claude" {
+		noteClaudeCLIVersion(version.Version)
+	}
 	refresh := false
 	previousStatus := providerStatusInactive
 	previousError := ""
