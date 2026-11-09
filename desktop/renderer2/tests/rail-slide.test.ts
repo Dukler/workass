@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { columnSlideFrames, PANE_SLIDE_MS, railSlides } from '../src/store/right-pane.ts';
+import { columnSlideFrames, PANE_SLIDE_MS, railSlides, READ_MAX, readingWidth } from '../src/store/right-pane.ts';
 import { anchorBlockAt, type AnchorBox } from '../src/transcript-window.ts';
 
 // 2026-11-08: opening the right pane rewrapped the whole transcript in one
@@ -64,7 +64,11 @@ test('the slide reads the final layout before any animation puts the old columns
   // Measured after the grid animation started, the column read its old width
   // and was never frozen: the rig showed it rewrapping every frame again.
   assert.ok(apply > 0 && apply < measure && measure < animate, 'apply, then measure, then animate');
-  assert.ok(slide.indexOf("removeProperty('min-height')") < apply, 'the held height goes before the rewrap');
+  // The held height goes only with a width change, before anything paints;
+  // with the width fixed it stays, so a followed transcript does not move.
+  const drop = slide.indexOf("removeProperty('min-height')");
+  assert.ok(drop > apply && drop < animate, 'the held height is dropped after the final layout is read, before the slide starts');
+  assert.match(slide, /if \(Math\.abs\(box\.width - before\[i\]\.width\) > 0\.5\) doc\.style\.removeProperty\('min-height'\);/);
   assert.match(slide, /duration: PANE_SLIDE_MS, easing: PANE_SLIDE_EASING/);
 });
 
@@ -106,4 +110,28 @@ test('the anchor pick undoes a layout shift before it re-reads the held element'
   const pick = transcript.slice(transcript.indexOf('const pickAnchorNode = () => {'), transcript.indexOf('const recordAnchor = () => {'));
   assert.ok(pick.indexOf('holdAnchor();') > 0 && pick.indexOf('holdAnchor();') < pick.indexOf('const held = anchorNode.current;'));
   assert.match(pick, /anchorBlockAt\(hit, line, isInlineBox\)/);
+});
+
+// 2026-11-09 (owner, option 1 of .dev/mocks/rightpane-v1.html): opening the
+// pane still made the text jump up once, because the narrower column rewrapped
+// and a reader at the bottom kept the bottom. The column now always has the
+// width it has with the pane open, so the pane only slides it sideways.
+test('the reading column keeps the width it has with the right pane open', () => {
+  const base = { side: true, sideW: 288, railW: 312, minMain: 600 };
+  // A 14-inch window: 1512 - 288 - 312 = 912 beside the pane, less the composer's 48.
+  assert.equal(readingWidth({ ...base, winW: 1512 }), 864);
+  // Wide enough that the full measure fits beside the pane: unchanged.
+  assert.equal(readingWidth({ ...base, winW: 1920 }), READ_MAX);
+  // Hiding the sidebar gives the column the room back.
+  assert.equal(readingWidth({ ...base, winW: 1512, side: false }), 1040);
+  // A wider pane narrows it the same way open or shut.
+  assert.equal(readingWidth({ ...base, winW: 1512, railW: 470 }), 706);
+  // At or under 1180px the CSS drops the rail; too little room beside it keeps the old measure.
+  assert.equal(readingWidth({ ...base, winW: 1180 }), READ_MAX);
+  assert.equal(readingWidth({ ...base, winW: 1190, railW: 320 }), READ_MAX);
+  const app = readFileSync(new URL('../src/components/App.tsx', import.meta.url), 'utf8');
+  const layout = app.slice(app.indexOf('function applyRootLayout('));
+  assert.match(layout, /root\.style\.setProperty\('--read', `\$\{readingWidth\(\{ winW, side: app\.panes\.side, sideW: app\.panes\.sideW, railW: railEff, minMain: MIN_MAIN \}\)\}px`\);/);
+  // Set whether or not the pane is open: before the class that opens it.
+  assert.ok(layout.indexOf("'--read'") < layout.indexOf("cls.push('no-rail')"));
 });

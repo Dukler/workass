@@ -1,7 +1,7 @@
 import { useEffect, useInsertionEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
-import { chatPane, columnSlideFrames, PANE_SLIDE_EASING, PANE_SLIDE_MS, railSlides } from '../store/right-pane';
+import { chatPane, columnSlideFrames, PANE_SLIDE_EASING, PANE_SLIDE_MS, railSlides, readingWidth } from '../store/right-pane';
 import { SidebarV2 } from './SidebarV2';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -68,26 +68,31 @@ function SidebarToggle({ expanded }: { expanded: boolean }) {
 
 /**
  * Slide the info rail open or shut (user 2026-11-09: "the text bounces"). The
- * grid's columns travel from where they are to where `apply` puts them; each
- * transcript column takes its final width at once (one rewrap, its reader's
- * line held by the transcript before that frame paints) and only its left edge
- * travels with the rail. A toggle mid-slide starts from where the slide is.
+ * grid's columns travel from where they are to where `apply` puts them. The
+ * transcript column keeps its width (readingWidth, owner 2026-11-09), so only
+ * its left edge travels with the rail and no line rewraps; on a window too
+ * narrow for that it takes its final width at once (one rewrap, its reader's
+ * line held before that frame paints). A toggle mid-slide starts from where
+ * the slide is.
  */
 function slidePane(root: HTMLElement, apply: () => void, running: Animation[]): Animation[] {
   const columns = [...root.querySelectorAll<HTMLElement>('main .scroll > .doc')].filter((doc) => doc.getClientRects().length > 0);
   const beforeColumns = getComputedStyle(root).gridTemplateColumns;
   const before = columns.map((doc) => { const box = doc.getBoundingClientRect(); return { x: box.x, width: box.width }; });
   for (const anim of running) anim.cancel();
-  // A followed transcript holds its tallest height as min-height (Transcript,
-  // heldHeight). That height belongs to the old width; held across the
-  // rewrap it left a band under the last line that closed 700 ms later.
-  for (const doc of columns) doc.style.removeProperty('min-height');
   apply();
-  // One layout at the final columns: the rewrap the slide costs, done once.
-  // Read everything here, before any animation puts the old columns back.
+  // One layout at the final columns. Read everything here, before any
+  // animation puts the old columns back. With the column's width fixed
+  // (readingWidth) nothing rewraps and only the column's left edge travels.
   const afterColumns = getComputedStyle(root).gridTemplateColumns;
   const frames = columns.map((doc, i) => {
     const box = doc.getBoundingClientRect();
+    // A followed transcript holds its tallest height as min-height (Transcript,
+    // heldHeight). That height belongs to the old width: when the width does
+    // change (a window too narrow to keep it), held across the rewrap it left
+    // a band under the last line that closed 700 ms later. Dropped before this
+    // frame paints; kept when the width stays, so nothing moves.
+    if (Math.abs(box.width - before[i].width) > 0.5) doc.style.removeProperty('min-height');
     return columnSlideFrames(before[i], { x: box.x, width: box.width, marginLeft: parseFloat(getComputedStyle(doc).marginLeft) || 0 });
   });
   const timing: KeyframeAnimationOptions = { duration: PANE_SLIDE_MS, easing: PANE_SLIDE_EASING };
@@ -165,6 +170,9 @@ export function App() {
     const maxRail = Math.max(320, winW - app.panes.sideW - MIN_MAIN);
     const railEff = Math.min(railBase, maxRail);
     root.style.setProperty('--rail-w', `${railEff}px`);
+    // The text keeps the width it has with the right pane open, so the pane
+    // opening or closing only slides it (owner 2026-11-09, readingWidth).
+    root.style.setProperty('--read', `${readingWidth({ winW, side: app.panes.side, sideW: app.panes.sideW, railW: railEff, minMain: MIN_MAIN })}px`);
     if (app.settingsOpen) { root.className = 'app settings'; return; }
     const cls = ['app'];
     if (!app.panes.side) cls.push('no-side');

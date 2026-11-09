@@ -21,7 +21,9 @@ body {
   /* The transcript + composer fill the content area rather than sitting in a
      narrow fixed column that leaves dead gutters on a wide window (user
      2026-07-12). One knob for the whole reading measure: fills narrower windows,
-     caps line length on wide ones so text stays readable (~110 chars). */
+     caps line length on wide ones so text stays readable (~110 chars).
+     App.tsx overrides it with the width the column has with the right pane
+     open (readingWidth, owner 2026-11-09), so the pane never rewraps it. */
   --read: 1040px;
   /* Breathing room under the last settled message. The live pulse row cancels
      it (see .thinklive), so the two can't drift apart. */

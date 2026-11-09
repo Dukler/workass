@@ -31,6 +31,29 @@ export function columnSlideFrames(before: ColumnBox, after: ColumnBox & { margin
 /** Whether going from `before` to `after` in the same chat slides the rail.
  *  Only the info rail opening or closing does: the browser's native view
  *  follows its slot in another process and would trail a moving column. */
+/** The widest reading column (app.css --read, ~110 characters). */
+export const READ_MAX = 1040;
+// .compwrap's side padding: the composer is the widest thing in the column.
+const COMPOSER_GUTTER = 48;
+
+/**
+ * The reading column's width, written to #root as --read (owner 2026-11-09,
+ * option 1 of .dev/mocks/rightpane-v1.html): the width it has with the right
+ * pane open, whether the pane is open or not. Opening or closing the pane then
+ * only slides the text sideways; nothing rewraps, so nothing moves up. The
+ * cost the owner chose: with the pane closed the column is narrower than the
+ * full measure. A window too narrow for the rail (<= 1180px, where the CSS
+ * drops it) or that would leave less than minMain beside it keeps the full
+ * measure and rewraps as before.
+ */
+export function readingWidth(o: { winW: number; side: boolean; sideW: number; railW: number; minMain: number }): number {
+  if (o.winW <= 1180) return READ_MAX;
+  const sideW = o.side && o.winW > 820 ? o.sideW : 0;
+  const main = o.winW - sideW - o.railW;
+  if (main < o.minMain) return READ_MAX;
+  return Math.min(READ_MAX, main - COMPOSER_GUTTER);
+}
+
 export function railSlides(before: RightPane | null, after: RightPane | null): boolean {
   return (before === 'rail' && after === null) || (before === null && after === 'rail');
 }
