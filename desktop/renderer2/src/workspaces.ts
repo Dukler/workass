@@ -157,12 +157,18 @@ export function lastProject(): string | null {
 }
 
 // Where the sidebar's + puts the next chat. Scoped to a project → that project,
-// always. In "Todos los proyectos" → the last folder a chat was started in, but
-// only while it is still a listed group: removing a folder has to stop new chats
-// landing there. null = no opinion, and newChat falls back to its own chain.
-export function newChatTarget(scope: string | null, groups: WorkspaceGroup[], remembered: string | null): string | null {
+// always. In "Todos los proyectos" it is Ajustes · General's "Carpeta" (`folder`):
+// "last" (the default) is the last folder a chat was started in, "active" the
+// open chat's folder, and a path that one folder. A remembered or fixed folder
+// counts only while it is still a listed group: removing a folder has to stop
+// new chats landing there, and a fixed folder that is gone falls back to the
+// last one. null = no opinion, and newChat falls back to its own chain.
+export function newChatTarget(scope: string | null, groups: WorkspaceGroup[], remembered: string | null, folder = 'last', activeCwd?: string | null): string | null {
   const scoped = normalizeWorkspacePath(scope);
   if (scoped) return scoped;
+  if (folder === 'active') return concreteWorkspacePath(activeCwd, groups);
+  const fixed = folder === 'last' ? '' : normalizeWorkspacePath(folder);
+  if (fixed && groups.some((g) => pathKey(g.path) === pathKey(fixed))) return concreteWorkspacePath(fixed, groups);
   const last = normalizeWorkspacePath(remembered);
   if (!last) return null;
   if (!groups.some((g) => pathKey(g.path) === pathKey(last))) return null;

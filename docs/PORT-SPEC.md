@@ -732,7 +732,9 @@ that are Electron-shell-local (dialogs, clipboard, window state) stay in the she
     clear the editor. Remove matching-text deletion workarounds.
     while a turn is running, ordinary `Enter` appends one durable FIFO follow-up
     and never interrupts the active turn; `Cmd+Enter` explicitly invokes the
-    provider-aware steering path above (`Ctrl+Enter` on Windows/Linux). One
+    provider-aware steering path above (`Ctrl+Enter` on Windows/Linux). The
+    app setting `whileWorking: "steer"` (Ajustes · General) swaps the two keys;
+    a chat whose agent cannot be steered keeps the FIFO on `Enter`. One
     shortcut submits directly, even with slash/@ autocomplete open, without
     first placing the direction in the FIFO (user correction 2026-09-22).
     `Shift+Enter` remains newline. The send

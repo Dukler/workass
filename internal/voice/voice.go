@@ -63,7 +63,8 @@ type Engine struct {
 type Request struct {
 	// WAV is a complete RIFF/WAVE file, 16 kHz mono s16le.
 	WAV []byte
-	// Lang is an ISO code ("es", "en"). Empty means let whisper detect it.
+	// Lang is an ISO code ("es", "en") or "auto" to let whisper detect it.
+	// Empty passes no -l flag, and whisper-cli then assumes English.
 	//
 	// Detection is not free of consequence: a multilingual model asked to guess
 	// on a sentence that switches languages mid-way sometimes translates instead

@@ -441,6 +441,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"chatTitles":         defaultChatTitleSettings(),
 		"jobs":               defaultJobSettings(),
 	}
+	applyGeneralSettings(next, input)
 	if input == nil {
 		return next
 	}

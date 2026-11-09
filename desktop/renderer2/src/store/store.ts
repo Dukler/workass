@@ -21,7 +21,7 @@ import {
   shouldDrainRecoveredQueue, withoutDraftImages,
 } from '../image-drafts';
 import { acceptPendingSteer, commitChronologicalSteer, hasSteerConsumptionReceipt, insertChronologicalSteer, liveSteeringSupported, markPendingSteerUncertain, normalizeDeliveryCapabilities, rejectChronologicalSteer, settlePendingSteer, settleSendingSteersAtTurnEnd, settleStagedSteersAtTurnEnd, stageChronologicalSteer, SteeringDispatchLane, steeringDestination, steeringStagesBoundary, stopAndSendSupported } from '../steering';
-import { chooseWorkspacePath, inheritChatControls, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
+import { buildWorkspaceGroups, chooseWorkspacePath, inheritChatControls, lastProject, newChatTarget, normalizeWorkspacePath, normalizeWorkspaces, rememberLastProject, workspaceFromPath } from '../workspaces';
 import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } from '../workspace-move';
 import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
@@ -53,6 +53,11 @@ import {
   DEFAULT_CHAT_TITLES, chatTitleAgents, chatTitlesFromSettings, resolveChatTitleChoice, withChatTitlesInSettings,
   type ChatTitleSettings,
 } from '../chat-titles';
+import {
+  DEFAULT_GENERAL_SETTINGS, NEW_CHAT_FOLDER_ACTIVE, generalSettingsFromSettings, newChatAgents, newChatModel, parseGeneralSettings,
+  withGeneralSettingsInSettings, type GeneralSettings,
+} from '../general-settings';
+import { finishedBackgroundWork, finishedWorkText, freshEnding, playNoticeChime } from '../notices';
 import { workassRuntimeProfile } from '../model-catalog';
 import { clearPermissionById, clearPermissionsOutsideSnapshot } from '../permissions';
 import { isQueuedJobStart, reconcileQueuedJobStart } from './busy-start';
@@ -1341,7 +1346,7 @@ export class Store {
 
   private fromMirror(m: Mirror | null): AppState {
     const base: AppState = {
-      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, planUsageByProvider: {}, planUsageLoadingByProvider: {},
+      chats: [], deferredChats: null, workspaces: [], collapsedWorkspaces: [], removedWorkspaces: [], activeId: null, seq: 0, globalRevision: 0, groups: [], providers: [], modelFavorites: [], chatTitles: { ...DEFAULT_CHAT_TITLES }, general: parseGeneralSettings(DEFAULT_GENERAL_SETTINGS), planUsageByProvider: {}, planUsageLoadingByProvider: {},
       theme: prefersLight() ? 'light' : 'dark',
       themePref: 'system', density: 'compact',
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
@@ -4103,7 +4108,10 @@ export class Store {
     // Provider plan-usage snapshots — feature-detected; the daemon replays the
     // cached snapshot(s) to fresh clients like chat:catalog.
     on('onChatPlanUsage', (s) => this.onPlanUsage(s as PlanUsageSnapshot));
-    on('onSpawnedWorkChanged', (s) => this.onSpawnedWorkChanged(s as SpawnedWorkChanged));
+    on('onSpawnedWorkChanged', (s) => {
+      this.noticeFinishedWork(s as SpawnedWorkChanged);
+      this.onSpawnedWorkChanged(s as SpawnedWorkChanged);
+    });
     // Per-chat changed files (Entorno rail) — feature-detected. chat:env is NOT
     // in the provider replay set, so this only keeps the card live after turns;
     // fresh-client hydration is refreshChatEnv() via chat:env-get.
@@ -4135,7 +4143,8 @@ export class Store {
     on('onChatCheckpointRestored', (e) => this.onCheckpointRestored(e as CheckpointRestored));
     // R7 notifications — controller-only explicit agent events. Permission
     // requests retain their own attention path; ordinary turn completion never
-    // creates a notification or backlog entry.
+    // creates a daemon notification or backlog entry (the turn-ended notice of
+    // Ajustes · General is this window's own, from job:event end).
     on('onNotify', (e) => this.onNotify(e as NotifyEvent));
     on('onNotifyBacklog', (e) => this.onNotifyBacklog(e as NotifyBacklog));
     on('onChatCommands', (e) => {
@@ -4680,6 +4689,10 @@ export class Store {
     this.state.chatTitles = { ...next };
     this.commitModelPreferences();
   }
+  setGeneral(next: GeneralSettings) {
+    this.state.general = parseGeneralSettings(next);
+    this.commitModelPreferences();
+  }
   // Repaint now (bumpApp(false) → no session-mirror write) and schedule the
   // debounced settings save.
   private commitModelPreferences() {
@@ -4700,6 +4713,7 @@ export class Store {
     if (this.settingsSaveTimer) return;
     this.state.modelFavorites = modelFavoritesFromSettings(reply);
     this.state.chatTitles = chatTitlesFromSettings(reply);
+    this.state.general = generalSettingsFromSettings(reply);
     this.bumpApp(false);
   }
   private scheduleModelPreferencesSave() {
@@ -4721,7 +4735,7 @@ export class Store {
       const reply = await call('getSettings');
       if (!reply || typeof reply !== 'object') return;   // can't confirm the blob — never clobber
       const withFavorites = withModelFavoritesInSettings(settingsFromReply(reply), this.state.modelFavorites);
-      const merged = withChatTitlesInSettings(withFavorites, this.state.chatTitles);
+      const merged = withGeneralSettingsInSettings(withChatTitlesInSettings(withFavorites, this.state.chatTitles), this.state.general);
       const revision = (reply as { settingsRevision?: unknown }).settingsRevision;
       if (typeof revision !== 'string' || !revision) { await call('setSettings', merged); return; }
       try {
@@ -4791,6 +4805,15 @@ export class Store {
   newChat(activate = true, workspacePath?: string | null, machineId?: string | null): Chat {
     const nextSeq = this.state.seq + 1;
     const active = this.active();
+    // A caller that names no folder (⌘N, the command bar, the first chat) gets
+    // the one Ajustes · General names, on that folder's machine.
+    if (workspacePath === undefined) {
+      const target = this.newChatDefaultFolder(active);
+      if (target) {
+        workspacePath = target.path;
+        if (machineId === undefined) machineId = target.machineId;
+      }
+    }
     const cwd = chooseWorkspacePath(workspacePath, active, this.state.workspaces, this.state.meta?.workspaceDir ?? this.state.meta?.rootDir);
     const workspace = cwd ? workspaceFromPath(cwd) : null;
     const controls = inheritChatControls(active);
@@ -4823,6 +4846,7 @@ export class Store {
       pane: null,
       pending: true, messages: [], draft: '',
     };
+    this.applyNewChatDefaults(chat);
     this.state.chats.unshift(chat);
     this.captureChatOrder();
     this.pendingChatCreates.add(chat.id);
@@ -4837,6 +4861,37 @@ export class Store {
     void this.ensureChatCreated(chat);
     if (activate) this.refreshPlanUsage(chat.id);
     return chat;
+  }
+  // Ajustes · General "Carpeta": "last" and a fixed folder resolve here like
+  // the sidebar's +; "active" (null) is newChat's own chain, the open chat's.
+  private newChatDefaultFolder(active: Chat | null): { path: string; machineId: string } | null {
+    const folder = this.state.general.newChat.folder;
+    if (folder === NEW_CHAT_FOLDER_ACTIVE) return null;
+    const groups = buildWorkspaceGroups(this.state.workspaces, this.state.chats, this.state.removedWorkspaces, this.state.deferredChats?.cwds ?? []);
+    const path = newChatTarget(null, groups, lastProject(), folder, active?.cwd);
+    if (!path) return null;
+    const group = groups.find((candidate) => normalizeWorkspacePath(candidate.path) === normalizeWorkspacePath(path));
+    return { path, machineId: group?.machineId ?? '' };
+  }
+  // Ajustes · General "Agente", "Modelo y esfuerzo", "Permisos": with an agent
+  // chosen, a new chat starts on it instead of copying the open chat. Only
+  // when the chat's machine offers that agent ready; otherwise the open chat
+  // stays the model. A model gone from the catalog falls back to the agent's
+  // first, an effort or permission mode it lacks to the agent's own default.
+  private applyNewChatDefaults(chat: Chat) {
+    const defaults = this.state.general.newChat;
+    if (!defaults.providerId) return;
+    const group = newChatAgents(this.catalogGroupsForChat(chat)).find((candidate) => candidate.providerId === defaults.providerId);
+    const model = group ? newChatModel(defaults, group) : null;
+    if (!group || !model) return;
+    chat.providerId = group.providerId;
+    chat.providerName = this.providerName(group.providerId, chat) ?? group.providerName ?? null;
+    chat.modelControls = undefined;
+    chat.currentModeId = null;
+    this.applyControlsForModel(chat, group.providerId, model.modelId, group.models, group.modes, {
+      explicitEffort: model.modelId === defaults.model && defaults.effort ? defaults.effort : null,
+      fallbackMode: defaults.modeId || null,
+    });
   }
   private async ensureChatCreated(chat: Chat): Promise<boolean> {
     if (!this.pendingChatCreates.has(chat.id) || this.confirmedChatCreates.has(chat.id)) return true;
@@ -6942,6 +6997,14 @@ export class Store {
           this.touchChat(endedChat.id);
           this.bumpApp(false);
         }
+        // Ajustes · General "Cuando termina un turno": the same news as the
+        // unread cue, announced when you are not looking at that chat. A chat
+        // with a queued message keeps working, and a late replay is old news.
+        if (!terminalWasAlreadyApplied && endedChat && !e.job.interrupted && e.job.code !== 130
+          && e.job.stopReason !== 'cancelled' && this.state.general.notices.turnEnded && !endedChat.queue?.length
+          && this.notLookingAt(endedChat.id) && freshEnding(e.job.finishedAt)) {
+          this.fireNotify(endedChat.title || 'workass', e.job.status === 'done' ? 'Terminó.' : 'El turno falló.', endedChat.id);
+        }
         // R4: a turn just finished — refresh this chat's checkpoints so the
         // per-turn Deshacer/Revisar affordances light up (feature-detected).
         if (endedChat) void this.refreshCheckpoints(endedChat);
@@ -7171,6 +7234,16 @@ export class Store {
   // newest thing known (a fresh sequence number); a list reply is as new as
   // the moment its read was issued.
   private settledSubagentCards = new Set<string>();
+  // Ajustes · General "Cuando termina o falla un trabajo en segundo plano":
+  // only a live change announces, against the rows this window last saw for
+  // that chat, so a reload or a list read never replays old endings.
+  private noticeFinishedWork(s: SpawnedWorkChanged) {
+    if (!this.state.general.notices.jobs || !s || !s.tabId || !s.chatId || !Array.isArray(s.items)) return;
+    const owner = this.chat(s.tabId);
+    if (owner?.chatId !== s.chatId || !this.notLookingAt(owner.id)) return;
+    const previous = this.state.spawnedWorkByChat[spawnedWorkChatKey(s.tabId, s.chatId)];
+    for (const item of finishedBackgroundWork(previous, s.items)) this.fireNotify(owner.title || 'workass', finishedWorkText(item), owner.id);
+  }
   private onSpawnedWorkChanged(s: SpawnedWorkChanged, seq = ++this.spawnedWorkSeq) {
     if (!s || !s.tabId || !s.chatId || !Array.isArray(s.items)) return;
     const key = spawnedWorkChatKey(s.tabId, s.chatId);
@@ -7641,6 +7714,7 @@ export class Store {
     }
     return null;
   }
+  private announcedPermissionIds = new Set<string>();
   private onPermission(req: PermissionRequest, notify = true) {
     if (this.resolvedPermissionIds.has(req.id)) return;
     let msg = req.jobId ? this.resolveMsg(req.jobId) : null;
@@ -7660,10 +7734,14 @@ export class Store {
     if (!msg) return;
     msg.permission = { id: req.id, title: req.title || 'una acción', kind: req.kind, options: req.options, question: req.question ?? null, context: req.context ?? null };
     this.bump('msg:' + msg.id);
-    // R7: a permission prompt needs the user's attention — surface it if the tab
-    // is unfocused so they don't leave the turn blocked.
-    if (notify && documentHidden()) {
-      const owner = this.state.chats.find((candidate) => candidate.messages.includes(msg));
+    // R7: a permission prompt needs the user's attention — surface it unless
+    // they are looking at that chat, so they don't leave the turn blocked.
+    // Ajustes · General can turn it off. Once per request: the daemon replays
+    // pending requests on every reconnect.
+    const owner = notify ? this.state.chats.find((candidate) => candidate.messages.includes(msg)) : undefined;
+    if (notify && this.state.general.notices.needsYou && !this.announcedPermissionIds.has(req.id) && this.notLookingAt(owner?.id)) {
+      this.announcedPermissionIds.add(req.id);
+      if (this.announcedPermissionIds.size > 512) this.announcedPermissionIds.delete(this.announcedPermissionIds.values().next().value!);
       this.fireNotify(owner?.title ?? 'workass',
         req.question ? `Pregunta: ${req.question.question}` : `Permiso solicitado: ${req.title || 'una acción'}`,
         owner?.id);
@@ -7825,15 +7903,28 @@ export class Store {
   // the daemon that channel re-broadcasts to THIS controller, so a notify that
   // arrived via onNotify and fell through to a `call('notify')` fallback echoed
   // forever — the "spam like crazy" the user hit. Local rendering only.
+  //
+  // The system notification is always silent: Ajustes · General's "Sonido"
+  // plays Workass's own chime instead, the same for a toast, so one switch
+  // decides the sound everywhere.
   fireNotify(title: string, body: string, tabId?: string | null) {
+    if (this.state.general.notices.sound) this.playNoticeSound();
     if (this.state.notifEnabled && this.state.notifPermission === 'granted' && typeof Notification !== 'undefined') {
       try {
-        const n = new Notification(title, { body });
+        const n = new Notification(title, { body, silent: true });
         n.onclick = () => { try { window.focus(); } catch { /* ignore */ } if (tabId) this.switchChat(tabId); n.close(); };
         return;
       } catch { /* fall through to toast */ }
     }
     this.addToast(title, body);
+  }
+  // Replaceable so tests never reach the speakers.
+  playNoticeSound: () => void = playNoticeChime;
+  // You are looking at a chat when it is the open one and this window is in
+  // front. Without a document (tests) only the open chat counts.
+  private notLookingAt(tabId: string | null | undefined): boolean {
+    if (!tabId || tabId !== this.state.activeId || documentHidden()) return true;
+    return typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus();
   }
   addToast(title: string, body: string) {
     const t: Toast = { id: rid('to'), title, body };

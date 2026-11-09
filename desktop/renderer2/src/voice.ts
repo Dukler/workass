@@ -35,6 +35,12 @@ function bridge(): Bridge | undefined {
   return typeof window !== 'undefined' ? ((window as unknown as { api?: Bridge }).api) : undefined;
 }
 
+/** Whether this daemon offers dictation at all (Ajustes · General shows its
+ *  language only then). */
+export function canDictate(): boolean {
+  return typeof bridge()?.voiceTranscribe === 'function';
+}
+
 /** A daemon too old to know the channel answers with an ordinary channel error;
  *  that is indistinguishable from "not installed" to the user, and both mean the
  *  microphone should not open. */
