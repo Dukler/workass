@@ -367,6 +367,9 @@ type client struct {
 	// replay (?replayKnown=<channel>:<etag>, see replay_known.go): a replayed
 	// event whose payload hashes to that etag is not sent again.
 	replayKnown map[string]string
+	// lean is set when the client connected with lean=1: events it never
+	// reads are not sent to it (lean_events.go).
+	lean bool
 }
 
 type outboundFrame struct {
@@ -897,6 +900,7 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	}
 	encoded := encodeTextFrame(frame)
 	h.recordChannel(&h.eventStats, channel, 0, len(encoded))
+	leanDrop := leanDrops(channel, payload)
 
 	h.mu.RLock()
 	clients := make([]*client, 0, len(h.clients))
@@ -911,6 +915,9 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 			continue
 		}
 		if include != nil && !include(c) {
+			continue
+		}
+		if leanDrop && c.lean {
 			continue
 		}
 		if err := c.admitEvent(outboundFrame{payload: encoded}); err != nil {
@@ -1111,6 +1118,7 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		announceLarge:   r.URL.Query().Get("progress") == "1",
 		announceBytes:   h.announceBytes,
 		replayKnown:     replayKnownFromQuery(r.URL.Query()["replayKnown"]),
+		lean:            r.URL.Query().Get("lean") == "1",
 	}
 	// The handshake is the peer's first word; idleness counts from it.
 	c.live.noteInbound()
@@ -2524,6 +2532,9 @@ func (c *client) sendControllerEventAndWait(channel string, payload any) error {
 }
 
 func (c *client) sendEventWithScope(channel string, payload any, controllerOnly, wait bool) error {
+	if c.lean && leanDrops(channel, payload) {
+		return nil
+	}
 	frame, err := json.Marshal(eventFrame{T: "event", Channel: channel, Payload: payload})
 	if err != nil {
 		return err
