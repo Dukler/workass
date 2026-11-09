@@ -1,7 +1,8 @@
-import { useEffect, useInsertionEffect, useRef, useState } from 'react';
+import { Component, useEffect, useInsertionEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { store, useApp } from '../store/store';
-import { chatPane, columnSlideFrames, PANE_SLIDE_EASING, PANE_SLIDE_MS, railSlides, readingWidth } from '../store/right-pane';
+import { chatPane, columnSlideFrames, PANE_SLIDE_EASING, PANE_SLIDE_MS, railSlides, type RightPane } from '../store/right-pane';
+import { columnSlideViews } from '../transcript-flip';
 import { SidebarV2 } from './SidebarV2';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -68,12 +69,12 @@ function SidebarToggle({ expanded }: { expanded: boolean }) {
 
 /**
  * Slide the info rail open or shut (user 2026-11-09: "the text bounces"). The
- * grid's columns travel from where they are to where `apply` puts them. The
- * transcript column keeps its width (readingWidth, owner 2026-11-09), so only
- * its left edge travels with the rail and no line rewraps; on a window too
- * narrow for that it takes its final width at once (one rewrap, its reader's
- * line held before that frame paints). A toggle mid-slide starts from where
- * the slide is.
+ * grid's columns travel from where they are to where `apply` puts them. Each
+ * transcript column takes its final width at once, so it rewraps once and
+ * never frame by frame, and only its left edge travels with the rail. What
+ * that one rewrap moves up or down glides to its new place over the same
+ * 220 ms (transcript-flip.ts) instead of landing in one frame. A toggle
+ * mid-slide starts from where the slide is.
  */
 function slidePane(root: HTMLElement, apply: () => void, running: Animation[]): Animation[] {
   const columns = [...root.querySelectorAll<HTMLElement>('main .scroll > .doc')].filter((doc) => doc.getClientRects().length > 0);
@@ -81,17 +82,17 @@ function slidePane(root: HTMLElement, apply: () => void, running: Animation[]): 
   const before = columns.map((doc) => { const box = doc.getBoundingClientRect(); return { x: box.x, width: box.width }; });
   for (const anim of running) anim.cancel();
   apply();
-  // One layout at the final columns. Read everything here, before any
-  // animation puts the old columns back. With the column's width fixed
-  // (readingWidth) nothing rewraps and only the column's left edge travels.
+  // One layout at the final columns: the rewrap the slide costs, done once.
+  // Read everything here, before any animation puts the old columns back.
   const afterColumns = getComputedStyle(root).gridTemplateColumns;
   const frames = columns.map((doc, i) => {
     const box = doc.getBoundingClientRect();
     // A followed transcript holds its tallest height as min-height (Transcript,
-    // heldHeight). That height belongs to the old width: when the width does
-    // change (a window too narrow to keep it), held across the rewrap it left
-    // a band under the last line that closed 700 ms later. Dropped before this
-    // frame paints; kept when the width stays, so nothing moves.
+    // heldHeight). That height belongs to the old width: held across the
+    // rewrap it left a band under the last line that closed 700 ms later.
+    // Dropped before this frame paints, and before the transcript settles at
+    // the new width; kept when the width stays (a window wide enough for the
+    // full measure either way), so nothing moves.
     if (Math.abs(box.width - before[i].width) > 0.5) doc.style.removeProperty('min-height');
     return columnSlideFrames(before[i], { x: box.x, width: box.width, marginLeft: parseFloat(getComputedStyle(doc).marginLeft) || 0 });
   });
@@ -102,6 +103,26 @@ function slidePane(root: HTMLElement, apply: () => void, running: Animation[]): 
   }
   columns.forEach((doc, i) => { const docFrames = frames[i]; if (docFrames) anims.push(doc.animate(docFrames, timing)); });
   return anims;
+}
+
+/**
+ * Lets each view that rewraps with the column (the transcript) note where its
+ * blocks are drawn before a rail toggle is committed, so their glide starts
+ * exactly there (transcript-flip.ts). getSnapshotBeforeUpdate is the one
+ * point React gives that runs before the commit changes any DOM: read from an
+ * effect, the transcript's own changes for the same commit (its window re-cut)
+ * had already moved the text 10-12 px.
+ */
+class RailSlideSnapshot extends Component<{ chatId: string | null; pane: RightPane | null }> {
+  getSnapshotBeforeUpdate(prev: Readonly<{ chatId: string | null; pane: RightPane | null }>) {
+    if (prev.chatId === this.props.chatId && railSlides(prev.pane, this.props.pane)) {
+      const timing: KeyframeAnimationOptions = { duration: PANE_SLIDE_MS, easing: PANE_SLIDE_EASING };
+      for (const view of columnSlideViews()) view.capture(timing);
+    }
+    return null;
+  }
+  componentDidUpdate() { /* the snapshot is all it needs */ }
+  render() { return null; }
 }
 
 export function App() {
@@ -170,9 +191,6 @@ export function App() {
     const maxRail = Math.max(320, winW - app.panes.sideW - MIN_MAIN);
     const railEff = Math.min(railBase, maxRail);
     root.style.setProperty('--rail-w', `${railEff}px`);
-    // The text keeps the width it has with the right pane open, so the pane
-    // opening or closing only slides it (owner 2026-11-09, readingWidth).
-    root.style.setProperty('--read', `${readingWidth({ winW, side: app.panes.side, sideW: app.panes.sideW, railW: railEff, minMain: MIN_MAIN })}px`);
     if (app.settingsOpen) { root.className = 'app settings'; return; }
     const cls = ['app'];
     if (!app.panes.side) cls.push('no-side');
@@ -249,6 +267,7 @@ export function App() {
         {accountsOpen && <AccountsPage />}
       </main>
       <RightRail key={`rail:${chat?.id ?? 'none'}`} chat={chat} />
+      <RailSlideSnapshot chatId={chat?.id ?? null} pane={activePane} />
       {/* One shared resize handle for the right column — drives --rail-w whether
           it hosts the info rail or the browser (single shared width). */}
       {activePane && <ResizeHandle which="rail" />}

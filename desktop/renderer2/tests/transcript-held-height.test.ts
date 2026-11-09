@@ -18,9 +18,19 @@ test('the page height is held whenever the reader is followed, not only when mot
   const onResize = source.slice(source.indexOf('const onResize = () => {'), source.indexOf('const mo = new MutationObserver'));
   // The only thing between "followed" and the hold is starting a new hold at
   // a new width (rail-slide.test.ts), never a motion setting.
-  assert.match(onResize, /if \(stick\.current && doc\) \{[^]*?const height = doc\.offsetHeight;\s*if \(height > heldHeight\.current\) \{/);
-  assert.doesNotMatch(onResize.slice(0, onResize.indexOf('const height = doc.offsetHeight;')), /streamFollow|prefersReducedMotion/);
+  assert.match(onResize, /if \(stick\.current && doc\) \{[^]*?const height = doc\.getBoundingClientRect\(\)\.height;\s*if \(height > heldHeight\.current\) \{/);
+  assert.doesNotMatch(onResize.slice(0, onResize.indexOf('const height = doc.getBoundingClientRect().height;')), /streamFollow|prefersReducedMotion/);
   assert.doesNotMatch(onResize, /streamFollow\.current && doc/);
+});
+
+// 2026-11-09: offsetHeight is rounded. A page 4060.4 px tall was held at
+// 4061 px, so setting the hold grew it inside its own resize observer and the
+// release 700 ms later shrank it again: a "ResizeObserver loop" error every
+// 700 ms while a reader followed the bottom (rig, 1512 and 1920 px).
+test('the hold is the exact height, so setting it never resizes the page', () => {
+  const onResize = source.slice(source.indexOf('const onResize = () => {'), source.indexOf('const mo = new MutationObserver'));
+  assert.doesNotMatch(onResize, /doc\.offsetHeight/);
+  assert.match(onResize, /doc\.style\.minHeight = `\$\{height\}px`;/);
 });
 
 test('a turn ending does not drop the hold; only leaving the chat does', () => {
