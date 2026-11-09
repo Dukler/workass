@@ -32,6 +32,7 @@ var mutatingChannels = map[string]struct{}{
 	"lan:access-decide":             {},
 	"lan:revoke":                    {},
 	"settings:set":                  {},
+	"agent-tools:set":               {},
 	"config:set":                    {},
 	"session:save":                  {},
 	"fs:create-dir":                 {},

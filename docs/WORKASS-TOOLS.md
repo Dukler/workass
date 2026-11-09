@@ -94,6 +94,20 @@ engine that has since stopped (contexts written before chat-lifetime tokens
 carry an engine owner key that dies with its engine); for delayed work use
 `workass_schedule_message` instead of a detached helper.
 
+Ajustes › Herramientas switches tool groups off per machine (app-settings key
+`agentToolGroupsOff`): browser, rendered pages, subagents and forks, tracked
+jobs, scheduled messages, chat control, and machines and updates
+(`cmd/workass/agent_tool_groups.go` assigns each tool). A group that is off
+leaves `tools list` and `list --full`; naming or calling one of its tools is
+refused with `403` and says it is switched off. Its sentences leave the
+environment brief, the per-turn browser rule and the guide, which a native
+engine rewrites before its next turn (`internal/acp/tool_groups.go`).
+`workass_ask_user_question`, `workass_host_artifact`, `workass_agent_catalog`
+and `workass_register_process_child` belong to no group: no switch removes them,
+so questions, file delivery, the model catalog and every `workass run` report
+keep working. Settings shows each group's cost as the characters it removes
+from the guide and the `tools list` output, divided by four.
+
 `workass_ask_user_question` is available to a foreground ACP turn even when
 its native manifest has no ask-question capability. It opens the existing
 question card in the exact owning chat and waits for a structured answer. This

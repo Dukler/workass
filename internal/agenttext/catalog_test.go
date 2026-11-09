@@ -99,7 +99,11 @@ func TestInstructionCatalogBoundaries(t *testing.T) {
 // accumulate: each holds at its size from before this guidance was added.
 func TestGuideSaysWhichToolForWhichJobWithinItsBudget(t *testing.T) {
 	const guideBefore, guideBudgetBytes = 586, 800 // about 200 tokens
-	guide := Get("native.guide")
+	// The guide and the controls paragraph are cut into one part per tool
+	// group (Ajustes > Herramientas switches them); with every group on they
+	// are all sent, so the budget holds for the whole.
+	guide := joinedEntries("native.guide")
+	controls := joinedEntries("environment.controls")
 	if len(guide) > guideBefore+guideBudgetBytes {
 		t.Fatalf("native.guide is %d bytes, %d over its budget", len(guide), len(guide)-guideBefore-guideBudgetBytes)
 	}
@@ -119,12 +123,27 @@ func TestGuideSaysWhichToolForWhichJobWithinItsBudget(t *testing.T) {
 	if strings.Contains(lower, "thinking") {
 		t.Error("Workass tells agents nothing about thinking")
 	}
-	for key, before := range map[string]int{"environment.controls": 1077, "native.bootstrap": 677, "cli.bootstrap": 722} {
-		if got := len(Get(key)); got > before {
+	for key, sizes := range map[string][2]int{
+		"environment.controls": {len(controls), 1077},
+		"native.bootstrap":     {len(Get("native.bootstrap")), 677},
+		"cli.bootstrap":        {len(Get("cli.bootstrap")), 722},
+	} {
+		if got, before := sizes[0], sizes[1]; got > before {
 			t.Errorf("%s grew from %d to %d bytes, and it is delivered with every session", key, before, got)
 		}
 	}
 	if strings.Contains(Get("cli.bootstrap"), "complete catalog") {
 		t.Error("cli.bootstrap still calls the short listing the complete catalog")
 	}
+}
+
+// joinedEntries is an entry and every entry under it (prefix "."), together.
+func joinedEntries(prefix string) string {
+	var out strings.Builder
+	for key, value := range entries {
+		if key == prefix || strings.HasPrefix(key, prefix+".") {
+			out.WriteString(value)
+		}
+	}
+	return out.String()
 }

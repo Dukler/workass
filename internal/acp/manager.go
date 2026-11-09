@@ -36,6 +36,7 @@ type Manager struct {
 	laneDiagnostics            []laneDiagnostic
 	turnDiagnostics            []turnDiagnostic
 	opts                       Options
+	toolGroupsSource           atomic.Pointer[func() ToolGroups]
 	toolContextMu              sync.Mutex
 	toolContexts               map[string]sessionToolContext
 
@@ -1923,7 +1924,7 @@ var perTurnBrowserRule = agenttext.Get("rules.browser")
 
 func (m *Manager) buildUserRequestBlock(userText string, humanAuthored bool) string {
 	browserRule := ""
-	if m != nil && strings.HasPrefix(strings.TrimSpace(m.opts.WorkassToolsOrigin), "https://") {
+	if m != nil && strings.HasPrefix(strings.TrimSpace(m.opts.WorkassToolsOrigin), "https://") && !m.ToolGroupsOff().Off(ToolGroupBrowser) {
 		browserRule = perTurnBrowserRule
 	}
 	return buildUserRequestBlockWithToolRules(userText, humanAuthored, browserRule)
@@ -2031,18 +2032,25 @@ func buildTurnRuntimeIdentity(bridge *Bridge, providerID, selectedModelID string
 // call to a tool that is not there on codex — the same defect as the
 // notify/show line deleted in 153a406d, introduced by the same commit.
 func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
+	return m.environmentBriefWith(forSubagent, m.ToolGroupsOff())
+}
+
+// environmentBriefWith leaves out the sentences of every tool group switched
+// off in Ajustes > Herramientas, so the brief never names a tool the agent
+// cannot call.
+func (m *Manager) environmentBriefWith(forSubagent bool, off ToolGroups) string {
 	stateDir := strings.TrimSpace(m.opts.StateDir)
 	if abs, err := filepath.Abs(stateDir); err == nil {
 		stateDir = abs
 	}
 	archivePath := filepath.Join(stateDir, "chat-archive", "<chatId>.jsonl")
 	browserLine := ""
-	if strings.HasPrefix(strings.TrimSpace(m.opts.WorkassToolsOrigin), "https://") && !forSubagent {
+	if strings.HasPrefix(strings.TrimSpace(m.opts.WorkassToolsOrigin), "https://") && !forSubagent && !off.Off(ToolGroupBrowser) {
 		browserLine = perTurnBrowserRule
 	}
 	agentLine := ""
 	if strings.TrimSpace(m.opts.WorkassToolsOrigin) != "" {
-		agentLine = agenttext.Get("environment.controls") +
+		agentLine = environmentControls(off) +
 			agenttext.Get("environment.artifacts")
 	}
 	return agenttext.Get("environment.context") +
