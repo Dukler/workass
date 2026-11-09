@@ -440,6 +440,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
 	}
+	applyGeneralSettings(next, input)
 	if input == nil {
 		return next
 	}

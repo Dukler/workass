@@ -13,6 +13,7 @@ import { QueueList } from './QueueList';
 import { QuestionDock, usePendingQuestion } from './QuestionDock';
 import { liveSteeringSupported, stopAndSendSupported } from '../steering';
 import { composerButtonAction, composerKeyAction, type ComposerSubmitIntent } from '../composer-submit';
+import { busyEnterIntent } from '../general-settings';
 import { insertAtCaret, startRecording, transcribe, voiceStatus, type Recorder, type VoiceState } from '../voice';
 import { clampPlanUsagePercent, formatAbsolutePlanReset, formatCountdown, formatPlanUsagePercent, isExpiredPlanReset, isHotRateLimit, isLiveReset, rateLimitLabel, relativePlanReset } from '../plan-usage';
 import { imageDraftCapability } from '../model-controls';
@@ -24,7 +25,7 @@ import {
   type ContextUsageSnapshot,
 } from '../context-usage';
 
-const MODE_LABEL: Record<string, string> = { ask: 'Preguntar permisos', bypass: 'Permitir todo', bypassPermissions: 'Permitir todo', acceptEdits: 'Aceptar ediciones' };
+export const MODE_LABEL: Record<string, string> = { ask: 'Preguntar permisos', bypass: 'Permitir todo', bypassPermissions: 'Permitir todo', acceptEdits: 'Aceptar ediciones' };
 
 // Fuzzy subsequence match for the commands/agents popup (approved mock,
 // 2026-07-28): returns the matched character indices for highlighting, or null
@@ -700,6 +701,8 @@ export function Composer({ chat }: { chat: Chat | null }) {
   const fastOn = serviceTiers.includes('fast') && serviceTier === 'fast';
   const steerAvail = has('appChatSteer') && liveSteeringSupported(chat?.deliveryCapabilities);
   const stopAndSendAvail = has('chatQueueReplace') && has('cancelJob') && stopAndSendSupported(chat?.deliveryCapabilities);
+  // Ajustes · General: what plain Enter does while this chat works.
+  const whileWorking = app.general.whileWorking;
 
   function autosize() {
     const el = taRef.current; if (!el) return;
@@ -864,7 +867,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
     finishSubmission();
   }
   function keydown(e: React.KeyboardEvent) {
-    const action = composerKeyAction(running, e, popOpen);
+    const action = composerKeyAction(running, e, popOpen, { whileWorking, canSteer: steerAvail || stopAndSendAvail });
     if (!action) return;
     e.preventDefault();
     if (action === 'next') { setPopIndex((i) => Math.min(i + 1, popCount - 1)); return; }
@@ -879,7 +882,10 @@ export function Composer({ chat }: { chat: Chat | null }) {
   // While the daemon socket is down, sending would vanish into a dead queue —
   // block it honestly (the banner above the composer explains why).
   const offline = app.connection !== 'connected';
-	const steerShortcut = typeof window !== 'undefined' && window.workassWindow?.platform === 'darwin' ? '⌘Enter' : 'Ctrl+Enter';
+	const modifiedEnter = typeof window !== 'undefined' && window.workassWindow?.platform === 'darwin' ? '⌘Enter' : 'Ctrl+Enter';
+	const steerByEnter = busyEnterIntent(whileWorking, false, steerAvail || stopAndSendAvail) === 'steer';
+	const steerShortcut = steerByEnter ? 'Enter' : modifiedEnter;
+	const queueShortcut = steerByEnter ? modifiedEnter : 'Enter';
 	const canSend = (running || hasText) && !offline && !preparingImages && !stopping;
 	const sendGlyph = steerMode ? '⤴' : running ? '■' : '↑';
   const sendTitle = offline
@@ -957,7 +963,7 @@ export function Composer({ chat }: { chat: Chat | null }) {
           ref={taRef} rows={1} value={text} placeholder="Contale a tu agente qué sigue…"
           onChange={(e) => change(e.target.value)} onKeyDown={keydown} onPaste={onPaste} onScroll={fade}
           aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
-          title={running ? `Enter: encolar · ${steerShortcut}: ${stopAndSendAvail ? 'detener y enviar' : 'dirigir el turno'} · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
+          title={running ? `${queueShortcut}: encolar · ${steerShortcut}: ${stopAndSendAvail ? 'detener y enviar' : 'dirigir el turno'} · ⇧Enter: nueva línea` : 'Enter: enviar · ⇧Enter: nueva línea'}
         />
         <button className={`send ${running && !steerMode ? 'stop' : ''} ${stopping ? 'stopping' : ''} ${steerMode ? 'steer' : ''}`} disabled={!canSend} onClick={(event) => {
           const action = composerButtonAction(running, hasText, event.detail);

@@ -1137,7 +1137,7 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count++
 	registerConfigSettingsHandlers(hub, state, acpManager)
 	count += 4
-	registerVoiceHandlers(hub)
+	registerVoiceHandlers(hub, state.setting.get)
 	count += 2
 	_, changesChannels := registerChangesHandlers(hub, acpManager, providerChats)
 	count += changesChannels
@@ -1362,8 +1362,9 @@ func registerNotifyHandlers(hub *wire.Hub) {
 // and can say so before the user speaks.
 //
 // Additive channels only — the wire contract is frozen, and the renderer that
-// never calls these keeps working exactly as it did.
-func registerVoiceHandlers(hub *wire.Hub) {
+// never calls these keeps working exactly as it did. A transcribe that names
+// no language uses the one chosen in Ajustes · General (settings "dictation").
+func registerVoiceHandlers(hub *wire.Hub, settings func() map[string]any) {
 	hub.Register("voice:status", func(args []any) (any, error) {
 		engine, err := voice.Locate()
 		payload := map[string]any{"available": err == nil}
@@ -1399,9 +1400,13 @@ func registerVoiceHandlers(hub *wire.Hub) {
 		if err != nil {
 			return nil, err
 		}
+		lang := fieldString(arg, "lang")
+		if lang == "" && settings != nil {
+			lang = dictationLanguage(settings())
+		}
 		res, err := engine.Transcribe(context.Background(), voice.Request{
 			WAV:   wav,
-			Lang:  fieldString(arg, "lang"),
+			Lang:  lang,
 			Vocab: stringsField(arg, "vocab"),
 		})
 		if err != nil {

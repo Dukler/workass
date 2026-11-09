@@ -1910,6 +1910,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .inp { background: var(--field); border: 1px solid var(--line2); border-radius: 7px; padding: 5px 10px; color: var(--ink); font: inherit; font-size: 12.5px; outline: 0; }
 .stgs .inp.num { width: 66px; text-align: right; font-family: ui-monospace, Menlo, monospace; }
 .stgs .inp:disabled { opacity: .7; cursor: default; }
+.stgs select.inp { appearance: none; -webkit-appearance: none; max-width: 240px; padding-right: 26px; text-overflow: ellipsis; cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23888' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; background-size: 12px; }
 .stgs .suf { color: var(--muted); font-size: 12px; }
 .stgs .btn { border: 1px solid var(--line2); background: transparent; color: var(--ink2); border-radius: 7px; padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer; transition: background .15s ease, color .15s ease; }
 .stgs .btn:hover { background: var(--line); color: var(--ink); }

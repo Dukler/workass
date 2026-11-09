@@ -781,8 +781,10 @@ export function SidebarV2() {
     : groups.find((g) => normalizeWorkspacePath(g.path) === scope);
 
   // Where + puts the next chat: the project you are scoped to, and in "Todos los
-  // proyectos" the last one you started a chat in.
-  const newTarget = newChatTarget(scope, groups, lastProject());
+  // proyectos" the folder Ajustes · General names (by default the last one you
+  // started a chat in). The open chat's folder keeps the open chat's machine,
+  // which newChat decides when it is given none.
+  const newTarget = newChatTarget(scope, groups, lastProject(), app.general.newChat.folder, store.active()?.cwd);
   const newTargetGroup = newTarget
     ? groups.find((g) => normalizeWorkspacePath(g.path) === newTarget)
     : undefined;
@@ -841,7 +843,7 @@ export function SidebarV2() {
         <button
           className="sv2-sq"
           title={newTargetLabel ? `Nueva conversación en ${newTargetLabel}` : 'Nueva conversación'}
-          onClick={() => store.newChat(true, newTarget, newTargetGroup?.machineId ?? '')}
+          onClick={() => store.newChat(true, newTarget, scope === null && app.general.newChat.folder === 'active' ? undefined : newTargetGroup?.machineId ?? '')}
         ><IcPlus /></button>
       </div>
 
