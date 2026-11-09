@@ -66,7 +66,9 @@ function BlockView({ sb, media, visualizeTabId, visualizeChatId, artifactOrigin,
       return renderList(b.ordered, b.items, 'l', media);
     case 'table':
       return (
-        <div className="mdtable-wrap">
+        // A wide table scrolls sideways; the region takes keyboard focus so it
+        // can be scrolled without a mouse (WCAG 2.1.1).
+        <div className="mdtable-wrap" tabIndex={0} role="region" aria-label="Tabla">
           <table className="mdtable">
             <thead>
               <tr>{b.header.map((h, idx) => <th key={idx} style={{ textAlign: b.align[idx] === 'c' ? 'center' : b.align[idx] === 'r' ? 'right' : 'left' }}>{renderInline(h, `th-${idx}`, true, media)}</th>)}</tr>

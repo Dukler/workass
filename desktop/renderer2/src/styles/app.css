@@ -445,22 +445,26 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
   .steerstate.sending .steerstate-mark { animation: none; }
 }
 
-/* markdown prose blocks */
+/* markdown prose blocks — owner-chosen style "C" (2026-11-09, mock
+   .dev/mocks/markdown-v2.html): Tailwind Typography's calm (horizontal rules
+   only) with GitHub's content-width tables and alternating rows. Links are
+   underlined (never colour alone, WCAG 1.4.1). */
 /* Long unbroken tokens (URLs, ids) wrap inside the column instead of
    overflowing it and adding a horizontal scrollbar, like the user bubble. */
 .p, .mdh, .mdquote, ul.doclist > li, ol.doclist > li { overflow-wrap: anywhere; }
 .p { margin: 0 0 14px; max-width: var(--read); }
 .p b { font-weight: 600; }
-.p code, li code { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; font-size: 11.5px; color: var(--ink2); }
-.p a { color: var(--link); text-decoration: none; }
-.p a:hover { text-decoration: underline; }
-.mdh { margin: 4px 0 12px; max-width: var(--read); font-weight: 600; line-height: 1.35; }
-.mdh1 { font-size: 19px; } .mdh2 { font-size: 16px; } .mdh3 { font-size: 14px; }
+.p code, li code, table.mdtable code, .mdquote code { background: color-mix(in srgb, var(--ink) 9%, transparent); border: 0; border-radius: 5px; padding: .15em .38em; font-family: ui-monospace, Menlo, monospace; font-size: .88em; color: var(--ink); }
+.p a, .doclist a, table.mdtable a, .mdquote a { color: var(--link); text-decoration: underline; text-decoration-thickness: 1px; text-decoration-color: color-mix(in srgb, var(--link) 55%, transparent); text-underline-offset: 2px; }
+.p a:hover, .doclist a:hover, table.mdtable a:hover, .mdquote a:hover { text-decoration-color: var(--link); }
+.mdh { margin: 20px 0 7px; max-width: var(--read); font-weight: 650; line-height: 1.3; letter-spacing: -.005em; }
+.mdh:first-child { margin-top: 0; }
+.mdh1 { font-size: 18px; margin-top: 24px; } .mdh2 { font-size: 16px; margin-top: 22px; } .mdh3 { font-size: 14px; margin-top: 18px; }
 ul.doclist, ol.doclist { margin: 0 0 14px 5px; list-style: none; }
-ul.doclist > li, ol.doclist > li { margin: 0 0 7px; padding-left: 17px; position: relative; max-width: var(--read); }
+ul.doclist > li, ol.doclist > li { margin: 0 0 4px; padding-left: 17px; position: relative; max-width: var(--read); }
 ul.doclist > li::before { content: "•"; position: absolute; left: 2px; color: var(--muted); }
 /* Nested lists sit tight under their parent item. */
-.doclist li > .doclist { margin: 7px 0 0 0; }
+.doclist li > .doclist { margin: 4px 0 0 0; }
 ul.doclist > li.task { padding-left: 0; }
 ul.doclist > li.task::before { content: none; }
 li.task > input[type="checkbox"] { margin: 0 7px 0 1px; vertical-align: -1px; accent-color: var(--acc); }
@@ -469,12 +473,19 @@ li.task > input[type="checkbox"] { margin: 0 7px 0 1px; vertical-align: -1px; ac
 ol.doclist { counter-reset: li; }
 ol.doclist > li::before { counter-increment: li; content: counter(li) "."; position: absolute; left: 0; color: var(--muted); }
 ul.doclist li b, ol.doclist li b { font-weight: 600; }
-.mdquote { border-left: 2px solid var(--line2); padding: 2px 0 2px 12px; margin: 0 0 14px; color: var(--ink2); max-width: var(--read); }
+.mdquote { border-left: 3px solid var(--line2); padding: 2px 0 2px 12px; margin: 0 0 14px; color: var(--ink2); max-width: var(--read); }
 .mdhr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
-.mdtable-wrap { overflow-x: auto; margin: 0 0 14px; }
-table.mdtable { border-collapse: collapse; font-size: 12.5px; }
-table.mdtable th, table.mdtable td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
-table.mdtable th { background: var(--field); font-weight: 600; }
+.mdtable-wrap { overflow-x: auto; margin: 4px 0 16px; max-width: var(--read); }
+/* A wide table scrolls; its region takes keyboard focus (WCAG 2.1.1). */
+.mdtable-wrap:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: 2px; border-radius: 4px; }
+table.mdtable { border-collapse: collapse; width: max-content; max-width: 100%; font-size: .95em; line-height: 1.55; font-variant-numeric: tabular-nums; }
+table.mdtable thead { border-bottom: 1.5px solid var(--line2); }
+table.mdtable th, table.mdtable td { padding: 6px 14px; text-align: left; vertical-align: baseline; }
+table.mdtable th { font-weight: 600; color: var(--ink); vertical-align: bottom; }
+table.mdtable td { border-bottom: 1px solid var(--line); }
+/* Alternating rows help the eye follow a row across. */
+table.mdtable tbody tr:nth-child(2n) td { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+table.mdtable tbody tr:last-child td { border-bottom: 0; }
 .visualize-card { width: min(100%, 760px); margin: 4px 0 16px; overflow: hidden; border: 1px solid var(--line2); border-radius: 10px; background: var(--panel); }
 .visualize-card.visualize-wide { width: min(100%, 1024px); }
 .visualize-head { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 11px; border-bottom: 1px solid var(--line); }
