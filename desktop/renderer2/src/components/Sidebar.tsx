@@ -11,6 +11,7 @@ import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterC
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { AccountsFootButton, closeAccounts } from './AccountsPage';
+import { AutomationsFootButton, closeAutomations } from './Automations';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
 // thread or the workspace path for a folder. Drag state lives in <Sidebar> and
@@ -726,10 +727,11 @@ export function FooterBar() {
   return (
     <div className="footbar" ref={ref}>
       <button type="button" className={`footbtn${app.settingsOpen ? ' on' : ''}`} title="Ajustes" aria-label="Ajustes"
-        aria-pressed={app.settingsOpen} onClick={() => { if (!app.settingsOpen) closeAccounts(); store.toggleSettings(); }}>
+        aria-pressed={app.settingsOpen} onClick={() => { if (!app.settingsOpen) { closeAccounts(); closeAutomations(); } store.toggleSettings(); }}>
         <IcGear />
       </button>
       <AccountsFootButton />
+      <AutomationsFootButton />
       <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}
         aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <IcDownload />

@@ -4,6 +4,7 @@ import { store, useApp } from '../store/store';
 import { call, callThrow, has } from '../wire/api';
 import { ModelIcon } from '../icons';
 import { pushEscapeLayer } from '../markdown/html-frames';
+import { closeAutomations } from './Automations';
 import { settingsFromReply } from '../settings-blob';
 import type { AccountResetsAnswer, PlanUsageSnapshot, ProviderRecord } from '../wire/types';
 import {
@@ -167,6 +168,7 @@ export function AccountsFootButton() {
   // Ajustes covers the whole window, so from there Cuentas replaces it.
   const shown = open && !app.settingsOpen;
   const click = () => {
+    closeAutomations();
     if (app.settingsOpen) { store.closeSettings(); openAccounts(); } else toggleAccounts();
   };
   return (

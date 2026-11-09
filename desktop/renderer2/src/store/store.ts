@@ -3997,6 +3997,13 @@ export class Store {
   async machineUpdateStatus(machineId: string): Promise<Record<string, unknown>> {
     return this.agentUpdateStatus({ machine_id: machineId }, false);
   }
+  /** One call on another machine's daemon over its own link (Automatizaciones
+   *  reads and cancels there). Throws when that machine is not linked. */
+  async invokeOnMachine<T>(machineId: string, channel: string, ...args: unknown[]): Promise<T> {
+    const link = this.machines?.linkFor(machineId);
+    if (!link) throw new Error('Esa máquina no está conectada.');
+    return link.invoke<T>(channel, ...args);
+  }
   /** What an update would stop on that machine right now; null when it does not say. */
   async machineUpdateWork(machineId: string): Promise<AppUpdateWork | null> {
     const link = this.machines?.linkFor(machineId);

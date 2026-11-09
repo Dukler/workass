@@ -275,6 +275,9 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// handed over the same way. It touches no chat actor: an installed CLI only
 	// reaches a chat through the engine's own recycle at idle.
 	"SetAutoUpdateProviders": {},
+	// Automatizaciones: the crons each provider session reported at its last
+	// turn end, read for a list. It touches no chat actor and decides nothing.
+	"SessionCrons": {},
 	// Two reads beside them, for a supervised job started from another machine
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.

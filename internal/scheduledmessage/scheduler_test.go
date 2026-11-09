@@ -711,3 +711,32 @@ func TestRedact(t *testing.T) {
 		t.Errorf("truncated to %d runes", len([]rune(got)))
 	}
 }
+
+// Automatizaciones lists every chat's pending messages, the soonest first;
+// cancelled ones leave the list.
+func TestPendingListsEveryChatSoonestFirst(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_800_000_000, 0).UTC()}
+	s, err := New(Options{StateDir: t.TempDir(), Now: clock.Now, Send: (&recorder{}).Send})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, err := s.Schedule("tab-a", "chat-a", mustParse(t, after("late", 600)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	soon, err := s.Schedule("tab-b", "chat-b", mustParse(t, after("soon", 60)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := s.Schedule("tab-b", "chat-b", mustParse(t, after("dropped", 120)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Cancel("tab-b", "chat-b", dropped.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Pending()
+	if len(got) != 2 || got[0].ID != soon.ID || got[1].ID != late.ID {
+		t.Fatalf("pending = %+v, want soon then late", got)
+	}
+}

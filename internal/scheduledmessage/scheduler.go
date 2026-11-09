@@ -378,6 +378,33 @@ func (s *Scheduler) List(tabID, chatID string) []Entry {
 // Cancel cancels one pending scheduled message of that chat. An already
 // settled one is returned as it is. One whose delivery is under way cannot be
 // cancelled any more.
+// Pending is every chat's pending scheduled messages, the soonest first: a
+// time is due at its time, a condition at the moment it would expire.
+// Automatizaciones lists them (cmd/workass/automations.go).
+func (s *Scheduler) Pending() []Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Entry
+	for _, e := range s.entries {
+		if e.Status == StatusPending {
+			out = append(out, e.clone())
+		}
+	}
+	due := func(e Entry) time.Time {
+		if e.Condition.Kind == "at" {
+			return e.Condition.At
+		}
+		return e.ExpiresAt
+	}
+	sort.SliceStable(out, func(a, b int) bool {
+		if !due(out[a]).Equal(due(out[b])) {
+			return due(out[a]).Before(due(out[b]))
+		}
+		return out[a].ID < out[b].ID
+	})
+	return out
+}
+
 func (s *Scheduler) Cancel(tabID, chatID, id string) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

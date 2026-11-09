@@ -81,7 +81,9 @@ func decodeClaudeHarnessTurn(update map[string]any) providerHarnessTurnUpdate {
 		for _, item := range raw {
 			cron := mapFromAny(item)
 			evidence.Crons = append(evidence.Crons, harnessSessionCron{
+				ID:       asString(cron["id"]),
 				Schedule: asString(cron["schedule"]), Recurring: boolFromProviderValue(cron["recurring"]),
+				Prompt: redactSensitiveText(asString(cron["prompt"])),
 			})
 		}
 	}

@@ -54,6 +54,8 @@ var mutatingChannels = map[string]struct{}{
 	"chat:kill-command":             {},
 	"app-chat:steer":                {},
 	"app-chat:use-rate-limit-reset": {},
+	// Automatizaciones: cancels a pending scheduled message.
+	"automations:cancel": {},
 	// Names a chat: changes its title and starts an agent process.
 	"app-chat:auto-title":         {},
 	"app-chat:reset":              {},

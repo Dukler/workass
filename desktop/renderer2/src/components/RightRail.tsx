@@ -1,3 +1,4 @@
+import { useAutomations } from '../automations';
 import { useEffect, useState } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
@@ -72,6 +73,8 @@ function ActivityPane({ chat }: { chat: Chat | null }) {
   const app = useApp();
   useActivity();
   useSpawnedWork();
+  // Programado (Trabajos) reads what is scheduled while the pane is open.
+  useAutomations();
   // Cambios's count is the last snapshot's: the daemon only looks while the
   // tab is open, so it is not refreshed for the other tabs.
   const changes = useChangesState();

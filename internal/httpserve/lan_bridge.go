@@ -251,6 +251,8 @@ const LANBridgeJS = `(() => {
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
     // Cuentas: one provider's resets read from its account API with the owner's consented login.
     accountsResetsRefresh: (providerId, force) => invoke('accounts:resets-refresh', { providerId, force: force === true }),
+    // Automatizaciones: what is scheduled on this machine, and cancelling one scheduled message.
+    automationsList: () => invoke('automations:list'), automationsCancel: (o) => invoke('automations:cancel', o || {}),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
     // Ajustes > Herramientas: Workass tool groups and what each costs, one
     // switch per group, and the MCP servers each agent's CLI is configured with.

@@ -21,6 +21,7 @@ import { ForkChildView } from './ForkChildView';
 import { forkStore, useForks } from '../store/forks';
 import { forkSelectionVisible } from '../fork-sidebar';
 import { AccountsPage, closeAccounts, useAccountsOpen } from './AccountsPage';
+import { AutomationsPage, closeAutomations, useAutomationsOpen } from './Automations';
 
 function AssistStub() {
   return (
@@ -131,7 +132,8 @@ export function App() {
   const chat = store.active();
   // Cuentas covers the chat area; going to another chat or mode leaves it.
   const accountsOpen = useAccountsOpen();
-  useEffect(() => { closeAccounts(); }, [app.activeId, app.mode]);
+  const automationsOpen = useAutomationsOpen();
+  useEffect(() => { closeAccounts(); closeAutomations(); }, [app.activeId, app.mode]);
   // A selected fork child replaces the transcript and composer of its parent.
   const forkChild = !!chat && app.mode !== 'assist' && forkSelectionVisible(forkStore.selected, app.activeId);
   // The right column's occupant is per-chat: read the ACTIVE chat's choice.
@@ -265,6 +267,7 @@ export function App() {
         {app.mode !== 'assist' && <ConnectionBanner />}
         {app.mode !== 'assist' && !forkChild && <Composer key={`composer:${chat?.id ?? 'none'}`} chat={chat} />}
         {accountsOpen && <AccountsPage />}
+        {automationsOpen && !accountsOpen && <AutomationsPage />}
       </main>
       <RightRail key={`rail:${chat?.id ?? 'none'}`} chat={chat} />
       <RailSlideSnapshot chatId={chat?.id ?? null} pane={activePane} />

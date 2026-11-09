@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -346,5 +347,37 @@ func TestSubagentHookIsNotASessionTurn(t *testing.T) {
 	})
 	if bridge.jobForSession("sess-1") != first {
 		t.Fatal("a repeated start for the same prompt adopted a second job")
+	}
+}
+
+// Automatizaciones shows each chat's session crons with what they will send;
+// the prompt is redacted before it is kept.
+func TestSessionCronsCarryIDAndRedactedPrompt(t *testing.T) {
+	decoded := decodeClaudeHarnessTurn(map[string]any{
+		"sessionUpdate": "_workass_claude_turn", "phase": "ended", "promptId": "p-1", "harnessEvidence": true,
+		"backgroundTasks": []any{},
+		"sessionCrons": []any{map[string]any{
+			"id": "cron-1", "schedule": "*/30 * * * *", "recurring": true,
+			"prompt": "check CI with token=abcd1234secretvalue please",
+		}},
+	})
+	evidence := decoded.Evidence
+	if evidence == nil || len(evidence.Crons) != 1 {
+		t.Fatalf("evidence = %#v", evidence)
+	}
+	cron := evidence.Crons[0]
+	if cron.ID != "cron-1" || cron.Schedule != "*/30 * * * *" || !cron.Recurring {
+		t.Fatalf("cron = %#v", cron)
+	}
+	if strings.Contains(cron.Prompt, "abcd1234secretvalue") || !strings.Contains(cron.Prompt, "check CI") {
+		t.Fatalf("prompt not redacted: %q", cron.Prompt)
+	}
+
+	manager := &Manager{harnessTurns: newHarnessTurnStore()}
+	evidence.TabID, evidence.ChatID = "tab-1", "chat-1"
+	manager.harnessTurns.record("session-1", evidence)
+	crons := manager.SessionCrons()
+	if len(crons) != 1 || crons[0].TabID != "tab-1" || crons[0].ChatID != "chat-1" || crons[0].ID != "cron-1" {
+		t.Fatalf("session crons = %#v", crons)
 	}
 }

@@ -2852,3 +2852,43 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .acct-api-k { min-width: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct-api-m { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 /* ============ end Cuentas ============ */
+
+/* ---- Automatizaciones (owner 2026-11-09, mock docs/mocks/scheduled E) ----
+   Trabajos · Programado: the open chat's scheduled things under the queue.
+   The page: every chat's, by day, opened from the clock at the left foot. */
+.auto-list { display: flex; flex-direction: column; }
+.auto-r { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; column-gap: 8px; row-gap: 1px; padding: 5px 6px; margin: 0 -6px; border-radius: 7px; }
+.auto-r:hover { background: var(--line); }
+.auto-g { display: grid; place-items: center; width: 16px; height: 18px; color: var(--faint); }
+.auto-g svg { width: 14px; height: 14px; stroke-width: 1.3; }
+.auto-r .auto-g { grid-row: span 2; }
+.auto-t { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12.5px; color: var(--ink); }
+.auto-w { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11.5px; color: var(--muted); }
+.auto-r .auto-w { grid-column: 2; }
+.auto-when { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--ink2); }
+.auto-r.soon .auto-when, .auto-gr.soon .auto-tm { color: var(--acc); }
+.auto-x { grid-row: span 2; align-self: center; width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; opacity: 0; transition: opacity .12s ease, background .12s ease; }
+.auto-x svg { width: 12px; height: 12px; }
+.auto-r:hover .auto-x, .auto-gr:hover .auto-x, .auto-x:focus-visible { opacity: 1; }
+.auto-x:hover { background: var(--line2); color: var(--ink); }
+.auto-x:disabled { cursor: default; opacity: .5; }
+.auto-all { display: block; margin: 4px 0 0; padding: 0; border: 0; background: transparent; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.auto-all:hover { color: var(--ink); }
+
+.auto-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 28px 28px; font-size: 13px; color: var(--ink2); }
+.auto-body > * { max-width: var(--read); }
+.auto-sum { font-size: 12px; color: var(--muted); }
+.auto-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.auto-chip { height: 24px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; font-size: 12px; color: var(--muted); cursor: pointer; }
+.auto-chip:hover { color: var(--ink); }
+.auto-chip.on { border-color: transparent; background: var(--line); color: var(--ink); }
+.auto-day { margin-top: 16px; }
+.auto-dh { margin-bottom: 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.auto-gr { display: grid; grid-template-columns: 76px 16px minmax(0, 1fr) minmax(0, 190px) 24px; column-gap: 10px; align-items: center; padding: 7px 6px; margin: 0 -6px; border-top: 1px solid var(--line); border-radius: 0; }
+.auto-gr.link { cursor: pointer; }
+.auto-gr:hover { background: color-mix(in srgb, var(--line) 60%, transparent); border-radius: 7px; }
+.auto-tm { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-txt { display: flex; flex-direction: column; min-width: 0; }
+.auto-src { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; color: var(--muted); text-align: right; }
+.auto-act { display: grid; place-items: center; }
+.auto-act .auto-x { grid-row: auto; }

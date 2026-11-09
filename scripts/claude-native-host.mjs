@@ -677,8 +677,12 @@ class ClaudeSession {
           : {}),
         ...(Array.isArray(input.session_crons)
           ? boundedTurnList('sessionCrons', input.session_crons, (cron) => ({
+            id: clipTurnField(cron?.id),
             schedule: clipTurnField(cron?.schedule),
             recurring: cron?.recurring === true,
+            // Shown in Automatizaciones, clipped here and redacted by the
+            // daemon before it reaches any log or screen.
+            prompt: clipTurnField(cron?.prompt),
           }))
           : {}),
       },
@@ -687,8 +691,9 @@ class ClaudeSession {
 
   // Emitted once per user-visible turn end, from every result path that really
   // ends the turn. Free text from the harness — a task's command line or
-  // description, a cron's prompt — is never copied into the payload at all, so
-  // there is no field for a secret to travel in.
+  // description — is never copied into the payload. A cron's prompt is, clipped
+  // to 200 chars, because Automatizaciones shows what each cron will send; the
+  // daemon redacts it before anything else sees it.
   emitTurnEnded(message) {
     const evidence = this.stopEvidence;
     this.stopEvidence = null;

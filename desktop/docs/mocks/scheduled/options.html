@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --hair: color-mix(in srgb, var(--border) 85%, transparent); }
+  * { box-sizing: border-box; }
+  body { font: 13px/1.45 var(--font-sans); color: var(--foreground); padding: 4px 2px 24px; }
+  .opt { margin: 0 0 34px; }
+  .opt-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 4px; }
+  .opt-k { font: 600 12px var(--font-mono); color: var(--accent); }
+  .opt-n { font-weight: 600; font-size: 14px; }
+  .opt-d { color: var(--muted-foreground); margin: 0 0 12px; max-width: 70ch; }
+  .frame { border: 1px solid var(--hair); border-radius: calc(var(--radius) + 2px); overflow: hidden; display: flex; min-height: 300px; }
+  .mono { font-family: var(--font-mono); }
+  .mut { color: var(--muted-foreground); }
+
+  /* fake chat column */
+  .chatcol { flex: 1; min-width: 0; padding: 18px 22px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .prose { color: var(--muted-foreground); }
+  .prose b { color: var(--foreground); font-weight: 500; }
+  .upill { align-self: flex-end; background: var(--secondary); border-radius: 12px; padding: 6px 11px; max-width: 70%; }
+  .comp { margin-top: auto; border: 1px solid var(--hair); border-radius: 14px; padding: 9px 12px; color: var(--muted-foreground); display: flex; justify-content: space-between; }
+  .comp .send { width: 20px; height: 20px; border-radius: 50%; background: var(--muted); }
+
+  /* rail */
+  .rail { width: 300px; border-left: 1px solid var(--hair); display: flex; flex-direction: column; }
+  .railhead { display: flex; align-items: center; padding: 12px 14px 6px; font-weight: 600; }
+  .railhead .x { margin-left: auto; color: var(--muted-foreground); font-weight: 400; }
+  .tabs { display: flex; gap: 14px; padding: 4px 14px 0; border-bottom: 1px solid var(--hair); }
+  .tab { padding: 6px 0 8px; color: var(--muted-foreground); position: relative; }
+  .tab.on { color: var(--foreground); }
+  .tab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--foreground); border-radius: 2px; }
+  .tab .c { font-size: 11px; color: var(--muted-foreground); margin-left: 4px; }
+  .rbody { padding: 6px 0; }
+  .sec { padding: 10px 14px 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); display: flex; }
+  .sec .r { margin-left: auto; text-transform: none; letter-spacing: 0; }
+
+  /* item row */
+  .it { display: grid; grid-template-columns: 16px 1fr auto; gap: 2px 9px; padding: 7px 14px; align-items: start; }
+  .it:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  .it .g { grid-row: span 2; margin-top: 2px; color: var(--muted-foreground); }
+  .it .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .it .w { grid-column: 2; font-size: 12px; color: var(--muted-foreground); }
+  .it .w .when { font-family: var(--font-mono); font-size: 11.5px; color: var(--foreground); }
+  .it .a { grid-row: span 2; display: flex; gap: 6px; color: var(--muted-foreground); opacity: .0; transition: opacity .12s; }
+  .it:hover .a { opacity: 1; }
+  .act { font-size: 11.5px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--hair); }
+  .soon .when { color: var(--accent) !important; }
+  .run { display: grid; grid-template-columns: 16px 1fr auto; gap: 9px; padding: 7px 14px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin: 5px 0 0 4px; }
+
+  /* sidebar + global page */
+  .side { width: 210px; border-right: 1px solid var(--hair); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .srow { padding: 6px 10px; border-radius: 8px; color: var(--muted-foreground); display: flex; gap: 8px; align-items: center; }
+  .srow.on { background: var(--secondary); color: var(--foreground); }
+  .srow .c { margin-left: auto; font-size: 11px; }
+  .slabel { padding: 10px 10px 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .page { flex: 1; min-width: 0; padding: 18px 24px; }
+  .page h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+  .filters { display: flex; gap: 6px; margin: 10px 0 8px; }
+  .chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--hair); color: var(--muted-foreground); }
+  .chip.on { color: var(--foreground); background: var(--secondary); border-color: transparent; }
+  .day { margin: 14px 0 2px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .grow { display: grid; grid-template-columns: 64px 1fr 170px auto; gap: 12px; padding: 8px 0; border-top: 1px solid var(--hair); align-items: baseline; }
+  .grow .tm { font: 12px var(--font-mono); }
+  .grow .src { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* inline */
+  .inl { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12.5px; padding: 2px 0; }
+  .inl .when { font-family: var(--font-mono); font-size: 11.5px; color: var(--foreground); }
+  .inl .more { margin-left: 2px; }
+  .inl-open { border-left: 1px solid var(--hair); margin: 2px 0 0 6px; padding: 2px 0 2px 12px; display: flex; flex-direction: column; gap: 4px; }
+  .note { font-size: 12px; color: var(--muted-foreground); margin-top: 10px; }
+  .pros { display: flex; gap: 20px; font-size: 12px; color: var(--muted-foreground); margin-top: 8px; flex-wrap: wrap; }
+  .pros b { color: var(--foreground); font-weight: 500; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+
+<!-- shared glyphs -->
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="repeat" viewBox="0 0 16 16"><path d="M3 7a4 4 0 0 1 4-4h5M10 1l2 2-2 2M13 9a4 4 0 0 1-4 4H4M6 15l-2-2 2-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="plug" viewBox="0 0 16 16"><path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="file" viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4z M9 2v3h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
+</svg>
+
+<!-- ===================== A ===================== -->
+<div class="opt">
+  <div class="opt-h"><span class="opt-k">A</span><span class="opt-n">Dentro de Trabajos, debajo de lo que corre</span></div>
+  <p class="opt-d">Trabajos ya es "lo que corre y lo que espera". Lo programado de este chat va como segunda sección, más quieta. Sin pestaña nueva; el número de la pestaña suma ambos.</p>
+  <div class="frame">
+    <div class="chatcol">
+      <div class="prose">…dejé el benchmark corriendo. <b>Te escribo cuando termine</b> y mañana a las 8:30 reviso los resultados.</div>
+      <div class="upill">dale</div>
+      <div class="comp"><span>Contale a tu agente qué sigue…</span><span class="send"></span></div>
+    </div>
+    <div class="rail">
+      <div class="railhead">Actividad<span class="x">⤢ ✕</span></div>
+      <div class="tabs"><span class="tab on">Trabajos<span class="c">5</span></span><span class="tab">Cambios</span><span class="tab">Salidas</span></div>
+      <div class="rbody">
+        <div class="sec">En curso</div>
+        <div class="run"><span class="dot"></span><span>bench-depthvision <span class="mut mono" style="font-size:11.5px">· 12 min</span></span><span class="mut">■</span></div>
+        <div class="run"><span class="dot"></span><span>vite dev <span class="mut mono" style="font-size:11.5px">· :5173</span></span><span class="mut">■</span></div>
+        <div class="sec">Programado<span class="r">3</span></div>
+        <div class="it soon"><svg class="g" width="14" height="14"><use href="#clock"/></svg><span class="t">Revisá si el bench terminó y resumí</span><span class="a"><span class="act">Ahora</span><span class="act">✕</span></span><div class="w"><span class="when">hoy 19:15</span> · en 42 min</div></div>
+        <div class="it"><svg class="g" width="14" height="14"><use href="#plug"/></svg><span class="t">El daemon volvió: corré el smoke test</span><span class="a"><span class="act">✕</span></span><div class="w"><span class="when">cuando :8788 responda</span></div></div>
+        <div class="it"><svg class="g" width="14" height="14"><use href="#repeat"/></svg><span class="t">Revisar la cola de CI</span><span class="a"><span class="act">✕</span></span><div class="w"><span class="when">cada 30 min</span> · tarea de Claude</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="pros"><span><b>+</b> cero chrome nuevo</span><span><b>+</b> ya sabés dónde mirar</span><span><b>−</b> solo este chat</span></div>
+</div>
+
+<!-- ===================== B ===================== -->
+<div class="opt">
+  <div class="opt-h"><span class="opt-k">B</span><span class="opt-n">Pestaña propia "Programado" en Actividad</span></div>
+  <p class="opt-d">Una cuarta pestaña solo para lo programado de este chat, agrupado por día. Más espacio para el texto completo y para lo que ya se envió.</p>
+  <div class="frame">
+    <div class="chatcol">
+      <div class="prose">Listo, quedan <b>tres recordatorios</b> programados para esta semana.</div>
+      <div class="comp"><span>Contale a tu agente qué sigue…</span><span class="send"></span></div>
+    </div>
+    <div class="rail">
+      <div class="railhead">Actividad<span class="x">⤢ ✕</span></div>
+      <div class="tabs"><span class="tab">Trabajos<span class="c">2</span></span><span class="tab">Cambios</span><span class="tab">Salidas</span><span class="tab on">Programado<span class="c">4</span></span></div>
+      <div class="rbody">
+        <div class="sec">Hoy</div>
+        <div class="it soon"><svg class="g" width="14" height="14"><use href="#clock"/></svg><span class="t">Revisá si el bench terminó y resumí</span><span class="a"><span class="act">Ahora</span><span class="act">✕</span></span><div class="w"><span class="when">19:15</span> · en 42 min</div></div>
+        <div class="it"><svg class="g" width="14" height="14"><use href="#repeat"/></svg><span class="t">Revisar la cola de CI</span><span class="a"><span class="act">✕</span></span><div class="w"><span class="when">cada 30 min</span> · tarea de Claude</div></div>
+        <div class="sec">Mañana</div>
+        <div class="it"><svg class="g" width="14" height="14"><use href="#clock"/></svg><span class="t">Revisar resultados del bench nocturno</span><span class="a"><span class="act">✕</span></span><div class="w"><span class="when">05:30</span></div></div>
+        <div class="sec">Cuando pase algo</div>
+        <div class="it"><svg class="g" width="14" height="14"><use href="#file"/></svg><span class="t">Leé el informe y abrí un PR</span><span class="a"><span class="act">✕</span></span><div class="w"><span class="when">cuando exista out/report.md</span> · vence en 6 h</div></div>
+        <div class="sec">Enviado<span class="r">ver 23</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="pros"><span><b>+</b> lugar claro y completo</span><span><b>+</b> historial de lo enviado</span><span><b>−</b> una pestaña más</span><span><b>−</b> solo este chat</span></div>
+</div>
+
+<!-- ===================== C ===================== -->
+<div class="opt">
+  <div class="opt-h"><span class="opt-k">C</span><span class="opt-n">Página global "Programado" desde la barra lateral</span></div>
+  <p class="opt-d">Todo lo programado de todos los chats y máquinas en una lista por día. Cada fila dice de qué chat es y te lleva ahí. La entrada en la barra lateral solo aparece si hay algo programado.</p>
+  <div class="frame">
+    <div class="side">
+      <div class="srow">Buscar</div>
+      <div class="srow on"><svg width="14" height="14"><use href="#clock"/></svg>Programado<span class="c">11</span></div>
+      <div class="slabel">Chats</div>
+      <div class="srow">ios</div>
+      <div class="srow">DepthVision speed</div>
+      <div class="srow">test pipeline</div>
+    </div>
+    <div class="page">
+      <h3>Programado</h3>
+      <div class="mut">11 pendientes en 4 chats</div>
+      <div class="filters"><span class="chip on">Todo</span><span class="chip">Mensajes</span><span class="chip">Tareas de Claude</span><span class="chip">Este Mac</span><span class="chip">duklerver</span></div>
+      <div class="day">Hoy</div>
+      <div class="grow soon"><span class="tm" style="color:var(--accent)">19:15</span><span>Revisá si el bench terminó y resumí</span><span class="src">DepthVision speed</span><span class="mut">✕</span></div>
+      <div class="grow"><span class="tm">cada 30m</span><span>Revisar la cola de CI <span class="mut">· tarea de Claude</span></span><span class="src">test pipeline</span><span class="mut">✕</span></div>
+      <div class="day">Mañana</div>
+      <div class="grow"><span class="tm">05:30</span><span>Revisar resultados del bench nocturno</span><span class="src">DepthVision speed</span><span class="mut">✕</span></div>
+      <div class="grow"><span class="tm">09:00</span><span>Seguí con la migración del store</span><span class="src">ios · duklerver</span><span class="mut">✕</span></div>
+      <div class="day">Cuando pase algo</div>
+      <div class="grow"><span class="tm">:8788</span><span>El daemon volvió: corré el smoke test</span><span class="src">workass</span><span class="mut">✕</span></div>
+    </div>
+  </div>
+  <div class="pros"><span><b>+</b> ves todo de un vistazo</span><span><b>+</b> incluye otras máquinas</span><span><b>−</b> una entrada más en la barra lateral</span></div>
+</div>
+
+<!-- ===================== D ===================== -->
+<div class="opt">
+  <div class="opt-h"><span class="opt-k">D</span><span class="opt-n">Fila quieta al final del chat</span></div>
+  <p class="opt-d">Como el trabajo en segundo plano: una línea gris bajo el último mensaje con lo próximo que va a llegar. Clic la abre en lista. Se ve sin abrir ningún panel.</p>
+  <div class="frame" style="min-height:0">
+    <div class="chatcol">
+      <div class="prose">…dejé el benchmark corriendo. <b>Te escribo cuando termine</b> y mañana a las 8:30 reviso los resultados.</div>
+      <div class="inl"><svg width="14" height="14"><use href="#clock"/></svg>Programado: <span class="when">hoy 19:15</span> "Revisá si el bench terminó…" <span class="more">· 2 más ›</span></div>
+      <div class="note">Abierta:</div>
+      <div class="inl"><svg width="14" height="14"><use href="#clock"/></svg>3 programados ⌄</div>
+      <div class="inl-open">
+        <div class="inl"><span class="when">hoy 19:15</span> Revisá si el bench terminó y resumí <span class="mut">· ✕</span></div>
+        <div class="inl"><span class="when">cuando :8788 responda</span> El daemon volvió: corré el smoke test <span class="mut">· ✕</span></div>
+        <div class="inl"><span class="when">cada 30 min</span> Revisar la cola de CI <span class="mut">· tarea de Claude · ✕</span></div>
+      </div>
+      <div class="comp" style="margin-top:14px"><span>Contale a tu agente qué sigue…</span><span class="send"></span></div>
+    </div>
+  </div>
+  <div class="pros"><span><b>+</b> siempre a la vista</span><span><b>+</b> sin abrir paneles</span><span><b>−</b> ocupa una línea en cada chat que tenga algo</span></div>
+</div>
+
+<!-- ===================== E ===================== -->
+<div class="opt">
+  <div class="opt-h"><span class="opt-k">E</span><span class="opt-n">A + C juntos</span></div>
+  <p class="opt-d">Lo de este chat dentro de Trabajos (A), y la página global (C) para verlo todo. Cada fila de A tiene "Ver todo lo programado ›" al final de la sección.</p>
+</div>
+
+</body>
+</html>

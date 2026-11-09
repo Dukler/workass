@@ -966,6 +966,10 @@ export interface WorkassApi {
   // consented login, through the daemon's cache; the snapshot arrives on
   // chat:plan-usage. force is the owner's retry (never skips a 429's wait).
   accountsResetsRefresh?: (providerId: string, force?: boolean) => Promise<AccountResetsAnswer>;
+  // Automatizaciones: this machine's pending scheduled messages and the crons
+  // its provider sessions last reported; cancel drops one scheduled message.
+  automationsList?: () => Promise<{ items: AutomationItem[] }>;
+  automationsCancel?: (o: { tabId: string; chatId: string; id: string }) => Promise<{ ok: boolean; id: string; status: string }>;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
   spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;
@@ -1152,4 +1156,26 @@ declare global {
     __workassSocketGen?: number;
     __workassWireState?: () => WireState;
   }
+}
+
+/** One scheduled thing (automations:list). "message" is a Workass scheduled
+ *  message (workass_schedule_message); "session-cron" a cron a provider session
+ *  reported at its last turn end (Claude's CronCreate, ScheduleWakeup, /loop). */
+export interface AutomationItem {
+  kind: 'message' | 'session-cron';
+  id: string;
+  tabId: string;
+  chatId: string;
+  text: string;
+  createdAt?: string;
+  condition?: 'at' | 'tcp' | 'file' | 'pid';
+  at?: string;
+  addr?: string;
+  path?: string;
+  pid?: number;
+  expiresAt?: string;
+  late?: boolean;
+  schedule?: string;
+  recurring?: boolean;
+  reportedAt?: string;
 }

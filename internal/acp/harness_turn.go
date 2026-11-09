@@ -38,8 +38,12 @@ type harnessBackgroundTask struct {
 }
 
 type harnessSessionCron struct {
+	ID        string
 	Schedule  string
 	Recurring bool
+	// Prompt is what the cron submits when it fires, clipped by the host and
+	// redacted here; Automatizaciones shows it.
+	Prompt string
 }
 
 // harnessTurnEvidence is the latest turn-end report for one session.
@@ -609,4 +613,47 @@ func (m *Manager) abandonAdoptedHarnessTurns(bridge *Bridge) {
 	for _, sessionID := range sessions {
 		m.abandonAdoptedHarnessTurn(bridge, sessionID)
 	}
+}
+
+// ChatSessionCron is one cron a provider session reported at its last turn
+// end: Claude's CronCreate tasks, ScheduleWakeup and /loop wakes. They live in
+// that session, so only the session can cancel them.
+type ChatSessionCron struct {
+	TabID      string    `json:"tabId"`
+	ChatID     string    `json:"chatId"`
+	ID         string    `json:"id,omitempty"`
+	Schedule   string    `json:"schedule"`
+	Recurring  bool      `json:"recurring"`
+	Prompt     string    `json:"prompt,omitempty"`
+	ReportedAt time.Time `json:"reportedAt"`
+}
+
+// SessionCrons is every chat's crons as of its latest turn-end report.
+func (m *Manager) SessionCrons() []ChatSessionCron {
+	if m == nil || m.harnessTurns == nil {
+		return nil
+	}
+	s := m.harnessTurns
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	newest := map[[2]string]*harnessTurnEvidence{}
+	for _, evidence := range s.latest {
+		if evidence == nil || !evidence.CronsKnown || evidence.TabID == "" || evidence.ChatID == "" {
+			continue
+		}
+		key := [2]string{evidence.TabID, evidence.ChatID}
+		if held := newest[key]; held == nil || evidence.At.After(held.At) {
+			newest[key] = evidence
+		}
+	}
+	var out []ChatSessionCron
+	for _, evidence := range newest {
+		for _, cron := range evidence.Crons {
+			out = append(out, ChatSessionCron{
+				TabID: evidence.TabID, ChatID: evidence.ChatID, ID: cron.ID,
+				Schedule: cron.Schedule, Recurring: cron.Recurring, Prompt: cron.Prompt, ReportedAt: evidence.At,
+			})
+		}
+	}
+	return out
 }
