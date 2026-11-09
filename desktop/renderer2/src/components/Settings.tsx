@@ -35,7 +35,7 @@ import { HerramientasPage } from './settings/HerramientasPage';
 import { TrabajosPage } from './settings/TrabajosPage';
 import { ActualizacionesPage } from './settings/ActualizacionesPage';
 import { MantenimientoPage } from './settings/MantenimientoPage';
-import { fleetLabel } from './settings/fleet';
+import { FooterBar } from './Sidebar';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
   general: 'General', apariencia: 'Apariencia', agentes: 'Agentes y modelos', permisos: 'Permisos',
@@ -388,7 +388,6 @@ const NAV: ReadonlyArray<{ label?: string; items: SettingsSection[] }> = [
 
 export function Settings() {
   const app = useApp();
-  useProc();
   // A renderer replacement can reconnect while an older in-memory shell still
   // names a section removed by the new bundle. Never let that stale value blank
   // the Settings surface; the canonical default is General.
@@ -396,7 +395,6 @@ export function Settings() {
     ? app.settingsSection
     : 'general';
   const Panel = PANELS[sec];
-  const fleet = fleetLabel(app.processes);
 
   return (
     <div className="stgs">
@@ -418,10 +416,10 @@ export function Settings() {
             ))}
           </div>
         ))}
+        {/* The left panel's own foot, in the same place (owner 2026-11-09):
+            opening Ajustes must not change it, and its gear closes Ajustes. */}
         <div className="foot">
-          {app.hasProcChannels && (
-            <div className="fleet"><span className="fd" />{fleet.count} {fleet.count === 1 ? 'engine' : 'engines'}<span className="mono">· {fleet.rss}</span></div>
-          )}
+          <FooterBar />
         </div>
       </aside>
 

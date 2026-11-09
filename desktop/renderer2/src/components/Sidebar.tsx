@@ -10,7 +10,7 @@ import { chatHasLiveActivity } from '../chat-activity';
 import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, appUpdaterReceiptIsRecent, updatesNeedAttention, useAppUpdater } from '../app-updater';
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
-import { AccountsFootButton } from './AccountsPage';
+import { AccountsFootButton, closeAccounts } from './AccountsPage';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
 // thread or the workspace path for a folder. Drag state lives in <Sidebar> and
@@ -684,7 +684,8 @@ export function FooterUpdateCards() {
 }
 
 // The left panel's foot (owner 2026-11-08): Ajustes, Cuentas (2026-11-09,
-// AccountsPage.tsx) and Actualizaciones. It replaced an account menu that
+// AccountsPage.tsx) and Actualizaciones. Ajustes draws this same bar in the
+// same place, so the gear closes Ajustes again and Cuentas takes its place. It replaced an account menu that
 // held a fixed name, Ajustes and, rarely, a free reset; resets live on Cuentas.
 // Updates no longer slide in as cards on their own: the update icon carries a
 // green dot, and its popover holds the same cards (FooterUpdateCards, whole
@@ -721,7 +722,8 @@ export function FooterBar() {
 
   return (
     <div className="footbar" ref={ref}>
-      <button type="button" className="footbtn" title="Ajustes" aria-label="Ajustes" onClick={() => store.openSettings()}>
+      <button type="button" className={`footbtn${app.settingsOpen ? ' on' : ''}`} title="Ajustes" aria-label="Ajustes"
+        aria-pressed={app.settingsOpen} onClick={() => { if (!app.settingsOpen) closeAccounts(); store.toggleSettings(); }}>
         <IcGear />
       </button>
       <AccountsFootButton />

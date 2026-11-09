@@ -201,7 +201,6 @@ aside.side {
 .sess .x:hover { color: var(--ink); opacity: 1; }
 
 .side .foot { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 9px 2px; }
-/* (sidebar fleet row removed by user request 2026-07-11; .stgs-nav .fleet below is a separate surface) */
 /* The foot (owner 2026-11-08): Ajustes and Actualizaciones as icons. The
    update icon's dot means something to install, running or to retry; its
    popover holds the update cards and the installed versions. */
@@ -1876,9 +1875,11 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 /* ============ settings (full-view takeover) ============
    Ported from desktop/docs/mocks/p4/designs/settings.html; all rules scoped
    under .stgs so they never collide with the chat surface. */
-.stgs { display: grid; grid-template-columns: 264px 1fr; height: 100%; min-height: 0; background: var(--bg); }
+/* The nav takes the left panel's width and padding, so the foot bar it shares
+   with the panel stays exactly where it was when Ajustes opens. */
+.stgs { display: grid; grid-template-columns: var(--side-w, 288px) 1fr; height: 100%; min-height: 0; background: var(--bg); }
 
-.stgs-nav { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 0 9px 10px; overflow-y: auto; }
+.stgs-nav { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 0 8px 10px; overflow-y: auto; }
 .stgs-nav .navhead { display: flex; align-items: center; gap: 9px; padding: 2px 9px 12px; }
 .stgs-nav .navhead svg { width: 15px; height: 15px; opacity: .7; }
 .stgs-nav .navhead b { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
@@ -1888,10 +1889,7 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs-nav .nrow.on { background: var(--field); border-color: var(--line2); color: var(--ink); font-weight: 550; }
 .stgs-nav .nrow svg { width: 15px; height: 15px; opacity: .62; flex: none; }
 .stgs-nav .nrow.on svg { opacity: .85; }
-.stgs-nav .foot { margin-top: auto; border-top: 1px solid var(--line); padding: 11px 9px 2px; }
-.stgs-nav .fleet { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); padding: 0; }
-.stgs-nav .fleet .fd { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 20%, transparent); }
-.stgs-nav .fleet .mono { font-size: 11px; }
+.stgs-nav .foot { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 9px 2px; }
 
 .stgs-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
 .stgs-main .tbar { border-bottom: 1px solid var(--line); }

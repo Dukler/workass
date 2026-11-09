@@ -162,9 +162,14 @@ export function AccountsFootButton() {
     });
   }, [app.providers]);
   const title = ready ? 'Cuentas · tenés un reset para usar' : 'Cuentas';
+  // Ajustes covers the whole window, so from there Cuentas replaces it.
+  const shown = open && !app.settingsOpen;
+  const click = () => {
+    if (app.settingsOpen) { store.closeSettings(); openAccounts(); } else toggleAccounts();
+  };
   return (
-    <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}
-      aria-pressed={open} onClick={toggleAccounts}>
+    <button type="button" className={`footbtn${shown ? ' on' : ''}`} title={title} aria-label={title}
+      aria-pressed={shown} onClick={click}>
       <IcAccount />
       {ready && <span className="footdot" aria-hidden="true" />}
     </button>
