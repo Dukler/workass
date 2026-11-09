@@ -235,6 +235,8 @@ function bootstrapHarness() {
   class FakeElement { attachShadow() { return shadowRoot; } setHTMLUnsafe() {} }
   class FakeShadowRoot { setHTMLUnsafe() {} }
   const written: string[] = [];
+  const focused: unknown[] = [];
+  class FakeHTMLElement { focus(options: unknown) { focused.push(options); } }
   const documentElement = { scrollHeight: 640, clientHeight: 150, getBoundingClientRect: () => ({ height: 120 }) };
   const win: Record<string, unknown> = {
     parent,
@@ -247,6 +249,7 @@ function bootstrapHarness() {
     MutationObserver: FakeMutationObserver,
     Element: FakeElement,
     ShadowRoot: FakeShadowRoot,
+    HTMLElement: FakeHTMLElement,
     Document: { parseHTMLUnsafe() {} },
     addEventListener: (type: string, listener: (event: unknown) => void) => { (listeners[type] ??= []).push(listener); },
   };
@@ -263,8 +266,35 @@ function bootstrapHarness() {
   const fire = (type: string, event: unknown) => { for (const listener of listeners[type] ?? []) listener(event); };
   // Messages are built in the bootstrap's own realm; compare them as data.
   const messages = () => JSON.parse(JSON.stringify(posted)) as unknown[];
-  return { posted, messages, win, doc, style, parent, fire, documentElement, observers, shadowRoot, FakeElement, FakeShadowRoot, written };
+  return { posted, messages, win, doc, style, parent, fire, documentElement, observers, shadowRoot, FakeElement, FakeShadowRoot, written, focused, FakeHTMLElement };
 }
+
+// 2026-11-08: a page that hides its tab radios at its top scrolled the chat up
+// to the frame's top on every tab click, because the label focused its radio.
+test('a label click toggles its control without focusing it, and page focus() does not scroll the chat', () => {
+  const { fire, focused, FakeHTMLElement } = bootstrapHarness();
+  const toggled: string[] = [];
+  const control = { type: 'radio', click: () => toggled.push('radio') };
+  const label = { control, contains: () => true };
+  const click = (target: unknown) => {
+    let prevented = false;
+    fire('click', { target, isTrusted: true, defaultPrevented: false, preventDefault() { prevented = true; } });
+    return prevented;
+  };
+  const text = { closest: (selector: string) => (selector === 'label' ? label : null) };
+  assert.equal(click(text), true, 'the focusing activation of the label is cancelled');
+  assert.deepEqual(toggled, ['radio'], 'the radio is still chosen, with its own click and change');
+  const field = { closest: (selector: string): unknown => (selector === 'label' ? label : selector.startsWith('a,button') ? field : null) };
+  assert.equal(click(field), false, 'a control inside the label keeps its own click');
+  const plain = { closest: () => null };
+  assert.equal(click(plain), false);
+  assert.deepEqual(toggled, ['radio']);
+
+  const element = new (FakeHTMLElement as unknown as { new(): { focus(options?: unknown): void } })();
+  element.focus();
+  element.focus({ preventScroll: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(focused)), [{ preventScroll: true }, { preventScroll: false }]);
+});
 
 function fakeNode(tag: string, children: Array<ReturnType<typeof fakeNode>> = []) {
   const node = {

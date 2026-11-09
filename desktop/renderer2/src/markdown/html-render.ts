@@ -169,6 +169,28 @@ export function htmlFrameBootstrap(BASE: string): void {
     if (u.protocol === 'https:' || u.protocol === 'http:') P.postMessage({ type: 'wa-html:link', url: u.href }, '*');
   }, true);
   w.addEventListener('keydown', function (e: any) { if (e.key === 'Escape') P.postMessage({ type: 'wa-html:escape' }, '*'); }, true);
+
+  // The frame is as tall as its page, so the page never scrolls itself: what
+  // it brings into view scrolls the CHAT. A click on a label focuses its radio
+  // or checkbox, and a page that keeps its tab radios hidden at its top (a
+  // common no-script pattern) pulled the chat up to the frame's top on every
+  // click (user 2026-11-08). A label now toggles its control without focusing
+  // it, and the page's own focus() calls do not scroll unless they ask to.
+  // Keyboard focus still scrolls: a reader tabbing through the page follows it.
+  w.addEventListener('click', function (e: any) {
+    var t = e.target, l = t && t.closest ? t.closest('label') : null, c = l && l.control, own;
+    if (!c || e.defaultPrevented || (c.type !== 'radio' && c.type !== 'checkbox')) return;
+    own = t.closest('a,button,input,select,textarea,summary');
+    if (own && l.contains(own)) return;
+    e.preventDefault();
+    c.click();
+  });
+  var focus = w.HTMLElement && w.HTMLElement.prototype.focus;
+  if (focus) {
+    w.HTMLElement.prototype.focus = function (o: any) {
+      return focus.call(this, Object.assign({ preventScroll: true }, o));
+    };
+  }
 }
 /* eslint-enable */
 
