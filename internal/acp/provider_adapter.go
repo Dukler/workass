@@ -32,6 +32,9 @@ type providerAdapter struct {
 	// oneShot answers one prompt and exits (one_shot.go); nil means the
 	// provider offers no one-shot prompt.
 	oneShot providerOneShotStrategy
+	// mcpConfig reads the MCP servers the provider's own CLI is configured
+	// with (mcp_config.go); nil means Workass does not know where it keeps them.
+	mcpConfig providerMCPConfigStrategy
 	// subagentEnvironment contains only provider-owned launch settings. The
 	// generic bridge adds its provider-neutral owner marker separately.
 	subagentEnvironment map[string]string

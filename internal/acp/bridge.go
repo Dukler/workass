@@ -30,6 +30,10 @@ type Bridge struct {
 	manager                   *Manager
 	opts                      Options
 
+	// nativeGuide is the guide.md last written; a turn rewrites the file only
+	// when the tool groups switched off have changed it.
+	nativeGuide string
+
 	mu                sync.Mutex
 	child             *exec.Cmd
 	childExited       chan struct{}

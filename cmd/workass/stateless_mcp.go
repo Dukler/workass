@@ -95,13 +95,32 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(401, "unauthorized")
 		return
 	}
-	catalog := append(agentMCPTools(), browserMCPTools()...)
+	catalog := agentToolsCatalog()
 	if child {
 		catalog = agentToolsForChild()
+	}
+	// A group switched off in Ajustes > Herramientas leaves the listing, and
+	// naming one of its tools says why rather than "unknown".
+	off := h.manager.ToolGroupsOff()
+	switchedOff := func(name string) bool {
+		if !off.Off(agentToolGroup(name)) {
+			return false
+		}
+		for _, t := range catalog {
+			if t["name"] == name {
+				return true
+			}
+		}
+		return false
 	}
 	if r.Method == http.MethodGet {
 		query := r.URL.Query()
 		name := query.Get("name")
+		if name != "" && switchedOff(name) {
+			fail(403, toolSwitchedOffError(name))
+			return
+		}
+		catalog = withoutToolGroups(catalog, off)
 		if name != "" {
 			for _, t := range catalog {
 				if t["name"] == name {
@@ -143,6 +162,10 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if hostedJob && call.Name != "workass_register_process_child" {
 		fail(403, "this supervised-job credential authorizes only workass_register_process_child")
+		return
+	}
+	if switchedOff(call.Name) {
+		fail(403, toolSwitchedOffError(call.Name))
 		return
 	}
 	var tool map[string]any

@@ -389,7 +389,20 @@ func (s *appSettingsStore) setExpecting(input map[string]any, expectedRevision s
 	if expectedRevision != "" && settingsRevision(normalizeSettings(s.readRawLocked())) != expectedRevision {
 		return nil, errSettingsConflict
 	}
-	next := normalizeSettings(input)
+	return s.writeLocked(normalizeSettings(input))
+}
+
+// update changes the stored settings in place under the store's lock, so a
+// daemon-side edit of one key never drops a key another writer just saved.
+func (s *appSettingsStore) update(change func(map[string]any)) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := normalizeSettings(s.readRawLocked())
+	change(next)
+	return s.writeLocked(normalizeSettings(next))
+}
+
+func (s *appSettingsStore) writeLocked(next map[string]any) (map[string]any, error) {
 	if s.path == "" {
 		return next, nil
 	}
@@ -440,6 +453,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 		"modelFavorites":     []any{},
 		"chatTitles":         defaultChatTitleSettings(),
 	}
+	next[agentToolGroupsOffKey] = []any{}
 	if input == nil {
 		return next
 	}
@@ -472,6 +486,7 @@ func normalizeSettings(input map[string]any) map[string]any {
 	}
 	next["modelFavorites"] = normalizeModelFavorites(input["modelFavorites"])
 	next["chatTitles"] = normalizeChatTitles(input["chatTitles"])
+	next[agentToolGroupsOffKey] = normalizeToolGroupsOff(input[agentToolGroupsOffKey])
 	return next
 }
 

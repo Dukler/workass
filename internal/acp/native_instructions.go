@@ -54,8 +54,7 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 			os.RemoveAll(dir)
 			return provider, err
 		}
-		guide := b.manager.buildEnvironmentBrief(false)
-		guide += agenttext.Get("native.guide")
+		_, guide := b.manager.WorkassGuide(b.manager.ToolGroupsOff())
 		for name, body := range map[string]string{"instructions.md": workassNativeInstructions, "guide.md": guide, "context.json": "{}\n"} {
 			if err := os.WriteFile(filepath.Join(absolute, name), []byte(body), 0600); err != nil {
 				os.RemoveAll(dir)
@@ -63,6 +62,7 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 			}
 		}
 		b.nativeInstructionsDir = absolute
+		b.nativeGuide = guide
 	}
 	provider.Env = copyStringMap(provider.Env)
 	if provider.Env == nil {
@@ -173,7 +173,36 @@ func (b *Bridge) bindNativeToolContext(owner, chatID, tabID string) error {
 	if err := os.Rename(name, filepath.Join(dir, "context.json")); err != nil {
 		return errors.New("cannot replace Workass tool context")
 	}
+	b.refreshNativeGuide(dir)
 	return nil
+}
+
+// refreshNativeGuide rewrites guide.md before a turn when a tool group was
+// switched on or off since it was written, so `tools guide` agrees with
+// `tools list` without restarting the engine. A failed write keeps the old
+// guide; the tool endpoint still refuses a group that is off.
+func (b *Bridge) refreshNativeGuide(dir string) {
+	_, guide := b.manager.WorkassGuide(b.manager.ToolGroupsOff())
+	b.mu.Lock()
+	same := b.nativeGuide == guide
+	b.mu.Unlock()
+	if same {
+		return
+	}
+	file, err := os.CreateTemp(dir, "guide-*")
+	if err != nil {
+		return
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	_, writeErr := file.WriteString(guide)
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil || os.Rename(name, filepath.Join(dir, "guide.md")) != nil {
+		return
+	}
+	b.mu.Lock()
+	b.nativeGuide = guide
+	b.mu.Unlock()
 }
 
 func nativeUserRequestBlock(text string, human bool) string {

@@ -245,6 +245,9 @@ const LANBridgeJS = `(() => {
     appChatSteer: (sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary) => invoke('app-chat:steer', { sessionId, prompt, images, clientUserMessageId, continuationAssistantMessageId, boundary }),
     appChatUseRateLimitReset: (providerId, sessionId, idempotencyKey, creditId) => invoke('app-chat:use-rate-limit-reset', { providerId, sessionId, idempotencyKey, creditId }),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
+    // Ajustes > Herramientas: Workass tool groups and what each costs, one
+    // switch per group, and the MCP servers each agent's CLI is configured with.
+    agentToolsGet: () => invoke('agent-tools:get'), agentToolsSet: (group, on) => invoke('agent-tools:set', { group, on }), agentMcpList: () => invoke('agent-mcp:list'),
     spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch } : { tabId, chatId }),
     // Every chat's running background rows, counts and obligation in one read.
     // Additive: a renderer that finds it boots its sidebar from it instead of

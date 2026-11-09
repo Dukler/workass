@@ -752,6 +752,24 @@ export interface StateDigestUnchanged {
   etag: string;
 }
 
+// Ajustes · Herramientas. Token counts are the daemon's estimate (four
+// characters a token) of the text agents are actually given; a group's count is
+// what switching it off removes.
+export interface AgentToolGroup { id: string; on: boolean; tools: number; tokens: number; }
+export interface AgentToolsView {
+  groups: AgentToolGroup[];
+  essential: { tools: number; tokens: number };
+  guideTokens: number;
+  listTokens: number;
+  totalTokens: number;
+}
+// One MCP server as the agent CLI's own config files describe it. Nothing is
+// started, so there is no tool count or connection state; status is only what
+// the files say: 'off' (switched off or rejected), 'pending' (a project server
+// not yet approved), '' (nothing said).
+export interface AgentMcpServer { name: string; scope: 'user' | 'project' | 'local'; project?: string; file: string; status?: 'off' | 'pending' | ''; }
+export interface AgentMcpServers { providerId: string; name: string; servers: AgentMcpServer[]; error?: string; }
+
 // The subset of window.api this renderer consumes. Every method is optional so
 // we can feature-detect against an older/newer bridge and degrade gracefully.
 export interface WorkassApi {
@@ -866,6 +884,10 @@ export interface WorkassApi {
   // Names a new chat with an agent (Settings: Títulos de los chats). Answers at
   // once; the title arrives later as an ordinary presentation change.
   appChatAutoTitle?: (o: { tabId: string; chatId: string; text: string; expectTitle: string; providerId: string; model: string }) => Promise<{ started: boolean; reason?: string }>;
+  // Ajustes · Herramientas (daemon cmd/workass/agent_tools_settings.go).
+  agentToolsGet?: () => Promise<AgentToolsView>;
+  agentToolsSet?: (group: string, on: boolean) => Promise<AgentToolsView>;
+  agentMcpList?: () => Promise<{ agents: AgentMcpServers[] }>;
   appChatUseRateLimitReset?: (
     providerId: string,
     sessionId: string | undefined,
