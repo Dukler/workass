@@ -30,7 +30,11 @@ test('fenced code renders a language header, visible copy action, and syntax tok
   assert.match(html, /class="codebox"[^>]+data-language="typescript"/);
   assert.match(html, /class="code-lang">typescript<\/span>/);
   assert.match(html, /class="code-copy"[^>]+aria-label="Copiar código"/);
-  assert.match(html, />Copiar<\/span>/);
+  // Style D (owner, 2026-11-09): quiet icon buttons always visible, a wrap
+  // toggle, a named, focusable code area and an announced copy result.
+  assert.match(html, /class="code-copy code-wrap" aria-pressed="false"[^>]*aria-label="Ajustar las líneas largas"/);
+  assert.match(html, /class="code-live" aria-live="polite"/);
+  assert.match(html, /<pre class="code-body" tabindex="0" aria-label="Código typescript">/);
   assert.match(html, /class="tk-kw">const<\/span>/);
   assert.match(html, /class="tk-ty">number<\/span>/);
   assert.match(html, /class="tk-num">42<\/span>/);

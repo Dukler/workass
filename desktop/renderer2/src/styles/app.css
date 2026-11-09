@@ -657,25 +657,35 @@ table.mdtable tbody tr:last-child td { border-bottom: 0; }
   .ping::after { animation: none; transform: scale(2.2); opacity: .28; }
 }
 
-.codebox { max-width: var(--read); border: 1px solid var(--line); background: var(--field); border-radius: 10px; margin: 0 0 14px; overflow: hidden; color: var(--ink2); }
-.code-head { min-height: 33px; display: flex; align-items: center; gap: 9px; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 48%, var(--field)); }
-.code-lang { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 600 10.5px/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .025em; }
-.code-copy { flex: none; min-height: 23px; display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: 500 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease; }
-.code-copy:hover { color: var(--ink); border-color: var(--line2); background: color-mix(in srgb, var(--ink) 4%, transparent); }
-.code-copy:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 65%, transparent); outline-offset: 1px; }
+/* Code blocks — owner-chosen style "D" (2026-11-09, mock .dev/mocks/code-v1.html):
+   a soft panel with no header band, the language small at the top left, quiet
+   icon buttons that are always visible. Syntax colours are GitHub's light and
+   dark palettes (WCAG AA on this panel), no bold, and strings never take the
+   green accent. */
+.codebox { max-width: var(--read); margin: 0 0 14px; border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--ink) 5.5%, transparent); border: 1px solid color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink);
+  --tk-kw: #ff7b72; --tk-str: #a5d6ff; --tk-fn: #d2a8ff; --tk-num: #79c0ff; --tk-cm: #9198a1; --tk-ty: #ffa657; --tk-attr: #79c0ff; }
+:root[data-theme="light"] .codebox { --tk-kw: #cf222e; --tk-str: #0a3069; --tk-fn: #8250df; --tk-num: #0550ae; --tk-cm: #59636e; --tk-ty: #953800; --tk-attr: #0550ae; }
+.code-head { min-height: 32px; display: flex; align-items: center; gap: 2px; padding: 5px 5px 0 13px; }
+.code-lang { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 500 11px/1.2 ui-monospace, "SF Mono", Menlo, monospace; }
+.code-copy { flex: none; height: 26px; min-width: 26px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 6px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-family: inherit; font-size: 11.5px; font-weight: 500; line-height: 1; cursor: pointer; transition: color .12s ease, background .12s ease; }
+.code-copy:hover, .code-copy[aria-pressed="true"] { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.code-copy:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 60%, transparent); outline-offset: 1px; }
 .code-copy[data-state="copied"] { color: var(--acc); }
 .code-copy[data-state="failed"] { color: var(--del); }
-.code-copy svg { width: 12px; height: 12px; }
-.code-body { margin: 0; padding: 12px 14px; overflow-x: auto; white-space: pre; tab-size: 2; font: 12px/1.65 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink2); }
+.code-copy svg { width: 14px; height: 14px; }
+.code-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.code-body { margin: 0; padding: 6px 14px 13px; overflow-x: auto; white-space: pre; tab-size: 2; font: 12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); }
+.code-body.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.code-body:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -3px; border-radius: 8px; }
 .code-body code { font: inherit; color: inherit; }
-.codebox .tk-cm, .codebox .cm { color: var(--faint); font-style: italic; }
-.codebox .tk-kw, .codebox .kw { color: var(--link); font-weight: 600; }
-.codebox .tk-str, .codebox .str { color: var(--acc); }
-.codebox .tk-num, .codebox .tk-lit { color: var(--amber); }
-.codebox .tk-fn { color: var(--ink); font-weight: 600; }
-.codebox .tk-ty { color: color-mix(in srgb, var(--link) 78%, var(--ink2)); }
-.codebox .tk-attr { color: color-mix(in srgb, var(--amber) 82%, var(--ink2)); }
-.codebox .tk-op { color: var(--muted); }
+.codebox .tk-cm, .codebox .cm { color: var(--tk-cm); }
+.codebox .tk-kw, .codebox .kw { color: var(--tk-kw); }
+.codebox .tk-str, .codebox .str { color: var(--tk-str); }
+.codebox .tk-num, .codebox .tk-lit { color: var(--tk-num); }
+.codebox .tk-fn { color: var(--tk-fn); }
+.codebox .tk-ty { color: var(--tk-ty); }
+.codebox .tk-attr { color: var(--tk-attr); }
+.codebox .tk-op { color: inherit; }
 
 /* HTML pages in the chat — the approved mock desktop/docs/mocks/html-render
    (2026-10-21): Marco B, full height, page first, one line while written,

@@ -83,6 +83,8 @@ export const IcStopSquare = () => <svg viewBox="0 0 16 16" fill="currentColor"><
 // 14px and stood for nothing in particular. Every former use now takes a mark
 // that names its actual action; the generic tool call uses IcActPlug.
 export const IcStampCopy = () => <S><rect x="5" y="5" width="8" height="8" rx="1.5" /><path d="M3 11V4a1 1 0 011-1h7" /></S>;
+// Long lines wrap: a line that runs to the edge and comes back under itself.
+export const IcWrapLines = () => <S><path d="M2.5 4h11M2.5 8h9a2 2 0 010 4H8.5M10 10.5L8.5 12l1.5 1.5M2.5 12h3.5" /></S>;
 
 // ── Action glyphs for a single tool row (approved mock toolrow-names, 2026-07-25)
 // One mark per ACTION, not per tool: the row says «Ejecutar un comando» with a

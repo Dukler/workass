@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { IcStampCopy } from '../icons';
+import { IcCheck, IcStampCopy, IcWrapLines } from '../icons';
 import type { ImageClipboardBridge } from '../image-copy';
 import { codeLanguageLabel, renderCode } from './inline';
 
@@ -48,10 +48,15 @@ export function shouldHighlightCode(raw: string, closed: boolean): boolean {
     && new TextEncoder().encode(raw).byteLength <= MAX_HIGHLIGHTED_CODE_BYTES;
 }
 
-// `actions` render before Copiar (an HTML block's «Página» switch); `className`
+// Owner-chosen style "D" (2026-11-09, mock .dev/mocks/code-v1.html): no header
+// band, the language small at the top left, and two quiet icon buttons that
+// are always there: wrap long lines, and copy (which shows «Copiado» and is
+// announced). The code area takes keyboard focus so it can be scrolled.
+// `actions` render before them (an HTML block's «Página» switch); `className`
 // is added to the box. Neither changes an ordinary code block.
 export function CodeBlock({ raw, language, closed, actions, className }: { raw: string; language: string; closed: boolean; actions?: ReactNode; className?: string }) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
+  const [wrapped, setWrapped] = useState(false);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const label = codeLanguageLabel(language);
   const highlighted = shouldHighlightCode(raw, closed);
@@ -71,7 +76,7 @@ export function CodeBlock({ raw, language, closed, actions, className }: { raw: 
     resetTimer.current = setTimeout(() => setCopyState('idle'), 1800);
   };
 
-  const copyLabel = copyState === 'copied' ? 'Copiado' : copyState === 'failed' ? 'Reintentar' : 'Copiar';
+  const announcement = copyState === 'copied' ? 'Código copiado' : copyState === 'failed' ? 'No se pudo copiar el código' : '';
   return (
     <div className={className ? `codebox ${className}` : 'codebox'} data-language={label}>
       <div className="code-head">
@@ -79,17 +84,31 @@ export function CodeBlock({ raw, language, closed, actions, className }: { raw: 
         {actions}
         <button
           type="button"
+          className="code-copy code-wrap"
+          aria-pressed={wrapped}
+          title={wrapped ? 'No ajustar las líneas largas' : 'Ajustar las líneas largas'}
+          aria-label="Ajustar las líneas largas"
+          onClick={() => setWrapped((value) => !value)}
+        >
+          <IcWrapLines />
+        </button>
+        <button
+          type="button"
           className="code-copy"
           data-state={copyState}
-          title={copyState === 'failed' ? 'No se pudo copiar el código' : `${copyLabel} código`}
-          aria-label={copyState === 'failed' ? 'No se pudo copiar el código; reintentar' : `${copyLabel} código`}
+          title={copyState === 'failed' ? 'No se pudo copiar el código' : 'Copiar código'}
+          aria-label={copyState === 'failed' ? 'No se pudo copiar el código; reintentar' : 'Copiar código'}
           onClick={() => { void copy(); }}
         >
-          <IcStampCopy />
-          <span aria-live="polite">{copyLabel}</span>
+          {copyState === 'copied' ? <IcCheck /> : <IcStampCopy />}
+          {copyState === 'copied' && <span>Copiado</span>}
+          {copyState === 'failed' && <span>Reintentar</span>}
         </button>
+        <span className="code-live" aria-live="polite">{announcement}</span>
       </div>
-      <pre className="code-body"><code>{highlighted ? renderCode(raw, language) : raw}</code></pre>
+      <pre className={`code-body${wrapped ? ' wrap' : ''}`} tabIndex={0} aria-label={`Código ${label}`}>
+        <code>{highlighted ? renderCode(raw, language) : raw}</code>
+      </pre>
     </div>
   );
 }
