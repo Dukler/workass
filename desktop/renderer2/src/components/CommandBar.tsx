@@ -54,7 +54,7 @@ export function CommandBar() {
       title: 'Acceso aprobado',
       detail: 'Qué clientes conservan acceso a esta Workass, y revocarlos.',
       keywords: 'devices telefono phone acceso revocar',
-      run: () => { store.closeCommandBar(); store.openSettings('dispositivos'); },
+      run: () => { store.closeCommandBar(); store.openSettings('maquinas'); },
     },
     {
       id: 'new-chat',

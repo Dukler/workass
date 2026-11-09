@@ -243,27 +243,34 @@ test('agent settings render a quiet list with provider marks and accessible manu
   store.state.groups = [{ providerId: 'codex', providerName: 'Codex', assistantBrand: 'gpt', models: [{ modelId: 'gpt', name: 'GPT' }] }];
 
   const html = renderToStaticMarkup(React.createElement(Settings));
-  assert.match(html, /class="lrow agent-provider-row/);
-  assert.doesNotMatch(html, /agent-machine-head|data-machine-scope/);
-  assert.match(html, /class="agent-provider-location local"[^>]*>[\s\S]*?Este equipo[\s\S]*?Example Mac Studio/);
-  assert.match(html, /class="agent-provider-location remote"[^>]*>[\s\S]*?Remoto[\s\S]*?Work-laptop/);
-  assert.doesNotMatch(html, />Local</);
-  assert.match(html, /aria-label="Agentes por ubicación"/);
+  // One tab per machine; the local machine's agents are listed first.
+  assert.match(html, /role="tablist" aria-label="Máquinas"/);
+  assert.match(html, /role="tab" aria-selected="true"[^>]*>[\s\S]*?Example Mac Studio/);
+  assert.match(html, /role="tab" aria-selected="false"[^>]*>[\s\S]*?Work-laptop/);
+  assert.match(html, /aria-label="Agentes en Example Mac Studio"/);
   assert.match(html, /class="ic agent-provider-icon brand"/);
-  assert.match(html, /viewBox="0 0 425 425"/, 'Devin uses its mark even when an older remote omits assistantBrand');
   assert.match(html, /fill="#6950ef"/, 'Qwen uses its mark rather than a placeholder letter');
   assert.match(html, /class="agent-status-dot run"/);
   assert.match(html, /role="switch"[^>]*aria-checked="true"[^>]*aria-label="Desactivar Qwen Code en Example Mac Studio"/);
-  assert.match(html, /role="switch"[^>]*aria-checked="false"[^>]*aria-label="Activar Devin en Work-laptop"/);
+  assert.match(html, /Encontrado en \/bin\/codex/, 'the chosen agent shows where its CLI was found');
+  assert.match(html, /Hay una nueva: 1\.0\.1/, 'and an update the local daemon knows about');
   assert.doesNotMatch(html, /agent-summary|agent-provider-state|agent-switch-text/);
   assert.doesNotMatch(html, />[0-9]+ modelos?</);
-  assert.doesNotMatch(html, />Listo</);
+  assert.doesNotMatch(html, />Listo</, 'a working agent stays quiet');
   assert.doesNotMatch(html, /Versiones de CLIs|cli-lrow|Actualización/);
+
+  // The remote machine's tab lists that machine's agents and switches.
+  const { AgentsPage } = await server.ssrLoadModule('/src/components/settings/AgentsPage.tsx') as {
+    AgentsPage: React.ComponentType<{ initialMachineId?: string }>;
+  };
+  const remote = renderToStaticMarkup(React.createElement(AgentsPage, { initialMachineId: 'm-work' }));
+  assert.match(remote, /aria-label="Agentes en Work-laptop"/);
+  assert.match(remote, /viewBox="0 0 425 425"/, 'Devin uses its mark even when an older remote omits assistantBrand');
+  assert.match(remote, /role="switch"[^>]*aria-checked="false"[^>]*aria-label="Activar Devin en Work-laptop"/);
 
   const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
   assert.match(css, /\.stgs \.agent-switch/);
   assert.match(css, /\.stgs \.agent-status-dot\.run/);
-  assert.match(css, /\.stgs \.agent-provider-location\.remote/);
-  assert.doesNotMatch(css, /\.stgs \.agent-machine-head/);
-  assert.match(css, /\.stgs \.agent-provider-row\.disabled/);
+  assert.match(css, /\.stgs \.ag-tab\.on/);
+  assert.match(css, /\.stgs \.ag-item\.disabled/);
 });

@@ -720,7 +720,7 @@ export function FooterBar() {
 
   return (
     <div className="footbar" ref={ref}>
-      <button type="button" className="footbtn" title="Ajustes  ⌘," aria-label="Ajustes" onClick={() => store.openSettings()}>
+      <button type="button" className="footbtn" title="Ajustes" aria-label="Ajustes" onClick={() => store.openSettings()}>
         <IcGear />
       </button>
       <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}

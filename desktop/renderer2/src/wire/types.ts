@@ -262,6 +262,10 @@ export interface ProviderRecord {
   resolvedCommand?: string;
   cliVersion?: CliVersion;
   assistantBrand?: string;
+  // Additive daemon fields shown in Ajustes · Agentes: when the CLI was last
+  // looked for, and the environment Workass adds (values arrive redacted).
+  detectedAt?: string;
+  autoEnv?: Record<string, string>;
   // Additive: models offered for one-shot prompts (daemon one_shot.go), used
   // to name chats. Absent when the provider offers none.
   oneShotModels?: Array<{ id: string; name: string }>;

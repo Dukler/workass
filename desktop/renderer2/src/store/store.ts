@@ -1347,7 +1347,7 @@ export class Store {
       panes: { side: true, railWide: false, sideW: 288, railW: 312 },
       mode: 'chats', hydrated: false, connection: 'connected', hasBrowserChannels: false,
       processes: [], hasProcChannels: false, spawnedWorkByChat: {}, obligationByChat: {}, hasSpawnedWorkChannels: false, chatEnvByChat: {},
-      settingsOpen: false, settingsSection: 'agentes', commandBarOpen: false,
+      settingsOpen: false, settingsSection: 'general', commandBarOpen: false,
       machines: [], hasMachineChannels: false, hasFleetKey: false,
       fleetKeys: [], fleetCanReveal: false, hasFleetKeyChannels: false,
       hasDeviceChannels: false, devices: [], devicesLoaded: false, accessRequests: [],
