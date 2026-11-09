@@ -358,7 +358,8 @@ export interface FleetKeyView {
   createdAt: string;
 }
 
-export type SettingsSection = 'general' | 'apariencia' | 'agentes' | 'maquinas' | 'atajos' | 'mantenimiento';
+export type SettingsSection = 'general' | 'apariencia' | 'agentes' | 'permisos' | 'herramientas'
+  | 'maquinas' | 'trabajos' | 'actualizaciones' | 'atajos' | 'mantenimiento';
 
 export interface AppState {
   chats: Chat[];

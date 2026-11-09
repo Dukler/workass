@@ -14,16 +14,23 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import type { MachineView, SettingsSection } from '../store/types';
-import type { LanDevice, AccessRequest, ProcessSummary } from '../wire/types';
+import type { LanDevice, AccessRequest } from '../wire/types';
 import { store, useApp, useProc } from '../store/store';
 import { has } from '../wire/api';
 import { normalizeMachineNickname } from '../machine-nickname';
 import { AgentsPage } from './settings/AgentsPage';
-import { chatTitleAgents, resolveChatTitleChoice } from '../chat-titles';
+import { GeneralPage } from './settings/GeneralPage';
+import { PermisosPage } from './settings/PermisosPage';
+import { HerramientasPage } from './settings/HerramientasPage';
+import { TrabajosPage } from './settings/TrabajosPage';
+import { ActualizacionesPage } from './settings/ActualizacionesPage';
+import { MantenimientoPage } from './settings/MantenimientoPage';
+import { fleetLabel } from './settings/fleet';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
-  general: 'General', apariencia: 'Apariencia', agentes: 'Agentes y modelos', maquinas: 'Máquinas y acceso',
-  atajos: 'Atajos', mantenimiento: 'Mantenimiento',
+  general: 'General', apariencia: 'Apariencia', agentes: 'Agentes y modelos', permisos: 'Permisos',
+  herramientas: 'Herramientas', maquinas: 'Máquinas y acceso', trabajos: 'Trabajos',
+  actualizaciones: 'Actualizaciones', atajos: 'Atajos', mantenimiento: 'Mantenimiento',
 };
 
 function Svg({ children }: { children: ReactNode }) {
@@ -31,6 +38,10 @@ function Svg({ children }: { children: ReactNode }) {
 }
 const NavIcon: Record<SettingsSection, ReactNode> = {
   general: <Svg><path d="M3 4.5h10M3 8h10M3 11.5h6" /></Svg>,
+  permisos: <Svg><path d="M8 1.8 13 4v4c0 3-2.2 5.2-5 6.2C5.2 13.2 3 11 3 8V4z" /><path d="M6 8.2 7.5 9.7 10.2 6.8" /></Svg>,
+  herramientas: <Svg><path d="M10.5 2.5a3 3 0 0 0-3.4 4L2.8 10.8a1.3 1.3 0 0 0 1.9 1.9L9 8.4a3 3 0 0 0 4-3.4l-1.8 1.8-1.7-.4-.4-1.7z" /></Svg>,
+  trabajos: <Svg><path d="M4 2.5h8M4 13.5h8M5 2.5c0 3 6 3.5 6 5.5s-6 2.5-6 5.5M11 2.5c0 3-6 3.5-6 5.5" /></Svg>,
+  actualizaciones: <Svg><path d="M8 2.5v7M5 6.5l3 3 3-3M3 12.5h10" /></Svg>,
   agentes: <Svg><rect x="2.5" y="3" width="11" height="8" rx="2" /><circle cx="6" cy="7" r="1" /><circle cx="10" cy="7" r="1" /><path d="M8 11v2M5 14h6" /></Svg>,
   maquinas: <Svg><rect x="1.8" y="3" width="12.4" height="8" rx="1.6" /><path d="M5.5 13.5h5M8 11v2.5" /></Svg>,
   mantenimiento: <Svg><rect x="2.5" y="2.5" width="11" height="4" rx="1.2" /><rect x="2.5" y="9.5" width="11" height="4" rx="1.2" /><circle cx="5" cy="4.5" r=".6" fill="currentColor" /><circle cx="5" cy="11.5" r=".6" fill="currentColor" /></Svg>,
@@ -39,19 +50,6 @@ const NavIcon: Record<SettingsSection, ReactNode> = {
 };
 
 // ---- shared helpers ------------------------------------------------------
-function liveEngines(procs: ProcessSummary[]): ProcessSummary[] {
-  return procs.filter((p) => p.engine && p.status === 'running');
-}
-function fmtRss(kb: number): string {
-  if (!kb) return '—';
-  const mb = kb / 1024;
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
-}
-function fleetLabel(procs: ProcessSummary[]): { count: number; rss: string } {
-  const eng = liveEngines(procs);
-  const kb = eng.reduce((s, p) => s + (p.rssKb ?? 0), 0);
-  return { count: eng.length, rss: fmtRss(kb) };
-}
 function fmtSeen(iso?: string): string {
   if (!iso) return 'visto —';
   const t = new Date(iso).getTime();
@@ -62,65 +60,6 @@ function fmtSeen(iso?: string): string {
   if (s < 86400) return `visto hace ${Math.floor(s / 3600)} h`;
   return `visto ${new Date(iso).toLocaleDateString('es', { day: 'numeric', month: 'short' })}`;
 }
-// ---- 1 · Agentes ---------------------------------------------------------
-// How new chats are named. "Primer mensaje" is the old behavior; "Un agente"
-// also sends the first message once to the chosen agent for a short title
-// (daemon app-chat:auto-title). A rename typed by hand always wins. The agents
-// and models listed are the ones this machine's providers offer for one-shot
-// prompts.
-function ChatTitlesGroup() {
-  const app = useApp();
-  if (!has('appChatAutoTitle') || !has('setSettings')) return null;
-  const choice = app.chatTitles;
-  const agents = chatTitleAgents(app.providers);
-  const pick = resolveChatTitleChoice(choice, agents);
-  const byAgent = choice.mode === 'agent';
-  return (
-    <>
-      <div className="gtitle">Títulos de los chats</div>
-      <div className="group">
-        <div className="set">
-          <div className="lbl">
-            <div className="n">Nombrar chats nuevos</div>
-            <div className="d">{!byAgent
-              ? 'El título son las primeras palabras del primer mensaje.'
-              : pick
-                ? `${pick.agent.name} lee el primer mensaje una sola vez, sin herramientas ni proyecto, y le pone un título corto. Si lo renombrás vos, queda tu nombre.`
-                : 'Ningún agente activo en esta computadora puede nombrar chats: se usa el primer mensaje.'}</div>
-          </div>
-          <div className="ctl"><div className="seg">
-            <button className={!byAgent ? 'on' : ''} onClick={() => store.setChatTitles({ ...choice, mode: 'prompt' })}>Primer mensaje</button>
-            <button className={byAgent ? 'on' : ''} disabled={!pick && !byAgent} title={!pick ? 'Ningún agente activo puede nombrar chats' : undefined}
-              onClick={() => store.setChatTitles({ ...choice, mode: 'agent' })}>Un agente</button>
-          </div></div>
-        </div>
-        {byAgent && pick && agents.length > 1 && (
-          <div className="set">
-            <div className="lbl"><div className="n">Agente</div><div className="d">Cuál lee el primer mensaje.</div></div>
-            <div className="ctl"><div className="seg">
-              {agents.map((a) => (
-                <button key={a.providerId} className={pick.agent.providerId === a.providerId ? 'on' : ''}
-                  onClick={() => store.setChatTitles({ ...choice, providerId: a.providerId, model: a.models[0].id })}>{a.name}</button>
-              ))}
-            </div></div>
-          </div>
-        )}
-        {byAgent && pick && (
-          <div className="set">
-            <div className="lbl"><div className="n">Modelo</div><div className="d">{`${pick.agent.name} · ${pick.model.name}. El primero es el más rápido y barato.`}</div></div>
-            <div className="ctl"><div className="seg">
-              {pick.agent.models.map((m) => (
-                <button key={m.id} className={pick.model.id === m.id ? 'on' : ''}
-                  onClick={() => store.setChatTitles({ ...choice, providerId: pick.agent.providerId, model: m.id })}>{m.name}</button>
-              ))}
-            </div></div>
-          </div>
-        )}
-      </div>
-    </>
-  );
-}
-
 // ---- 3 · Dispositivos ----------------------------------------------------
 function platformBadge(d: LanDevice): string {
   const n = (d.name || '').toLowerCase();
@@ -186,45 +125,6 @@ function DispositivosPanel() {
   );
 }
 
-// ---- 4 · Engines ---------------------------------------------------------
-// Read-only daemon defaults read as plain values, never as a disabled field.
-function EngineDefault({ n, d, value, suf }: { n: string; d: string; value: string; suf: string }) {
-  return (
-    <div className="set">
-      <div className="lbl"><div className="n">{n}</div><div className="d">{d}</div></div>
-      <div className="ctl"><span className="stat mono">{value} {suf}</span></div>
-    </div>
-  );
-}
-function EnginesPanel() {
-  const app = useApp();
-  useProc();
-  const fleet = fleetLabel(app.processes);
-  return (
-    <section className="stgs-panel">
-
-      <div className="gtitle">Flota</div>
-      <div className="group">
-        <div className="set">
-          <div className="lbl"><div className="n">Estado actual</div><div className="d">Engines vivos y memoria residente agregada.</div></div>
-          <div className="ctl">
-            {app.hasProcChannels
-              ? <span className="stat"><span className={`dot ${fleet.count ? 'run' : ''}`} />{fleet.count} {fleet.count === 1 ? 'engine' : 'engines'} · <span className="mono" style={{ color: 'var(--ink2)' }}>{fleet.rss}</span></span>
-              : <span className="stat"><span className="dot" />sin datos de proceso</span>}
-          </div>
-        </div>
-      </div>
-
-      <div className="gtitle" title="Flags del daemon: --hibernate-ttl, --engine-max-rss-kb, --rss-sample-interval. Ningún canal los edita todavía.">Ciclo de vida <span className="gtag">del daemon · solo lectura</span></div>
-      <div className="group">
-        <EngineDefault n="TTL de hibernación" d="Tiempo inactivo antes de que un chat suspenda su engine. Los prompts en vuelo se anclan." value="20" suf="min" />
-        <EngineDefault n="Umbral de reciclado de RAM" d="Cuando un engine supera este RSS, se recicla en el próximo momento ocioso." value="4" suf="GB" />
-        <EngineDefault n="Intervalo de muestreo" d="Cada cuánto el reaper muestrea RSS y barre las sesiones inactivas." value="30" suf="s" />
-      </div>
-    </section>
-  );
-}
-
 // ---- 5 · Apariencia ------------------------------------------------------
 function AparienciaPanel() {
   const app = useApp();
@@ -252,39 +152,6 @@ function AparienciaPanel() {
 
     </section>
   );
-}
-
-// ---- General ---------------------------------------------------------------
-function GeneralPanel() {
-  const app = useApp();
-  return (
-    <section className="stgs-panel">
-      <ChatTitlesGroup />
-      <div className="gtitle">Avisos</div>
-      <div className="group">
-        <div className="set">
-          <div className="lbl">
-            <div className="n">Avisos de escritorio</div>
-            <div className="d">{notifDetail(app.notifEnabled, app.notifPermission)}</div>
-          </div>
-          <div className="ctl">
-            <button className={`toggle ${app.notifEnabled ? 'on' : ''}`} role="switch" aria-checked={app.notifEnabled}
-              aria-label="Avisos de escritorio" onClick={() => void store.setNotifEnabled(!app.notifEnabled)}>
-              <span className="knob" />
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function notifDetail(enabled: boolean, perm: NotificationPermission | 'unsupported'): string {
-  if (perm === 'unsupported') return 'Tu navegador no soporta notificaciones — se usarán avisos dentro de la app.';
-  if (!enabled) return 'Desactivados. Activalos para recibir avisos cuando la pestaña esté en segundo plano.';
-  if (perm === 'granted') return 'Activos. Se muestran como notificaciones del sistema.';
-  if (perm === 'denied') return 'El navegador bloqueó los permisos — se usarán avisos dentro de la app.';
-  return 'Activados. Concedé el permiso del navegador para verlos en el sistema.';
 }
 
 // ---- 6 · Atajos ----------------------------------------------------------
@@ -497,15 +364,16 @@ function MaquinasYAccesoPanel() {
 
 // ---- shell ---------------------------------------------------------------
 const PANELS: Record<SettingsSection, () => ReactNode> = {
-  general: GeneralPanel, apariencia: AparienciaPanel, agentes: () => <AgentsPage />,
-  maquinas: MaquinasYAccesoPanel, atajos: AtajosPanel, mantenimiento: EnginesPanel,
+  general: GeneralPage, apariencia: AparienciaPanel, agentes: () => <AgentsPage />,
+  permisos: PermisosPage, herramientas: HerramientasPage, maquinas: MaquinasYAccesoPanel,
+  trabajos: TrabajosPage, actualizaciones: ActualizacionesPage, atajos: AtajosPanel, mantenimiento: MantenimientoPage,
 };
-// The mock's grouped navigation; a group appears once it has a page.
+// The mock's grouped navigation.
 const NAV: ReadonlyArray<{ label?: string; items: SettingsSection[] }> = [
   { items: ['general', 'apariencia'] },
-  { label: 'Agentes', items: ['agentes'] },
-  { label: 'Tus máquinas', items: ['maquinas'] },
-  { label: 'Sistema', items: ['atajos', 'mantenimiento'] },
+  { label: 'Agentes', items: ['agentes', 'permisos', 'herramientas'] },
+  { label: 'Tus máquinas', items: ['maquinas', 'trabajos'] },
+  { label: 'Sistema', items: ['actualizaciones', 'atajos', 'mantenimiento'] },
 ];
 
 export function Settings() {
