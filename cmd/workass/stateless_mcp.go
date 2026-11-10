@@ -89,6 +89,15 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		hostedJob = true
 	}
+	if _, isStart := h.manager.JobStartTokenFor(owner); isStart {
+		// A timer's job-start credential names no chat either, and is good for
+		// the same one tool: the job it starts reports through it.
+		if chatID != "" || tabID != "" || r.Method != http.MethodPost {
+			fail(401, "unauthorized")
+			return
+		}
+		hostedJob = true
+	}
 	child := chatID == tabID && strings.HasPrefix(chatID, subagentTabPrefix) && strings.TrimPrefix(chatID, subagentTabPrefix) != ""
 	if !child && !hostedJob {
 		if _, err := h.providerChats.exactActorFence(tabID, chatID); err != nil {
@@ -302,7 +311,9 @@ func workassToolMutates(kind toolKind, name string) bool {
 		"workass_settle_external_work", "workass_cancel_subagent", "workass_decide_subagent_permission",
 		"workass_ask_user_question",
 		"workass_create_fork_point", "workass_fork_run", "workass_cancel_fork_child", "workass_retry_fork_child",
-		"workass_register_process_child", "workass_start_process_child", "workass_cancel_process_child":
+		"workass_register_process_child", "workass_start_process_child", "workass_cancel_process_child",
+		"workass_issue_job_credential", "workass_revoke_job_credential",
+		"workass_report_bug", "workass_update_bug_report":
 		return true
 	default:
 		return false

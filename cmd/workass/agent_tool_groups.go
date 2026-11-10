@@ -67,6 +67,10 @@ var agentToolGroups = map[string]string{
 	"workass_cancel_chat_turn":     acp.ToolGroupChats,
 	"workass_get_chat_diagnostics": acp.ToolGroupChats,
 
+	"workass_issue_job_credential":  acp.ToolGroupJobs,
+	"workass_list_job_credentials":  acp.ToolGroupJobs,
+	"workass_revoke_job_credential": acp.ToolGroupJobs,
+
 	"workass_discover_machines":   acp.ToolGroupMachines,
 	"workass_list_update_targets": acp.ToolGroupMachines,
 	"workass_get_update_status":   acp.ToolGroupMachines,
@@ -82,6 +86,11 @@ var essentialAgentTools = map[string]bool{
 	"workass_host_artifact":          true,
 	"workass_agent_catalog":          true,
 	"workass_register_process_child": true,
+	// Reporting a Workass bug to Workass itself: no switch may leave an agent
+	// with no way to say the tool it relies on is broken.
+	"workass_report_bug":        true,
+	"workass_list_bug_reports":  true,
+	"workass_update_bug_report": true,
 }
 
 // agentToolGroup is the group a tool belongs to; "" is essential.

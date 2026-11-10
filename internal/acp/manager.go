@@ -55,7 +55,10 @@ type Manager struct {
 	// runTokens are the one-shot supervised-job credentials (run_tokens.go).
 	// Kept apart from every other credential on purpose: each one authorizes
 	// exactly one process.register, for one operation id, and nothing else.
-	runTokens               map[string]RunTokenBinding
+	runTokens map[string]RunTokenBinding
+	// jobStartTokens are the durable job-start credentials a chat issues to
+	// its own timers (job_start_tokens.go).
+	jobStartTokens          map[string]JobStartBinding
 	agentOwnerBySession     map[string]string
 	providers               map[string]*providerRuntime
 	providerOrder           []string
@@ -444,6 +447,7 @@ func NewManager(opts Options) *Manager {
 	m.loadPersistedPlanUsage()
 	m.loadChatToolTokens()
 	m.loadRunTokens()
+	m.loadJobStartTokens()
 	m.pruneToolBootstrap()
 	m.startManagerLoop(m.lifecycleLoop)
 	m.startManagerLoop(m.rssLoop)
@@ -1080,6 +1084,7 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 	m.DropSpawnedWorkForChat(tabID, chatID)
 	chatToken := m.chatToolTokenForChat(chatID, tabID)
 	m.revokeChatToolToken(chatID, tabID)
+	m.RevokeJobStartTokensForChat(tabID, chatID)
 	changed := false
 	for _, live := range m.LiveSessions() {
 		if live.TabID == tabID && live.ChatID == chatID {

@@ -282,7 +282,12 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.
 	// Neither touches a chat actor, and neither mints anything.
-	"RunTokenFor":            {},
+	"RunTokenFor": {},
+	// A timer's job-start credential (former issue #4): what one authorizes,
+	// and the issuing chat's own owner key it reports as. Reads; neither
+	// touches a chat actor.
+	"JobStartTokenFor":       {},
+	"JobStartChatOwner":      {},
 	"ProcessChildByID":       {},
 	"ToolContextTemplate":    {},
 	"StartProviderDetection": {},
@@ -425,6 +430,15 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/fleet_process_start.go:writeRunCredential:MintRunToken": {1, "one one-shot credential for one supervised job"},
 		"cmd/workass/agent_control.go:call:CloseRunToken":                    {1, "the job's credential ends the moment its job is terminal"},
 		"cmd/workass/agent_control.go:call:TouchRunToken":                    {1, "a reporting job keeps its credential; the ceiling is idleness, not age"},
+		// A chat's job-start credentials for its timers: issued, listed and
+		// revoked by that chat alone, touched when a timer's job reports.
+		"cmd/workass/job_credentials.go:jobCredentialCall:IssueJobStartToken":  {1, "one durable credential per operation id, for the calling chat"},
+		"cmd/workass/job_credentials.go:jobCredentialCall:ListJobStartTokens":  {1, "read-only: the calling chat's credentials"},
+		"cmd/workass/job_credentials.go:jobCredentialCall:RevokeJobStartToken": {1, "the calling chat ends one of its own credentials"},
+		"cmd/workass/agent_control.go:call:TouchJobStartToken":                 {1, "last use, coalesced to the hour"},
+		// The bug ledger attaches the reporting chat's background work, read.
+		"cmd/workass/bug_reports.go:collectBugReportDiagnostics:ListSpawnedWork":         {1, "read-only: diagnostics attached to a bug report"},
+		"cmd/workass/bug_reports.go:collectBugReportDiagnostics:ListSpawnedWorkReceipts": {1, "read-only: diagnostics attached to a bug report"},
 	}
 }
 
@@ -1066,6 +1080,10 @@ func TestPhaseCStatelessMCPOperationManifest(t *testing.T) {
 		// it launches a supervisor there and mints the one credential that job
 		// will ever hold, so one operation id is one job (fleet-runtime §6).
 		"workass_start_process_child": {},
+		// A job-start credential is issued once per operation id, and a bug
+		// report is filed once per operation id: a retry finds the first.
+		"workass_issue_job_credential": {}, "workass_revoke_job_credential": {},
+		"workass_report_bug": {}, "workass_update_bug_report": {},
 	}
 	browserMutations := map[string]struct{}{
 		"workass_browser_open": {}, "workass_browser_navigate": {}, "workass_browser_click": {},

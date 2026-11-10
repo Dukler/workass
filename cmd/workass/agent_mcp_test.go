@@ -37,8 +37,12 @@ func TestAgentMCPToolCatalogKeepsTypedSubagentContract(t *testing.T) {
 	// machine was listening. The daemon still lends no environment — the job's
 	// is built from nothing — and on this machine the tool refuses and points
 	// at `workass run` in the caller's own shell.
-	if len(tools) != 47 {
-		t.Fatalf("tool count = %d, want 47", len(tools))
+	// 2026-11-10: +3 job-start credential tools (issue, list, revoke): a timer
+	// with no chat turn starts jobs owned by the chat that issued it (former
+	// issue #4). +3 bug-ledger tools (report, list, update): Workass bugs are
+	// reported to Workass, which opens a chat to fix each one.
+	if len(tools) != 53 {
+		t.Fatalf("tool count = %d, want 53", len(tools))
 	}
 	byName := make(map[string]map[string]any, len(tools))
 	for _, tool := range tools {

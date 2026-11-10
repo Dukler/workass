@@ -68,7 +68,13 @@ func runProcessChildCommand(args []string, stdout, stderr io.Writer) int {
   --min-free-disk 50G      refuse unless that much space is free
   --owner GLOBAL-ID        the chat or turn owed the outcome, on any machine
   --operation-id ID        the same id is the same job, never a second one
-  --token-file FILE        this run's credential; never passed on a command line
+  --token-file FILE        this run's credential; never passed on a command line.
+                           Only a one-shot run credential Workass minted for the
+                           job (wrt_..., under state/run-credentials) is deleted
+                           once read; any other file you name, such as a chat's
+                           context.json or a timer's job-start credential
+                           (wjs_..., from workass_issue_job_credential), is
+                           left untouched
   --unreported             supervise with no chat told, and say so
 
 The job runs apart from the daemon, so it survives a daemon restart or a
@@ -121,6 +127,10 @@ no settled event means lost, not running.
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
 		return procchild.ExitSupervisorFailed
+	}
+	if strings.TrimSpace(*owner) == "" {
+		// A timer's job-start credential knows whose job this is.
+		*owner = procchild.CredentialOwner(reporter)
 	}
 	outbox, err := procchild.OpenOutbox(resolvedStateDir)
 	if err != nil {

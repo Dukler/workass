@@ -529,10 +529,87 @@ A pid that is gone with no recorded outcome is **`lost`**, which means UNKNOWN,
 not dead: the work may still be running and nobody is left who could say. It is
 never reported as finished, and never as failed.
 
+### Jobs started by a timer: `workass_issue_job_credential`
+
+A launchd/systemd/cron timer has no chat turn, so it holds no Workass
+credential, and `workass run` refuses a run with no chat to tell. A chat hands
+its timer a **job-start credential** instead:
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_issue_job_credential <<'JSON'
+{"label":"launchd com.me.nightly-build","operation_id":"issue-nightly-build"}
+JSON
+# → {"credential_id":"jsc-…","token_file":"…/state/job-credentials/jsc-…/context.json",…}
+```
+
+The timer then runs, each time with a fresh operation id:
+
+```sh
+workass run --token-file /path/from/token_file --label "nightly build" \
+  --operation-id "nightly-build-$(date +%F)" -- make release
+```
+
+- Every job it starts is the issuing chat's, exactly as if started from that
+  chat's own shell: its row, its process-group tree-kill, and its outcome
+  notice land in that chat. `--owner` cannot point it at another chat.
+- It authorizes nothing but that job's own report: no message, no chat read,
+  no agent, no job on another machine, no tool catalog.
+- It is durable. It survives engine recycles, daemon restarts and updates (the
+  file is rewritten if the daemon's endpoint moves), and `workass run` never
+  deletes its file. Only a one-shot `wrt_` run credential Workass mints for a
+  single job is deleted once read; any other `--token-file`, a chat's own
+  context included, is left alone.
+- It ends with `workass_revoke_job_credential` or when its chat is deleted.
+  `workass_list_job_credentials` lists a chat's credentials, never the tokens.
+
 `workass_register_external_work` is unchanged and still tracks a detached lane
 with no supervisor. It gets no preflight, no resource queue, no notice and no
 `lost` verdict, because nothing is watching it — which is the reason to prefer
 `workass run`.
+
+## Reporting a Workass bug: `workass_report_bug`
+
+When Workass itself misbehaves (the daemon, the app, `workass run`, a Workass
+tool, a provider bridge), report it to Workass. Bugs are not tracked on
+GitHub; each machine keeps a **bug ledger** under `state/bug-reports/`.
+
+```sh
+"$WORKASS_TOOLS_COMMAND" tools call workass_report_bug <<'JSON'
+{"operation_id":"bug-token-file-deleted",
+ "title":"workass run --token-file deletes the token file",
+ "what_happened":"passing a chat's context.json as --token-file deleted it",
+ "expected":"the file is only read",
+ "repro_steps":["take a chat context file F","workass run --token-file F -- true","F is gone"],
+ "severity":"high","workaround":"copy F to a temp file first",
+ "log_paths":["/abs/path/to/the.log"],
+ "log_excerpts":["the lines that show it"],
+ "work_ids":["xw…"]}
+JSON
+```
+
+- **Incomplete reports are refused**, with nothing saved and every missing
+  field named: title, what_happened, expected, repro_steps, severity
+  (`blocker | high | medium | low`), workaround (`"none"` if there is none),
+  and at least one log, as `log_paths` (absolute files; their last 64 KiB) or
+  `log_excerpts`.
+- **Workass adds its own diagnostics**: daemon version and machine, the end of
+  its own logs, update status, providers and processes, the reporting chat's
+  turn diagnostics and background work, and the supervised jobs it owns or
+  named in `work_ids`. Secret-shaped text and Workass credentials are redacted
+  in everything saved.
+- **A new chat fixes it.** The report is saved first (`report.json`,
+  `diagnostics.json`, `brief.md`), then a NEW chat is opened in the Workass
+  source checkout with the report as its brief: reproduce, fix with tests, run
+  the gates, ship, report back to the reporting chat, and record the outcome
+  with `workass_update_bug_report`. The answer carries `bug_id` and the fixing
+  chat's ids. The checkout is found from `repo_dir` (remembered),
+  `$WORKASS_SOURCE_DIR`, the daemon's own directory, or the reporting chat's
+  directory; if none is found the report is still saved and the answer says
+  so, and a retry with the same `operation_id` and `repo_dir` opens the chat.
+- `workass_list_bug_reports` reads the ledger (newest first, or one whole
+  report by `bug_id`); `workass_update_bug_report` moves a report to
+  `open | fixing | fixed | wontfix | duplicate` with a note, kept in its
+  history.
 
 ## Forkable subsessions
 

@@ -545,11 +545,26 @@ func TestTheCredentialNeverTouchesArgv(t *testing.T) {
 	if dir := StateDirForCredential(contextPath); dir != state {
 		t.Fatalf("the state directory derived from the credential = %q, want %q", dir, state)
 	}
-	// A --token-file is unlinked the moment it is read: the credential lives in
-	// the process from then on, so leaving the file for the length of a
-	// training run is a window with no purpose.
-	if _, err := os.Stat(contextPath); err == nil {
-		t.Fatal("a token file must be unlinked once it has been read")
+	// A chat's context file named as --token-file is the caller's, not a
+	// one-shot run credential: it must survive being read.
+	if _, err := os.Stat(contextPath); err != nil {
+		t.Fatalf("a non-run credential file must not be deleted: %v", err)
+	}
+	// A one-shot run credential (wrt_) is unlinked the moment it is read: the
+	// credential lives in the process from then on.
+	runPath := filepath.Join(contextDir, "run.json")
+	runEncoded, _ := json.Marshal(map[string]string{
+		"endpoint": "https://tools.localhost:8788/workass/tools", "ca_file": filepath.Join(state, "ca.pem"),
+		"credential": "wrt_abc",
+	})
+	if err := os.WriteFile(runPath, runEncoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolveCredential(runPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runPath); err == nil {
+		t.Fatal("a one-shot run credential must be unlinked once it has been read")
 	}
 	loose := filepath.Join(contextDir, "loose.json")
 	if err := os.WriteFile(loose, encoded, 0o644); err != nil {

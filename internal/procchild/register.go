@@ -100,12 +100,27 @@ func ResolveCredential(tokenFile string) (Reporter, string, error) {
 		return nil, "", errors.New("that Workass credential file carries no credential")
 	}
 	reporter := &daemonReporter{config: config, timeout: 20 * time.Second}
-	if consume {
+	if consume && strings.HasPrefix(strings.TrimSpace(config.Credential), toolcli.RunCredentialPrefix) {
 		// Read, and therefore spent: the token lives in this process from here
-		// on, and the file it came from has no further purpose.
+		// on, and the file it came from has no further purpose. Only a one-shot
+		// run credential Workass minted for a job (wrt_...) is spent this way.
+		// Any other file the caller named — a chat's context.json, a saved
+		// credential copy — is theirs, and deleting it broke every later tools
+		// call from that chat.
 		_ = os.Remove(path)
 	}
 	return reporter, path, nil
+}
+
+// CredentialOwner is the chat a job-start credential starts jobs for: the
+// owner a run reports when no --owner was given. Empty for every other
+// credential, whose owner is the chat that holds it.
+func CredentialOwner(reporter Reporter) string {
+	daemon, ok := reporter.(*daemonReporter)
+	if !ok || daemon == nil || !strings.HasPrefix(strings.TrimSpace(daemon.config.Credential), toolcli.JobStartCredentialPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(daemon.config.Owner)
 }
 
 // CredentialStateDir is the daemon state directory a credential file names.

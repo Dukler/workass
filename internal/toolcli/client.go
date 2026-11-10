@@ -39,6 +39,10 @@ type Config struct {
 	// daemon that minted the credential is the one authority on the answer, so
 	// it states it here.
 	StateDir string `json:"state_dir,omitempty"`
+	// Owner is the global id of the chat a job-start credential starts jobs
+	// for. Additive and optional, like StateDir: only that credential's file
+	// carries it, and `workass run` uses it when no --owner is given.
+	Owner string `json:"owner,omitempty"`
 }
 
 type Call struct {
@@ -75,6 +79,17 @@ var ErrContextMissing = errors.New("Workass context file does not exist")
 // RunCredentialPrefix marks a one-shot supervised-job credential. It lives here
 // because this client has to recognise one, and internal/acp sits above it.
 const RunCredentialPrefix = "wrt_"
+
+// JobStartCredentialPrefix marks a durable job-start credential: one a chat
+// issues to its own timers (launchd, systemd, cron) so `workass run` can start
+// jobs owned by that chat with no live turn. It authorizes only the job's own
+// report, names no chat, and is never deleted when read.
+const JobStartCredentialPrefix = "wjs_"
+
+// NamesNoChat reports a credential that belongs to a job rather than a chat.
+func NamesNoChat(credential string) bool {
+	return strings.HasPrefix(credential, RunCredentialPrefix) || strings.HasPrefix(credential, JobStartCredentialPrefix)
+}
 
 func ReadConfig(path string) (Config, error) {
 	var config Config
@@ -123,7 +138,7 @@ func DoQuery(ctx context.Context, config Config, query url.Values, call *Call) (
 	if config.Credential == "" || strings.ContainsAny(config.Credential, "\r\n") {
 		return Response{}, errors.New("Workass session context is incomplete")
 	}
-	if (config.ChatID == "" || config.TabID == "") && !strings.HasPrefix(config.Credential, RunCredentialPrefix) {
+	if (config.ChatID == "" || config.TabID == "") && !NamesNoChat(config.Credential) {
 		// A supervised job's own credential is the one that names no chat: the
 		// job belongs to its owner, wherever that is, and no chat here holds it.
 		return Response{}, errors.New("Workass session context is incomplete")

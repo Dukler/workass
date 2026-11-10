@@ -43,7 +43,15 @@ type diagnosticsReport struct {
 	now       func() time.Time
 }
 
+// daemonStartedAt is when this daemon process started.
+var daemonStartedAt = time.Now()
+
 func (d diagnosticsReport) build() map[string]any {
+	return d.buildWith(diagnosticsLogFiles, diagnosticsLogTailBytes)
+}
+
+// buildWith is build with its own bound on how much of each log it keeps.
+func (d diagnosticsReport) buildWith(logFiles int, logTailBytes int64) map[string]any {
 	now := d.now()
 	report := map[string]any{
 		"schema":      diagnosticsSchema,
@@ -75,7 +83,7 @@ func (d diagnosticsReport) build() map[string]any {
 			report["storage"] = storageUsageReply(snapshot, ok)
 		}
 	}
-	logs, note := diagnosticsLogTails(d.logRoot)
+	logs, note := diagnosticsLogTailsLimited(d.logRoot, logFiles, logTailBytes)
 	report["logs"] = logs
 	if note != "" {
 		report["logsNote"] = note
@@ -103,6 +111,10 @@ func pickEach(rows []map[string]any, keys ...string) []any {
 // root: at most diagnosticsLogFiles files, diagnosticsLogTailBytes of each,
 // starting at a whole line.
 func diagnosticsLogTails(root string) ([]any, string) {
+	return diagnosticsLogTailsLimited(root, diagnosticsLogFiles, diagnosticsLogTailBytes)
+}
+
+func diagnosticsLogTailsLimited(root string, maxFiles int, tailBytes int64) ([]any, string) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return []any{}, "This daemon was not told where its logs are."
@@ -132,12 +144,12 @@ func diagnosticsLogTails(root string) ([]any, string) {
 		}
 		return files[i].name < files[j].name
 	})
-	if len(files) > diagnosticsLogFiles {
-		files = files[:diagnosticsLogFiles]
+	if len(files) > maxFiles {
+		files = files[:maxFiles]
 	}
 	out := make([]any, 0, len(files))
 	for _, file := range files {
-		tail, err := readLogTail(filepath.Join(root, file.name), diagnosticsLogTailBytes)
+		tail, err := readLogTail(filepath.Join(root, file.name), tailBytes)
 		item := map[string]any{
 			"name":       file.name,
 			"bytes":      file.info.Size(),

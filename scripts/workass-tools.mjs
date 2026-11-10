@@ -277,7 +277,7 @@ function readContext(contextFile) {
   try { return readConfig(contextFile); }
   catch (err) {
     if (err.message === 'Workass context file does not exist') {
-      throw new ToolError('Workass context file does not exist; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper');
+      throw new ToolError('Workass context file does not exist; the chat that launched this process was deleted, the daemon cleaned up a context left over from before a restart, or a command deleted the file (for example a one-shot run credential). For delayed work, ask the chat to use workass_schedule_message instead of a detached helper');
     }
     throw new ToolError(`${err.message}; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history`);
   }

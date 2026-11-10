@@ -507,6 +507,9 @@ func (h *agentControlHandler) fenceRunCredential(method, ownerKey, tabID, chatID
 	if h == nil || h.manager == nil {
 		return nil
 	}
+	if start, isStart := h.manager.JobStartTokenFor(ownerKey); isStart {
+		return fenceJobStartCredential(start, method, tabID, chatID, params)
+	}
 	binding, isRun := h.manager.RunTokenFor(ownerKey)
 	if !isRun {
 		return nil
@@ -560,4 +563,27 @@ func processStartHostRefusal(machineID string, err error) error {
 		}
 	}
 	return err
+}
+
+// fenceJobStartCredential holds a timer's job-start credential to what it was
+// issued for: reporting jobs it starts, owned by the chat that issued it.
+func fenceJobStartCredential(binding acp.JobStartBinding, method, tabID, chatID string, params map[string]any) error {
+	if method != "process.register" {
+		return errors.New("this is a job-start credential: it authorizes only the report of a job `workass run` starts with it, for the chat that issued it")
+	}
+	if strings.TrimSpace(chatID) != "" || strings.TrimSpace(tabID) != "" ||
+		strings.TrimSpace(fieldString(params, "chat_id")) != "" || strings.TrimSpace(fieldString(params, "tab_id")) != "" {
+		return errors.New("a job-start credential names no chat, so it cannot act for one")
+	}
+	if owner := strings.TrimSpace(fieldString(params, "owner")); owner != "" && owner != binding.Owner {
+		return errors.New("this job-start credential starts jobs only for the chat that issued it; drop --owner")
+	}
+	operationID := strings.TrimSpace(fieldString(params, "operation_id"))
+	if operationID == "" {
+		return errors.New("a job reported with a job-start credential needs its operation id")
+	}
+	if workID, err := procchild.IDForOperation(operationID); err != nil || workID != strings.TrimSpace(fieldString(params, "work_id")) {
+		return errors.New("this report's work id is not the one its operation id names")
+	}
+	return nil
 }

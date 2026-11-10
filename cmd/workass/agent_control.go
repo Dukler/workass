@@ -141,6 +141,21 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	if err := h.fenceRunCredential(request.Method, ownerKey, tabID, chatID, params); err != nil {
 		return nil, err
 	}
+	// A timer's job-start credential, past its fence, reports its job as the
+	// chat that issued it: the same registration that chat's own shell would
+	// make, so the job's row, notices and tree-kill are that chat's.
+	if h.manager != nil {
+		if _, isStart := h.manager.JobStartTokenFor(ownerKey); isStart {
+			chatKey, startTab, startChat, ok := h.manager.JobStartChatOwner(ownerKey)
+			if !ok {
+				return nil, errors.New("the chat that issued this job-start credential no longer exists")
+			}
+			h.manager.TouchJobStartToken(ownerKey)
+			ownerKey, tabID, chatID = chatKey, startTab, startChat
+			params = copyAnyMap(params)
+			params["owner_key"], params["parent_tab_id"], params["parent_chat_id"] = ownerKey, tabID, chatID
+		}
+	}
 	// One authority decides whether this call addresses this machine or another
 	// fleet machine, for every tool, before any local state is touched.
 	if self := strings.TrimSpace(h.selfMachineID); self != "" && self == strings.TrimSpace(fieldString(params, "machine_id")) {
@@ -245,6 +260,10 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			return h.chats.cancel(params)
 		}
 		return nil, errors.New("unknown chat control method")
+	case "job_credential.issue", "job_credential.list", "job_credential.revoke":
+		return h.jobCredentialCall(request.Method, ownerKey, tabID, chatID, params)
+	case "bug.report", "bug.list", "bug.update":
+		return h.bugReportCall(r.Context(), request.Method, ownerKey, tabID, chatID, params)
 	case "schedule.create", "schedule.list", "schedule.cancel":
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, "Workass chat control caller is not an owned ACP session"); err != nil {
 			return nil, err

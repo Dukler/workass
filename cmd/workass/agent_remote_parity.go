@@ -82,17 +82,23 @@ var remoteAgentMethodKinds = map[string]remoteAgentMethodKind{
 	// each catalog natively. With the daemon able to dial, the fleet-wide chat
 	// list has to be answerable over a link too, or workass_list_chats would be
 	// the one tool that still needed the app open (§6, §10).
-	"chat.list":         remoteAgentMachineScoped,
-	"update.status":     remoteAgentMachineScoped,
-	"agent.question":    remoteAgentLocalOnly,
-	"machines.discover": remoteAgentLocalOnly,
-	"html.render":       remoteAgentLocalOnly,
-	"artifact.host":     remoteAgentLocalOnly,
-	"schedule.create":   remoteAgentLocalOnly,
-	"schedule.list":     remoteAgentLocalOnly,
-	"schedule.cancel":   remoteAgentLocalOnly,
-	"external.register": remoteAgentLocalOnly,
-	"external.settle":   remoteAgentLocalOnly,
+	"chat.list":             remoteAgentMachineScoped,
+	"update.status":         remoteAgentMachineScoped,
+	"agent.question":        remoteAgentLocalOnly,
+	"machines.discover":     remoteAgentLocalOnly,
+	"html.render":           remoteAgentLocalOnly,
+	"artifact.host":         remoteAgentLocalOnly,
+	"schedule.create":       remoteAgentLocalOnly,
+	"schedule.list":         remoteAgentLocalOnly,
+	"job_credential.issue":  remoteAgentLocalOnly,
+	"job_credential.list":   remoteAgentLocalOnly,
+	"job_credential.revoke": remoteAgentLocalOnly,
+	"bug.report":            remoteAgentLocalOnly,
+	"bug.list":              remoteAgentLocalOnly,
+	"bug.update":            remoteAgentLocalOnly,
+	"schedule.cancel":       remoteAgentLocalOnly,
+	"external.register":     remoteAgentLocalOnly,
+	"external.settle":       remoteAgentLocalOnly,
 	// A process child is machine-scoped in EXECUTION and chat-scoped in
 	// OWNERSHIP, which is the combination this table had no class for — and the
 	// reason supervised jobs could not be expressed before the fleet runtime.
@@ -138,17 +144,23 @@ var remoteAgentMachineTaggedEntity = map[string]bool{
 // agent sees, so an explicit reason here is the difference between a retry and
 // a dead end.
 var remoteAgentLocalOnlyReasons = map[string]string{
-	"machines.discover": "workass_discover_machines scans the network this daemon is attached to; to scan from another machine, run it in a chat on that machine",
-	"agent.question":    "workass_ask_user_question always asks the person at this controller; it has no remote form",
-	"html.render":       "workass_render_html renders into the calling chat on this machine; to show a page in a chat on another machine send its markdown with workass_send_chat_message",
-	"artifact.host":     "workass_host_artifact serves a file from this machine's workspace; run it on the machine that holds the file and send the returned link to the remote chat",
-	"schedule.create":   "scheduled messages are delivered to the calling chat by this machine's daemon; schedule them here and send the result with workass_send_chat_message",
-	"schedule.list":     "scheduled messages are owned by the calling chat on this machine",
-	"schedule.cancel":   "scheduled messages are owned by the calling chat on this machine",
-	"external.register": "external work tracks a process on this machine and must stay in the exact calling chat; register it on the machine that runs the process",
-	"external.settle":   "external work tracks a process on this machine and must stay in the exact calling chat",
-	"process.register":  "a process child is registered by `workass run` on the machine that supervises it, whose pid is the evidence this machine probes; to run a job elsewhere, pass machine_id to workass_start_process_child, or run `workass run --owner <this chat's global id>` on that machine, and watch it with workass_list_process_children --machine_id",
-	"obligation.get":    "the obligation belongs to the calling chat's running turn on this machine",
+	"job_credential.issue":  "a job-start credential is issued by this machine's daemon for a timer on this machine; ask a chat on the other machine to issue one there",
+	"job_credential.list":   "a job-start credential is held by the machine that issued it; ask a chat on that machine",
+	"job_credential.revoke": "a job-start credential is revoked by the machine that issued it; ask a chat on that machine",
+	"bug.report":            "a bug report is saved in this machine's own bug ledger, with this machine's own diagnostics; report it from a chat on the machine that has the bug",
+	"bug.list":              "each machine keeps its own bug ledger; ask a chat on that machine",
+	"bug.update":            "each machine keeps its own bug ledger; update it from a chat on that machine",
+	"machines.discover":     "workass_discover_machines scans the network this daemon is attached to; to scan from another machine, run it in a chat on that machine",
+	"agent.question":        "workass_ask_user_question always asks the person at this controller; it has no remote form",
+	"html.render":           "workass_render_html renders into the calling chat on this machine; to show a page in a chat on another machine send its markdown with workass_send_chat_message",
+	"artifact.host":         "workass_host_artifact serves a file from this machine's workspace; run it on the machine that holds the file and send the returned link to the remote chat",
+	"schedule.create":       "scheduled messages are delivered to the calling chat by this machine's daemon; schedule them here and send the result with workass_send_chat_message",
+	"schedule.list":         "scheduled messages are owned by the calling chat on this machine",
+	"schedule.cancel":       "scheduled messages are owned by the calling chat on this machine",
+	"external.register":     "external work tracks a process on this machine and must stay in the exact calling chat; register it on the machine that runs the process",
+	"external.settle":       "external work tracks a process on this machine and must stay in the exact calling chat",
+	"process.register":      "a process child is registered by `workass run` on the machine that supervises it, whose pid is the evidence this machine probes; to run a job elsewhere, pass machine_id to workass_start_process_child, or run `workass run --owner <this chat's global id>` on that machine, and watch it with workass_list_process_children --machine_id",
+	"obligation.get":        "the obligation belongs to the calling chat's running turn on this machine",
 }
 
 // remoteAgentAddressParams are the params whose machine tag selects the

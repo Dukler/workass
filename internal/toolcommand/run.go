@@ -30,7 +30,7 @@ func readContext(contextFile string) (toolcli.Config, error) {
 	config, err := toolcli.ReadConfig(contextFile)
 	if err != nil {
 		if errors.Is(err, toolcli.ErrContextMissing) {
-			return toolcli.Config{}, fmt.Errorf("%w; the chat that launched this process was deleted, or the daemon cleaned up a context left over from before a restart. For delayed work, ask the chat to use workass_schedule_message instead of a detached helper", err)
+			return toolcli.Config{}, fmt.Errorf("%w; the chat that launched this process was deleted, the daemon cleaned up a context left over from before a restart, or a command deleted the file (for example a one-shot run credential). For delayed work, ask the chat to use workass_schedule_message instead of a detached helper", err)
 		}
 		return toolcli.Config{}, fmt.Errorf("%w; use the current process WORKASS_TOOL_CONTEXT, not a context path copied from conversation history", err)
 	}

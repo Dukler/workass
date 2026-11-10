@@ -340,6 +340,39 @@ func agentMCPTools() []map[string]any {
 			"reason":     str(agenttext.Get("schema.process.reason")),
 			"machine_id": str(agenttext.Get("schema.process.machine_id")),
 		}, "work_id"), false, true, true, false),
+		tool("workass_issue_job_credential", agenttext.Get("tools.workass_issue_job_credential"), mutationObject(map[string]any{
+			"label": map[string]any{"type": "string", "minLength": 1, "maxLength": 120, "description": agenttext.Get("schema.jobCredential.label")},
+		}, "label"), false, false, true, false),
+		tool("workass_list_job_credentials", agenttext.Get("tools.workass_list_job_credentials"), object(map[string]any{}), true, false, true, false),
+		tool("workass_revoke_job_credential", agenttext.Get("tools.workass_revoke_job_credential"), mutationObject(map[string]any{
+			"credential_id": str(agenttext.Get("schema.jobCredential.credential_id")),
+		}, "credential_id"), false, true, true, false),
+		tool("workass_report_bug", agenttext.Get("tools.workass_report_bug"), mutationObject(map[string]any{
+			"title":           map[string]any{"type": "string", "minLength": 1, "maxLength": 200, "description": agenttext.Get("schema.bug.title")},
+			"what_happened":   str(agenttext.Get("schema.bug.what_happened")),
+			"expected":        str(agenttext.Get("schema.bug.expected")),
+			"repro_steps":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 40, "description": agenttext.Get("schema.bug.repro_steps")},
+			"severity":        enum(agenttext.Get("schema.bug.severity"), "blocker", "high", "medium", "low"),
+			"workaround":      str(agenttext.Get("schema.bug.workaround")),
+			"log_paths":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": bugReportMaxLogPaths, "description": agenttext.Get("schema.bug.log_paths")},
+			"log_excerpts":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": bugReportMaxExcerpts, "description": agenttext.Get("schema.bug.log_excerpts")},
+			"work_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 16, "description": agenttext.Get("schema.bug.work_ids")},
+			"workass_version": str(agenttext.Get("schema.bug.workass_version")),
+			"machine":         str(agenttext.Get("schema.bug.machine")),
+			"repo_dir":        str(agenttext.Get("schema.bug.repo_dir")),
+			"provider_id":     str(agenttext.Get("schema.bug.provider_id")),
+			"model_id":        str(agenttext.Get("schema.bug.model_id")),
+		}), false, false, true, false),
+		tool("workass_list_bug_reports", agenttext.Get("tools.workass_list_bug_reports"), object(map[string]any{
+			"bug_id": str(agenttext.Get("schema.bug.bug_id")),
+			"status": enum(agenttext.Get("schema.bug.status_filter"), "open", "fixing", "fixed", "wontfix", "duplicate"),
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": bugReportListMax, "description": agenttext.Get("schema.bug.limit")},
+		}), true, false, true, false),
+		tool("workass_update_bug_report", agenttext.Get("tools.workass_update_bug_report"), mutationObject(map[string]any{
+			"bug_id": str(agenttext.Get("schema.bug.bug_id")),
+			"status": enum(agenttext.Get("schema.bug.status"), "open", "fixing", "fixed", "wontfix", "duplicate"),
+			"note":   map[string]any{"type": "string", "minLength": 1, "description": agenttext.Get("schema.bug.note")},
+		}, "bug_id", "status", "note"), false, false, true, false),
 		tool("workass_list_spawned_work_receipts", agenttext.Get("tools.workass_list_spawned_work_receipts"), callingChatPair(object(map[string]any{
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 256, "description": agenttext.Get("schema.agentMCPTools.05")},
 		})), true, false, true, false),
@@ -523,6 +556,18 @@ func callAgentMCPTool(request *http.Request, call browserMCPCallParams, options 
 		method = "process.read"
 	case "workass_cancel_process_child":
 		method = "process.cancel"
+	case "workass_issue_job_credential":
+		method = "job_credential.issue"
+	case "workass_list_job_credentials":
+		method = "job_credential.list"
+	case "workass_revoke_job_credential":
+		method = "job_credential.revoke"
+	case "workass_report_bug":
+		method = "bug.report"
+	case "workass_list_bug_reports":
+		method = "bug.list"
+	case "workass_update_bug_report":
+		method = "bug.update"
 	case "workass_list_spawned_work_receipts":
 		method = "spawned_work.receipts"
 	case "workass_list_subagents":
