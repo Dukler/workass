@@ -234,7 +234,14 @@ const UNAVAILABLE_REASON: Record<string, string> = {
   paused: 'En pausa',
 };
 
-function refillShape(refills: ReadonlyArray<string>, resetType?: string): 'both' | 'five' | 'week' | '' {
+// Claude's Fable bucket. A reset that clears only it frees what Fable used
+// this week and nothing else (Claude Code calls it a "Fable reset"); one that
+// also clears another limit is not only a Fable reset (owner 2026-11-10: say
+// it only when it is only that).
+const FABLE_WINDOW = 'seven_day_overage_included';
+
+function refillShape(refills: ReadonlyArray<string>, resetType?: string): 'both' | 'five' | 'week' | 'fable' | '' {
+  if (refills.length > 0 && refills.every((id) => windowBase(id) === FABLE_WINDOW)) return 'fable';
   const five = refills.some((id) => windowBase(id) === 'five_hour');
   const week = refills.some((id) => windowBase(id).startsWith('seven_day'));
   if ((five && week) || (!refills.length && resetType === 'full')) return 'both';
@@ -258,7 +265,8 @@ function expiryText(iso: string | undefined, now: number): string {
 function grantRow(credit: RateLimitResetCredit, index: number, now: number): AccountResetRow {
   const refills = credit.refills ?? [];
   const shape = refillShape(refills, credit.resetType);
-  const title = shape === 'both' ? 'Reset completo'
+  const title = shape === 'fable' ? 'Reset de Fable'
+    : shape === 'both' ? 'Reset completo'
     : shape === 'five' ? 'Reset del límite de 5 horas'
       : shape === 'week' ? 'Reset del límite semanal'
         : (credit.title || 'Reset');
@@ -268,10 +276,14 @@ function grantRow(credit: RateLimitResetCredit, index: number, now: number): Acc
     key: credit.id || `grant-${index}`,
     creditId: credit.id,
     title: title + count,
-    detail: [shape === 'both' ? 'Rellena 5 horas y semana' : '', expiryText(credit.expiresAt, now)].filter(Boolean).join(' · '),
+    detail: [
+      shape === 'both' ? 'Rellena 5 horas y semana' : shape === 'fable' ? 'Solo libera lo que usaste con Fable esta semana' : '',
+      expiryText(credit.expiresAt, now),
+    ].filter(Boolean).join(' · '),
     usable,
     reason: usable ? '' : (UNAVAILABLE_REASON[credit.unavailableReason ?? ''] ?? 'No disponible ahora'),
-    question: shape === 'both' ? '¿Rellenar tus límites ahora?'
+    question: shape === 'fable' ? '¿Liberar ahora lo que usaste con Fable esta semana?'
+      : shape === 'both' ? '¿Rellenar tus límites ahora?'
       : shape === 'five' ? '¿Rellenar tu límite de 5 horas ahora?'
         : shape === 'week' ? '¿Rellenar tu límite semanal ahora?'
           : '¿Usar el reset ahora?',
@@ -324,11 +336,13 @@ export function resetResultToast(result: ResetResult | undefined, row: AccountRe
   switch (result?.outcome) {
     case 'reset': {
       const shape = refillShape(result.refilled?.length ? result.refilled : row.refills);
-      const title = shape === 'five' ? 'Límite de 5 horas reiniciado'
+      const title = shape === 'fable' ? 'Reset de Fable usado'
+        : shape === 'five' ? 'Límite de 5 horas reiniciado'
         : shape === 'week' ? 'Límite semanal reiniciado'
           : `Límites de ${name} rellenados`;
       const left = result.remaining;
-      const body = typeof left === 'number'
+      const body = shape === 'fable' ? 'Lo que usaste con Fable volvió a tu límite semanal.'
+        : typeof left === 'number'
         ? (left === 0 ? 'Ya no te quedan resets de este tipo.' : left === 1 ? 'Te queda 1 reset de este tipo.' : `Te quedan ${left} resets de este tipo.`)
         : `${name} actualizó tus límites.`;
       return { title, body };

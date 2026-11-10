@@ -671,6 +671,7 @@ func mergePlanUsageEntries(existing, incoming []PlanUsageEntry) []PlanUsageEntry
 	}
 	out := append([]PlanUsageEntry(nil), existing...)
 	for _, entry := range incoming {
+		out = dropRenamedPlanUsageWindow(out, entry)
 		key := planUsageEntryKey(entry)
 		replaced := false
 		for i := range out {
@@ -683,6 +684,38 @@ func mergePlanUsageEntries(existing, incoming []PlanUsageEntry) []PlanUsageEntry
 		if !replaced {
 			out = append(out, entry)
 		}
+	}
+	return out
+}
+
+// dropRenamedPlanUsageWindow removes an older rate-limit entry that is the
+// incoming one's window under another id: same limit, same length, same reset.
+// A window id can change between builds (de3e7145 renamed ChatGPT Free's
+// 30-day window from seven_day to 30_day); the merge keeps entries an update
+// does not mention, so the old name stayed beside the new one and Cuentas
+// drew a "Semana" bar for a login with no week at all (owner 2026-11-10).
+func dropRenamedPlanUsageWindow(entries []PlanUsageEntry, incoming PlanUsageEntry) []PlanUsageEntry {
+	if incoming.Kind != "rate-limit" || incoming.WindowMinutes == nil || incoming.ResetsAt == "" {
+		return entries
+	}
+	out := entries[:0]
+	for _, entry := range entries {
+		renamed := entry.Kind == "rate-limit" && entry.ID != incoming.ID && entry.WindowMinutes != nil &&
+			*entry.WindowMinutes == *incoming.WindowMinutes && entry.ResetsAt == incoming.ResetsAt &&
+			entry.LimitName == incoming.LimitName
+		if !renamed {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// collapseRenamedPlanUsageWindows keeps, of the entries that are one window
+// under different ids, the last one.
+func collapseRenamedPlanUsageWindows(entries []PlanUsageEntry) []PlanUsageEntry {
+	var out []PlanUsageEntry
+	for _, entry := range entries {
+		out = append(dropRenamedPlanUsageWindow(out, entry), entry)
 	}
 	return out
 }

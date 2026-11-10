@@ -113,6 +113,9 @@ func (m *Manager) loadPersistedPlanUsage() {
 		}
 		snapshot.ProviderID = id
 		snapshot.Raw = nil
+		// A snapshot saved before a window was renamed holds it twice; the
+		// later entry is the current name (mergePlanUsageEntries appends).
+		snapshot.Entries = collapseRenamedPlanUsageWindows(snapshot.Entries)
 		if _, live := m.planUsageByProvider[id]; live {
 			continue
 		}

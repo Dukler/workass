@@ -799,3 +799,28 @@ func numberString(v any) string {
 		return fmt.Sprint(x)
 	}
 }
+
+// A window renamed between builds (ChatGPT Free's 30 days: seven_day → 30_day)
+// replaces its old name instead of standing beside it (owner 2026-11-10).
+func TestRenamedPlanUsageWindowReplacesItsOldName(t *testing.T) {
+	month := int64(43200)
+	week := int64(10080)
+	old := PlanUsageEntry{Kind: "rate-limit", ID: "seven_day", ResetsAt: "2026-11-18T00:22:43Z", WindowMinutes: &month, LimitName: "codex"}
+	renamed := old
+	renamed.ID = "30_day"
+	other := PlanUsageEntry{Kind: "rate-limit", ID: "seven_day", ResetsAt: "2026-11-18T00:22:43Z", WindowMinutes: &week, LimitName: "codex"}
+
+	merged := mergePlanUsageEntries([]PlanUsageEntry{old}, []PlanUsageEntry{renamed})
+	if len(merged) != 1 || merged[0].ID != "30_day" {
+		t.Fatalf("merged = %#v, want only 30_day", merged)
+	}
+	collapsed := collapseRenamedPlanUsageWindows([]PlanUsageEntry{old, renamed})
+	if len(collapsed) != 1 || collapsed[0].ID != "30_day" {
+		t.Fatalf("collapsed = %#v, want only 30_day", collapsed)
+	}
+	// A real week beside the 30 days is another window: both stay.
+	kept := mergePlanUsageEntries([]PlanUsageEntry{other}, []PlanUsageEntry{renamed})
+	if len(kept) != 2 {
+		t.Fatalf("a different window was dropped: %#v", kept)
+	}
+}

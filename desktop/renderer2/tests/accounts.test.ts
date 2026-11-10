@@ -282,3 +282,20 @@ test('a free login shows no resets block', async () => {
   assert.match(page, /\} else if \(freeLogin\) \{[\s\S]{0,200}resetsBody = null;/);
   assert.match(page, /\} else if \(snapshot && !needsConsent && !freeLogin\) \{/);
 });
+
+// Owner 2026-11-10: a reset that clears only Claude's Fable bucket says so; one
+// that clears more is not "only Fable" and keeps its own title.
+test('a reset that frees only Fable is named a Fable reset, and only then', () => {
+  const fable = { id: 'launch-2610-fable', status: 'available', resetType: 'full', remaining: 1, total: 1, usableNow: true, refills: ['seven_day_overage_included'], expiresAt: iso(at(14, 22, 53)) };
+  const [row] = accountResetRows({ availableCount: 1, credits: [fable] }, at(9, 12));
+  assert.equal(row.title, 'Reset de Fable');
+  assert.match(row.detail, /^Solo libera lo que usaste con Fable esta semana · vence/);
+  assert.equal(row.question, '¿Liberar ahora lo que usaste con Fable esta semana?');
+  const toast = resetResultToast({ outcome: 'reset', refilled: ['seven_day_overage_included'], remaining: 0 }, row, 'Claude');
+  assert.equal(toast.title, 'Reset de Fable usado');
+
+  const [wider] = accountResetRows({ availableCount: 1, credits: [{ ...fable, id: 'wider', refills: ['seven_day_overage_included', 'seven_day'] }] }, at(9, 12));
+  assert.equal(wider.title, 'Reset del límite semanal', 'a reset that also refills the week is not only Fable');
+  const [weekly] = accountResetRows({ availableCount: 1, credits: [{ ...fable, id: 'weekly', refills: ['seven_day'] }] }, at(9, 12));
+  assert.equal(weekly.title, 'Reset del límite semanal');
+});
