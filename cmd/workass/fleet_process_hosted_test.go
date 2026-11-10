@@ -81,6 +81,12 @@ const hostedJobOwner = "wa:m-away/chat/mcp-chat"
 // P, whose chat asks.
 func newHostedJobFleet(t *testing.T, mutate ...func(*acp.Options)) hostedJobFleet {
 	t.Helper()
+	return newHostedJobFleetAsking(t, nil, mutate...)
+}
+
+// newHostedJobFleetAsking is the same fleet with P's own daemon options set too.
+func newHostedJobFleetAsking(t *testing.T, askingOptions func(*acp.Options), mutate ...func(*acp.Options)) hostedJobFleet {
+	t.Helper()
 	secret := newFleetTestSecret(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -121,7 +127,7 @@ func newHostedJobFleet(t *testing.T, mutate ...func(*acp.Options)) hostedJobFlee
 	hostingFleet := installTestFleetHome(t, "m-home", hosting, home)
 	hosting.manager.SetProcessLifecycleObserver(hostingFleet.ObserveProcess)
 
-	asking := newStatelessMCPTestHarness(t)
+	asking := newStatelessMCPTestHarnessWithOptions(t, nil, askingOptions)
 	// Starting a job on another machine takes full access, and the mock's default
 	// `ask` is not it. It used to pass because `ask` translated to no limit at all.
 	setChatModeAsHuman(t, asking, "mcp-tab", "mcp-chat", "bypass", "asking-owner-full-access")

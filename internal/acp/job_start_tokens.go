@@ -24,9 +24,10 @@ import (
 // every timer-started job refused to start (former issue #4, 2026-11-10).
 //
 // This credential is the narrow, durable answer:
-//   - it authorizes exactly one method, process.register, so a timer can start
-//     and report supervised jobs and nothing else: no message, no chat read, no
-//     agent, no job on another machine;
+//   - it authorizes process.register, so a timer can start and report
+//     supervised jobs here, and, for that chat's own jobs on ANOTHER machine,
+//     process.start/list/read/cancel (bug-20261110-12916e73); nothing else: no
+//     message, no chat read, no agent, no tool catalog;
 //   - every job it reports is owned by the chat that issued it, and only by
 //     that chat: the owner is fixed when it is issued, not chosen per job;
 //   - it names no chat, so no chat-authorized path can accept it;

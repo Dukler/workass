@@ -553,8 +553,18 @@ func (h *agentControlHandler) openBugFixThread(ctx context.Context, root, ownerK
 		"cwd":          repo,
 		"focus":        false,
 	}
+	explicit := false
 	for _, key := range []string{"provider_id", "model_id", "effort", "mode_id"} {
 		if value := strings.TrimSpace(fieldString(params, key)); value != "" {
+			create[key] = value
+			explicit = true
+		}
+	}
+	if !explicit {
+		// Workass's own default, as a chat the owner starts by hand gets it.
+		// Before, this create named nothing, so the fixing chat took the first
+		// ready provider's first model rather than the one in Ajustes · General.
+		for key, value := range h.newChatDefaultControls(ctx, ownerKey, tabID, chatID) {
 			create[key] = value
 		}
 	}
@@ -717,4 +727,58 @@ func (h *agentControlHandler) updateBugReport(root, tabID, chatID string, params
 		return nil, err
 	}
 	return map[string]any{"ok": true, "replayed": false, "bug_id": report.ID, "status": report.Status}, nil
+}
+
+// newChatDefaultControls is Ajustes · General's new-chat agent, model, effort
+// and permission mode, resolved against this machine's catalog the way the
+// composer resolves them for a chat the owner starts (applyNewChatDefaults in
+// desktop/renderer2/src/store/store.ts): no agent named, or one not ready
+// here, is nothing; a model gone from the catalog falls back to the agent's
+// own default; an effort applies only with its own model; a permission mode
+// only if the agent offers it. A mode above the asking chat's own level is
+// left out, so the default never turns a create into a request for approval.
+func (h *agentControlHandler) newChatDefaultControls(ctx context.Context, ownerKey, tabID, chatID string) map[string]any {
+	if h == nil || h.settings == nil || h.manager == nil {
+		return nil
+	}
+	defaults := mapFromAnyMain(h.settings()["newChat"])
+	providerID := strings.TrimSpace(fieldString(defaults, "providerId"))
+	if providerID == "" {
+		return nil
+	}
+	groups, _ := h.manager.Catalog(ctx)["groups"].([]acp.CatalogGroup)
+	for _, group := range groups {
+		if group.ProviderID != providerID || (group.Status != "" && group.Status != "ready") || len(group.Models) == 0 {
+			continue
+		}
+		out := map[string]any{"provider_id": providerID}
+		if model := strings.TrimSpace(fieldString(defaults, "model")); model != "" {
+			for _, candidate := range group.Models {
+				if candidate.ModelID != model {
+					continue
+				}
+				out["model_id"] = model
+				if effort := strings.TrimSpace(fieldString(defaults, "effort")); effort != "" {
+					for _, offered := range candidate.Efforts {
+						if offered == effort {
+							out["effort"] = effort
+						}
+					}
+				}
+			}
+		}
+		if mode := strings.TrimSpace(fieldString(defaults, "modeId")); mode != "" {
+			for _, offered := range group.Modes {
+				if offered.ID != mode {
+					continue
+				}
+				caller := h.permissionCallerFor(ctx, ownerKey, tabID, chatID)
+				if !permissionChangeRaises(caller, permissionChange{providerID: providerID, modeID: mode}) {
+					out["mode_id"] = mode
+				}
+			}
+		}
+		return out
+	}
+	return nil
 }

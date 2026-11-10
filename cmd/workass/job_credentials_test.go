@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,16 @@ import (
 
 func jobCredentialHarness(t *testing.T) statelessMCPTestHarness {
 	t.Helper()
-	harness := newStatelessMCPTestHarnessWithOptions(t, nil, func(options *acp.Options) {
+	harness := newStatelessMCPTestHarnessWithOptions(t, nil, jobCredentialOptions(t))
+	harness.handler.agentControl.selfMachineID = "m-home"
+	return harness
+}
+
+// jobCredentialOptions gives a test daemon the tool endpoint a credential file
+// has to name.
+func jobCredentialOptions(t *testing.T) func(*acp.Options) {
+	t.Helper()
+	return func(options *acp.Options) {
 		options.WorkassToolsOrigin = "https://tools.localhost:18799"
 		options.WorkassToolsCAFile = filepath.Join(t.TempDir(), "ca.pem")
 		executable, err := os.Executable()
@@ -24,9 +34,7 @@ func jobCredentialHarness(t *testing.T) statelessMCPTestHarness {
 			t.Fatal(err)
 		}
 		options.WorkassToolsCommand = executable
-	})
-	harness.handler.agentControl.selfMachineID = "m-home"
-	return harness
+	}
 }
 
 // A timer has no chat turn, so it had no supported way to start a job owned by
@@ -163,4 +171,34 @@ func timerCredentialRequest(t *testing.T, harness statelessMCPTestHarness, metho
 	var response map[string]any
 	_ = json.NewDecoder(reply.Body).Decode(&response)
 	return reply.StatusCode, response
+}
+
+// Through the tool endpoint an agent actually calls, the answer names the file
+// to hand the timer and the id to revoke it by. Both were masked by the key-name
+// redactor, so a chat was told token_file "[redacted]".
+func TestTheIssuedCredentialFileAndIDReachTheAgentUnmasked(t *testing.T) {
+	harness := jobCredentialHarness(t)
+	status, response := harness.request(t, http.MethodPost, map[string]any{
+		"name": "workass_issue_job_credential", "arguments": map[string]any{"label": "launchd x", "operation_id": "issue-unmasked"},
+	})
+	issued := mapFromAnyMain(response["result"])
+	file, id := fieldString(issued, "token_file"), fieldString(issued, "credential_id")
+	if status != http.StatusOK || !strings.HasPrefix(id, "jsc-") || !filepath.IsAbs(file) {
+		t.Fatalf("issue answered %d %#v", status, response)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("token_file does not name the file: %v", err)
+	}
+	config, err := toolcli.ReadConfig(file)
+	if err != nil || strings.Contains(bugJSON(response), config.Credential) {
+		t.Fatalf("the token itself must never be in the answer: %v", err)
+	}
+	_, response = harness.request(t, http.MethodPost, map[string]any{"name": "workass_list_job_credentials", "arguments": map[string]any{}})
+	rows := anySlice(mapFromAnyMain(response["result"])["credentials"])
+	if len(rows) != 1 || fieldString(mapFromAnyMain(rows[0]), "credential_id") != id || fieldString(mapFromAnyMain(rows[0]), "token_file") != file {
+		t.Fatalf("list answered %#v", response)
+	}
+	if strings.Contains(bugJSON(response), config.Credential) {
+		t.Fatal("the list carried the token")
+	}
 }

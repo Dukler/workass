@@ -568,12 +568,17 @@ func processStartHostRefusal(machineID string, err error) error {
 // fenceJobStartCredential holds a timer's job-start credential to what it was
 // issued for: reporting jobs it starts, owned by the chat that issued it.
 func fenceJobStartCredential(binding acp.JobStartBinding, method, tabID, chatID string, params map[string]any) error {
-	if method != "process.register" {
-		return errors.New("this is a job-start credential: it authorizes only the report of a job `workass run` starts with it, for the chat that issued it")
+	if method != "process.register" && !jobStartCredentialMethods[method] {
+		return errors.New("this is a job-start credential: it authorizes only the report of a job `workass run` starts with it, and starting, listing, reading and stopping its own chat's jobs on another machine")
 	}
 	if strings.TrimSpace(chatID) != "" || strings.TrimSpace(tabID) != "" ||
 		strings.TrimSpace(fieldString(params, "chat_id")) != "" || strings.TrimSpace(fieldString(params, "tab_id")) != "" {
 		return errors.New("a job-start credential names no chat, so it cannot act for one")
+	}
+	if method != "process.register" {
+		// Past this fence it acts as its chat, scoped to that chat's own jobs
+		// (job_credentials.go).
+		return nil
 	}
 	if owner := strings.TrimSpace(fieldString(params, "owner")); owner != "" && owner != binding.Owner {
 		return errors.New("this job-start credential starts jobs only for the chat that issued it; drop --owner")

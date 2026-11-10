@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workass/internal/acp"
 )
 
 func bugCall(t *testing.T, harness statelessMCPTestHarness, method string, params map[string]any) (map[string]any, error) {
@@ -137,4 +140,71 @@ func TestABugReportIsRefusedIncompleteThenLedgeredWithAFixingChat(t *testing.T) 
 func bugJSON(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+// The fixing chat starts on Workass's own default (Ajustes · General), the way
+// a chat the owner starts by hand does. It took the first ready provider's first
+// model instead, which on the owner's Mac was not the default they had chosen.
+func TestTheFixingChatStartsOnWorkassNewChatDefault(t *testing.T) {
+	harness := newStatelessMCPTestHarness(t)
+	harness.handler.agentControl.selfMachineID = "m-home"
+	// The mock has one model, whose own default effort is its last; the
+	// default names its other one, which applies only with its own model.
+	groups, _ := harness.manager.Catalog(context.Background())["groups"].([]acp.CatalogGroup)
+	var model acp.Model
+	for _, group := range groups {
+		if group.ProviderID == "mock" && len(group.Models) > 0 {
+			model = group.Models[0]
+		}
+	}
+	if len(model.Efforts) < 2 {
+		t.Fatalf("the mock catalog needs a model with two efforts for this test, has %#v", model)
+	}
+	chosen, effort := model.ModelID, model.Efforts[0]
+	harness.handler.agentControl.settings = func() map[string]any {
+		return map[string]any{"newChat": map[string]any{
+			"providerId": "mock", "model": chosen, "effort": effort, "modeId": "bypass", "folder": "last",
+		}}
+	}
+	logFile := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(logFile, []byte("boom\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := bugCall(t, harness, "bug.report", map[string]any{
+		"operation_id": "bug-default-model", "title": "the fixing chat ignores the default",
+		"what_happened": "it opened on another model", "expected": "the default model",
+		"repro_steps": []any{"report a bug"}, "severity": "low", "workaround": "none",
+		"log_paths": []any{logFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID := fieldString(mapFromAnyMain(report["thread"]), "chat_id")
+	state, ok := harness.runtime.Snapshot(chatID)
+	if !ok {
+		t.Fatalf("no fixing chat: %#v", report)
+	}
+	if want := chosen + "[" + effort + "]"; state.Presentation.ProviderID != "mock" || state.Presentation.CurrentModelID != want {
+		t.Fatalf("the fixing chat runs %s/%s, want mock/%s", state.Presentation.ProviderID, state.Presentation.CurrentModelID, want)
+	}
+	// The reporting chat runs at `ask`, so the default's bypass would have asked
+	// a human; it is left to the agent's own default instead.
+	if state.Presentation.CurrentModeID == "bypass" {
+		t.Fatal("the default permission mode raised the fixing chat above the reporter")
+	}
+	// A reporter at full access, the owner's own case, gets the default's mode.
+	setChatModeAsHuman(t, harness, "mcp-tab", "mcp-chat", "bypass", "reporter-full-access")
+	report, err = bugCall(t, harness, "bug.report", map[string]any{
+		"operation_id": "bug-default-mode", "title": "the fixing chat ignores the default mode",
+		"what_happened": "it opened on another mode", "expected": "the default mode",
+		"repro_steps": []any{"report a bug"}, "severity": "low", "workaround": "none",
+		"log_paths": []any{logFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ = harness.runtime.Snapshot(fieldString(mapFromAnyMain(report["thread"]), "chat_id"))
+	if state.Presentation.CurrentModeID != "bypass" {
+		t.Fatalf("a full-access reporter's fixing chat runs mode %q, want the default bypass", state.Presentation.CurrentModeID)
+	}
 }

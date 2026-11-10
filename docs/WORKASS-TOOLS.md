@@ -552,8 +552,24 @@ workass run --token-file /path/from/token_file --label "nightly build" \
 - Every job it starts is the issuing chat's, exactly as if started from that
   chat's own shell: its row, its process-group tree-kill, and its outcome
   notice land in that chat. `--owner` cannot point it at another chat.
-- It authorizes nothing but that job's own report: no message, no chat read,
-  no agent, no job on another machine, no tool catalog.
+- On another fleet machine the same file starts the chat's job there, and
+  lists, reads and stops the chat's own jobs, so a timer can check "is it
+  already running?" first:
+
+  ```sh
+  WORKASS_TOOL_CONTEXT=/path/from/token_file "$WORKASS_TOOLS_COMMAND" tools call \
+    workass_start_process_child <<'JSON'
+  {"machine_id":"m-…","label":"nightly build","cwd":"/srv/build",
+   "command":["make","release"],"operation_id":"nightly-build-2026-11-10"}
+  JSON
+  ```
+
+  `workass_list_process_children`, `workass_read_process_child` and
+  `workass_cancel_process_child` take the same file. Another chat's job is
+  neither listed, read nor stopped, and a resource queue shows only the
+  chat's own entries. A remote start needs the chat at full access, as from
+  the chat itself; a job on this machine is still `workass run --token-file`.
+- Nothing else: no message, no chat read, no agent, no tool catalog.
 - It is durable. It survives engine recycles, daemon restarts and updates (the
   file is rewritten if the daemon's endpoint moves), and `workass run` never
   deletes its file. Only a one-shot `wrt_` run credential Workass mints for a
@@ -602,7 +618,11 @@ JSON
   source checkout with the report as its brief: reproduce, fix with tests, run
   the gates, ship, report back to the reporting chat, and record the outcome
   with `workass_update_bug_report`. The answer carries `bug_id` and the fixing
-  chat's ids. The checkout is found from `repo_dir` (remembered),
+  chat's ids. The fixing chat starts on Workass's new-chat default (Ajustes ·
+  General: agent, model, effort, permissions), resolved as the composer does,
+  unless the report names `provider_id`/`model_id`/`effort`/`mode_id`. The
+  default's permission mode applies only when the reporting chat already runs at
+  that level or above, so it never stops to ask for approval. The checkout is found from `repo_dir` (remembered),
   `$WORKASS_SOURCE_DIR`, the daemon's own directory, or the reporting chat's
   directory; if none is found the report is still saved and the answer says
   so, and a retry with the same `operation_id` and `repo_dir` opens the chat.

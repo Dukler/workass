@@ -50,6 +50,13 @@ var daemonVersion = "0.0.1-dev"
 
 var secretKeyRE = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|credential|bearer)`)
 
+// notSecretKeys match secretKeyRE by name and hold no secret: a job-start
+// credential's public id, the path of its 0600 file, and the list of them,
+// which never carries a token. Masked, workass_issue_job_credential answered
+// token_file "[redacted]", the one thing a chat must hand its timer, and no
+// credential could be named to revoke it.
+var notSecretKeys = map[string]bool{"credential_id": true, "token_file": true, "credentials": true}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "install-update" {
 		if len(os.Args) != 3 {
@@ -2394,7 +2401,7 @@ func redactValue(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, v := range x {
-			if secretKeyRE.MatchString(k) {
+			if secretKeyRE.MatchString(k) && !notSecretKeys[k] {
 				out[k] = "[redacted]"
 				continue
 			}

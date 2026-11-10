@@ -145,7 +145,7 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 	// chat that issued it: the same registration that chat's own shell would
 	// make, so the job's row, notices and tree-kill are that chat's.
 	if h.manager != nil {
-		if _, isStart := h.manager.JobStartTokenFor(ownerKey); isStart {
+		if binding, isStart := h.manager.JobStartTokenFor(ownerKey); isStart {
 			chatKey, startTab, startChat, ok := h.manager.JobStartChatOwner(ownerKey)
 			if !ok {
 				return nil, errors.New("the chat that issued this job-start credential no longer exists")
@@ -154,6 +154,11 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 			ownerKey, tabID, chatID = chatKey, startTab, startChat
 			params = copyAnyMap(params)
 			params["owner_key"], params["parent_tab_id"], params["parent_chat_id"] = ownerKey, tabID, chatID
+			if request.Method != "process.register" {
+				// A timer's remote start, list, read or stop: its chat's own
+				// jobs and nothing else (bug-20261110-12916e73).
+				return h.jobStartCredentialCall(r, binding, request.Method, params)
+			}
 		}
 	}
 	// One authority decides whether this call addresses this machine or another

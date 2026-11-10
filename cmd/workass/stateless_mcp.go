@@ -81,7 +81,7 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// its job reports through. It is not a catalog reader. One whose job has ended
 	// is treated the same whichever kind it is: it resolves to no chat either, and
 	// may only hear that its job has ended.
-	hostedJob := false
+	hostedJob, jobStart := false, false
 	if binding, isRun := h.manager.RunTokenFor(owner); isRun && (binding.JobScoped() || binding.Closed()) {
 		if chatID != binding.ChatID || tabID != binding.TabID || r.Method != http.MethodPost {
 			fail(401, "unauthorized")
@@ -96,7 +96,7 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(401, "unauthorized")
 			return
 		}
-		hostedJob = true
+		hostedJob, jobStart = true, true
 	}
 	child := chatID == tabID && strings.HasPrefix(chatID, subagentTabPrefix) && strings.TrimPrefix(chatID, subagentTabPrefix) != ""
 	if !child && !hostedJob {
@@ -174,7 +174,11 @@ func (h *workassToolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(400, "request must contain one JSON object")
 		return
 	}
-	if hostedJob && call.Name != "workass_register_process_child" {
+	if jobStart && !jobStartCredentialTools[call.Name] {
+		fail(403, "this job-start credential authorizes only workass_register_process_child, and starting, listing, reading and stopping its own chat's jobs on another machine")
+		return
+	}
+	if hostedJob && !jobStart && call.Name != "workass_register_process_child" {
 		fail(403, "this supervised-job credential authorizes only workass_register_process_child")
 		return
 	}
