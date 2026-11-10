@@ -1893,3 +1893,54 @@ func TestLifecyclePendingSessionTimersBlockIdleTTLHibernation(t *testing.T) {
 		t.Fatalf("an idle engine with no timers left was kept awake: %#v", manager.Processes())
 	}
 }
+
+// A resumed agent that the engine recycle took down is owed a receipt of its
+// own run. Receipts were deduplicated on the task id alone, so the resumed run
+// — same task id as the first — left no record anywhere (issue #2, 2026-10-16).
+func TestResumedClaudeAgentRunGetsItsOwnReceipt(t *testing.T) {
+	t.Parallel()
+	stateDir := t.TempDir()
+	manager := NewManager(Options{
+		StateDir: stateDir, SpawnedWorkReconcileInterval: time.Hour,
+		SpawnedWorkPIDProbe: func([]string) (map[string][]int, bool) { return nil, false },
+	})
+	t.Cleanup(func() { manager.Reset() })
+	first := SpawnedWorkReceipt{
+		ReceiptID: "spawned-a6b1b14750726df64", TaskID: "a6b1b14750726df64", ToolCallID: "toolu_launch",
+		TabID: "tab-dv", ChatID: "chat-dv", Kind: "agent", Label: "Trainer optimization",
+		Status: "exited", StartedAt: "2026-10-16T14:12:52Z", FinishedAt: "2026-10-16T15:23:42Z",
+	}
+	line, _ := json.Marshal(first)
+	path := manager.spawnedWorkReceiptPath("tab-dv")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observeRawSpawnLifecycleFixture(t, manager, "tab-dv", "chat-dv", "session-dv", "claude", map[string]any{
+		"type": "started", "taskId": "a6b1b14750726df64", "toolCallId": "toolu_sendmessage", "taskType": "local_agent", "backgrounded": true,
+	})
+	if !manager.hasRunningSpawnedWorkForChat("tab-dv", "chat-dv") {
+		t.Fatal("a resumed agent must hold the engine like a fresh launch")
+	}
+	if !manager.orphanInProcessSpawnedWorkForChat("tab-dv", "chat-dv", "recycle-age") {
+		t.Fatal("the resumed agent was not settled when its engine went")
+	}
+	for i := 0; i < 2; i++ { // a second pass must not write it twice
+		if err := manager.persistNewSpawnedWorkReceipts("tab-dv", "chat-dv", manager.listSpawnedWorkRaw("tab-dv", "chat-dv")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipts := manager.listSpawnedWorkReceipts("tab-dv", "chat-dv", 10)
+	if len(receipts) != 2 {
+		t.Fatalf("receipts = %#v", receipts)
+	}
+	resumed := receipts[1]
+	if resumed.ReceiptID == first.ReceiptID || !strings.HasPrefix(resumed.ReceiptID, first.ReceiptID+"-run-") || resumed.Status != "orphaned" || resumed.TaskID != first.TaskID {
+		t.Fatalf("resumed run receipt = %#v", resumed)
+	}
+	if !strings.Contains(resumed.Summary, "recycle-age") {
+		t.Fatalf("the receipt must say why it ended: %q", resumed.Summary)
+	}
+}

@@ -2722,12 +2722,36 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string, acceptedIt
 		_ = os.MkdirAll(filepath.Dir(path), 0o700)
 		existing, _ := os.ReadFile(path)
 		lines := boundedSpawnedReceiptLines(existing)
-		duplicate := false
+		duplicate, earlierRun := false, false
 		for _, line := range lines {
 			var prior SpawnedWorkReceipt
 			if json.Unmarshal(line, &prior) == nil && prior.ReceiptID == receipt.ReceiptID {
-				duplicate = true
-				break
+				if prior.StartedAt == receipt.StartedAt {
+					duplicate = true
+					break
+				}
+				earlierRun = true
+			}
+		}
+		if !duplicate && earlierRun {
+			// The same task ran again: an agent resumed with SendMessage keeps
+			// its task id. That run is owed its own receipt; deduplicated on
+			// the task id alone, a resumed agent the engine recycle killed left
+			// no record at all (issue #2, 2026-10-16).
+			receipt.ReceiptID = spawnedRunReceiptID(receipt)
+			for _, line := range lines {
+				var prior SpawnedWorkReceipt
+				if json.Unmarshal(line, &prior) == nil && prior.ReceiptID == receipt.ReceiptID {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				data, err = json.Marshal(receipt)
+				if err != nil {
+					m.receiptMu.Unlock()
+					return err
+				}
 			}
 		}
 		if !duplicate {
@@ -2757,6 +2781,16 @@ func (m *Manager) persistNewSpawnedWorkReceipts(tabID, chatID string, acceptedIt
 		m.spawnedWorkMu.Unlock()
 	}
 	return nil
+}
+
+// spawnedRunReceiptID names a later run of a task that already has a receipt.
+// The first run keeps "spawned-<task>", which readers already know.
+func spawnedRunReceiptID(receipt SpawnedWorkReceipt) string {
+	base := "spawned-" + receipt.TaskID
+	if started, err := time.Parse(time.RFC3339Nano, receipt.StartedAt); err == nil {
+		return base + "-run-" + strconv.FormatInt(started.UnixMilli(), 10)
+	}
+	return base + "-run-" + safeProcessID(receipt.StartedAt)
 }
 
 func boundedSpawnedReceiptLines(data []byte) [][]byte {
