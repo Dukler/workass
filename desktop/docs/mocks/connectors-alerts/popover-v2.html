@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --hair: color-mix(in srgb, var(--border) 85%, transparent);
+    --crit: #e5484d;
+    --warn: var(--warning, #d9a21b);
+    --fill: color-mix(in srgb, var(--foreground) 5%, transparent);
+    --fill2: color-mix(in srgb, var(--foreground) 9%, transparent);
+    --pop: var(--popover, var(--card));
+    --side: color-mix(in srgb, var(--card) 50%, var(--background));
+    --lift: 0 14px 36px rgb(0 0 0 / .22);
+  }
+  * { box-sizing: border-box; }
+  :focus, :focus-visible { outline: none; }
+  body { font: 13px/1.45 var(--font-sans); color: var(--foreground); padding: 4px 2px 24px; }
+  p { margin: 0; }
+  label { cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+  .ic.s { width: 13px; height: 13px; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .mut { color: var(--muted-foreground); }
+  .sm { font-size: 12px; }
+  .sp { flex: 1; }
+
+  /* gallery scaffolding, same as mock.html */
+  .opt { margin: 0 0 40px; }
+  .opt-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 4px; }
+  .opt-k { font: 600 12px var(--font-mono); color: var(--accent); }
+  .opt-n { font-weight: 600; font-size: 14px; }
+  .opt-d { color: var(--muted-foreground); margin: 0 0 10px; max-width: 82ch; }
+  .opt-d b { color: var(--foreground); font-weight: 500; }
+  .frame { border: 1px solid var(--hair); border-radius: calc(var(--radius) + 2px); overflow: hidden; display: flex; position: relative; }
+
+  /* state switch: radios only, no script */
+  .proto { position: relative; overflow-x: auto; }
+  .proto > .frame { min-width: 760px; }
+  .proto > input { position: absolute; top: 0; left: 0; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+  .steps { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin: 0 0 8px; font-size: 12px; color: var(--muted-foreground); }
+  .steps label { padding: 2px 9px; border-radius: 7px; white-space: nowrap; }
+  .steps .hint { margin-left: 10px; font-size: 11.5px; }
+  .proto > .r0:checked ~ .steps label:nth-of-type(1),
+  .proto > .r1:checked ~ .steps label:nth-of-type(2),
+  .proto > .r2:checked ~ .steps label:nth-of-type(3),
+  .proto > .r3:checked ~ .steps label:nth-of-type(4),
+  .proto > .r4:checked ~ .steps label:nth-of-type(5),
+  .proto > .r5:checked ~ .steps label:nth-of-type(6) { background: var(--fill2); color: var(--foreground); }
+  .proto > .r0:checked ~ .frame [data-s]:not([data-s~="0"]),
+  .proto > .r1:checked ~ .frame [data-s]:not([data-s~="1"]),
+  .proto > .r2:checked ~ .frame [data-s]:not([data-s~="2"]),
+  .proto > .r3:checked ~ .frame [data-s]:not([data-s~="3"]),
+  .proto > .r4:checked ~ .frame [data-s]:not([data-s~="4"]),
+  .proto > .r5:checked ~ .frame [data-s]:not([data-s~="5"]) { display: none !important; }
+
+  /* the app behind: sidebar, chat, composer */
+  .side { width: 224px; flex: none; background: var(--side); border-right: 1px solid var(--hair); padding: 10px 8px 8px; display: flex; flex-direction: column; gap: 1px; min-height: 0; }
+  .s-tools { display: flex; gap: 4px; margin-bottom: 4px; }
+  .s-wide { flex: 1; height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 6px; color: var(--muted-foreground); }
+  .s-sq { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: var(--muted-foreground); }
+  .s-label { padding: 10px 8px 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .s-row { height: 30px; padding: 0 8px; border-radius: 6px; color: var(--muted-foreground); display: flex; align-items: center; gap: 8px; white-space: nowrap; min-width: 0; }
+  .s-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .s-row.on { background: var(--fill2); color: var(--foreground); }
+  .wk { display: inline-flex; align-items: baseline; gap: 4px; font-size: 11.5px; color: var(--muted-foreground); white-space: nowrap; font-variant-numeric: tabular-nums; flex: none; }
+  .wk svg { width: 12px; height: 12px; transform: translateY(2px); }
+  .s-foot { margin-top: auto; border-top: 1px solid var(--hair); padding-top: 8px; display: flex; gap: 2px; }
+  .fb { position: relative; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--muted-foreground); }
+  .fb.on { background: var(--fill2); color: var(--foreground); }
+  .fdot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--crit); box-shadow: 0 0 0 2px var(--side); }
+  .fdot.w { background: var(--warn); }
+  .fdot.ring { background: var(--side); box-shadow: inset 0 0 0 1.5px var(--muted-foreground), 0 0 0 2px var(--side); }
+
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+  .c-bar { height: 38px; flex: none; display: flex; align-items: center; padding: 0 22px; color: var(--muted-foreground); font-size: 12px; }
+  .c-doc { flex: 1; min-height: 0; overflow: hidden; padding: 4px 22px 0; display: flex; flex-direction: column; gap: 10px; }
+  .c-doc p { max-width: 64ch; line-height: 1.55; }
+  .c-doc .fold { color: var(--muted-foreground); font-size: 12.5px; }
+  .c-doc .upill { align-self: flex-end; background: var(--fill2); border-radius: 12px; padding: 6px 11px; max-width: 72%; }
+  .c-comp { flex: none; margin: 10px 18px 14px; border: 1px solid var(--hair); border-radius: 15px; background: var(--pop); padding: 10px 12px 8px; }
+  .c-comp .ph { color: var(--muted-foreground); }
+  .c-comp .cr { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12.5px; color: var(--muted-foreground); }
+  .send { width: 24px; height: 24px; border-radius: 50%; background: var(--fill2); display: grid; place-items: center; margin-left: auto; color: var(--muted-foreground); }
+  .send svg { width: 13px; height: 13px; }
+
+  /* shared pieces */
+  .sev { font-size: 11.5px; white-space: nowrap; }
+  .sev.c { color: var(--crit); } .sev.w { color: var(--warn); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; }
+  .dot.c { background: var(--crit); } .dot.w { background: var(--warn); }
+  .dot.o { box-shadow: inset 0 0 0 1.5px var(--muted-foreground); }
+  .rule { font-weight: 500; }
+  .caps { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .verbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; color: var(--muted-foreground); white-space: nowrap; }
+  .verbs .main { color: var(--foreground); font-weight: 500; }
+  .tg { display: inline-flex; align-items: center; gap: 3px; }
+  .tg svg { width: 12px; height: 12px; transform: translateY(1px); }
+  .tg.on { color: var(--foreground); }
+  .btn { font-size: 12px; line-height: 18px; padding: 3px 10px; border-radius: 7px; border: 1px solid var(--hair); color: var(--foreground); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+  .btn.pri { background: var(--foreground); color: var(--background); border-color: transparent; }
+  .btn.q { border-color: transparent; color: var(--muted-foreground); padding-left: 4px; padding-right: 4px; }
+  .pair { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+  .log { font: 11.5px/1.6 var(--font-mono); background: var(--fill); border-radius: 8px; padding: 7px 10px; }
+  .ll { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 0 8px; }
+  .ll > i { font-style: normal; color: var(--muted-foreground); }
+  .ll > span { overflow-wrap: anywhere; }
+  .caret { display: inline-block; width: 1px; height: 14px; background: var(--foreground); vertical-align: -2px; margin-left: 1px; }
+  .tail { border-left: 2px solid var(--hair); padding: 1px 0 1px 10px; }
+  .tail-h > svg { transform: translateY(2px); }
+  .tail-h { display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted-foreground); margin-bottom: 2px; flex-wrap: wrap; }
+  .oi { padding: 1px 8px; border-radius: 6px; color: var(--muted-foreground); white-space: nowrap; }
+  .oi.on { background: var(--fill2); color: var(--foreground); }
+  .radio { width: 11px; height: 11px; border-radius: 50%; box-shadow: inset 0 0 0 1.3px var(--muted-foreground); flex: none; }
+  .radio.on { box-shadow: inset 0 0 0 1.3px var(--foreground), inset 0 0 0 3.2px var(--pop), inset 0 0 0 6px var(--foreground); }
+
+  /* 0 · bell states */
+  .bells { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .bst { padding: 14px 16px 14px; border-left: 1px solid var(--hair); }
+  .bst:first-child { border-left: 0; }
+  .bst .s-foot { margin: 0 0 10px; border: 0; padding: 4px; background: var(--side); border-radius: 10px; width: max-content; max-width: 100%; }
+  .bst .fb { width: 28px; height: 28px; }
+  .bst b { display: block; font-weight: 500; }
+  .bst span.d { color: var(--muted-foreground); font-size: 12px; }
+  .swing svg { transform: rotate(-16deg); transform-origin: 50% 12%; }
+  .bst:hover .swing svg { animation: swing .9s ease-in-out 1; }
+  @keyframes swing { 0% { transform: rotate(0); } 20% { transform: rotate(-18deg); } 45% { transform: rotate(13deg); } 70% { transform: rotate(-7deg); } 100% { transform: rotate(0); } }
+
+  /* A · Parte */
+  .pa { position: absolute; left: 10px; bottom: 50px; width: 476px; max-width: calc(100% - 20px); background: var(--pop); border: 1px solid var(--hair); border-radius: 13px; box-shadow: var(--lift); padding: 14px 18px 13px; line-height: 1.5; }
+  .pa-cap { display: flex; align-items: baseline; margin-bottom: 9px; }
+  .pa-cap .mono { margin-left: auto; font-size: 11.5px; color: var(--muted-foreground); }
+  .sit ~ .sit, .sit ~ .past { margin-top: 18px; }
+  .sit-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 1px; }
+  .sit-h b { font-weight: 600; font-size: 14px; }
+  .sit .ev { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .sit .verbs { margin-top: 8px; }
+  .hand { display: flex; flex-direction: column; gap: 10px; margin-top: 2px; }
+  .tok { font-weight: 500; border-bottom: 1px dashed var(--muted-foreground); white-space: nowrap; }
+  .tok.on { border-bottom-color: transparent; background: var(--fill2); border-radius: 5px; padding: 1px 6px; margin: 0 -1px; }
+  .ag { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px 8px; align-items: baseline; }
+  .ag .o { display: flex; flex-wrap: wrap; gap: 2px 4px; margin-left: -8px; }
+  .say { border-left: 2px solid var(--foreground); padding: 1px 0 1px 11px; }
+  .hand-b { display: flex; align-items: center; gap: 8px; }
+  .hand-b .q { margin-left: -4px; }
+  .past { border-top: 1px solid var(--hair); padding-top: 11px; }
+  .past .verbs { margin-top: 8px; font-size: 12px; }
+
+  /* B · Compositor */
+  .dock { flex: none; position: relative; margin: 10px 18px 14px; border: 1px solid var(--hair); border-radius: 15px; background: var(--pop); box-shadow: 0 -14px 34px -14px rgb(0 0 0 / .3); }
+  .dk-h { padding: 10px 14px 9px; }
+  .dk-l1 { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+  .dk-l1 b { font-weight: 600; font-size: 14px; }
+  .dk-l1 .bell { color: var(--muted-foreground); }
+  .pager { display: inline-flex; align-items: center; gap: 1px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
+  .pager .ch { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; }
+  .pager .ch.off { opacity: .35; }
+  .pager .n { min-width: 56px; text-align: center; }
+  .dk-h .verbs { margin-top: 5px; }
+  .dk-ev { padding: 0 14px 11px; display: flex; flex-direction: column; gap: 6px; }
+  .dk-m { border-top: 1px solid var(--hair); padding: 10px 14px 9px; }
+  .dk-say { line-height: 1.5; }
+  .dk-row { display: flex; align-items: center; gap: 6px; margin-top: 11px; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border-radius: 7px; font-size: 12.5px; white-space: nowrap; }
+  .chip.lead { margin-left: -8px; }
+  .chip.on { background: var(--fill2); }
+  .chip svg { width: 13px; height: 13px; color: var(--muted-foreground); }
+  .menu { position: absolute; left: 8px; bottom: 46px; width: 262px; background: var(--pop); border: 1px solid var(--hair); border-radius: 11px; box-shadow: var(--lift); padding: 5px; font-size: 12.5px; z-index: 2; }
+  .menu .caps { padding: 7px 8px 3px; display: block; }
+  .mi { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; }
+  .mi.on { background: var(--fill2); }
+  .mi .k { margin-left: auto; color: var(--muted-foreground); font-size: 11.5px; }
+  .mi svg { width: 13px; height: 13px; margin-left: auto; }
+  .msep { height: 1px; background: var(--hair); margin: 5px 2px 1px; }
+
+  /* C · Consola */
+  .cons { position: absolute; left: 224px; right: 0; bottom: 0; height: 380px; background: var(--pop); border-top: 1px solid var(--hair); box-shadow: 0 -14px 34px -12px rgb(0 0 0 / .28); display: flex; flex-direction: column; }
+  .lanes { padding: 10px 14px 8px; flex: none; }
+  .lane { display: grid; grid-template-columns: 104px minmax(0, 1fr) 132px; gap: 0 12px; align-items: center; height: 27px; padding: 0 8px; border-radius: 7px; }
+  .lane.axis { height: 20px; font-size: 11px; color: var(--muted-foreground); }
+  .lane.on { background: var(--fill2); }
+  .lane .nm { font-weight: 500; white-space: nowrap; }
+  .lane .st { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .lane.on .st { color: var(--foreground); }
+  .trk { position: relative; display: block; height: 27px; }
+  .trk::before { content: ""; position: absolute; left: 0; right: 0; top: 13px; height: 1px; background: var(--hair); }
+  .lane.axis .trk::before { display: none; }
+  .trk .tk { position: absolute; top: 0; transform: translateX(-50%); font: 10.5px var(--font-mono); line-height: 20px; }
+  .trk .tk.now { transform: translateX(-100%); color: var(--foreground); }
+  .bar { position: absolute; height: 5px; border-radius: 3px; min-width: 7px; }
+  .bar.c { background: var(--crit); } .bar.w { background: var(--warn); }
+  .bar.o { height: 7px; background: var(--pop); box-shadow: inset 0 0 0 1.5px var(--muted-foreground); }
+  .lane.on .bar.o { background: transparent; }
+  .cdet { flex: 1; min-height: 0; border-top: 1px solid var(--hair); padding: 9px 22px 12px; display: flex; flex-direction: column; }
+  .cdet-h { display: flex; align-items: center; gap: 14px; min-height: 26px; margin-bottom: 6px; color: var(--muted-foreground); white-space: nowrap; }
+  .cdet-h > b { font-weight: 600; font-size: 14px; color: var(--foreground); }
+  .story { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; gap: 1px 10px; align-items: baseline; }
+  .story > i { font: normal 11.5px var(--font-mono); color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+  .story .r { display: flex; align-items: baseline; gap: 8px; font-weight: 500; }
+  .story .r .dot { transform: translateY(-1px); }
+  .story .l { font: 11.5px/1.6 var(--font-mono); padding-left: 15px; overflow-wrap: anywhere; grid-column: 2 / 4; }
+  .story .n { padding-left: 15px; color: var(--muted-foreground); grid-column: 2 / 4; }
+  .story .n.lnk { color: var(--foreground); display: flex; align-items: baseline; gap: 6px; padding-left: 0; flex-wrap: wrap; }
+  .story .n.lnk svg { width: 13px; height: 13px; color: var(--muted-foreground); transform: translateY(2px); }
+  .who { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 0 30px; margin-bottom: 10px; }
+  .who .col { display: flex; flex-direction: column; min-width: 0; }
+  .wr { display: flex; align-items: center; gap: 8px; height: 22px; white-space: nowrap; color: var(--muted-foreground); }
+  .wr.on { color: var(--foreground); }
+  .wr .k { font-size: 11.5px; color: var(--muted-foreground); }
+  .wr .t { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .box { border: 1px solid var(--hair); border-radius: 10px; padding: 8px 11px; line-height: 1.5; flex: 1; min-height: 0; overflow: hidden; }
+  .cdet .foot { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+
+  /* D · Barra lateral */
+  .face { display: flex; flex-direction: column; gap: 1px; min-height: 0; }
+  .f-title { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; font-weight: 600; margin-bottom: 4px; }
+  .f-title.back { font-weight: 400; color: var(--muted-foreground); margin-left: -4px; }
+  .arow { display: grid; grid-template-columns: 7px minmax(0, 1fr); gap: 0 9px; padding: 7px 8px 8px; border-radius: 7px; }
+  .arow.on { background: var(--fill2); }
+  .arow .dot { margin-top: 6px; }
+  .arow .l1 { display: flex; align-items: baseline; gap: 6px; color: var(--foreground); font-weight: 500; white-space: nowrap; }
+  .arow .l1 .m { margin-left: auto; font-weight: 400; font-size: 11.5px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+  .arow .l2 { grid-column: 2; font-size: 12px; line-height: 1.4; color: var(--muted-foreground); }
+  .drow { height: 28px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); white-space: nowrap; min-width: 0; }
+  .drow .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .drow.on { background: var(--fill2); color: var(--foreground); }
+  .drow .k { font-size: 11.5px; }
+  .peek { position: absolute; left: 232px; top: 46px; width: 470px; max-width: calc(100% - 242px); background: var(--pop); border: 1px solid var(--hair); border-radius: 13px; box-shadow: var(--lift); padding: 13px 16px 12px; display: flex; flex-direction: column; gap: 9px; line-height: 1.5; }
+  .peek.low { top: 150px; }
+  .pk-h { display: flex; align-items: baseline; gap: 8px; }
+  .pk-h b { font-weight: 600; font-size: 14px; }
+  .pk-h .m { margin-left: auto; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+  .rl { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 1px 8px; align-items: baseline; }
+  .rl > i { font: normal 11.5px var(--font-mono); color: var(--muted-foreground); }
+  .pk-b { display: flex; align-items: center; gap: 14px; margin-top: 2px; color: var(--muted-foreground); white-space: nowrap; flex-wrap: wrap; }
+  .att { display: flex; flex-wrap: wrap; gap: 5px; }
+  .att span { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: 6px; background: var(--fill); color: var(--muted-foreground); white-space: nowrap; }
+  .att svg { width: 11px; height: 11px; }
+  .peek .dk-row { margin-top: 2px; }
+
+  .reco { border-top: 1px solid var(--hair); padding-top: 14px; max-width: 86ch; }
+  .reco b { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ===== 0 · the bell ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">0</span><span class="opt-n">La campana · igual en las cuatro</span></div>
+  <p class="opt-d">Quinto ícono del pie de la barra lateral, entre Automatizaciones y Actualizaciones. No lleva número. Una alerta nueva solo mueve la campana: <b>no abre un chat, no le escribe a un chat y no despierta a un agente</b>. Las reglas de una misma máquina se leen juntas, como una sola situación. Entre A, B, C y D solo cambia qué aparece cuando tocás la campana.</p>
+  <div class="frame bells">
+    <div class="bst">
+      <div class="s-foot">
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+      </div>
+      <b>Nada</b><span class="d">Sin alertas es un ícono más.</span>
+    </div>
+    <div class="bst">
+      <div class="s-foot">
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+        <span class="fb swing" style="color:var(--foreground)"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+      </div>
+      <b>Llega una</b><span class="d">Se mueve una vez y queda el punto. Sin sonido, sin tarjeta. Si Grafana la repite, no pasa nada.</span>
+    </div>
+    <div class="bst">
+      <div class="s-foot">
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+      </div>
+      <b>Te espera</b><span class="d">Punto lleno, del color de la más grave: hay algo sin decidir.</span>
+    </div>
+    <div class="bst">
+      <div class="s-foot">
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot ring"></i></span>
+        <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+      </div>
+      <b>Ya decidiste</b><span class="d">Aro vacío: sigue activa, pero tiene chat o está silenciada.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== A · Parte ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">A</span><span class="opt-n">Parte</span></div>
+  <p class="opt-d">La campana abre un parte escrito, no una lista: un párrafo por máquina con las reglas tal como vienen de Grafana y quién se ocupa; debajo, lo que pasó hoy. <b>Optimiza leer</b>: en dos líneas sabés qué pasa y si hace falta hacer algo. La entrega es una frase que dice exactamente lo que va a pasar, con el agente y la carpeta como palabras que se cambian. <b>Cuesta</b>: con muchas máquinas a la vez es un muro de texto.</p>
+  <div class="proto">
+    <input type="radio" name="pa" id="a0" class="r0">
+    <input type="radio" name="pa" id="a1" class="r1" checked>
+    <input type="radio" name="pa" id="a2" class="r2">
+    <input type="radio" name="pa" id="a3" class="r3">
+    <input type="radio" name="pa" id="a4" class="r4">
+    <div class="steps"><label for="a0">En reposo</label><label for="a1">Parte</label><label for="a2">Registro</label><label for="a3">A un agente</label><label for="a4">Con chat</label><span class="hint">o tocá la maqueta</span></div>
+    <div class="frame" style="height:620px">
+      <div class="side">
+        <div class="s-tools"><span class="s-wide"><svg class="ic" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>Buscar</span><span class="s-sq"><svg class="ic" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></span></div>
+        <div class="s-label">lagspace</div>
+        <div class="s-row on"><span class="t">DepthVision coordinador</span></div>
+        <div class="s-row"><span class="t">v0.4.29 follow-ups</span></div>
+        <div class="s-row"><span class="t">Disco de duklerfin</span><span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>
+        <div class="s-label">workass</div>
+        <div class="s-row"><span class="t">Fleet alerts design</span></div>
+        <div class="s-foot">
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+          <label class="fb" for="a1" data-s="0"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <label class="fb on" for="a0" data-s="1 2 3 4"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="c-bar">DepthVision coordinador</div>
+        <div class="c-doc">
+          <p>El dataset de hoy quedó con 77 clips admitidos. Los 11 de Gold con calibración mala ya estaban fuera, así que no hubo que tocar el filtro.</p>
+          <div class="fold">Corrió 2 comandos ›</div>
+          <div class="upill">ok, seguí con el lote 02</div>
+          <p>Sigo con el lote 02. Voy por el clip 14 de 60; hasta ahora hay 2 descartes por desenfoque y ninguno por calibración.</p>
+          <div class="fold">Trabajó 55 s ›</div>
+          <p>Cuando termine te dejo la tabla con los descartes y el motivo de cada uno.</p>
+        </div>
+        <div class="c-comp"><div class="ph">Contale a tu agente qué sigue…</div><div class="cr"><span>Claude Code · Opus 5.5</span><span class="send"><svg class="ic" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></svg></span></div></div>
+      </div>
+
+      <div class="pa" data-s="1 2 3 4">
+        <div class="pa-cap"><span class="caps">Ahora</span><span class="mono">21:20</span></div>
+
+        <div class="sit">
+          <div class="sit-h"><b>arcade-gold</b><span class="sev c">crítica</span><span class="sp"></span><span class="sm mut">hace 6 min</span></div>
+          <p data-s="1 2 4">Dispara <span class="rule">DepthCut camera moved: calibration stale</span> desde las 21:14 y, desde las 21:15, <span class="rule">DepthCut camera moved: running on re-aim bridge</span> <span class="mut">(aviso)</span>. Nadie se ocupa.</p>
+          <div class="ev" data-s="2">
+            <div class="log">
+              <div class="ll"><i>21:14:07</i><span>calibration_alert {"reason":"imu_tilt","tilt_deg":0.61,"held_s":15}</span></div>
+              <div class="ll"><i>21:14:07</i><span>calibration_trust stale camera_moved</span></div>
+              <div class="ll"><i>21:14:38</i><span>dynamic_calibration_event=bridge_reaim residual_px=1.8</span></div>
+            </div>
+            <p class="sm mut">Grafana repitió las dos a las 21:19; no se volvió a avisar. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+          </div>
+          <div class="verbs" data-s="1 2 4">
+            <label class="main" for="a3">Dársela a un agente</label><span>Silenciar 10 min</span><span>Descartar</span><span class="sp"></span>
+            <label class="tg" for="a2" data-s="1 4">Registro<svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></label><label class="tg on" for="a1" data-s="2">Registro<svg class="ic s" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></label>
+          </div>
+          <div class="hand" data-s="3">
+            <p>Abrir un chat nuevo en <span class="tok">Mac · ~/Workspace/lagspace</span> y decirle:</p>
+            <div class="say">arcade-gold dispara «DepthCut camera moved: calibration stale» desde las 21:14 y, un minuto después, «DepthCut camera moved: running on re-aim bridge». Mirá qué pasó y si la auto-reparación de v0.4.29 ya lo está arreglando. No toques nada en la arcade sin mi OK: está abierta al público.<i class="caret"></i></div>
+            <p class="sm mut">Van adjuntos el registro (3 líneas) y ops/runbooks/camera_move.md.</p>
+            <p class="sm mut">Con el agente de siempre (Ajustes · General: Claude Code · Opus 5.5). La carpeta sale de Conectores; tocala para cambiarla solo esta vez. <span style="white-space:nowrap">O mandalo a un chat abierto…</span></p>
+            <div class="hand-b"><label class="btn q" for="a1">Volver</label><span class="pair"><span class="btn">Abrir sin enviar</span><span class="btn pri">Abrir y enviar</span></span></div>
+          </div>
+        </div>
+
+        <div class="sit" data-s="1 2 4">
+          <div class="sit-h"><b>duklerfin</b><span class="sev w">aviso</span><span class="sp"></span><span class="sm mut">hace 1 h 40 min</span></div>
+          <p><span class="rule">Disk space low</span> desde las 19:40. La lleva el chat <span class="rule">Disco de duklerfin</span>, que trabaja hace <span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span>.</p>
+          <div class="ev" data-s="4">
+            <div class="tail"><div class="tail-h">Claude Code · Sonnet 5.5 · lo último que dijo</div>Encontré 41 GB en /var/lib/docker/overlay2, casi todo imágenes sin usar. Antes de borrar nada te paso la lista.</div>
+            <p class="sm mut">Lo abriste vos a las 19:48. Si la alerta se resuelve, el chat no recibe nada.</p>
+          </div>
+          <div class="verbs">
+            <span class="main">Ir al chat</span><span>Silenciar</span><span class="sp"></span>
+            <label class="tg" for="a4" data-s="1 2">Qué dijo<svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></label><label class="tg on" for="a1" data-s="4">Qué dijo<svg class="ic s" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></label>
+          </div>
+        </div>
+
+        <div class="past" data-s="1 2 4">
+          <div class="pa-cap"><span class="caps">Hoy</span></div>
+          <p class="mut"><span class="mono sm">14:02–14:09</span> · arcade-silver disparó DepthCut camera moved: calibration stale y se resolvió sola en 7 min. Nadie la tocó.</p>
+          <div class="verbs"><span>Días anteriores</span><span>Silenciadas</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== B · Compositor ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">B</span><span class="opt-n">Compositor</span></div>
+  <p class="opt-d">Una alerta es un mensaje que todavía no mandaste. La campana la pone donde escribís, en el lugar del compositor, ya redactada y con el selector de modelo de siempre. <b>Optimiza la entrega</b>: de la campana a un chat trabajando hay un clic, sin formulario; arriba quedan las salidas que no usan agente. <b>Cuesta</b>: se ve una máquina a la vez, no hay vista de conjunto, y todo depende de que la primera línea deje claro que esto no es el chat que tenés abierto.</p>
+  <div class="proto">
+    <input type="radio" name="pb" id="b0" class="r0">
+    <input type="radio" name="pb" id="b1" class="r1" checked>
+    <input type="radio" name="pb" id="b2" class="r2">
+    <input type="radio" name="pb" id="b3" class="r3">
+    <input type="radio" name="pb" id="b4" class="r4">
+    <input type="radio" name="pb" id="b5" class="r5">
+    <div class="steps"><label for="b0">En reposo</label><label for="b1">Llega escrita</label><label for="b2">Registro</label><label for="b3">Elegir agente</label><label for="b4">Con chat</label><label for="b5">Hoy</label><span class="hint">o tocá la maqueta</span></div>
+    <div class="frame" style="height:560px">
+      <div class="side">
+        <div class="s-tools"><span class="s-wide"><svg class="ic" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>Buscar</span><span class="s-sq"><svg class="ic" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></span></div>
+        <div class="s-label">lagspace</div>
+        <div class="s-row on"><span class="t">DepthVision coordinador</span></div>
+        <div class="s-row"><span class="t">v0.4.29 follow-ups</span></div>
+        <div class="s-row"><span class="t">Disco de duklerfin</span><span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>
+        <div class="s-label">workass</div>
+        <div class="s-row"><span class="t">Fleet alerts design</span></div>
+        <div class="s-foot">
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+          <label class="fb" for="b1" data-s="0"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <label class="fb on" for="b0" data-s="1 2 3 4 5"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="c-bar">DepthVision coordinador</div>
+        <div class="c-doc">
+          <p>El dataset de hoy quedó con 77 clips admitidos. Los 11 de Gold con calibración mala ya estaban fuera, así que no hubo que tocar el filtro.</p>
+          <div class="fold">Corrió 2 comandos ›</div>
+          <div class="upill">ok, seguí con el lote 02</div>
+          <p>Sigo con el lote 02. Voy por el clip 14 de 60; hasta ahora hay 2 descartes por desenfoque y ninguno por calibración.</p>
+          <div class="fold">Trabajó 55 s ›</div>
+          <p>Cuando termine te dejo la tabla con los descartes y el motivo de cada uno.</p>
+        </div>
+        <div class="c-comp" data-s="0"><div class="ph">Contale a tu agente qué sigue…</div><div class="cr"><span>Claude Code · Opus 5.5</span><span class="send"><svg class="ic" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></svg></span></div></div>
+
+        <div class="dock" data-s="1 2 3 4 5">
+          <!-- arcade-gold -->
+          <div class="dk-h" data-s="1 2 3">
+            <div class="dk-l1">
+              <svg class="ic s bell" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
+              <b>arcade-gold</b><span class="sev c">crítica</span><span class="sm mut">· hace 6 min</span><span class="sp"></span>
+              <span class="pager"><span class="ch off"><svg class="ic s" viewBox="0 0 16 16"><path d="M10 4L6 8l4 4"/></svg></span><span class="n">1 de 2</span><label class="ch" for="b4"><svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></label></span>
+            </div>
+            <div class="verbs">
+              <label class="tg" for="b2" data-s="1 3">Registro<svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></label><label class="tg on" for="b1" data-s="2">Registro<svg class="ic s" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></label>
+              <span>Silenciar 10 min</span><span>Descartar</span>
+            </div>
+          </div>
+          <div class="dk-ev" data-s="2">
+            <div class="log">
+              <div class="ll"><i>21:14:07</i><span>calibration_alert {"reason":"imu_tilt","tilt_deg":0.61,"held_s":15}</span></div>
+              <div class="ll"><i>21:14:07</i><span>calibration_trust stale camera_moved</span></div>
+              <div class="ll"><i>21:14:38</i><span>dynamic_calibration_event=bridge_reaim residual_px=1.8</span></div>
+            </div>
+            <p class="sm mut">Hoy a las 14:02 pasó lo mismo en arcade-silver y se resolvió sola en 7 min. Grafana repitió las dos a las 21:19; no se volvió a avisar. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+          </div>
+          <div class="dk-m" data-s="1 2 3">
+            <div class="dk-say">arcade-gold dispara «DepthCut camera moved: calibration stale» desde las 21:14 y, un minuto después, «DepthCut camera moved: running on re-aim bridge». Mirá qué pasó y si la auto-reparación de v0.4.29 ya lo está arreglando. No toques nada en la arcade sin mi OK: está abierta al público.<i class="caret"></i></div>
+            <div class="dk-row">
+              <label class="chip lead" for="b3" data-s="1 2">Claude Code · Opus 5.5<svg class="ic" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></label>
+              <label class="chip lead on" for="b1" data-s="3">Claude Code · Opus 5.5<svg class="ic" viewBox="0 0 16 16"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></label>
+              <span class="chip"><svg class="ic" viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>lagspace</span>
+              <span class="pair"><span class="btn q">Abrir sin enviar</span><span class="btn pri">Abrir y enviar</span></span>
+            </div>
+          </div>
+          <div class="menu" data-s="3">
+            <span class="caps">Chat nuevo · Claude Code</span>
+            <div class="mi on">Opus 5.5<svg class="ic" viewBox="0 0 16 16"><path d="M3.6 8.4l2.9 2.9 5.9-6.4"/></svg></div>
+            <label class="mi" for="b1">Sonnet 5.5</label>
+            <span class="caps">Chat nuevo · Pi</span>
+            <label class="mi" for="b1">gpt-oss local</label>
+            <div class="msep"></div>
+            <span class="caps">Un chat abierto</span>
+            <label class="mi" for="b1">DepthVision coordinador<span class="k">este</span></label>
+            <label class="mi" for="b1">v0.4.29 follow-ups</label>
+          </div>
+
+          <!-- duklerfin, already in a chat -->
+          <div class="dk-h" data-s="4">
+            <div class="dk-l1">
+              <svg class="ic s bell" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
+              <b>duklerfin</b><span class="sev w">aviso</span><span class="sm mut">· hace 1 h 40 min</span><span class="sp"></span>
+              <span class="pager"><label class="ch" for="b1"><svg class="ic s" viewBox="0 0 16 16"><path d="M10 4L6 8l4 4"/></svg></label><span class="n">2 de 2</span><label class="ch" for="b5"><svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></label></span>
+            </div>
+            <div class="verbs"><span class="tg">Registro<svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span><span>Silenciar</span></div>
+          </div>
+          <div class="dk-m" data-s="4">
+            <p style="margin-bottom:8px"><span class="rule">Disk space low</span> desde las 19:40. La lleva este chat:</p>
+            <div class="tail"><div class="tail-h"><svg class="ic s" viewBox="0 0 16 16"><path d="M2.6 4.4a1.6 1.6 0 0 1 1.6-1.6h7.6a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H6.4l-3 2.4v-2.4H4.2a1.6 1.6 0 0 1-1.6-1.6z"/></svg><span style="color:var(--foreground);font-weight:500">Disco de duklerfin</span>· Claude Code · Sonnet 5.5 · <span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>Encontré 41 GB en /var/lib/docker/overlay2, casi todo imágenes sin usar. Antes de borrar nada te paso la lista.</div>
+            <div class="dk-row"><span class="sm mut">Lo abriste vos a las 19:48. Si la alerta se resuelve, el chat no recibe nada.</span><span class="sp"></span><span class="btn pri">Ir al chat</span></div>
+          </div>
+
+          <!-- today -->
+          <div class="dk-h" data-s="5">
+            <div class="dk-l1">
+              <svg class="ic s bell" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>
+              <b>Hoy</b><span class="sm mut">· lo que ya no espera nada</span><span class="sp"></span>
+              <span class="pager"><label class="ch" for="b4"><svg class="ic s" viewBox="0 0 16 16"><path d="M10 4L6 8l4 4"/></svg></label><span class="n">Historial</span><span class="ch off"><svg class="ic s" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg></span></span>
+            </div>
+          </div>
+          <div class="dk-m" data-s="5">
+            <p><span class="mono sm mut">14:02–14:09</span> · <b style="font-weight:500">arcade-silver</b> disparó DepthCut camera moved: calibration stale y se resolvió sola en 7 min. Nadie la tocó.</p>
+            <div class="verbs" style="margin-top:10px"><span>Días anteriores</span><span>Silenciadas</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== C · Consola ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">C</span><span class="opt-n">Consola</span></div>
+  <p class="opt-d">Desde la campana sube una consola ancha. Arriba, una línea de tiempo por máquina: cuánto lleva cada cosa, qué se arregló sola, qué ya tiene chat. Abajo, la historia de la máquina elegida, con el registro sin cortar y el chat como un renglón más. <b>Optimiza entender</b> antes de decidir; el historial no es otro lugar, es la misma línea más a la izquierda. <b>Cuesta</b>: es la más grande, tapa el compositor mientras está abierta y se parece más a un instrumento que a un chat.</p>
+  <div class="proto">
+    <input type="radio" name="pc" id="c0" class="r0">
+    <input type="radio" name="pc" id="c1" class="r1" checked>
+    <input type="radio" name="pc" id="c2" class="r2">
+    <input type="radio" name="pc" id="c3" class="r3">
+    <input type="radio" name="pc" id="c4" class="r4">
+    <div class="steps"><label for="c0">En reposo</label><label for="c1">Historia</label><label for="c2">A un agente</label><label for="c3">Con chat</label><label for="c4">Se resolvió sola</label><span class="hint">o tocá una máquina</span></div>
+    <div class="frame" style="height:660px">
+      <div class="side">
+        <div class="s-tools"><span class="s-wide"><svg class="ic" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>Buscar</span><span class="s-sq"><svg class="ic" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></span></div>
+        <div class="s-label">lagspace</div>
+        <div class="s-row on"><span class="t">DepthVision coordinador</span></div>
+        <div class="s-row"><span class="t">v0.4.29 follow-ups</span></div>
+        <div class="s-row"><span class="t">Disco de duklerfin</span><span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>
+        <div class="s-label">workass</div>
+        <div class="s-row"><span class="t">Fleet alerts design</span></div>
+        <div class="s-foot">
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+          <label class="fb" for="c1" data-s="0"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <label class="fb on" for="c0" data-s="1 2 3 4"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="c-bar">DepthVision coordinador</div>
+        <div class="c-doc">
+          <p>El dataset de hoy quedó con 77 clips admitidos. Los 11 de Gold con calibración mala ya estaban fuera, así que no hubo que tocar el filtro.</p>
+          <div class="fold">Corrió 2 comandos ›</div>
+          <div class="upill">ok, seguí con el lote 02</div>
+          <p>Sigo con el lote 02. Voy por el clip 14 de 60; hasta ahora hay 2 descartes por desenfoque y ninguno por calibración.</p>
+          <div class="fold">Trabajó 55 s ›</div>
+          <p>Cuando termine te dejo la tabla con los descartes y el motivo de cada uno.</p>
+        </div>
+        <div class="c-comp"><div class="ph">Contale a tu agente qué sigue…</div><div class="cr"><span>Claude Code · Opus 5.5</span><span class="send"><svg class="ic" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></svg></span></div></div>
+      </div>
+
+      <div class="cons" data-s="1 2 3 4">
+        <div class="lanes">
+          <div class="lane axis"><span class="caps">Últimas 12 h</span><span class="trk" style="height:20px"><span class="tk" style="left:5.6%">10</span><span class="tk" style="left:22.2%">12</span><span class="tk" style="left:38.9%">14</span><span class="tk" style="left:55.6%">16</span><span class="tk" style="left:72.2%">18</span><span class="tk" style="left:88.9%">20</span></span><span class="mono" style="font-size:10.5px">ahora 21:20</span></div>
+
+          <label class="lane on" for="c1" data-s="1 2"><span class="nm">arcade-gold</span><span class="trk"><i class="bar c" style="left:99.2%;right:0;top:8px"></i><i class="bar w" style="left:99.3%;right:0;top:15px"></i></span><span class="st"><span class="dot c"></span>sin decidir · 6 min</span></label>
+          <label class="lane" for="c1" data-s="3 4"><span class="nm">arcade-gold</span><span class="trk"><i class="bar c" style="left:99.2%;right:0;top:8px"></i><i class="bar w" style="left:99.3%;right:0;top:15px"></i></span><span class="st"><span class="dot c"></span>sin decidir · 6 min</span></label>
+
+          <label class="lane" for="c4" data-s="1 2 3"><span class="nm">arcade-silver</span><span class="trk"><i class="bar o" style="left:39.2%;top:10px"></i></span><span class="st">se resolvió sola</span></label>
+          <label class="lane on" for="c4" data-s="4"><span class="nm">arcade-silver</span><span class="trk"><i class="bar o" style="left:39.2%;top:10px"></i></span><span class="st">se resolvió sola</span></label>
+
+          <label class="lane" for="c3" data-s="1 2 4"><span class="nm">duklerfin</span><span class="trk"><i class="bar w" style="left:86.1%;right:0;top:11px"></i></span><span class="st">con chat · <span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></span></label>
+          <label class="lane on" for="c3" data-s="3"><span class="nm">duklerfin</span><span class="trk"><i class="bar w" style="left:86.1%;right:0;top:11px"></i></span><span class="st">con chat · <span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></span></label>
+        </div>
+
+        <!-- arcade-gold: story -->
+        <div class="cdet" data-s="1">
+          <div class="cdet-h"><b>arcade-gold</b><span class="sp"></span><span>Silenciar 10 min</span><span>Descartar</span><label class="btn pri" for="c2">Dársela a un agente</label></div>
+          <div class="story">
+            <i>21:14</i><span class="r"><span class="dot c"></span>DepthCut camera moved: calibration stale</span><span class="sev c">crítica</span>
+            <i>21:14:07</i><span class="l">calibration_alert {"reason":"imu_tilt","tilt_deg":0.61,"held_s":15}</span>
+            <i>21:14:07</i><span class="l">calibration_trust stale camera_moved</span>
+            <i>21:15</i><span class="r"><span class="dot w"></span>DepthCut camera moved: running on re-aim bridge</span><span class="sev w">aviso</span>
+            <i>21:14:38</i><span class="l">dynamic_calibration_event=bridge_reaim residual_px=1.8</span>
+            <i>21:19</i><span class="n">Grafana repitió las dos. No se volvió a avisar. <span style="white-space:nowrap">Abrir en Grafana ↗</span></span>
+          </div>
+        </div>
+
+        <!-- arcade-gold: hand it to an agent -->
+        <div class="cdet" data-s="2">
+          <div class="cdet-h"><b>arcade-gold</b><span>a un agente</span><span class="sp"></span><label for="c1">Volver a la historia</label></div>
+          <div class="who">
+            <div class="col">
+              <span class="caps">Claude Code</span>
+              <div class="wr on"><span class="radio on"></span>Opus 5.5<span class="k">sugerido</span></div>
+              <div class="wr"><span class="radio"></span>Sonnet 5.5</div>
+            </div>
+            <div class="col">
+              <span class="caps">Pi</span>
+              <div class="wr"><span class="radio"></span>gpt-oss local</div>
+            </div>
+            <div class="col">
+              <span class="caps">Chat abierto</span>
+              <div class="wr"><span class="radio"></span><span class="t">DepthVision coordinador</span></div>
+              <div class="wr"><span class="radio"></span><span class="t">v0.4.29 follow-ups</span></div>
+            </div>
+          </div>
+          <div class="box">arcade-gold dispara «DepthCut camera moved: calibration stale» desde las 21:14 y, un minuto después, «DepthCut camera moved: running on re-aim bridge». Mirá qué pasó y si la auto-reparación de v0.4.29 ya lo está arreglando. No toques nada en la arcade sin mi OK: está abierta al público.<i class="caret"></i></div>
+          <div class="foot"><span class="sm mut" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">En ~/Workspace/lagspace · adjunta el registro y camera_move.md</span><span class="pair"><span class="btn q">Abrir sin enviar</span><span class="btn pri">Abrir y enviar</span></span></div>
+        </div>
+
+        <!-- duklerfin: the chat is one more line of the story -->
+        <div class="cdet" data-s="3">
+          <div class="cdet-h"><b>duklerfin</b><span class="sp"></span><span>Silenciar</span><span class="btn pri">Ir al chat</span></div>
+          <div class="story">
+            <i>19:40</i><span class="r"><span class="dot w"></span>Disk space low</span><span class="sev w">aviso</span>
+            <i>19:40:00</i><span class="l">disk_used_percent{mountpoint="/"} 91.3 &gt; 90</span>
+            <i>19:48</i><span class="n lnk"><svg class="ic" viewBox="0 0 16 16"><path d="M2.6 4.4a1.6 1.6 0 0 1 1.6-1.6h7.6a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H6.4l-3 2.4v-2.4H4.2a1.6 1.6 0 0 1-1.6-1.6z"/></svg>Abriste <b style="font-weight:500">Disco de duklerfin</b><span class="mut">con Claude Code · Sonnet 5.5</span></span>
+            <i>21:08</i><span class="n" style="padding-left:19px"><span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span> · «Encontré 41 GB en /var/lib/docker/overlay2, casi todo imágenes sin usar. Antes de borrar nada te paso la lista.»</span>
+          </div>
+          <p class="sm mut" style="margin-top:auto">Si la alerta se resuelve, la barra se cierra y el chat no recibe nada. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+        </div>
+
+        <!-- arcade-silver: resolved on its own -->
+        <div class="cdet" data-s="4">
+          <div class="cdet-h"><b>arcade-silver</b><span>14:02 – 14:09 · 7 min</span></div>
+          <div class="story">
+            <i>14:02</i><span class="r"><span class="dot c"></span>DepthCut camera moved: calibration stale</span><span class="sev c">crítica</span>
+            <i>14:09</i><span class="r" style="font-weight:400"><span class="dot o"></span>Resuelta. Nadie la tocó: sin chat, sin silencio.</span><span></span>
+          </div>
+          <p class="sm mut" style="margin-top:auto">Lo que ya pasó queda en la línea; para ir más atrás, se arrastra. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== D · Barra lateral ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">D</span><span class="opt-n">Barra lateral</span></div>
+  <p class="opt-d">La campana da vuelta la barra lateral: donde estaban tus chats quedan las alertas, escritas como chats que todavía no existen. El chat abierto no se tapa hasta que tocás una. Para entregar, la barra lista los destinos (agentes por proveedor, chats abiertos) y al lado se ve el chat que se va a crear. <b>Optimiza espacio e historial</b>: la lista tiene toda la altura y lo resuelto de hoy está a la vista. <b>Cuesta</b>: con la campana encendida no ves tus chats, la barra es angosta para reglas largas y son dos superficies en vez de una.</p>
+  <div class="proto">
+    <input type="radio" name="pd" id="d0" class="r0">
+    <input type="radio" name="pd" id="d1" class="r1">
+    <input type="radio" name="pd" id="d2" class="r2" checked>
+    <input type="radio" name="pd" id="d3" class="r3">
+    <input type="radio" name="pd" id="d4" class="r4">
+    <div class="steps"><label for="d0">En reposo</label><label for="d1">Lista</label><label for="d2">Abierta</label><label for="d3">A un agente</label><label for="d4">Con chat</label><span class="hint">o tocá la maqueta</span></div>
+    <div class="frame" style="height:570px">
+      <div class="side">
+        <!-- face: chats -->
+        <div class="face" data-s="0">
+          <div class="s-tools"><span class="s-wide"><svg class="ic" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>Buscar</span><span class="s-sq"><svg class="ic" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></span></div>
+          <div class="s-label">lagspace</div>
+          <div class="s-row on"><span class="t">DepthVision coordinador</span></div>
+          <div class="s-row"><span class="t">v0.4.29 follow-ups</span></div>
+          <div class="s-row"><span class="t">Disco de duklerfin</span><span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>
+          <div class="s-label">workass</div>
+          <div class="s-row"><span class="t">Fleet alerts design</span></div>
+        </div>
+        <!-- face: alerts -->
+        <div class="face" data-s="1 2 4">
+          <div class="f-title">Alertas</div>
+          <div class="s-label" style="padding-top:2px">Sin decidir</div>
+          <label class="arow" for="d2" data-s="1 4"><span class="dot c"></span><span class="l1">arcade-gold<span class="m">6 min</span></span><span class="l2">DepthCut camera moved: calibration stale, y 1 más</span></label>
+          <label class="arow on" for="d1" data-s="2"><span class="dot c"></span><span class="l1">arcade-gold<span class="m">6 min</span></span><span class="l2">DepthCut camera moved: calibration stale, y 1 más</span></label>
+          <div class="s-label">Con chat</div>
+          <label class="arow" for="d4" data-s="1 2"><span class="dot w"></span><span class="l1">duklerfin<span class="m wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></span><span class="l2">Disk space low<br>Disco de duklerfin</span></label>
+          <label class="arow on" for="d1" data-s="4"><span class="dot w"></span><span class="l1">duklerfin<span class="m wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></span><span class="l2">Disk space low<br>Disco de duklerfin</span></label>
+          <div class="s-label">Hoy</div>
+          <div class="arow"><span class="dot o"></span><span class="l1" style="color:var(--muted-foreground);font-weight:400">arcade-silver<span class="m">14:02–14:09</span></span><span class="l2">DepthCut camera moved: calibration stale<br>se resolvió sola</span></div>
+        </div>
+        <!-- face: where it goes -->
+        <div class="face" data-s="3">
+          <label class="f-title back" for="d2"><svg class="ic s" viewBox="0 0 16 16"><path d="M10 4L6 8l4 4"/></svg>arcade-gold</label>
+          <div class="s-label" style="padding-top:2px">Chat nuevo · Claude Code</div>
+          <div class="drow on"><span class="t">Opus 5.5</span><span class="k">sugerido</span></div>
+          <div class="drow"><span class="t">Sonnet 5.5</span></div>
+          <div class="s-label">Chat nuevo · Pi</div>
+          <div class="drow"><span class="t">gpt-oss local</span></div>
+          <div class="s-label">Un chat abierto</div>
+          <div class="drow"><span class="t">DepthVision coordinador</span></div>
+          <div class="drow"><span class="t">v0.4.29 follow-ups</span></div>
+          <div class="drow"><span class="t">Fleet alerts design</span></div>
+        </div>
+        <div class="s-foot">
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M12.7 3.3l-1.4 1.4M4.7 11.3l-1.4 1.4"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.2 13.7c.8-2.5 2.6-3.8 4.8-3.8s4 1.3 4.8 3.8"/></svg></span>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.9"/><path d="M8 4.8V8l2.2 1.4"/></svg></span>
+          <label class="fb" for="d1" data-s="0"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <label class="fb on" for="d0" data-s="1 2 3 4"><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><i class="fdot"></i></label>
+          <span class="fb"><svg class="ic" viewBox="0 0 16 16"><path d="M8 2.5v7M5.2 6.8L8 9.6l2.8-2.8"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1"/></svg></span>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="c-bar">DepthVision coordinador</div>
+        <div class="c-doc">
+          <p>El dataset de hoy quedó con 77 clips admitidos. Los 11 de Gold con calibración mala ya estaban fuera, así que no hubo que tocar el filtro.</p>
+          <div class="fold">Corrió 2 comandos ›</div>
+          <div class="upill">ok, seguí con el lote 02</div>
+          <p>Sigo con el lote 02. Voy por el clip 14 de 60; hasta ahora hay 2 descartes por desenfoque y ninguno por calibración.</p>
+          <div class="fold">Trabajó 55 s ›</div>
+          <p>Cuando termine te dejo la tabla con los descartes y el motivo de cada uno.</p>
+        </div>
+        <div class="c-comp"><div class="ph">Contale a tu agente qué sigue…</div><div class="cr"><span>Claude Code · Opus 5.5</span><span class="send"><svg class="ic" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7.5l4-4 4 4"/></svg></span></div></div>
+      </div>
+
+      <!-- peek: the alert, read -->
+      <div class="peek" data-s="2">
+        <div class="pk-h"><b>arcade-gold</b><span class="sev c">crítica</span><span class="m">hace 6 min</span></div>
+        <div class="rl">
+          <i>21:14</i><span class="rule">DepthCut camera moved: calibration stale</span><span></span>
+          <i>21:15</i><span class="rule">DepthCut camera moved: running on re-aim bridge</span><span class="sev w">aviso</span>
+        </div>
+        <div class="log">
+          <div class="ll"><i>21:14:07</i><span>calibration_alert {"reason":"imu_tilt","tilt_deg":0.61,"held_s":15}</span></div>
+          <div class="ll"><i>21:14:07</i><span>calibration_trust stale camera_moved</span></div>
+          <div class="ll"><i>21:14:38</i><span>dynamic_calibration_event=bridge_reaim residual_px=1.8</span></div>
+        </div>
+        <p class="sm mut">Hoy a las 14:02 pasó lo mismo en arcade-silver y se resolvió sola en 7 min. Grafana repitió las dos a las 21:19; no se volvió a avisar. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+        <div class="pk-b"><label class="btn pri" for="d3">Dársela a un agente</label><span>Silenciar 10 min</span><span>Descartar</span></div>
+      </div>
+
+      <!-- peek: the chat that will exist -->
+      <div class="peek" data-s="3">
+        <div class="pk-h"><b>Chat nuevo</b><span class="m">en ~/Workspace/lagspace</span></div>
+        <div class="att"><span><svg class="ic" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg>arcade-gold · 2 reglas · registro</span><span><svg class="ic" viewBox="0 0 16 16"><path d="M4.2 2.4h4.9l2.7 2.7v8.5H4.2z"/><path d="M9 2.4v2.8h2.8"/></svg>camera_move.md</span></div>
+        <div class="dk-say">arcade-gold dispara «DepthCut camera moved: calibration stale» desde las 21:14 y, un minuto después, «DepthCut camera moved: running on re-aim bridge». Mirá qué pasó y si la auto-reparación de v0.4.29 ya lo está arreglando. No toques nada en la arcade sin mi OK: está abierta al público.<i class="caret"></i></div>
+        <div class="dk-row"><span class="sm mut">Claude Code · Opus 5.5</span><span class="pair"><span class="btn q">Abrir sin enviar</span><span class="btn pri">Abrir y enviar</span></span></div>
+        <p class="sm mut">El agente se elige en la barra, donde viven los chats. Nada se abre hasta que tocás un botón.</p>
+      </div>
+
+      <!-- peek: an alert that is already in a chat -->
+      <div class="peek low" data-s="4">
+        <div class="pk-h"><b>duklerfin</b><span class="sev w">aviso</span><span class="m">hace 1 h 40 min</span></div>
+        <div class="rl"><i>19:40</i><span class="rule">Disk space low</span><span></span></div>
+        <div class="log"><div class="ll"><i>19:40:00</i><span>disk_used_percent{mountpoint="/"} 91.3 &gt; 90</span></div></div>
+        <div class="tail"><div class="tail-h"><svg class="ic s" viewBox="0 0 16 16"><path d="M2.6 4.4a1.6 1.6 0 0 1 1.6-1.6h7.6a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H6.4l-3 2.4v-2.4H4.2a1.6 1.6 0 0 1-1.6-1.6z"/></svg><span style="color:var(--foreground);font-weight:500">Disco de duklerfin</span>· Sonnet 5.5 · <span class="wk"><svg class="ic" viewBox="0 0 16 16"><path d="M9.3 2.6l4.1 4.1-1.9 1.9-4.1-4.1z"/><path d="M8.6 6.6L3 12.2a.9.9 0 0 0 1.3 1.3l5.6-5.6"/></svg>12 min</span></div>Encontré 41 GB en /var/lib/docker/overlay2, casi todo imágenes sin usar. Antes de borrar nada te paso la lista.</div>
+        <p class="sm mut">Lo abriste vos a las 19:48. Si la alerta se resuelve, el chat no recibe nada. <span style="white-space:nowrap">Abrir en Grafana ↗</span></p>
+        <div class="pk-b"><span class="btn pri">Ir al chat</span><span>Silenciar</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<p class="reco"><b>Mi recomendación: A.</b> Es la campana que ya te gustaba, pero se lee en vez de administrarse, y es la más callada de las cuatro. Si lo que más pesa es entregar rápido, B. C y D recién se pagan con muchas más máquinas que dos arcades y un servidor.</p>
+
+</body>
+</html>

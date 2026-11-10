@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --hair: color-mix(in srgb, var(--border) 85%, transparent); --crit: #e5484d; --warn: var(--warning, #d9a21b); }
+  * { box-sizing: border-box; }
+  body { font: 13px/1.45 var(--font-sans); color: var(--foreground); padding: 4px 2px 24px; }
+  .opt { margin: 0 0 38px; }
+  .opt-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 4px; }
+  .opt-k { font: 600 12px var(--font-mono); color: var(--accent); }
+  .opt-n { font-weight: 600; font-size: 14px; }
+  .opt-d { color: var(--muted-foreground); margin: 0 0 12px; max-width: 78ch; }
+  .frame { border: 1px solid var(--hair); border-radius: calc(var(--radius) + 2px); overflow: hidden; display: flex; min-height: 320px; position: relative; }
+  .mono { font-family: var(--font-mono); }
+  .mut { color: var(--muted-foreground); }
+  svg { display: block; flex: none; }
+
+  /* sidebar */
+  .side { width: 200px; border-right: 1px solid var(--hair); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .srow { padding: 6px 10px; border-radius: 8px; color: var(--muted-foreground); display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+  .srow.on { background: var(--secondary); color: var(--foreground); }
+  .srow .c { margin-left: auto; font-size: 11px; }
+  .slabel { padding: 10px 10px 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .new { font-size: 10px; color: var(--accent); margin-left: auto; }
+  .foot { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 8px 10px 0; border-top: 1px solid var(--hair); color: var(--muted-foreground); }
+  .foot .sp { flex: 1; }
+  .bell { position: relative; padding: 4px; border-radius: 6px; }
+  .bell.on { background: var(--secondary); color: var(--foreground); }
+  .bell .n { position: absolute; top: -2px; right: -3px; min-width: 14px; height: 14px; border-radius: 7px; background: var(--crit); color: #fff; font: 600 9.5px/14px var(--font-sans); text-align: center; padding: 0 3px; }
+
+  .page { flex: 1; min-width: 0; padding: 16px 24px 20px; }
+  .ttl { font-weight: 600; font-size: 13px; margin: 0 0 12px; }
+  .grp { margin: 16px 0 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); display: flex; }
+  .grp .r { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .row { display: flex; gap: 16px; align-items: center; padding: 10px 0; border-top: 1px solid var(--hair); }
+  .row .lbl { flex: 1; min-width: 0; }
+  .row .n { font-weight: 500; }
+  .row .d { color: var(--muted-foreground); font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 8px; padding: 2px; gap: 2px; }
+  .seg span { padding: 2px 9px; border-radius: 6px; color: var(--muted-foreground); font-size: 12px; }
+  .seg span.on { background: var(--secondary); color: var(--foreground); }
+  .tog { width: 28px; height: 16px; border-radius: 8px; background: var(--muted); position: relative; flex: none; }
+  .tog::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--background); }
+  .tog.on { background: var(--accent); }
+  .tog.on::after { left: 14px; }
+  .fld { font: 12px var(--font-mono); padding: 3px 8px; border: 1px solid var(--hair); border-radius: 6px; color: var(--foreground); white-space: nowrap; }
+  .btn { font-size: 12px; padding: 3px 10px; border-radius: 7px; border: 1px solid var(--hair); color: var(--foreground); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+  .btn.pri { background: var(--foreground); color: var(--background); border-color: transparent; }
+  .btn.q { border-color: transparent; color: var(--muted-foreground); }
+  .ok { color: var(--accent); }
+  .pill { font-size: 11px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--hair); color: var(--muted-foreground); }
+
+  /* connectors two-pane */
+  .clist { width: 210px; border-right: 1px solid var(--hair); padding: 0 12px 0 0; margin-right: 20px; }
+  .citem { display: flex; gap: 9px; align-items: center; padding: 8px 8px; border-radius: 8px; }
+  .citem.on { background: var(--secondary); }
+  .citem .s { font-size: 11.5px; color: var(--muted-foreground); }
+  .logo { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: color-mix(in srgb, var(--muted) 70%, transparent); }
+  .cdet { flex: 1; min-width: 0; }
+  .rules .row { padding: 7px 0; }
+  .sev { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .sev.c { background: var(--crit); } .sev.w { background: var(--warn); } .sev.i { background: var(--muted-foreground); }
+
+  /* alert rows */
+  .al { display: grid; grid-template-columns: 12px 1fr auto; gap: 2px 10px; padding: 10px 0; border-top: 1px solid var(--hair); align-items: start; }
+  .al .sev { margin-top: 6px; grid-row: span 2; }
+  .al .t { font-weight: 500; }
+  .al .w { grid-column: 2; font-size: 12px; color: var(--muted-foreground); }
+  .al .a { grid-row: span 2; display: flex; gap: 6px; align-items: center; }
+  .al.res { opacity: .62; }
+  .al .when { font: 11.5px var(--font-mono); color: var(--foreground); }
+  .detail { grid-column: 2 / 4; margin-top: 8px; border-left: 1px solid var(--hair); padding: 2px 0 2px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 90px 1fr; gap: 2px 10px; }
+  .kv b { font-weight: 400; color: var(--muted-foreground); }
+  .log { font: 11.5px/1.5 var(--font-mono); background: var(--code-background, var(--muted)); border-radius: 6px; padding: 6px 8px; color: var(--muted-foreground); white-space: pre; overflow: hidden; }
+  .linked { font-size: 12px; color: var(--accent); }
+
+  /* popover */
+  .chatbg { flex: 1; padding: 22px; color: var(--muted-foreground); display: flex; flex-direction: column; gap: 10px; }
+  .chatbg .p { max-width: 54ch; }
+  .chatbg .p b { color: var(--foreground); font-weight: 500; }
+  .pop { position: absolute; left: 14px; bottom: 44px; width: 380px; background: var(--popover, var(--card)); border: 1px solid var(--hair); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .22); padding: 6px 14px 10px; }
+  .pop .hd { display: flex; align-items: center; padding: 6px 0 4px; font-weight: 600; }
+  .pop .hd .r { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted-foreground); }
+
+  /* rail */
+  .rail { width: 330px; border-left: 1px solid var(--hair); display: flex; flex-direction: column; }
+  .tabs { display: flex; gap: 14px; padding: 10px 14px 0; border-bottom: 1px solid var(--hair); }
+  .tab { padding: 6px 0 8px; color: var(--muted-foreground); position: relative; }
+  .tab.on { color: var(--foreground); }
+  .tab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--foreground); border-radius: 2px; }
+  .tab .c { font-size: 11px; color: var(--crit); margin-left: 3px; }
+  .rail .al { padding: 10px 14px; }
+
+  /* menu + sheet */
+  .menu { position: absolute; width: 250px; background: var(--popover, var(--card)); border: 1px solid var(--hair); border-radius: 10px; box-shadow: 0 10px 28px rgb(0 0 0 / .22); padding: 4px; font-size: 12.5px; }
+  .mi { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; }
+  .mi.hov { background: var(--secondary); }
+  .mi .k { margin-left: auto; font-size: 11px; color: var(--muted-foreground); }
+  .msep { height: 1px; background: var(--hair); margin: 4px 2px; }
+  .mh { padding: 6px 8px 2px; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-foreground); }
+  .sheet { margin: 24px auto; width: 560px; background: var(--popover, var(--card)); border: 1px solid var(--hair); border-radius: 14px; box-shadow: 0 16px 40px rgb(0 0 0 / .25); padding: 16px 18px 14px; }
+  .sheet h4 { margin: 0 0 2px; font-size: 14px; }
+  .srow2 { display: grid; grid-template-columns: 90px 1fr; gap: 10px; align-items: center; padding: 6px 0; }
+  .srow2 > b { font-weight: 400; color: var(--muted-foreground); font-size: 12px; }
+  .ta { border: 1px solid var(--hair); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.5; min-height: 120px; }
+  .ta .q { color: var(--muted-foreground); }
+  .sbtns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; align-items: center; }
+  .sbtns .note { margin-right: auto; font-size: 11.5px; color: var(--muted-foreground); }
+  .dim { position: absolute; inset: 0; background: rgb(0 0 0 / .28); }
+  .notes { font-size: 12px; color: var(--muted-foreground); margin-top: 8px; max-width: 80ch; }
+  .notes b { color: var(--foreground); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<!-- ===== 1. Settings · Conectores ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">1</span><span class="opt-n">Ajustes · Conectores</span></div>
+  <p class="opt-d">Una página nueva en Ajustes. Un conector trae alertas de afuera, y nada más. Grafana primero; el modelo es universal (cualquier Grafana, cualquier regla). Ninguna opción hace que un agente actúe solo.</p>
+  <div class="frame">
+    <div class="side">
+      <div class="slabel">General</div>
+      <div class="srow">General</div><div class="srow">Apariencia</div>
+      <div class="slabel">Agentes</div>
+      <div class="srow">Agentes y modelos</div><div class="srow">Permisos</div><div class="srow">Herramientas</div>
+      <div class="slabel">Tus máquinas</div>
+      <div class="srow">Máquinas y acceso</div><div class="srow">Trabajos</div>
+      <div class="srow on">Conectores <span class="new">nuevo</span></div>
+      <div class="slabel">Sistema</div>
+      <div class="srow">Actualizaciones</div><div class="srow">Atajos</div><div class="srow">Mantenimiento</div>
+    </div>
+    <div class="page" style="display:flex">
+      <div class="clist">
+        <div class="ttl">Conectores</div>
+        <div class="citem on">
+          <div class="logo"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2"/><path d="M8 2.5V1M13.5 8H15"/></svg></div>
+          <div><div>Grafana · fiumba</div><div class="s"><span class="ok">●</span> conectado · hace 20 s</div></div>
+        </div>
+        <div class="citem" style="margin-top:8px;color:var(--muted-foreground)">
+          <div class="logo"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></div>
+          <div>Añadir conector</div>
+        </div>
+        <div class="s mut" style="font-size:11.5px;padding:2px 8px 0 39px">Grafana · Webhook genérico</div>
+      </div>
+      <div class="cdet">
+        <div class="ttl" style="display:flex;align-items:center;gap:10px">Grafana · fiumba <span class="pill">2 activas</span><span style="margin-left:auto" class="btn q">Quitar</span></div>
+        <div class="row" style="border-top:0;padding-top:0"><div class="lbl"><div class="n">Dirección</div><div class="d">El Grafana que Workass lee.</div></div><span class="fld">http://duklerfin:3000</span></div>
+        <div class="row"><div class="lbl"><div class="n">Cómo llegan</div><div class="d">Consultar: Workass pregunta a Grafana cada 30 s, sin tocar Grafana. Recibir: Grafana empuja a un punto de contacto que Workass te da.</div></div><div class="seg"><span class="on">Consultar</span><span>Recibir</span></div></div>
+        <div class="row"><div class="lbl"><div class="n">Token de cuenta de servicio</div><div class="d">Solo lectura (rol Viewer). Se guarda y no se vuelve a mostrar.</div></div><span class="fld">•••••••• 4f2a</span><span class="btn">Cambiar</span></div>
+        <div class="row"><div class="lbl"><div class="n">Máquina que escucha</div><div class="d">La que habla con Grafana. Las alertas se ven en todos tus clientes.</div></div><span class="fld" style="font-family:var(--font-sans)">duklerfin ▾</span></div>
+
+        <div class="grp">Reglas <span class="r">3 de 5 se muestran</span></div>
+        <div class="rules">
+          <div class="row"><span class="sev c"></span><div class="lbl"><div class="n">DepthCut camera moved: calibration stale</div><div class="d">Fiumba Alerts · por máquina</div></div><div class="tog on"></div></div>
+          <div class="row"><span class="sev w"></span><div class="lbl"><div class="n">DepthCut camera moved: running on re-aim bridge</div><div class="d">Fiumba Alerts · por máquina</div></div><div class="tog on"></div></div>
+          <div class="row"><span class="sev w"></span><div class="lbl"><div class="n">Disk space low</div><div class="d">Infra</div></div><div class="tog on"></div></div>
+          <div class="row"><span class="sev i"></span><div class="lbl"><div class="n">Windows crashes</div><div class="d">Infra · el corte de luz nocturno del parque</div></div><div class="tog"></div></div>
+          <div class="row"><span class="sev i"></span><div class="lbl"><div class="n">Arcade capture blocked</div><div class="d">Fiumba Alerts</div></div><div class="tog"></div></div>
+        </div>
+
+        <div class="grp">Avisos</div>
+        <div class="row"><div class="lbl"><div class="n">Notificación del sistema</div><div class="d">Un aviso por alerta nueva. Las repeticiones de Grafana no avisan.</div></div><div class="seg"><span>Nunca</span><span class="on">Críticas</span><span>Todas</span></div></div>
+
+        <div class="grp">Al dárselas a un agente</div>
+        <div class="row"><div class="lbl"><div class="n">Dónde se abre el chat</div><div class="d">Máquina y carpeta del chat nuevo. El agente es el de Ajustes · General.</div></div><span class="fld" style="font-family:var(--font-sans)">Mac ▾</span><span class="fld">~/Workspace/lagspace</span></div>
+        <div class="row"><div class="lbl"><div class="n">Por regla</div><div class="d">Una regla puede abrir en otro lado. Si no, usa la de arriba.</div></div></div>
+        <div class="rules">
+          <div class="row" style="padding-left:14px"><span class="sev w"></span><div class="lbl"><div class="n">Disk space low</div></div><span class="fld" style="font-family:var(--font-sans)">duklerfin ▾</span><span class="fld">~/fiumba-net</span><span class="btn q">↺</span></div>
+          <div class="row" style="padding-left:14px;color:var(--muted-foreground)"><span style="width:7px"></span><div class="lbl">Añadir una regla…</div></div>
+        </div>
+        <div class="row"><div class="lbl"><div class="n">Guía por regla</div><div class="d">Un archivo tuyo que se adjunta al mensaje, si existe.</div></div><span class="fld">ops/runbooks/&lt;regla&gt;.md</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== A. Alertas page ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">A</span><span class="opt-n">Página «Alertas» en la barra lateral</span></div>
+  <p class="opt-d">Una fila en la barra lateral, junto a Automatizaciones, con el número de activas. Es una bandeja: activas arriba, resueltas abajo. Al abrir una alerta ves los detalles y las acciones. Es la forma con más espacio, y la que mejor guarda la historia.</p>
+  <div class="frame" style="min-height:420px">
+    <div class="side">
+      <div class="srow">Nuevo chat</div>
+      <div class="srow">Automatizaciones</div>
+      <div class="srow on">Alertas <span class="c" style="color:var(--crit)">2</span></div>
+      <div class="slabel">lagspace</div>
+      <div class="srow">DepthVision coordinador</div>
+      <div class="srow">v0.4.29 follow-ups</div>
+      <div class="slabel">workass</div>
+      <div class="srow">Fleet alerts design</div>
+    </div>
+    <div class="page">
+      <div class="ttl" style="display:flex;gap:8px;align-items:center">Alertas <span class="mut" style="font-weight:400">· Grafana · fiumba</span><span style="margin-left:auto" class="seg"><span class="on">Activas 2</span><span>Resueltas</span><span>Silenciadas</span></span></div>
+
+      <div class="al">
+        <span class="sev c"></span>
+        <div class="t">Gold · cámara movida: calibración vieja</div>
+        <div class="a"><span class="btn pri">Arreglar con… ▾</span><span class="btn q">⋯</span></div>
+        <div class="w">desde <span class="when">21:14</span> · hace 6 min · arcade-gold · crítica</div>
+        <div class="detail">
+          <div class="kv"><b>Regla</b><span>DepthCut camera moved: calibration stale</span><b>Máquina</b><span>arcade-gold</span><b>Estado</b><span>disparada 21:14 · el re-aim bridge ya corrió (21:14:38)</span></div>
+          <div class="log">21:14:07 calibration_alert {"reason":"imu_tilt","tilt_deg":0.61,"held_s":15}
+21:14:07 calibration_trust stale camera_moved
+21:14:38 dynamic_calibration_event=bridge_reaim residual_px=1.8</div>
+          <div style="display:flex;gap:6px"><span class="btn">Ver en Grafana ↗</span><span class="btn">Silenciar 1 h</span><span class="btn q">Descartar</span></div>
+        </div>
+      </div>
+
+      <div class="al">
+        <span class="sev w"></span>
+        <div class="t">Gold · funcionando con el re-aim bridge</div>
+        <div class="a"><span class="linked">→ chat «Gold cámara» · trabajando</span></div>
+        <div class="w">desde <span class="when">21:15</span> · arcade-gold · aviso · abriste un chat a las 21:17</div>
+      </div>
+
+      <div class="grp">Resueltas hoy</div>
+      <div class="al res">
+        <span class="sev c"></span>
+        <div class="t">Silver · cámara movida: calibración vieja</div>
+        <div class="a"><span class="mut" style="font-size:12px">se arregló sola</span></div>
+        <div class="w"><span class="when">14:02 → 14:09</span> · arcade-silver · nadie la tocó</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== B. Bell popover ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">B</span><span class="opt-n">Campana en el pie de la barra lateral → popover</span></div>
+  <p class="opt-d">No hay página nueva. Junto a la fila de la cuenta aparece una campana con el número de activas, y al hacer clic se abre un popover compacto encima de lo que estés haciendo; no sales del chat. La historia vive en la propia lista («Ver resueltas»). Es la forma más liviana, pero tiene poco espacio para los detalles.</p>
+  <div class="frame" style="min-height:430px">
+    <div class="side">
+      <div class="srow">Nuevo chat</div>
+      <div class="srow">Automatizaciones</div>
+      <div class="slabel">lagspace</div>
+      <div class="srow on">DepthVision coordinador</div>
+      <div class="srow">v0.4.29 follow-ups</div>
+      <div class="foot">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="6" r="2.6"/><path d="M3 13.5c.8-2.3 2.7-3.5 5-3.5s4.2 1.2 5 3.5"/></svg>
+        <span style="font-size:12px">dukler</span><span class="sp"></span>
+        <span class="bell on"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.5H2.8z"/><path d="M6.5 14a1.6 1.6 0 0 0 3 0"/></svg><span class="n">2</span></span>
+      </div>
+    </div>
+    <div class="chatbg">
+      <div class="p">… el dataset de hoy quedó con <b>77 clips admitidos</b>; los 11 de Gold con calibración mala ya estaban fuera.</div>
+      <div class="p">Sigo con la revisión del lote 02 cuando me digas.</div>
+    </div>
+    <div class="pop">
+      <div class="hd">Alertas <span class="r">Grafana · fiumba</span></div>
+      <div class="al" style="border-top:0">
+        <span class="sev c"></span>
+        <div class="t">Gold · calibración vieja</div>
+        <div class="a"><span class="btn pri">Arreglar con… ▾</span></div>
+        <div class="w"><span class="when">21:14</span> · hace 6 min · <span style="text-decoration:underline">detalles</span></div>
+      </div>
+      <div class="al">
+        <span class="sev w"></span>
+        <div class="t">Gold · re-aim bridge</div>
+        <div class="a"><span class="linked">→ chat</span></div>
+        <div class="w"><span class="when">21:15</span> · chat abierto 21:17</div>
+      </div>
+      <div style="display:flex;gap:6px;padding-top:8px;border-top:1px solid var(--hair);font-size:12px" class="mut"><span>Ver resueltas (1)</span><span style="margin-left:auto">Silenciar todo 1 h</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== C. Rail tab ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">C</span><span class="opt-n">Pestaña «Alertas» en el carril derecho</span></div>
+  <p class="opt-d">Va al lado de Actividad, en el carril que ya existe, y el número de la pestaña es el único indicador. Puedes leer la alerta sin perder el chat de vista. El problema es que el carril es del chat, y las alertas no son de ningún chat.</p>
+  <div class="frame" style="min-height:360px">
+    <div class="chatbg">
+      <div class="p">… el dataset de hoy quedó con <b>77 clips admitidos</b>; los 11 de Gold con calibración mala ya estaban fuera.</div>
+      <div class="p">Sigo con la revisión del lote 02 cuando me digas.</div>
+    </div>
+    <div class="rail">
+      <div class="tabs"><span class="tab">Actividad</span><span class="tab">Cambios</span><span class="tab on">Alertas<span class="c">2</span></span></div>
+      <div class="al" style="border-top:0">
+        <span class="sev c"></span>
+        <div class="t">Gold · calibración vieja</div>
+        <div class="a"></div>
+        <div class="w"><span class="when">21:14</span> · hace 6 min</div>
+        <div class="detail" style="grid-column:2/4">
+          <div class="log" style="font-size:11px">21:14:07 calibration_alert imu_tilt 0.61°
+21:14:38 bridge_reaim residual 1.8 px</div>
+          <div style="display:flex;gap:6px"><span class="btn pri">Arreglar con… ▾</span><span class="btn">Silenciar</span><span class="btn q">↗</span></div>
+        </div>
+      </div>
+      <div class="al">
+        <span class="sev w"></span>
+        <div class="t">Gold · re-aim bridge</div>
+        <div class="a"></div>
+        <div class="w"><span class="when">21:15</span> · <span class="linked">→ chat abierto</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Arreglar con… ===== -->
+<section class="opt">
+  <div class="opt-h"><span class="opt-k">2</span><span class="opt-n">«Arreglar con…»: el único camino hacia un agente</span></div>
+  <p class="opt-d">Vale para A, B y C. El menú elige el agente, con los modelos agrupados por proveedor como en el compositor. Luego se abre una hoja con el mensaje ya escrito, que puedes editar. No se abre ningún chat ni se envía nada hasta que tú pulsas un botón.</p>
+  <div class="frame" style="min-height:250px;padding:18px 22px;display:block">
+    <div class="al" style="border-top:0;max-width:560px">
+      <span class="sev c"></span>
+      <div class="t">Gold · cámara movida: calibración vieja</div>
+      <div class="a"><span class="btn pri">Arreglar con… ▾</span></div>
+      <div class="w"><span class="when">21:14</span> · arcade-gold</div>
+    </div>
+    <div class="menu" style="left:340px;top:56px">
+      <div class="mh">Claude Code</div>
+      <div class="mi hov">Opus 5.5 <span class="k">sugerido</span></div>
+      <div class="mi">Sonnet 5.5</div>
+      <div class="mh">Pi</div>
+      <div class="mi">gpt-oss local</div>
+      <div class="msep"></div>
+      <div class="mi">Enviar a un chat existente…</div>
+      <div class="mi">Solo copiar el resumen</div>
+    </div>
+  </div>
+  <div class="frame" style="min-height:480px;display:block;margin-top:12px">
+    <div class="dim"></div>
+    <div class="sheet" style="position:relative">
+      <h4>Nuevo chat para esta alerta</h4>
+      <div class="mut" style="font-size:12px;margin-bottom:8px">Gold · cámara movida: calibración vieja · 21:14</div>
+      <div class="srow2"><b>Agente</b><span class="fld" style="font-family:var(--font-sans);justify-self:start">Claude Code · Opus 5.5 ▾</span></div>
+      <div class="srow2"><b>Máquina · carpeta</b><span class="fld" style="justify-self:start">Mac · ~/Workspace/lagspace</span></div>
+      <div class="srow2"><b>Mensaje</b><span></span></div>
+      <div class="ta">
+        Gold dispara «DepthCut camera moved: calibration stale» desde las 21:14. Investiga qué pasó y si la auto-reparación de v0.4.29 la está arreglando. <span class="q">Sin acciones en la arcade sin mi OK: está abierta.</span><br><br>
+        <span class="q">— adjunto: alerta (reglas, etiquetas, 3 líneas de log, enlace a Grafana) · ops/runbooks/camera_move.md</span>
+      </div>
+      <div class="sbtns"><span class="note">El chat queda enlazado a la alerta. Si la alerta se resuelve, el chat no recibe nada.</span><span class="btn q">Cancelar</span><span class="btn">Abrir sin enviar</span><span class="btn pri">Abrir y enviar</span></div>
+    </div>
+  </div>
+  <div class="notes">
+    <b>Lo que nunca pasa:</b> ninguna alerta abre un chat, escribe en un chat ni despierta a un agente por sí sola. Una alerta solo muestra un número y, si lo activas, una notificación del sistema.<br>
+    <b>Tras el clic:</b> la fila muestra «→ chat» y su estado. Si la alerta se resuelve, la fila se mueve a «Resueltas» y el chat queda intacto.
+  </div>
+</section>
+
+</body>
+</html>
