@@ -299,3 +299,18 @@ test('a reset that frees only Fable is named a Fable reset, and only then', () =
   const [weekly] = accountResetRows({ availableCount: 1, credits: [{ ...fable, id: 'weekly', refills: ['seven_day'] }] }, at(9, 12));
   assert.equal(weekly.title, 'Reset del límite semanal');
 });
+
+// Owner 2026-11-10: a free login is not waiting for a reset; its usage comes
+// back when the window starts over, and a far date is named by its date.
+test('a free login says its usage comes back, not that it resets', () => {
+  const now = at(10, 12);
+  const month = 43200;
+  const entry = { kind: 'rate-limit', id: '30_day', status: 'rejected', usedPercent: 100, windowMinutes: month, limitName: 'codex', resetsAt: iso(at(17, 21, 22)) } as PlanUsageEntry;
+  const pace = weeklyPace(entry, now)!;
+  assert.equal(weeklyPaceText(pace, now, true).line, 'Usaste todo tu uso gratis. Vuelve el 17 nov a las 21:22, cuando empiecen otros 30 días.');
+  assert.match(weeklyPaceText(pace, now, false).line, /reset/, 'a paid plan keeps its reset wording');
+  const [row] = accountWindowRows([entry], now, true);
+  assert.equal(row.sub, 'Llegaste al límite · vuelve 17 nov 21:22');
+  const far = { ...entry, resetsAt: iso(at(28, 9, 0)) } as PlanUsageEntry;
+  assert.match(weeklyPaceText(weeklyPace(far, now)!, now, true).line, /Vuelve el 28 nov a las 09:00/);
+});

@@ -309,11 +309,11 @@ function AccountSection({ provider, snapshot, consent, now }: {
   };
 
   const account = snapshot?.account;
-  const windows = accountWindowRows(snapshot?.entries, now);
-  const pace = weeklyPace(weeklyEntry(snapshot?.entries), now);
-  const paceText = pace ? weeklyPaceText(pace, now) : null;
-  const rows = accountResetRows(summary, now);
   const freeLogin = snapshot?.account?.billing === 'free';
+  const windows = accountWindowRows(snapshot?.entries, now, freeLogin);
+  const pace = weeklyPace(weeklyEntry(snapshot?.entries), now);
+  const paceText = pace ? weeklyPaceText(pace, now, freeLogin) : null;
+  const rows = accountResetRows(summary, now);
   const spend = extraUsageLine(snapshot?.extraUsage);
   const host = manageHost(account?.manageUrl);
   const who = [account?.email, account?.organization].filter(Boolean).join(' · ');

@@ -42,6 +42,8 @@ function resetDayPhrase(t: number, now: number): string {
   const days = dayOffset(t, now);
   if (days === 0) return 'de hoy';
   if (days === 1) return 'de mañana';
+  // A weekday alone names the right day only within a week.
+  if (days > 6) return `del ${new Date(t).getDate()} ${MONTHS[new Date(t).getMonth()]}`;
   return `del ${WEEKDAYS[new Date(t).getDay()]}`;
 }
 
@@ -51,6 +53,7 @@ function momentPhrase(t: number, now: number): string {
   const at = `a las ${clock(new Date(t))}`;
   if (days === 0) return `hoy ${at}`;
   if (days === 1) return `mañana ${at}`;
+  if (days > 6) return `el ${new Date(t).getDate()} ${MONTHS[new Date(t).getMonth()]} ${at}`;
   return `el ${WEEKDAYS[new Date(t).getDay()]} ${at}`;
 }
 
@@ -116,7 +119,10 @@ export interface AccountWindowRow {
 }
 
 /** The usage bars, 5 hours first, then the week, then per-model weeks. */
-export function accountWindowRows(entries: ReadonlyArray<PlanUsageEntry> | undefined, now: number = Date.now()): AccountWindowRow[] {
+// A free login has no reset to wait for: its allowance comes back when the
+// window starts over (owner 2026-11-10: "why does it say I'm having a reset
+// if I'm not subscribed"). Its bars and pace say "vuelve", not "reset".
+export function accountWindowRows(entries: ReadonlyArray<PlanUsageEntry> | undefined, now: number = Date.now(), free = false): AccountWindowRow[] {
   const limits = (entries ?? []).filter((entry) => entry.kind === 'rate-limit');
   const hasPerModel = limits.some((entry) => windowRank(entry) >= 2 && windowRank(entry) <= 3);
   return limits
@@ -130,8 +136,8 @@ export function accountWindowRows(entries: ReadonlyArray<PlanUsageEntry> | undef
       const relative = expired ? '' : relativePlanReset(entry.resetsAt, now);
       let sub = '';
       if (expired) sub = 'Actualizando…';
-      else if (atLimit) sub = short ? `Llegaste al límite · se reinicia ${short}` : 'Llegaste al límite';
-      else if (short) sub = relative ? `Se reinicia ${short} (${relative})` : `Se reinicia ${short}`;
+      else if (atLimit) sub = short ? `Llegaste al límite · ${free ? 'vuelve' : 'se reinicia'} ${short}` : 'Llegaste al límite';
+      else if (short) sub = `${free ? 'Se renueva' : 'Se reinicia'} ${short}${relative ? ` (${relative})` : ''}`;
       const pct = expired ? null : formatPlanUsagePercent(entry.usedPercent);
       return {
         key: entry.id || `window-${index}`,
@@ -193,7 +199,7 @@ export function weeklyPace(entry: PlanUsageEntry | undefined, now: number = Date
 
 export interface PaceText { line: string; detail: string; warn: boolean }
 
-export function weeklyPaceText(pace: WeeklyPace, now: number = Date.now()): PaceText {
+export function weeklyPaceText(pace: WeeklyPace, now: number = Date.now(), free = false): PaceText {
   // Told in the window's own length: a 30-day window is not a week.
   const week = Math.abs(pace.windowMinutes - WEEK_MINUTES) <= 60;
   const days = Math.round(pace.windowMinutes / (24 * 60));
@@ -201,6 +207,15 @@ export function weeklyPaceText(pace: WeeklyPace, now: number = Date.now()): Pace
   const use = week ? 'uso semanal' : 'uso';
   const detail = `Usaste ${Math.round(pace.usedPercent)} % y pasó el ${pace.elapsedPercent} % ${span}.`;
   const reset = resetDayPhrase(pace.resetsAt, now);
+  if (free) {
+    // The window starting over is what gives a free login its usage back.
+    const again = week ? 'empiece otra semana' : `empiecen otros ${days} días`;
+    if (pace.state === 'out') return { line: `Usaste todo tu uso gratis. Vuelve ${momentPhrase(pace.resetsAt, now)}, cuando ${again}.`, detail, warn: true };
+    if (pace.state === 'short' && pace.runsOutAt != null) {
+      return { line: `A este ritmo te quedás sin uso gratis ${momentPhrase(pace.runsOutAt, now)}, antes de que ${again}.`, detail, warn: true };
+    }
+    return { line: `Vas bien. Tu uso gratis te alcanza hasta que ${again}.`, detail, warn: false };
+  }
   if (pace.state === 'out') {
     return { line: `Te quedaste sin ${use} hasta el reset ${reset} a las ${clock(new Date(pace.resetsAt))}.`, detail, warn: true };
   }
