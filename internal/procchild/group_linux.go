@@ -29,6 +29,7 @@ func init() {
 	scopeAvailable = linuxScopeAvailable
 	wrapForScope = linuxWrapForScope
 	scopeStop = linuxScopeStop
+	scopeActive = linuxScopeActive
 }
 
 func linuxScopeAvailable() bool {
@@ -85,4 +86,14 @@ func linuxScopeStop(unit string, kill bool) error {
 		return errors.New("no scope unit to stop")
 	}
 	return exec.Command("systemctl", linuxScopeStopArgs(unit, kill)...).Run()
+}
+
+// linuxScopeActive is true while the transient unit exists. --collect removes
+// a scope when its cgroup empties, so "active" here means a process is left.
+func linuxScopeActive(unit string) bool {
+	unit = strings.TrimSpace(unit)
+	if unit == "" {
+		return false
+	}
+	return exec.Command("systemctl", "--user", "is-active", "--quiet", unit).Run() == nil
 }

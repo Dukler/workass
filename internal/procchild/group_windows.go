@@ -183,6 +183,10 @@ func (g *group) stop(pid int, kill bool) error {
 	return process.Kill()
 }
 
+// sweep has nothing to do: a job object with kill-on-close cannot be left by
+// its members, and terminating it already took the whole tree.
+func (g *group) sweep() string { return "" }
+
 // close drops the job handle, which — with kill-on-close set — is also what
 // takes the tree down when the supervisor itself dies.
 func (g *group) close() {

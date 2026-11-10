@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // group is the platform handle for one isolated child. On unix it holds no OS
@@ -28,6 +29,8 @@ var (
 	scopeStop      = func(unit string, kill bool) error {
 		return errors.New("transient scopes are a Linux facility")
 	}
+	// scopeActive reports whether the unit still exists with anything in it.
+	scopeActive = func(unit string) bool { return false }
 )
 
 // scopeUnitName derives the transient unit from the child id, so a human on
@@ -116,6 +119,38 @@ func (g *group) stop(pid int, kill bool) error {
 		return syscall.Kill(pid, signal)
 	}
 	return errors.New("no process to signal")
+}
+
+// sweep runs once the main process is gone, whatever ended it: cancel,
+// timeout or a plain exit. The polite and kill signals reach what was in the
+// process group when they were sent; a descendant that left it with setsid
+// stays in the run scope's cgroup, and nothing else ever stops it. So the
+// sweep asks the isolation itself whether anything is left, kills it, and
+// returns a sentence for the receipt ("" when nothing was left).
+func (g *group) sweep() string {
+	if g == nil {
+		return ""
+	}
+	if g.kind == GroupSystemdScope && g.unit != "" {
+		if !scopeActive(g.unit) {
+			return ""
+		}
+		_ = scopeStop(g.unit, true)
+		_ = scopeStop(g.unit, false)
+		note := "processes were left running in scope " + g.unit + " after the main process ended and were killed"
+		for i := 0; i < 50 && scopeActive(g.unit); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if scopeActive(g.unit) {
+			note = "processes left running in scope " + g.unit + " could not be stopped; check systemctl --user status " + g.unit
+		}
+		return note
+	}
+	if g.pgid > 1 && syscall.Kill(-g.pgid, 0) == nil {
+		_ = syscall.Kill(-g.pgid, syscall.SIGKILL)
+		return "processes were left running in the process group after the main process ended and were killed"
+	}
+	return ""
 }
 
 // close releases any OS handle the group held. Unix holds none.

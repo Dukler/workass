@@ -330,14 +330,24 @@ func Run(spec Spec) (Result, error) {
 	})
 
 	outcome, exitCode := supervise(spec, record, group, cmd, pid, stopPath, outputFile, started, diagnostics)
+	// Whatever ended the main process, nothing it started may outlive the job.
+	leftovers := group.sweep()
 	elapsed := now().Sub(started)
 	result.Outcome, result.ExitCode, result.Elapsed = outcome, exitCode, elapsed
 
 	summary := outcomeSummary(outcome, exitCode, elapsed)
-	_, _ = record.record(KindSettled, map[string]any{
+	settled := map[string]any{
 		"outcome": outcome, "exitCode": exitCode, "summary": summary,
 		"elapsedMs": elapsed.Milliseconds(), "pid": pid,
-	})
+	}
+	if leftovers != "" {
+		summary += "; " + leftovers
+		settled["summary"], settled["leftovers"] = summary, leftovers
+	} else if group.Kind() == GroupProcessGroup && outcome != OutcomeSettled {
+		// A process group cannot be found again once a descendant leaves it.
+		settled["summary"] = summary + "; isolation is a process group only, so a descendant that left it (setsid) is not tracked or stopped"
+	}
+	_, _ = record.record(KindSettled, settled)
 	// The done marker keeps the pre-P4 settle path working byte for byte: a
 	// child registered through the external-work adapter is settled from this
 	// file by the same reconcile branch it always was, whatever happened to the
