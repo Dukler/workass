@@ -63,12 +63,62 @@ func claudeNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecuta
 	if _, set := env["CLAUDE_CODE_FORK_SUBAGENT"]; !set && os.Getenv("CLAUDE_CODE_FORK_SUBAGENT") == "" {
 		env["CLAUDE_CODE_FORK_SUBAGENT"] = "1"
 	}
+	// The Agent SDK labels every process it starts "sdk-ts" unless told
+	// otherwise, and Anthropic's 5-hour meter charges that label about 1.7x
+	// to 3x more than the interactive CLI for the same tokens (measured by
+	// t3code, pingdotgg/t3code#24649). Workass names itself instead; the
+	// requests still carry agent-sdk/<version> and the client-app below, so
+	// nothing about what is calling is hidden. A provider setting wins.
+	if _, set := env["CLAUDE_CODE_ENTRYPOINT"]; !set {
+		env["CLAUDE_CODE_ENTRYPOINT"] = claudeWorkassEntrypoint
+	}
+	if _, set := env["CLAUDE_AGENT_SDK_CLIENT_APP"]; !set {
+		env["CLAUDE_AGENT_SDK_CLIENT_APP"] = claudeWorkassEntrypoint
+	}
+	// Claude Code turns its Artifact tools off only for the sdk-* labels. Under
+	// any other name it loads Artifact, ArtifactComments and ArtifactData into
+	// every request (about 26k more characters of tool definitions), which
+	// Workass chats never had. Off unless the provider or the daemon's own
+	// environment says otherwise.
+	if _, set := env["CLAUDE_CODE_ARTIFACT"]; !set && os.Getenv("CLAUDE_CODE_ARTIFACT") == "" {
+		env["CLAUDE_CODE_ARTIFACT"] = "0"
+	}
 	env["WORKASS_CLAUDE_SDK_MODULE"] = sdkModule
 	provider.Command = node
 	provider.ResolvedCommand = ""
 	provider.Args = []string{host}
 	provider.Env = env
 	return provider, nil
+}
+
+// claudeWorkassEntrypoint is how Workass's Claude processes name themselves
+// (CLAUDE_CODE_ENTRYPOINT and CLAUDE_AGENT_SDK_CLIENT_APP).
+const claudeWorkassEntrypoint = "workass"
+
+// claudeHostSessionEnv is what a Claude Code session exports to the processes it
+// starts. A daemon started from inside one (a dev rig run from a chat) would
+// hand them to every Claude it launches, and that Claude would act as part of a
+// session it does not belong to: its id, its messaging socket, its effort, its
+// label. They are dropped from the daemon's environment; a provider setting for
+// the same name still passes.
+var claudeHostSessionEnv = []string{
+	"CLAUDECODE",
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_CODE_HOST_SESSION_ID",
+	"CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_SESSION_ATTENDED",
+	"CLAUDE_CODE_MESSAGING_SOCKET",
+	"CLAUDE_CODE_MESSAGING_TOKEN",
+	"CLAUDE_CODE_EXECPATH",
+	"CLAUDE_CODE_SSE_PORT",
+	"CLAUDE_CODE_DESKTOP_APP_VERSION",
+	"CLAUDE_EFFORT",
+	"CLAUDE_PID",
+	"CLAUDE_AGENT_SDK_VERSION",
+	"CLAUDE_AGENT_SDK_CLIENT_APP",
+	"CLAUDE_PLUGIN_ROOT",
+	"CLAUDE_PLUGIN_DATA",
 }
 
 func firstNativeFile(explicit string, candidates []string) (string, error) {

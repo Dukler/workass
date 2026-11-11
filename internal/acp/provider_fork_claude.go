@@ -327,7 +327,7 @@ func (claudeForkStrategy) ForkNativeSession(ctx context.Context, launch Provider
 	args := append(append([]string(nil), launch.Args...), "--workass-fork-session")
 	cmd := managedCommandContext(ctx, launch.Command, args...)
 	cmd.Dir = strings.TrimSpace(dir)
-	cmd.Env = mergedEnv(os.Environ(), launch.Env, providerEnvironmentPolicy{})
+	cmd.Env = mergedEnv(os.Environ(), launch.Env, providerAdapterForID("claude").launch.EnvironmentPolicy())
 	cmd.Stdin = bytes.NewReader(request)
 	var stdout bytes.Buffer
 	stderr := &boundedTail{limit: forkStderrTailBytes}

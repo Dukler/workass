@@ -447,7 +447,7 @@ var daemonPrivateEnv = []string{"WORKASS_BROWSER_CONTROL_FILE"}
 func mergedEnv(inherited []string, extra map[string]string, policy providerEnvironmentPolicy) []string {
 	env := map[string]string{}
 	for _, item := range inherited {
-		if k, v, ok := strings.Cut(item, "="); ok && policy.allows(k) && !slices.Contains(daemonPrivateEnv, k) {
+		if k, v, ok := strings.Cut(item, "="); ok && policy.allowsInherited(k) && !slices.Contains(daemonPrivateEnv, k) {
 			env[k] = v
 		}
 	}

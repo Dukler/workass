@@ -72,13 +72,31 @@ type providerLaunchStrategy interface {
 // subprocess environment. It is owned by the provider launch adapter so the
 // process bridge never branches on provider identity.
 type providerEnvironmentPolicy struct {
-	blockedKeys          []string
+	blockedKeys []string
+	// inheritedBlockedKeys are dropped from the daemon's own environment only.
+	// The same key set by the provider's launch still reaches the child.
+	inheritedBlockedKeys []string
 	sanitizationRevision int
 }
 
 func (policy providerEnvironmentPolicy) allows(key string) bool {
 	key = strings.TrimSpace(key)
 	for _, blocked := range policy.blockedKeys {
+		if strings.EqualFold(key, strings.TrimSpace(blocked)) {
+			return false
+		}
+	}
+	return true
+}
+
+// allowsInherited reports whether a key from the daemon's own environment may
+// pass to the provider child.
+func (policy providerEnvironmentPolicy) allowsInherited(key string) bool {
+	if !policy.allows(key) {
+		return false
+	}
+	key = strings.TrimSpace(key)
+	for _, blocked := range policy.inheritedBlockedKeys {
 		if strings.EqualFold(key, strings.TrimSpace(blocked)) {
 			return false
 		}
@@ -183,12 +201,13 @@ func (mockACPLaunchStrategy) Prepare(config ProviderConfig, opts Options) (Provi
 }
 
 type nativeHostLaunchStrategy struct {
-	command string
-	prepare func(ProviderConfig, Options, string) (ProviderConfig, error)
+	command     string
+	prepare     func(ProviderConfig, Options, string) (ProviderConfig, error)
+	environment providerEnvironmentPolicy
 }
 
-func (nativeHostLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
-	return providerEnvironmentPolicy{}
+func (strategy nativeHostLaunchStrategy) EnvironmentPolicy() providerEnvironmentPolicy {
+	return strategy.environment
 }
 
 func (strategy nativeHostLaunchStrategy) Prepare(config ProviderConfig, opts Options) (ProviderConfig, error) {
