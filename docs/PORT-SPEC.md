@@ -478,6 +478,18 @@ The daemon's handlers are registered in `cmd/workass/` and `internal/wire/wire.g
 that are Electron-shell-local (dialogs, clipboard, window state) stay in the shell
 (`desktop/shell/`), NOT the daemon.
 
+Conectores + alerts (`docs/specs/connectors-alerts.md`, `internal/connectors`,
+`cmd/workass/connectors.go`), additive: reads `connectors:list`, `alerts:list` and
+`connectors:test` (one Grafana fetch, a concurrent read); mutating
+`connectors:set`, `connectors:remove`, `connectors:rotate-secret`, `alerts:act`;
+events `connectors:changed {connectors}` and `alerts:changed {alerts, announce}`
+(plus an additive `removed: [id]` when alerts are pruned or their connector is
+removed). Grafana's webhook contact point posts to the HTTP route
+`POST /workass/connectors/<id>/webhook` (bearer secret, 1 MiB cap) outside the
+WebSocket. State lives in `state/connectors/` (`connectors.json`, `alerts.json`,
+`secrets/<id>.json` 0600); no secret is ever on the wire or in a log, and no
+alert path touches a chat.
+
 ## 3. ACP landmines (each one was learned the hard way — all preserved)
 
 1. **Client terminals OFF.** Advertising `terminal:true` triggers the APIINT-14

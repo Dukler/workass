@@ -56,6 +56,12 @@ var mutatingChannels = map[string]struct{}{
 	"app-chat:use-rate-limit-reset": {},
 	// Automatizaciones: cancels a pending scheduled message.
 	"automations:cancel": {},
+	// Conectores + alerts: connector config and secrets, and the owner's
+	// decisions on alerts (docs/specs/connectors-alerts.md).
+	"connectors:set":           {},
+	"connectors:remove":        {},
+	"connectors:rotate-secret": {},
+	"alerts:act":               {},
 	// Names a chat: changes its title and starts an agent process.
 	"app-chat:auto-title":         {},
 	"app-chat:reset":              {},
