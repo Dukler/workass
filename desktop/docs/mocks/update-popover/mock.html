@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --hair: color-mix(in srgb, var(--border) 85%, transparent);
+    --crit: #e5484d;
+    --fill: color-mix(in srgb, var(--foreground) 5%, transparent);
+    --fill2: color-mix(in srgb, var(--foreground) 9%, transparent);
+    --pop: var(--popover, var(--card));
+    --side: color-mix(in srgb, var(--card) 50%, var(--background));
+    --lift: 0 14px 36px rgb(0 0 0 / .22);
+    --acc: var(--accent);
+  }
+  * { box-sizing: border-box; }
+  :focus, :focus-visible { outline: none; }
+  body { font: 13px/1.45 var(--font-sans); color: var(--foreground); padding: 4px 2px 20px; }
+  p { margin: 0; }
+  label { cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .mut { color: var(--muted-foreground); }
+
+  /* state switch: radios, no script */
+  .gal { position: relative; }
+  .gal > input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+  .steps { display: flex; flex-wrap: wrap; gap: 2px; margin: 0 0 14px; font-size: 12px; color: var(--muted-foreground); }
+  .steps label { padding: 3px 10px; border-radius: 7px; white-space: nowrap; }
+  .gal > .r0:checked ~ .steps label:nth-of-type(1),
+  .gal > .r1:checked ~ .steps label:nth-of-type(2),
+  .gal > .r2:checked ~ .steps label:nth-of-type(3),
+  .gal > .r3:checked ~ .steps label:nth-of-type(4),
+  .gal > .r4:checked ~ .steps label:nth-of-type(5),
+  .gal > .r5:checked ~ .steps label:nth-of-type(6) { background: var(--fill2); color: var(--foreground); }
+  .gal > .r0:checked ~ .cols [data-s]:not([data-s~="0"]),
+  .gal > .r1:checked ~ .cols [data-s]:not([data-s~="1"]),
+  .gal > .r2:checked ~ .cols [data-s]:not([data-s~="2"]),
+  .gal > .r3:checked ~ .cols [data-s]:not([data-s~="3"]),
+  .gal > .r4:checked ~ .cols [data-s]:not([data-s~="4"]),
+  .gal > .r5:checked ~ .cols [data-s]:not([data-s~="5"]) { display: none !important; }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(276px, 1fr)); gap: 26px 22px; align-items: start; }
+  .opt-h { display: flex; align-items: baseline; gap: 8px; margin: 0 0 3px; }
+  .opt-k { font: 600 12px var(--font-mono); color: var(--acc); }
+  .opt-n { font-weight: 600; font-size: 14px; }
+  .opt-d { color: var(--muted-foreground); font-size: 12px; margin: 0 0 10px; min-height: 52px; }
+  .was { margin-top: 26px; }
+  .was .opt-d { min-height: 0; }
+
+  /* the popover, sitting on the left pane's foot */
+  .stage { background: var(--side); border: 1px solid var(--hair); border-radius: 12px; padding: 10px 8px 8px; }
+  .pop { background: var(--pop); border: 1px solid var(--hair); border-radius: 11px; box-shadow: var(--lift); padding: 6px; }
+  .pop-h { font-size: 11.5px; color: var(--muted-foreground); padding: 5px 8px 6px; }
+  .foot { display: flex; gap: 2px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair); }
+  .fb { position: relative; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--muted-foreground); }
+  .fb.on { background: var(--fill2); color: var(--foreground); }
+  .fdot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--side); }
+  .fdot.c { background: var(--crit); }
+
+  /* shared: versions rows and buttons */
+  .vr { display: flex; align-items: center; gap: 10px; padding: 5px 8px; font-size: 12px; color: var(--muted-foreground); min-height: 28px; }
+  .vr .n { flex: 1; min-width: 0; color: var(--foreground); opacity: .86; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vr .v { font: 11px var(--font-mono); color: var(--muted-foreground); white-space: nowrap; }
+  .vr .v b { font-weight: 400; color: var(--acc); }
+  .vi { width: 16px; height: 16px; display: grid; place-items: center; color: var(--muted-foreground); flex: none; }
+  .vi svg { width: 14px; height: 14px; }
+  .claude { color: #d97757; }
+  .btn { font: inherit; font-size: 11.5px; line-height: 18px; padding: 2px 9px; border-radius: 7px; border: 1px solid var(--hair); color: var(--foreground); background: transparent; white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; flex: none; }
+  .btn.pri { background: var(--foreground); color: var(--background); border-color: transparent; font-weight: 500; }
+  .btn.q { border-color: transparent; color: var(--muted-foreground); padding-left: 4px; padding-right: 4px; }
+  .btn.w { background: var(--warning); color: #1a1406; border-color: transparent; font-weight: 500; }
+
+  /* motion: transform/opacity only (GPU layers), runs under Reduce Motion */
+  .line { position: relative; height: 2px; border-radius: 2px; background: var(--fill2); overflow: hidden; }
+  .line > i { position: absolute; inset: 0; transform-origin: left; background: var(--acc); border-radius: 2px; }
+  .line.det > i { transform: scaleX(.42); transition: transform .3s; }
+  .line.ind > i { width: 34%; animation: sweep 1.5s cubic-bezier(.45, 0, .25, 1) infinite; }
+  @keyframes sweep { from { transform: translateX(-105%); } to { transform: translateX(300%); } }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--fill2); border-top-color: var(--acc); animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* A · Fila viva */
+  .a-row { padding: 6px 8px 7px; border-radius: 8px; }
+  .a-row.on { background: var(--fill); }
+  .a-1 { display: flex; align-items: center; gap: 10px; font-size: 12px; min-height: 22px; }
+  .a-1 .n { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .a-1 .v { font: 11px var(--font-mono); color: var(--muted-foreground); white-space: nowrap; }
+  .a-1 .v b { font-weight: 400; color: var(--acc); }
+  .a-2 { margin: 3px 0 0 26px; font-size: 11.5px; color: var(--muted-foreground); line-height: 1.4; }
+  .a-2.err { color: var(--crit); }
+  .a-2.warn { color: var(--warning); }
+  .a-row .line { margin: 6px 0 0 26px; }
+  .a-act { display: flex; gap: 4px; margin: 7px 0 0 22px; }
+
+  /* B · Encabezado */
+  .b-top { padding: 8px 9px 10px; border-bottom: 1px solid var(--hair); margin-bottom: 4px; }
+  .b-t { font-size: 13.5px; font-weight: 600; letter-spacing: -.005em; }
+  .b-s { font-size: 11.5px; color: var(--muted-foreground); margin-top: 2px; line-height: 1.4; }
+  .b-s.err { color: var(--crit); }
+  .b-s.warn { color: var(--warning); }
+  .b-act { display: flex; gap: 6px; margin-top: 9px; }
+  .b-act .btn { flex: 1; justify-content: center; padding: 4px 9px; }
+  .b-act .btn.q { flex: 0 0 auto; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 9px; }
+  .seg > span { display: block; }
+  .seg .line.done > i { transform: none; }
+  .seg .line.err > i { transform: none; background: var(--crit); }
+  .seg-l { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 4px; font-size: 10.5px; color: var(--muted-foreground); }
+  .seg-l .on { color: var(--foreground); }
+  .seg-l .err { color: var(--crit); }
+
+  /* C · Pasos */
+  .c-row { padding: 6px 8px 8px; }
+  .c-h { display: flex; align-items: center; gap: 10px; font-size: 12px; min-height: 22px; }
+  .c-h .n { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; }
+  .c-h .v { font: 11px var(--font-mono); color: var(--muted-foreground); }
+  .c-h .v b { font-weight: 400; color: var(--acc); }
+  .tl { margin: 6px 0 0 7px; padding-left: 15px; border-left: 1px solid var(--hair); display: flex; flex-direction: column; gap: 5px; }
+  .st { position: relative; font-size: 11.5px; color: var(--muted-foreground); display: flex; gap: 6px; align-items: baseline; }
+  .st::before { content: ""; position: absolute; left: -19.5px; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--pop); box-shadow: inset 0 0 0 1.3px var(--muted-foreground); }
+  .st.ok::before { background: var(--muted-foreground); box-shadow: none; }
+  .st.now { color: var(--foreground); }
+  .st.now::before { background: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 22%, transparent); animation: pulse 1.4s ease-in-out infinite; }
+  .st.bad { color: var(--crit); }
+  .st.bad::before { background: var(--crit); box-shadow: none; }
+  .st .t { margin-left: auto; font: 10.5px var(--font-mono); color: var(--muted-foreground); }
+  .st .why { display: block; color: var(--muted-foreground); }
+  .c-act { display: flex; gap: 4px; margin: 8px 0 0 18px; }
+
+  /* the current card, for reference */
+  .old .updcard { position: relative; display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid var(--hair); border-radius: 11px; overflow: hidden; }
+  .old .updcard::before { content: ""; position: absolute; inset: -1px; border-radius: 11px; padding: 1px; background: conic-gradient(from var(--rg), transparent 0 250deg, var(--acc) 342deg, transparent 360deg); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: rg 1.15s linear infinite; }
+  @property --rg { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+  @keyframes rg { to { --rg: 360deg; } }
+  .old .ut { font-size: 12.5px; font-weight: 600; }
+  .old .us { font-size: 11px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="dl" viewBox="0 0 16 16"><path d="M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13h10"/></symbol>
+  <symbol id="ok" viewBox="0 0 16 16"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></symbol>
+  <symbol id="warn" viewBox="0 0 16 16"><path d="M8 2.6 14 13H2Z M8 6.5v3 M8 11.3v.01"/></symbol>
+  <symbol id="cl" viewBox="0 0 16 16"><path d="M8 1.8v12.4M1.8 8h12.4M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8" stroke-width="1.7"/></symbol>
+  <symbol id="cx" viewBox="0 0 16 16"><path d="M8 1.8 13.4 5v6L8 14.2 2.6 11V5Z M6 6.6 7.6 8 6 9.4 M8.6 9.6h1.8"/></symbol>
+  <symbol id="gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></symbol>
+  <symbol id="user" viewBox="0 0 16 16"><circle cx="8" cy="5.6" r="2.6"/><path d="M2.8 14c.6-2.6 2.6-4 5.2-4s4.6 1.4 5.2 4"/></symbol>
+  <symbol id="clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.4"/></symbol>
+  <symbol id="bell" viewBox="0 0 16 16"><path d="M4 11V7.4a4 4 0 0 1 8 0V11l1.2 1.4H2.8Z M6.6 14h2.8"/></symbol>
+</svg>
+
+<div class="gal">
+  <input type="radio" name="s" id="s0" class="r0" checked>
+  <input type="radio" name="s" id="s1" class="r1">
+  <input type="radio" name="s" id="s2" class="r2">
+  <input type="radio" name="s" id="s3" class="r3">
+  <input type="radio" name="s" id="s4" class="r4">
+  <input type="radio" name="s" id="s5" class="r5">
+  <div class="steps">
+    <label for="s0">Bajando</label>
+    <label for="s1">Probando antes de instalar</label>
+    <label for="s2">Lista</label>
+    <label for="s3">Confirmar (hay trabajo)</label>
+    <label for="s4">Falló</label>
+    <label for="s5">Agente actualizándose</label>
+  </div>
+
+  <div class="cols">
+
+    <!-- A -->
+    <section>
+      <div class="opt-h"><span class="opt-k">A</span><span class="opt-n">Fila viva</span></div>
+      <p class="opt-d">No card. The Workass row in the versions list is the update itself. A 2px line under it shows progress: filling while it downloads, sweeping while it tests. The button sits on the row.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="pop-h">Actualizaciones</div>
+          <div class="a-row on">
+            <div class="a-1"><span class="vi"><svg class="ic"><use href="#dl"/></svg></span><span class="n">Workass</span>
+              <span class="v" data-s="0 1 2 3">0.1.286 → <b>0.1.288</b></span>
+              <span class="v" data-s="4">0.1.286</span>
+              <span class="v" data-s="5">0.1.286</span>
+              <button class="btn pri" data-s="2">Actualizar</button>
+              <button class="btn" data-s="4">Reintentar</button>
+            </div>
+            <p class="a-2" data-s="0">Bajando · 42%</p>
+            <div class="line det" data-s="0"><i></i></div>
+            <p class="a-2" data-s="1">Probándola con tu estado antes de instalar · 1:12</p>
+            <div class="line ind" data-s="1"><i></i></div>
+            <p class="a-2" data-s="2">Lista. Actualizar solo reinicia Workass.</p>
+            <p class="a-2 warn" data-s="3">Se detendrá 1 subagente en DepthVision.</p>
+            <div class="a-act" data-s="3"><button class="btn w">Actualizar igual</button><button class="btn q">Cancelar</button></div>
+            <p class="a-2 err" data-s="4">La 0.1.287 no pasó su prueba: no se pudo copiar el estado. Sigue la 0.1.286.</p>
+            <p class="a-2" data-s="5">Al día</p>
+          </div>
+          <div class="a-row" data-s="0 1 2 3 4">
+            <div class="a-1"><span class="vi claude"><svg class="ic"><use href="#cl"/></svg></span><span class="n" style="font-weight:400;opacity:.86">Claude Code</span><span class="v">2.1.322</span></div>
+          </div>
+          <div class="a-row on" data-s="5">
+            <div class="a-1"><span class="vi claude"><svg class="ic"><use href="#cl"/></svg></span><span class="n">Claude Code</span><span class="v">2.1.322 → <b>2.1.330</b></span></div>
+            <p class="a-2 mono" style="font-size:11px">installing native build…</p>
+            <div class="line ind"><i></i></div>
+          </div>
+          <div class="a-row">
+            <div class="a-1"><span class="vi"><svg class="ic"><use href="#cx"/></svg></span><span class="n" style="font-weight:400;opacity:.86">Codex</span><span class="v">0.167.1</span></div>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="0 1 2 3 5"></i><i class="fdot c" data-s="4"></i></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- B -->
+    <section>
+      <div class="opt-h"><span class="opt-k">B</span><span class="opt-n">Encabezado</span></div>
+      <p class="opt-d">A status header at the top of the popover, borderless, with a full-width button. Preparing shows three segments (Bajar · Verificar · Probar), and a failure turns its segment red. The versions list stays plain underneath.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="b-top">
+            <p class="b-t" data-s="0 1">Preparando Workass 0.1.288</p>
+            <p class="b-t" data-s="2 3">Workass 0.1.288 lista</p>
+            <p class="b-t" data-s="4">No se pudo preparar la 0.1.287</p>
+            <p class="b-t" data-s="5">Actualizando Claude Code</p>
+            <p class="b-s" data-s="0">Bajando · 42% · Workass sigue andando</p>
+            <p class="b-s" data-s="1">Probándola con tu estado antes de instalar · 1:12</p>
+            <p class="b-s" data-s="2">Actualizar solo reinicia Workass.</p>
+            <p class="b-s warn" data-s="3">Se detendrá 1 subagente en DepthVision.</p>
+            <p class="b-s err" data-s="4">No se pudo copiar el estado. Sigue instalada la 0.1.286.</p>
+            <p class="b-s mono" data-s="5" style="font-size:11px">2.1.322 → 2.1.330 · installing native build…</p>
+            <div data-s="0 1 4">
+              <div class="seg">
+                <span class="line done" data-s="1 4"><i></i></span><span class="line det" data-s="0"><i></i></span>
+                <span class="line done" data-s="1 4"><i></i></span><span class="line" data-s="0"><i style="transform:scaleX(0)"></i></span>
+                <span class="line ind" data-s="1"><i></i></span><span class="line err" data-s="4"><i></i></span><span class="line" data-s="0"><i style="transform:scaleX(0)"></i></span>
+              </div>
+              <div class="seg-l"><span class="on">Bajar</span><span data-s="0">Verificar</span><span data-s="1 4">Verificar</span><span data-s="0">Probar</span><span class="on" data-s="1">Probar</span><span class="err" data-s="4">Probar</span></div>
+            </div>
+            <div class="line ind" data-s="5" style="margin-top:9px"><i></i></div>
+            <div class="b-act" data-s="2"><button class="btn pri">Actualizar ahora</button></div>
+            <div class="b-act" data-s="3"><button class="btn w">Actualizar igual</button><button class="btn q">Cancelar</button></div>
+            <div class="b-act" data-s="4"><button class="btn">Reintentar</button><button class="btn q">Ver registro</button></div>
+          </div>
+          <div class="vr"><span class="vi"><svg class="ic"><use href="#dl"/></svg></span><span class="n">Workass</span><span class="v">0.1.286</span></div>
+          <div class="vr"><span class="vi claude"><svg class="ic"><use href="#cl"/></svg></span><span class="n">Claude Code</span><span class="v">2.1.322</span></div>
+          <div class="vr"><span class="vi"><svg class="ic"><use href="#cx"/></svg></span><span class="n">Codex</span><span class="v">0.167.1</span></div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="0 1 2 3 5"></i><i class="fdot c" data-s="4"></i></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- C -->
+    <section>
+      <div class="opt-h"><span class="opt-k">C</span><span class="opt-n">Pasos</span></div>
+      <p class="opt-d">The row opens into a short timeline of what it did and what it is doing: done steps filled, the current one pulsing with its time, and a failed one red with its reason. Steps it hasn't reached stay hollow.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="pop-h">Actualizaciones</div>
+          <div class="c-row">
+            <div class="c-h"><span class="vi"><svg class="ic"><use href="#dl"/></svg></span><span class="n">Workass</span>
+              <span class="v" data-s="0 1 2 3">0.1.286 → <b>0.1.288</b></span>
+              <span class="v" data-s="4">0.1.286 → <b style="color:var(--crit)">0.1.287</b></span>
+              <span class="v" data-s="5">0.1.286</span>
+            </div>
+            <div class="tl" data-s="0 1 2 3 4">
+              <span class="st now" data-s="0">Bajando<span class="t">42%</span></span>
+              <span class="st ok" data-s="1 2 3 4">Bajada</span>
+              <span class="st" data-s="0">Verificar</span>
+              <span class="st ok" data-s="1 2 3 4">Verificada</span>
+              <span class="st" data-s="0">Probar con tu estado</span>
+              <span class="st now" data-s="1">Probándola con tu estado<span class="t">1:12</span></span>
+              <span class="st ok" data-s="2 3">Probada<span class="t">2:04</span></span>
+              <span class="st bad" data-s="4"><span>No pasó la prueba<span class="why">No se pudo copiar el estado. Sigue la 0.1.286.</span></span></span>
+              <span class="st" data-s="0 1">Instalar al reiniciar</span>
+              <span class="st now" data-s="2" style="color:var(--foreground)">Lista para instalar</span>
+              <span class="st" data-s="3" style="color:var(--warning)">Se detendrá 1 subagente en DepthVision</span>
+            </div>
+            <div class="c-act" data-s="2"><button class="btn pri">Reiniciar y actualizar</button></div>
+            <div class="c-act" data-s="3"><button class="btn w">Actualizar igual</button><button class="btn q">Cancelar</button></div>
+            <div class="c-act" data-s="4"><button class="btn">Reintentar</button><button class="btn q">Ver registro</button></div>
+          </div>
+          <div class="c-row" data-s="0 1 2 3 4"><div class="c-h"><span class="vi claude"><svg class="ic"><use href="#cl"/></svg></span><span class="n" style="font-weight:400;opacity:.86">Claude Code</span><span class="v">2.1.322</span></div></div>
+          <div class="c-row" data-s="5">
+            <div class="c-h"><span class="vi claude"><svg class="ic"><use href="#cl"/></svg></span><span class="n">Claude Code</span><span class="v">2.1.322 → <b>2.1.330</b></span></div>
+            <div class="tl"><span class="st now"><span class="mono" style="font-size:11px">installing native build…</span><span class="t">0:08</span></span><span class="st">Listo</span></div>
+          </div>
+          <div class="c-row"><div class="c-h"><span class="vi"><svg class="ic"><use href="#cx"/></svg></span><span class="n" style="font-weight:400;opacity:.86">Codex</span><span class="v">0.167.1</span></div></div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="0 1 2 3 5"></i><i class="fdot c" data-s="4"></i></span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="was">
+    <div class="opt-h"><span class="opt-k">hoy</span><span class="opt-n">The current card, for comparison</span></div>
+    <p class="opt-d">A bordered card inside the popover with a ring turning on its border, and the version list repeated below it.</p>
+    <div class="old" style="max-width:300px">
+      <div class="updcard"><span class="vi"><svg class="ic"><use href="#dl"/></svg></span><span style="min-width:0"><span class="ut" style="display:block">Actualizando Workass</span><span class="us" style="display:block">Verificando checksum, plataforma y daemon incluido…</span></span></div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

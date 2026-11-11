@@ -34,6 +34,7 @@ test('download progress and rollback are explicit user-facing states', () => {
   assert.match(appUpdaterPhaseText(state('downloading', { progress: 0.42 })), /42%/);
   assert.match(appUpdaterPhaseText(state('checking')), /versión verificada/);
   assert.doesNotMatch(appUpdaterPhaseText(state('staging')), /firma/);
+  assert.match(appUpdaterPhaseText(state('staging', { targetVersion: '1.2.0', stagingStep: 'preflight' })), /Probando la 1\.2\.0 antes de instalarla/);
   assert.match(appUpdaterPhaseText(state('rollback_healthy')), /restauró la versión anterior/);
 });
 
@@ -131,4 +132,14 @@ test('native ZIP installation has a completed state without claiming provider he
   assert.equal(appUpdaterCardTitle(state('installed')), 'Listo');
   assert.match(appUpdaterPhaseText(state('installed')), /1\.1\.0 quedó actualizado/);
   assert.doesNotMatch(appUpdaterPhaseText(state('installed')), /saludable|restaur/);
+});
+
+test('a release being prepared is named by version, never as Workass updating', () => {
+  // Owner 2026-11-11: after 0.1.287 failed its preflight, 0.1.288 staged and
+  // the card read "Actualizando Workass · Verificando checksum…", the failed
+  // update apparently still going.
+  assert.equal(appUpdaterCardTitle(state('staging', { targetVersion: '0.1.288' })), 'Preparando Workass 0.1.288');
+  assert.equal(appUpdaterCardTitle(state('downloading', { targetVersion: '0.1.288' })), 'Preparando Workass 0.1.288');
+  assert.equal(appUpdaterCardTitle(state('installing', { targetVersion: '0.1.288' })), 'Instalando Workass 0.1.288');
+  assert.equal(appUpdaterPhaseText(state('staging', { stagingStep: 'verify' })), 'Verificando la descarga…');
 });

@@ -52,6 +52,10 @@ export interface AppUpdaterState {
   size?: number | null;
   // "Instalar solo" (Mac shell). Absent from a shell that predates it.
   autoInstall?: AppUpdaterAutoInstall;
+  // What staging is doing: checking the download, or the preflight (the new
+  // version booted against a copy of the state, minutes long). Read only while
+  // phase is 'staging'; absent from a shell that predates it.
+  stagingStep?: 'verify' | 'preflight';
 }
 
 export interface AppUpdaterAutoInstall {
@@ -155,7 +159,9 @@ export function appUpdaterPhaseText(state: AppUpdaterState): string {
     case 'current': return 'Workass está al día.';
     case 'available': return `Workass ${state.targetVersion || ''} está disponible.`.trim();
     case 'downloading': return `Descargando la versión verificada… ${Math.round(state.progress * 100)}%`;
-    case 'staging': return 'Verificando checksum, plataforma y daemon incluido…';
+    case 'staging': return state.stagingStep === 'preflight'
+      ? `Probando ${state.targetVersion ? `la ${state.targetVersion}` : 'la versión nueva'} antes de instalarla…`
+      : 'Verificando la descarga…';
     case 'ready': return state.targetVersion
       ? `Workass ${state.targetVersion} ya está descargado y verificado: actualizar solo reinicia Workass.`
       : 'La actualización ya está descargada y verificada: actualizar solo reinicia Workass.';
@@ -177,7 +183,15 @@ export function appUpdaterCardTitle(state: AppUpdaterState): string {
   const offeredVersion = state.availableVersion?.trim()
     || (state.phase === 'available' || state.phase === 'ready' ? state.targetVersion?.trim() : '');
   if (offeredVersion) return `Workass ${offeredVersion}`;
+  const target = state.targetVersion?.trim();
   switch (state.phase) {
+    // Preparing is not updating: Workass keeps running, and a release that
+    // fails here never installs. Named by version, so a newer release staged
+    // right after a failed one never reads as the failed one still going.
+    case 'downloading':
+    case 'staging': return target ? `Preparando Workass ${target}` : 'Preparando la actualización';
+    case 'installing': return target ? `Instalando Workass ${target}` : 'Instalando Workass';
+    case 'checking': return 'Buscando actualizaciones';
     case 'busy': return 'La actualización necesita reintento';
     case 'check_failed': return 'No se pudo buscar actualizaciones';
     case 'rollback_healthy': return 'Workass volvió a la versión anterior';

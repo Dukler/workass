@@ -2802,7 +2802,7 @@ class UpdateManager {
     }
     const release = candidate.release;
     const operation = (async () => {
-      this.publish({ phase: 'staging', targetVersion: release.version, availableVersion: null, progress: 1, error: null });
+      this.publish({ phase: 'staging', stagingStep: 'verify', targetVersion: release.version, availableVersion: null, progress: 1, error: null });
       const verified = await this.deps.verifyStaged({
         schemaVersion: 1,
         platform: this.platform,
@@ -3748,7 +3748,7 @@ class UpdateManager {
       } else {
         await this.deps.downloadArtifact(artifactSource, archive, artifact, { onProgress: reportProgress });
       }
-      this.publish({ phase: 'staging', progress: 1 });
+      this.publish({ phase: 'staging', stagingStep: 'verify', progress: 1 });
       const installTarget = installedRoot(this.resourcesPath, this.executablePath, this.platform);
       const parent = path.dirname(installTarget);
       incomingTarget = this.platform === 'darwin'
@@ -3863,6 +3863,9 @@ class UpdateManager {
       error.code = 'WORKASS_UPDATE_PREFLIGHT_FAILED';
       throw error;
     }
+    // The longest step of staging (a copy of the state, then the new version
+    // booted against it): said as itself, not as more "verifying".
+    if (this.state.phase === 'staging') this.publish({ stagingStep: 'preflight' });
     const scratchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'workass-preflight-'));
     let result;
     try {

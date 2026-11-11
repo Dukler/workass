@@ -74,7 +74,9 @@ export function selfUpdateDetail(state: AppUpdaterState, now = Date.now()): stri
     case 'check_failed': return `${lead}no se pudo buscar una versión nueva${checked ? ` (${checked})` : ''}. Lo vuelve a intentar sola.`;
     case 'available': return `${lead}hay ${target}.`;
     case 'downloading': return `${lead}bajando ${target}… ${Math.round((state.progress || 0) * 100)}%`;
-    case 'staging': return `${lead}verificando ${target}…`;
+    case 'staging': return state.stagingStep === 'preflight'
+      ? `${lead}probando ${target} antes de instalarla…`
+      : `${lead}verificando ${target}…`;
     case 'ready': return `${lead}${target} ya está bajada: actualizar solo reinicia Workass.`;
     case 'busy': return appUpdaterBlockerText(state.blockers);
     case 'installing': return `Instalando ${target}…`;

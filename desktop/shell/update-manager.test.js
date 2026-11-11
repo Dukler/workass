@@ -3463,7 +3463,9 @@ test('a staged release is sealed read-only and a failed preflight keeps it from 
     writeMacUpdaterRuntime(request.incomingTarget);
     return { designatedRequirement: release.designatedRequirement };
   };
+  let shownDuringPreflight = null;
   manager.deps.preflight = async (request) => {
+    shownDuringPreflight = { phase: manager.state.phase, step: manager.state.stagingStep };
     sealedBeforePreflight = (fs.statSync(path.join(request.appPath, 'Contents')).mode & 0o222) === 0;
     assert.equal(request.appPath, incoming);
     assert.equal(request.liveStateDir, manager.runtime.stateDir);
@@ -3472,6 +3474,7 @@ test('a staged release is sealed read-only and a failed preflight keeps it from 
   await manager.autoCheck();
   const state = await manager.prestagePromise;
   assert.equal(sealedBeforePreflight, true, 'the bytes preflighted are the bytes that would be installed');
+  assert.deepEqual(shownDuringPreflight, { phase: 'staging', step: 'preflight' }, 'the minutes-long preflight is said as itself, not as more verifying');
   assert.equal(state.phase, 'failed', 'shown, not folded back into a quiet offer');
   assert.match(state.error, /no pasó su prueba antes de instalarse \(ningún agente quedó listo\)\. Sigue instalada 1\.1\.0\./);
   assert.equal(state.receipt.step, 'preflight');
