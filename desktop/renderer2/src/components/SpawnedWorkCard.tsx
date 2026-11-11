@@ -251,6 +251,31 @@ export function BackgroundJobs({ chat, running, nowMs, context }: { chat: Chat; 
   );
 }
 
+// Always-on services (role "service"): supervised like any job but not work, so
+// they are not counted above and sit in ONE closed line. Open, the same rows as
+// any job (output, stop). Opening ticks its own clock; closed, nothing ticks.
+export function ServiceJobs({ chat, services, context }: { chat: Chat; services: readonly SpawnedWorkItem[]; context: MachineContext }) {
+  const [open, setOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (!open) return;
+    setNowMs(Date.now());
+    const iv = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [open]);
+  if (services.length === 0) return null;
+  return (
+    <div className={`wq wsv${open ? ' open' : ''}`}>
+      <button type="button" className="wq-sum" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <span className="wq-chev" aria-hidden="true">{open ? <IcChevDown /> : <IcChevron />}</span>
+        <span className="wq-lead">Servicios · {services.length}</span>
+        <span className="wq-nx">{open ? 'siempre activos' : 'siempre activos, supervisados'}</span>
+      </button>
+      {open && services.map((item) => <JobRow key={item.id} chat={chat} item={item} nowMs={nowMs} context={context} />)}
+    </div>
+  );
+}
+
 function QueueRow({ chat, item, position, nowMs }: { chat: Chat; item: SpawnedWorkItem; position: number; nowMs: number }) {
   const { canStop, stopping, stop } = useWorkStop(chat, item);
   const label = workLabel(item);

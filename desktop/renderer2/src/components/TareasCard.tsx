@@ -5,7 +5,7 @@ import { extractSubagents, nodeState } from './messages';
 import { currentTurnMessages, nestSpawnedWork, reconcileSubagentWork, type SubagentNode } from '../subagent-layout';
 import { backgroundWork, loadSegments, machineLoads, workTotals, type MachineContext } from '../rail-work';
 import { SubagentRow } from './SubagentRow';
-import { BackgroundJobs, FinishedWork, MachineGlyph, SpawnedWorkDoneKids, SpawnedWorkKids, WorkQueue } from './SpawnedWorkCard';
+import { BackgroundJobs, FinishedWork, MachineGlyph, ServiceJobs, SpawnedWorkDoneKids, SpawnedWorkKids, WorkQueue } from './SpawnedWorkCard';
 import { ProgramadoSection, programadoCount } from './Automations';
 
 // Everything the Trabajos tab draws, and its count: the turn's subagents (the
@@ -23,10 +23,10 @@ export function trabajosModel(chat: Chat | null) {
   const runningNodes = nodes.filter((n) => nodeState(n) === 'running');
   // A cancelled child leaves the rail; its card stays in the conversation.
   const doneNodes = nodes.filter((n) => nodeState(n) !== 'running' && nodeState(n) !== 'cancelled');
-  const { running, queued } = backgroundWork(work);
+  const { running, queued, services } = backgroundWork(work);
   // What is scheduled for this chat counts too (Programado, below the queue).
   const scheduled = programadoCount(chat);
-  return { runningNodes, doneNodes, byParent, running, queued, scheduled, count: runningNodes.length + running.length + queued.length + scheduled };
+  return { runningNodes, doneNodes, byParent, running, queued, services, scheduled, count: runningNodes.length + running.length + queued.length + scheduled };
 }
 
 export function machineContextFor(chat: Chat | null): MachineContext {
@@ -45,14 +45,14 @@ export function TareasCard() {
   const cardRef = useRef<HTMLElement>(null);
 
   const chat = store.active();
-  const { runningNodes, doneNodes, byParent, running, queued, scheduled } = trabajosModel(chat);
+  const { runningNodes, doneNodes, byParent, running, queued, services, scheduled } = trabajosModel(chat);
   const context = machineContextFor(chat);
   const kidsOf = (n: SubagentNode) => chat && n.work ? <SpawnedWorkKids chat={chat} items={byParent.get(n.work.taskId)} nowMs={nowMs} /> : null;
   const doneKidsOf = (n: SubagentNode) => n.work ? <SpawnedWorkDoneKids items={byParent.get(n.work.taskId)} nowMs={nowMs} calls={n.calls} /> : null;
   const live = runningNodes.length + running.length + queued.length > 0;
   const totals = workTotals(runningNodes.length, running.length, queued.length);
   const loads = machineLoads(running, queued, context);
-  const empty = runningNodes.length + doneNodes.length + running.length + queued.length + scheduled === 0;
+  const empty = runningNodes.length + doneNodes.length + running.length + queued.length + services.length + scheduled === 0;
 
   useEffect(() => {
     if (!live) return;
@@ -107,6 +107,7 @@ export function TareasCard() {
       )}
       {chat && <BackgroundJobs chat={chat} running={running} nowMs={nowMs} context={context} />}
       {chat && <WorkQueue chat={chat} queued={queued} nowMs={nowMs} context={context} />}
+      {chat && <ServiceJobs chat={chat} services={services} context={context} />}
       {chat && <ProgramadoSection chat={chat} />}
       {chat && <FinishedWork chat={chat} />}
     </section>

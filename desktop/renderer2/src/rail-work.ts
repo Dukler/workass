@@ -16,16 +16,29 @@ export function isQueuedWork(item: Pick<SpawnedWorkItem, 'status' | 'queuedAt' |
 /** The chat's own background work: running rows and the ones still waiting.
  *  Agent work is drawn as subagent rows, and work an agent started hangs under
  *  that agent, so neither is counted here. */
-export function backgroundWork(work: readonly SpawnedWorkItem[]): { running: SpawnedWorkItem[]; queued: SpawnedWorkItem[] } {
+export function backgroundWork(work: readonly SpawnedWorkItem[]): { running: SpawnedWorkItem[]; queued: SpawnedWorkItem[]; services: SpawnedWorkItem[] } {
   const { nested } = nestSpawnedWork(work);
   const live = work.filter((item) => item.status === 'running' && !isAgentWork(item) && !nested.has(item.id));
   // Longest running first: a new job joins at the bottom, so rows never shift
   // under the pointer, and the cap folds away the newest, not the oldest.
-  const running = live.filter((item) => !isQueuedWork(item))
+  const started = live.filter((item) => !isQueuedWork(item))
     .map((item, index) => ({ item, index, at: stamp(item.execStartedAt || item.startedAt) }))
     .sort((a, b) => a.at - b.at || a.index - b.index)
     .map(({ item }) => item);
-  return { running, queued: live.filter(isQueuedWork) };
+  // A running service (role 'service': expected never to finish, e.g. an
+  // always-on pipeline) stays supervised but is not "work": it is kept out of
+  // the running rows and every count and folds into one closed line. It
+  // rejoins the main flow by leaving 'running' (exit, failure, stale), which
+  // the daemon reports as finished work.
+  return {
+    running: started.filter((item) => !isServiceWork(item)),
+    queued: live.filter(isQueuedWork),
+    services: started.filter(isServiceWork),
+  };
+}
+
+export function isServiceWork(item: Pick<SpawnedWorkItem, 'role'>): boolean {
+  return item.role === 'service';
 }
 
 export interface WorkMachine {

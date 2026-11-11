@@ -622,7 +622,7 @@ JSON
   General: agent, model, effort, permissions), resolved as the composer does,
   unless the report names `provider_id`/`model_id`/`effort`/`mode_id`. The
   default's permission mode applies only when the reporting chat already runs at
-  that level or above, so it never stops to ask for approval. The checkout is found from `repo_dir` (remembered),
+  that level or above, so it never stops to ask for approval. With no `mode_id` the fixing chat starts at the agent's full-access mode, on the same condition (the reporter holds full access). The checkout is found from `repo_dir` (remembered),
   `$WORKASS_SOURCE_DIR`, the daemon's own directory, or the reporting chat's
   directory; if none is found the report is still saved and the answer says
   so, and a retry with the same `operation_id` and `repo_dir` opens the chat.

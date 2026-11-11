@@ -31,6 +31,20 @@ test('background work splits into running rows and the queue; agents and their o
   assert.deepEqual(queued.map((item) => item.id), ['waits']);
 });
 
+test('a running service folds out of the running rows; once it stops it is no longer a service row', () => {
+  const work = [
+    job('train'),
+    job('pipe', { role: 'service', startedAt: ago(19 * 3600_000) }),
+    job('pipe2', { role: 'service' }),
+    job('queued-svc', { role: 'service', queuedAt: ago(5000) }),
+    job('dead', { role: 'service', status: 'failed', finishedAt: ago(1000) }),
+  ];
+  const { running, queued, services } = backgroundWork(work);
+  assert.deepEqual(running.map((item) => item.id), ['train']);
+  assert.deepEqual(services.map((item) => item.id), ['pipe', 'pipe2']);
+  assert.deepEqual(queued.map((item) => item.id), ['queued-svc']);
+});
+
 test('a row runs where the chat lives unless it names another host', () => {
   assert.deepEqual(workMachine(job('a'), context), { key: '', name: 'workbench', local: true });
   assert.deepEqual(workMachine(job('b', { hostMachine: 'm-self' }), context), { key: '', name: 'workbench', local: true });

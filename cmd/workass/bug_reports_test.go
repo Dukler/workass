@@ -207,4 +207,22 @@ func TestTheFixingChatStartsOnWorkassNewChatDefault(t *testing.T) {
 	if state.Presentation.CurrentModeID != "bypass" {
 		t.Fatalf("a full-access reporter's fixing chat runs mode %q, want the default bypass", state.Presentation.CurrentModeID)
 	}
+	// With no default naming a mode, the fixing chat still starts at full access
+	// when its reporter holds it.
+	harness.handler.agentControl.settings = func() map[string]any {
+		return map[string]any{"newChat": map[string]any{"providerId": "mock", "model": chosen, "effort": effort}}
+	}
+	report, err = bugCall(t, harness, "bug.report", map[string]any{
+		"operation_id": "bug-full-by-default", "title": "the fixing chat asks for permissions",
+		"what_happened": "it opened at a lower mode", "expected": "allow everything",
+		"repro_steps": []any{"report a bug"}, "severity": "low", "workaround": "none",
+		"log_paths": []any{logFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ = harness.runtime.Snapshot(fieldString(mapFromAnyMain(report["thread"]), "chat_id"))
+	if state.Presentation.CurrentModeID != "bypass" {
+		t.Fatalf("a full-access reporter's fixing chat runs mode %q, want full access (bypass)", state.Presentation.CurrentModeID)
+	}
 }

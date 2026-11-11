@@ -568,6 +568,19 @@ func (h *agentControlHandler) openBugFixThread(ctx context.Context, root, ownerK
 			create[key] = value
 		}
 	}
+	// The fixing chat starts with full access unless the reporter named a mode:
+	// it reproduces, edits, builds and ships, and a permission card on each step
+	// stalls a chat nobody is watching (owner, 2026-11-11). The permission
+	// ceiling still holds: a reporter below full access cannot hand out more than
+	// it has, and a card would hold this call for a person, so such a chat opens
+	// at the default above and the owner raises it.
+	if fieldString(params, "mode_id") == "" {
+		providerID := fieldString(create, "provider_id")
+		if fullMode := h.bugFixFullAccessMode(ctx, providerID); fullMode != "" &&
+			!permissionChangeRaises(h.permissionCallerFor(ctx, ownerKey, tabID, chatID), permissionChange{providerID: providerID, modeID: fullMode}) {
+			create["mode_id"] = fullMode
+		}
+	}
 	created, err := h.chats.createOnThisMachine(h.withPermissionGate(ctx, ownerKey, tabID, chatID), create)
 	if err != nil {
 		return fail(fmt.Errorf("the fixing chat could not be created: %w", err))
@@ -727,6 +740,27 @@ func (h *agentControlHandler) updateBugReport(root, tabID, chatID string, params
 		return nil, err
 	}
 	return map[string]any{"ok": true, "replayed": false, "bug_id": report.ID, "status": report.Status}, nil
+}
+
+// bugFixFullAccessMode is the provider's own full-access mode on this machine,
+// or empty when the provider is unnamed, not ready, or offers none.
+func (h *agentControlHandler) bugFixFullAccessMode(ctx context.Context, providerID string) string {
+	providerID = strings.TrimSpace(providerID)
+	if h == nil || h.manager == nil || providerID == "" {
+		return ""
+	}
+	groups, _ := h.manager.Catalog(ctx)["groups"].([]acp.CatalogGroup)
+	for _, group := range groups {
+		if group.ProviderID != providerID || (group.Status != "" && group.Status != "ready") {
+			continue
+		}
+		for _, offered := range group.Modes {
+			if acp.PermissionLevel(providerID, offered.ID) == fleetLimitFull {
+				return offered.ID
+			}
+		}
+	}
+	return ""
 }
 
 // newChatDefaultControls is Ajustes · General's new-chat agent, model, effort
