@@ -237,9 +237,13 @@ export function firingSegments(alerts: ReadonlyArray<Alert>, now: Date): Seg[] {
   const sorted = [...alerts].sort((a, b) => (time(a.startsAt) || 0) - (time(b.startsAt) || 0));
   const worst = worstSeverity(sorted);
   const segs: Seg[] = [];
+  let prev = '';
   sorted.forEach((alert, i) => {
     const at = dateOf(alert.startsAt);
-    const since = at ? `desde ${atText(at, now)}` : '';
+    const full = at ? `desde ${atText(at, now)}` : '';
+    // Same minute as the one before: say it once ("Dispara A y B desde las 21:19").
+    const since = full === prev ? '' : full;
+    prev = full;
     const note: Seg[] = severityOf(alert) !== worst ? [' ', { muted: `(${SEVERITY_WORD[severityOf(alert)]})` }] : [];
     if (i === 0) {
       segs.push('Dispara ', { rule: alert.ruleTitle }, since ? ` ${since}` : '', ...note);
@@ -414,8 +418,11 @@ export function buildHandoff(alerts: ReadonlyArray<Alert>, connector: Connector 
   const machine = sorted.find((a) => a.machine)?.machine ?? '';
   const who = machine || (connector ? `Grafana · ${connector.name}` : 'Grafana');
   let say = `${who} dispara`;
+  let prev = '';
   sorted.forEach((alert, i) => {
-    const since = sinceWords(alert, now);
+    const full = sinceWords(alert, now);
+    const since = full === prev ? '' : full;
+    prev = full;
     if (i === 0) say += ` «${alert.ruleTitle}»${since ? ` ${since}` : ''}`;
     else say += `${i === sorted.length - 1 ? ' y' : ','}${since ? `, ${since},` : ''} «${alert.ruleTitle}»`;
   });

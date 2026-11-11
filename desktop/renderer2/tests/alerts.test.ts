@@ -99,6 +99,9 @@ test('the Parte reads one situation per connector and machine, the undecided and
   assert.equal(words(h.firingSegments(gold.alerts.map((e) => e.alert), now)),
     'Dispara DepthCut camera moved: calibration stale desde las 21:14 y, desde las 21:15, DepthCut camera moved: running on re-aim bridge (aviso).');
   assert.equal(words(h.ownerSegments(gold.alerts.map((e) => e.alert), () => null, now)), 'Nadie se ocupa.');
+  const same = [alert({ id: 'gf-1:s1', startsAt: at(21, 19) }), alert({ id: 'gf-1:s2', ruleTitle: 'B', severity: 'warning', startsAt: at(21, 19) })];
+  assert.equal(words(h.firingSegments(same, now)),
+    'Dispara DepthCut camera moved: calibration stale desde las 21:19 y B (aviso).', 'one time said once');
   const disk = situations[1].alerts.map((e) => e.alert);
   const chat = { key: 'tab-9', title: 'Disco de duklerfin', working: new Date(2026, 10, 10, 21, 8) };
   assert.equal(words(h.ownerSegments(disk, () => chat, now)), 'La lleva el chat Disco de duklerfin, que trabaja hace 12 min.');
