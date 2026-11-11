@@ -974,6 +974,21 @@ export interface WorkassApi {
   // its provider sessions last reported; cancel drops one scheduled message.
   automationsList?: () => Promise<{ items: AutomationItem[] }>;
   automationsCancel?: (o: { tabId: string; chatId: string; id: string }) => Promise<{ ok: boolean; id: string; status: string }>;
+  // Conectores + alertas (docs/specs/connectors-alerts.md): connectors live on
+  // the daemon that listens; alerts never open or touch a chat by themselves.
+  connectorsList?: () => Promise<{ connectors: Connector[] }>;
+  connectorsSet?: (o: ConnectorSetArgs) => Promise<{ connector: Connector; webhookSecret?: string }>;
+  connectorsRemove?: (o: { id: string }) => Promise<{ ok: boolean }>;
+  connectorsTest?: (o: { id: string } | { url: string; token: string }) => Promise<ConnectorTestResult>;
+  connectorsRotateSecret?: (o: { id: string }) => Promise<{ webhookSecret: string }>;
+  // Moving a connector to another listening machine: handover on the old
+  // daemon, adopt on the new one, then remove on the old one.
+  connectorsHandover?: (o: { id: string }) => Promise<ConnectorHandover>;
+  connectorsAdopt?: (o: ConnectorAdoptArgs) => Promise<{ connector: Connector }>;
+  alertsList?: () => Promise<{ alerts: Alert[] }>;
+  alertsAct?: (o: AlertActArgs) => Promise<{ alerts: Alert[] }>;
+  onAlertsChanged?: (cb: (e: AlertsChanged) => void) => void;
+  onConnectorsChanged?: (cb: (e: { connectors: Connector[] }) => void) => void;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
   spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;
@@ -1182,4 +1197,97 @@ export interface AutomationItem {
   schedule?: string;
   recurring?: boolean;
   reportedAt?: string;
+}
+
+// ---- Conectores + alertas (docs/specs/connectors-alerts.md) ----------------
+
+export type AlertSeverity = 'critical' | 'warning' | 'info';
+export type ConnectorNotify = 'never' | 'critical' | 'all';
+/** Where a hand-off chat opens; machineId '' is the client's own machine. */
+export interface ConnectorTarget { machineId: string; cwd: string }
+export interface ConnectorRule {
+  key: string;
+  title: string;
+  folder?: string;
+  severity?: AlertSeverity;
+  enabled: boolean;
+  seenAt?: string;
+}
+export interface Connector {
+  id: string;
+  kind: 'grafana';
+  name: string;
+  url: string;
+  mode: 'poll' | 'webhook';
+  hasToken?: boolean;
+  tokenHint?: string;
+  webhookPath?: string;
+  hasWebhookSecret?: boolean;
+  status?: { state: 'ok' | 'error' | 'idle'; lastOkAt?: string; error?: string };
+  rules?: ConnectorRule[];
+  notify?: ConnectorNotify;
+  target?: ConnectorTarget;
+  ruleTargets?: Record<string, ConnectorTarget>;
+  guidePattern?: string;
+  machineLabels?: string[];
+}
+export interface ConnectorSetArgs {
+  id?: string;
+  name: string;
+  url: string;
+  mode: 'poll' | 'webhook';
+  /** Write-only: omitted keeps the stored one, '' clears it. */
+  token?: string;
+  notify: ConnectorNotify;
+  target: ConnectorTarget;
+  ruleTargets: Record<string, ConnectorTarget>;
+  guidePattern: string;
+  rules?: Array<{ key: string; enabled: boolean }>;
+}
+export interface ConnectorTestResult { ok: boolean; error?: string; rules?: number; firing?: number }
+export interface AlertLink { machineId: string; tabId: string; chatId: string; at?: string }
+export interface Alert {
+  id: string;
+  connectorId: string;
+  ruleKey: string;
+  ruleTitle: string;
+  severity: AlertSeverity;
+  machine: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  values?: Record<string, number>;
+  state: 'firing' | 'resolved';
+  startsAt: string;
+  endsAt?: string;
+  lastSeenAt?: string;
+  repeats?: number;
+  lastRepeatAt?: string;
+  generatorURL?: string;
+  silencedUntil?: string;
+  dismissedAt?: string;
+  link?: AlertLink;
+  history?: Array<{ at: string; state: 'firing' | 'resolved' }>;
+}
+export type AlertActArgs =
+  | { ids: string[]; action: 'silence'; minutes: number }
+  | { ids: string[]; action: 'unsilence' | 'dismiss' | 'undismiss' }
+  | { ids: string[]; action: 'link'; link: { machineId: string; tabId: string; chatId: string } };
+/** alerts:changed: the changed alerts, the ids that began a new episode, and
+ *  the ids the daemon dropped (pruned, or their connector removed). */
+export interface AlertsChanged { alerts: Alert[]; announce?: string[]; removed?: string[] }
+/** connectors:handover on the daemon that listens now: what another daemon
+ *  needs to take the connector over. The token lives only in that flow. */
+export interface ConnectorHandover {
+  connector: Connector;
+  token?: string;
+  webhookSecretHash?: string;
+  alerts?: Alert[];
+}
+export interface ConnectorAdoptArgs {
+  connector: Connector;
+  token?: string;
+  webhookSecretHash?: string;
+  alerts: Alert[];
+  /** The address as the adopting machine reaches Grafana. */
+  url: string;
 }

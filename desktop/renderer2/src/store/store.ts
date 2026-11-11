@@ -3200,6 +3200,9 @@ export class Store {
       // A remote chat's images load by URL from its own daemon, with that
       // machine's image key; without one they are read over its socket.
       setRemoteChatImageAccess((machineId) => this.machines?.imageAccess(machineId) ?? null);
+      // Machine-wide events a feature reads raw, with the machine it came from
+      // (alerts:changed, connectors:changed). Subscribed before the book existed.
+      for (const [channel, cb] of this.machineEventSubs) this.machines.subscribeRemote(channel, cb);
       // Another renderer can mutate the actor without this window issuing a
       // command. Job events do not contain user attachments or every steer
       // boundary, so reconcile the owning actor's revision on its refresh
@@ -4006,6 +4009,13 @@ export class Store {
   }
   /** One call on another machine's daemon over its own link (Automatizaciones
    *  reads and cancels there). Throws when that machine is not linked. */
+  private machineEventSubs: Array<[string, (payload: unknown, machineId: string) => void]> = [];
+  /** One event channel from every paired machine, untagged, with its machine
+   *  id (Conectores + alertas). Holds for machines mounted later too. */
+  subscribeMachineEvent(channel: string, cb: (payload: unknown, machineId: string) => void): void {
+    this.machineEventSubs.push([channel, cb]);
+    this.machines?.subscribeRemote(channel, cb);
+  }
   async invokeOnMachine<T>(machineId: string, channel: string, ...args: unknown[]): Promise<T> {
     const link = this.machines?.linkFor(machineId);
     if (!link) throw new Error('Esa máquina no está conectada.');

@@ -13,14 +13,15 @@ const accounts = readFileSync(new URL('../src/components/AccountsPage.tsx', impo
 const settings = readFileSync(new URL('../src/components/Settings.tsx', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
 
-test('the foot is four icons, Ajustes, Cuentas, Automatizaciones and Actualizaciones, and no account menu', () => {
+test('the foot is five icons, Ajustes, Cuentas, Automatizaciones, Alertas and Actualizaciones, and no account menu', () => {
   const bar = sidebar.slice(sidebar.indexOf('export function FooterBar()'));
   assert.equal(bar.match(/className=\{?[`"]footbtn/g)?.length, 2);
   // Opening Ajustes closes the pages that cover the chat (Cuentas, Automatizaciones).
   assert.match(bar, /aria-label="Ajustes"[\s\S]{0,80}onClick=\{\(\) => \{ if \(!app\.settingsOpen\) \{ closeAccounts\(\); closeAutomations\(\); \} store\.toggleSettings\(\); \}\}/);
   assert.match(bar, /<IcDownload \/>/);
   // 2026-11-09: Cuentas (AccountsPage.tsx) and Automatizaciones (Automations.tsx) sit between them.
-  const order = ['<IcGear />', '<AccountsFootButton />', '<AutomationsFootButton />', '<IcDownload />'].map((token) => bar.indexOf(token));
+  // 2026-11-10: the bell (Alerts.tsx) between Automatizaciones and Actualizaciones.
+  const order = ['<IcGear />', '<AccountsFootButton />', '<AutomationsFootButton />', '<AlertsFootButton />', '<IcDownload />'].map((token) => bar.indexOf(token));
   assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), `foot order ${order}`);
   const button = accounts.slice(accounts.indexOf('export function AccountsFootButton()'));
   assert.match(button, /const shown = open && !app\.settingsOpen;/);

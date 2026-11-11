@@ -12,6 +12,7 @@ import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { AccountsFootButton, closeAccounts } from './AccountsPage';
 import { AutomationsFootButton, closeAutomations } from './Automations';
+import { AlertsFootButton } from './Alerts';
 
 // What is currently being dragged in the sidebar. `id` is the chat.id for a
 // thread or the workspace path for a folder. Drag state lives in <Sidebar> and
@@ -732,6 +733,7 @@ export function FooterBar() {
       </button>
       <AccountsFootButton />
       <AutomationsFootButton />
+      <AlertsFootButton />
       <button type="button" className={`footbtn${open ? ' on' : ''}`} title={title} aria-label={title}
         aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <IcDownload />
