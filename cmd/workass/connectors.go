@@ -19,8 +19,9 @@ import (
 //   - connectors:list / alerts:list are reads.
 //   - connectors:test fetches Grafana once (10 s bound), so it is a
 //     concurrent read that never holds the ordered lane.
-//   - connectors:set, connectors:remove, connectors:rotate-secret and
-//     alerts:act are mutating (internal/wire mutatingChannels).
+//   - connectors:set, connectors:remove, connectors:rotate-secret,
+//     connectors:handover, connectors:adopt and alerts:act are mutating
+//     (internal/wire mutatingChannels).
 //   - events connectors:changed {connectors} and alerts:changed {alerts,
 //     announce} come from the service itself.
 
@@ -91,6 +92,29 @@ func registerConnectorHandlers(hub *wire.Hub, svc *connectors.Service) int {
 		}
 		return map[string]any{"webhookSecret": secret}, nil
 	})
+	// Moving the machine that listens: handover (old listener, the only reply
+	// that carries a secret, to the controller only, never logged) then adopt
+	// (new listener, same id, alerts kept, nothing announced).
+	hub.Register("connectors:handover", func(args []any) (any, error) {
+		if svc == nil {
+			return nil, unavailable
+		}
+		return svc.Handover(fieldString(firstMapArg(args), "id"))
+	})
+	hub.Register("connectors:adopt", func(args []any) (any, error) {
+		if svc == nil {
+			return nil, unavailable
+		}
+		var req connectors.AdoptRequest
+		if err := decodeConnectorArg(args, &req); err != nil {
+			return nil, errors.New("connectors:adopt needs {connector, token?, webhookSecretHash?, alerts, url?}")
+		}
+		connector, err := svc.Adopt(req)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"connector": connector}, nil
+	})
 	hub.Register("alerts:list", func(args []any) (any, error) {
 		if svc == nil {
 			return map[string]any{"alerts": []connectors.Alert{}}, nil
@@ -111,7 +135,7 @@ func registerConnectorHandlers(hub *wire.Hub, svc *connectors.Service) int {
 		}
 		return map[string]any{"alerts": changed}, nil
 	})
-	return 7
+	return 9
 }
 
 // connectorWebhookHandler is the daemon mux route for Grafana's webhook

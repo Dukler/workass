@@ -481,7 +481,8 @@ that are Electron-shell-local (dialogs, clipboard, window state) stay in the she
 Conectores + alerts (`docs/specs/connectors-alerts.md`, `internal/connectors`,
 `cmd/workass/connectors.go`), additive: reads `connectors:list`, `alerts:list` and
 `connectors:test` (one Grafana fetch, a concurrent read); mutating
-`connectors:set`, `connectors:remove`, `connectors:rotate-secret`, `alerts:act`;
+`connectors:set`, `connectors:remove`, `connectors:rotate-secret`, `alerts:act`,
+`connectors:handover` (the only reply with a secret, to the controller) and `connectors:adopt`;
 events `connectors:changed {connectors}` and `alerts:changed {alerts, announce}`
 (plus an additive `removed: [id]` when alerts are pruned or their connector is
 removed). Grafana's webhook contact point posts to the HTTP route

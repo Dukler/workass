@@ -33,7 +33,7 @@ func TestConnectorChannelsKeepReadsPassiveAndDecisionsMutating(t *testing.T) {
 			t.Fatalf("%s must remain a passive read", read)
 		}
 	}
-	for _, write := range []string{"connectors:set", "connectors:remove", "connectors:rotate-secret", "alerts:act"} {
+	for _, write := range []string{"connectors:set", "connectors:remove", "connectors:rotate-secret", "connectors:handover", "connectors:adopt", "alerts:act"} {
 		if _, ok := mutatingChannels[write]; !ok {
 			t.Fatalf("%s must take the controller lease", write)
 		}

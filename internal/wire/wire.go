@@ -62,6 +62,9 @@ var mutatingChannels = map[string]struct{}{
 	"connectors:remove":        {},
 	"connectors:rotate-secret": {},
 	"alerts:act":               {},
+	// Moving the listener: handover returns the secrets to the controller.
+	"connectors:handover": {},
+	"connectors:adopt":    {},
 	// Names a chat: changes its title and starts an agent process.
 	"app-chat:auto-title":         {},
 	"app-chat:reset":              {},

@@ -71,6 +71,37 @@ func TestConnectorChannelsRoundTripWithoutSecrets(t *testing.T) {
 	if err != nil || raw.(map[string]any)["webhookSecret"] == secret {
 		t.Fatalf("rotate = %#v %v", raw, err)
 	}
+	// Moving the listener: handover here, adopt on a second daemon's hub.
+	raw, err = hub.Invoke("connectors:handover", []any{map[string]any{"id": connector.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoverJSON, _ := json.Marshal(raw)
+	var adoptArg map[string]any
+	if err := json.Unmarshal(handoverJSON, &adoptArg); err != nil || adoptArg["token"] != token || adoptArg["webhookSecretHash"] == "" {
+		t.Fatalf("handover = %s", handoverJSON)
+	}
+	other, err := connectors.Open(connectors.Options{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(other.Close)
+	otherHub := wire.NewHub()
+	registerConnectorHandlers(otherHub, other)
+	adoptArg["url"] = "http://100.64.0.9:13000"
+	raw, err = otherHub.Invoke("connectors:adopt", []any{adoptArg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved := raw.(map[string]any)["connector"].(connectors.Connector); moved.ID != connector.ID || moved.URL != "http://100.64.0.9:13000" {
+		t.Fatalf("adopt = %#v", moved)
+	}
+	if moved, _ := otherHub.Invoke("alerts:list", nil); len(moved.(map[string]any)["alerts"].([]connectors.Alert)) != 1 {
+		t.Fatalf("alerts after adopt = %#v", moved)
+	}
+	if _, err := hub.Invoke("connectors:handover", []any{map[string]any{"id": "gf-00000000"}}); err == nil {
+		t.Fatal("handover of an unknown id succeeded")
+	}
 	if _, err := hub.Invoke("connectors:remove", []any{map[string]any{"id": connector.ID}}); err != nil {
 		t.Fatal(err)
 	}

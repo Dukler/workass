@@ -260,6 +260,8 @@ browser:set-active
 connectors:set
 connectors:remove
 connectors:rotate-secret
+connectors:handover
+connectors:adopt
 alerts:act
 ```
 

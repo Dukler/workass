@@ -256,6 +256,8 @@ const LANBridgeJS = `(() => {
     // Conectores + alerts (docs/specs/connectors-alerts.md): this daemon's connectors and their alerts.
     connectorsList: () => invoke('connectors:list'), connectorsSet: (o) => invoke('connectors:set', o || {}), connectorsRemove: (o) => invoke('connectors:remove', o || {}),
     connectorsTest: (o) => invoke('connectors:test', o || {}), connectorsRotateSecret: (o) => invoke('connectors:rotate-secret', o || {}),
+    // Moving the machine that listens: handover on the old daemon, adopt on the new one.
+    connectorsHandover: (o) => invoke('connectors:handover', o || {}), connectorsAdopt: (o) => invoke('connectors:adopt', o || {}),
     alertsList: () => invoke('alerts:list'), alertsAct: (o) => invoke('alerts:act', o || {}),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
     // Ajustes > Herramientas: Workass tool groups and what each costs, one
