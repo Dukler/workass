@@ -3393,19 +3393,55 @@ test('the preflight copies the live state again while the running daemon is writ
   const source = path.join(root, 'state');
   fs.mkdirSync(path.join(source, 'images'), { recursive: true });
   fs.writeFileSync(path.join(source, 'state.db'), 'db-1');
+  fs.writeFileSync(path.join(source, 'state.db-wal'), 'wal-1');
+  fs.writeFileSync(path.join(source, 'state.db-shm'), 'shm-1');
   fs.writeFileSync(path.join(source, 'images', 'a.png'), 'image');
   const destination = path.join(root, 'copy');
-  let copies = 0;
+  const calls = [];
+  let pairCopies = 0;
   const run = async (command, args) => {
-    copies += 1;
-    if (copies === 1) fs.writeFileSync(path.join(source, 'state.db'), 'db-written-during-copy');
+    const names = args.slice(3, -1).map((entry) => path.basename(entry));
+    calls.push(names);
+    if (names.includes('state.db')) {
+      pairCopies += 1;
+      if (pairCopies === 1) fs.appendFileSync(path.join(source, 'state.db-wal'), '+written-during-copy');
+    }
     execFileSync(command, args);
     return { status: 0, stdout: '' };
   };
   await cloneLiveState(source, destination, { run, pause: async () => {} });
-  assert.equal(copies, 2, 'a copy taken while the database moved is taken again');
-  assert.equal(fs.readFileSync(path.join(destination, 'state.db'), 'utf8'), 'db-written-during-copy');
+  assert.equal(pairCopies, 2, 'a database pair copied while it moved is copied again');
+  assert.equal(calls.filter((names) => names.includes('images')).length, 1, 'the bulk of the state is copied once');
+  assert.equal(fs.readFileSync(path.join(destination, 'state.db-wal'), 'utf8'), 'wal-1+written-during-copy');
   assert.equal(fs.readFileSync(path.join(destination, 'images', 'a.png'), 'utf8'), 'image', 'everything, images included');
+  assert.equal(fs.existsSync(path.join(destination, 'state.db-shm')), false, 'SQLite rebuilds the index from the log');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('the preflight copy finds its window when always-on jobs write the state while the bulk is copied', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workass-preflight-busy-'));
+  const source = path.join(root, 'state');
+  fs.mkdirSync(path.join(source, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'state.db'), 'db');
+  fs.writeFileSync(path.join(source, 'state.db-wal'), 'wal');
+  fs.writeFileSync(path.join(source, 'process-outbox.db'), 'outbox');
+  fs.writeFileSync(path.join(source, 'images', 'a.png'), 'image');
+  const destination = path.join(root, 'copy');
+  // The daemon writes through the whole slow bulk copy, as supervised jobs do.
+  const run = async (command, args) => {
+    if (args.some((entry) => entry.endsWith('images'))) fs.appendFileSync(path.join(source, 'state.db-wal'), 'x');
+    execFileSync(command, args);
+    return { status: 0, stdout: '' };
+  };
+  await cloneLiveState(source, destination, { run, pause: async () => {} });
+  assert.equal(fs.readFileSync(path.join(destination, 'state.db-wal'), 'utf8'), 'walx');
+  assert.equal(fs.readFileSync(path.join(destination, 'process-outbox.db'), 'utf8'), 'outbox');
+  const never = async (command, args) => {
+    execFileSync(command, args);
+    if (args.some((entry) => entry.endsWith('state.db'))) fs.appendFileSync(path.join(source, 'state.db-wal'), 'y');
+    return { status: 0, stdout: '' };
+  };
+  await assert.rejects(cloneLiveState(source, path.join(root, 'copy2'), { run: never, pause: async () => {}, attempts: 3 }), /kept changing/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

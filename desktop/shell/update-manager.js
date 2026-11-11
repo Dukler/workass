@@ -1024,43 +1024,55 @@ function runCommandAsync(command, args) {
   });
 }
 
-// A consistent copy of the live state while the running daemon may write it:
-// APFS clones of every file, retried until the database and its log did not
-// move during the copy (a copy taken while they move can be a torn pair).
+// A consistent copy of the live state while the running daemon may write it.
+// Everything is cloned (APFS) once; the SQLite databases and their logs, the
+// only files whose copy can be a torn pair, are then cloned on their own in a
+// window of a few milliseconds and retried until none of them moved inside it.
+// Timing the whole state (gigabytes of images, a database written every second
+// by always-on jobs) instead never found a quiet window. Each -shm index is
+// left out: SQLite rebuilds it from the log on open.
+const SQLITE_PAIR_FILE = /\.db(-wal)?$/;
+const SQLITE_INDEX_FILE = /\.db-shm$/;
+
 async function cloneLiveState(source, destination, {
   run = runCommandAsync,
-  attempts = 20,
+  attempts = 40,
   pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!fs.statSync(source, { throwIfNoEntry: false })?.isDirectory()) {
     fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
     return;
   }
-  const stamp = () => ['state.db', 'state.db-wal'].map((name) => {
+  const names = await fs.promises.readdir(source);
+  const pairNames = names.filter((name) => SQLITE_PAIR_FILE.test(name));
+  const restNames = names.filter((name) => !SQLITE_PAIR_FILE.test(name) && !SQLITE_INDEX_FILE.test(name));
+  const stamp = () => pairNames.map((name) => {
     const info = fs.statSync(path.join(source, name), { throwIfNoEntry: false, bigint: true });
     return info ? `${name}:${info.size}:${info.mtimeNs}` : `${name}:absent`;
   }).join('|');
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await fs.promises.rm(destination, { recursive: true, force: true });
-    await fs.promises.mkdir(destination, { recursive: true, mode: 0o700 });
-    const before = stamp();
-    const entries = (await fs.promises.readdir(source)).map((name) => path.join(source, name));
-    if (entries.length) {
-      const cloned = await run('/bin/cp', ['-c', '-R', '-p', ...entries, `${destination}/`]);
-      if (cloned.error || cloned.status !== 0) {
-        // Another volume: an ordinary copy (clones where it can).
-        await fs.promises.rm(destination, { recursive: true, force: true });
-        await fs.promises.mkdir(destination, { recursive: true, mode: 0o700 });
-        for (const entry of entries) {
-          await fs.promises.cp(entry, path.join(destination, path.basename(entry)), {
-            recursive: true, force: false, errorOnExist: true, dereference: false,
-            preserveTimestamps: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE,
-          });
-        }
-      }
+  const copy = async (entryNames) => {
+    if (!entryNames.length) return;
+    const entries = entryNames.map((name) => path.join(source, name));
+    const cloned = await run('/bin/cp', ['-c', '-R', '-p', ...entries, `${destination}/`]);
+    if (!cloned.error && cloned.status === 0) return;
+    // Another volume: an ordinary copy (clones where it can).
+    for (const name of entryNames) await fs.promises.rm(path.join(destination, name), { recursive: true, force: true });
+    for (const entry of entries) {
+      await fs.promises.cp(entry, path.join(destination, path.basename(entry)), {
+        recursive: true, force: false, errorOnExist: true, dereference: false,
+        preserveTimestamps: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE,
+      });
     }
+  };
+  await fs.promises.rm(destination, { recursive: true, force: true });
+  await fs.promises.mkdir(destination, { recursive: true, mode: 0o700 });
+  await copy(restNames);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    for (const name of pairNames) await fs.promises.rm(path.join(destination, name), { force: true });
+    const before = stamp();
+    await copy(pairNames);
     if (stamp() === before) return;
-    await pause(250);
+    await pause(25 + Math.floor(Math.random() * 100));
   }
   throw new Error('the state kept changing while it was copied');
 }
