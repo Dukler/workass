@@ -64,3 +64,90 @@ func TestJobStartCredentialOutlivesARestartAndEndsWithItsChat(t *testing.T) {
 		t.Fatal("a deleted chat's credential file is still there")
 	}
 }
+
+// The in-app updater boots a test daemon on a clone of the state. The clone's
+// token index still names the live credential files by absolute path, so that
+// daemon must leave every file outside its own state directory alone: a timer
+// holding the live file would otherwise be pointed at the test daemon's
+// temporary certificate and state, and every call after the update would fail.
+func TestJobStartCredentialFileOutsideThisStateIsNeverRewritten(t *testing.T) {
+	liveState := t.TempDir()
+	live := jobStartTestManager(t, liveState, "https://tools.localhost:18001")
+	binding, _, err := live.IssueJobStartToken("tab-a", "chat-a", "wa:m-x/chat/chat-a", "daily builder", "op-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(binding.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Reset()
+
+	cloneState := t.TempDir()
+	index := filepath.Join("tool-contexts", "job-start-tokens.json")
+	data, err := os.ReadFile(filepath.Join(liveState, index))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cloneState, "tool-contexts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloneState, index), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clone := jobStartTestManager(t, cloneState, "https://tools.localhost:61331")
+	config, err := toolcli.ReadConfig(binding.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := clone.JobStartTokenFor(config.Credential); !ok {
+		t.Fatal("the clone lost the credential")
+	}
+	if _, replayed, err := clone.IssueJobStartToken("tab-a", "chat-a", "wa:m-x/chat/chat-a", "daily builder", "op-1"); err != nil || !replayed {
+		t.Fatalf("replay: %v replayed=%v", err, replayed)
+	}
+	after, err := os.ReadFile(binding.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("a daemon on another state directory rewrote the live credential file:\nbefore %s\nafter  %s", before, after)
+	}
+	// Deleted by hand, the replay must not recreate it from the clone either.
+	if err := os.Remove(binding.File); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := clone.IssueJobStartToken("tab-a", "chat-a", "wa:m-x/chat/chat-a", "daily builder", "op-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(binding.File); !os.IsNotExist(err) {
+		t.Fatal("the clone wrote a credential file into the live state directory")
+	}
+}
+
+// A file the buggy updater already pointed at a vanished temporary directory is
+// repaired by the live daemon's next boot.
+func TestJobStartCredentialFileDamagedByAnUpdateIsRepairedAtBoot(t *testing.T) {
+	stateDir := t.TempDir()
+	first := jobStartTestManager(t, stateDir, "https://tools.localhost:18001")
+	binding, _, err := first.IssueJobStartToken("tab-a", "chat-a", "wa:m-x/chat/chat-a", "daily builder", "op-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := toolcli.ReadConfig(binding.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Reset()
+	damaged := config
+	damaged.CAFile, damaged.StateDir = "/var/folders/x/workass-preflight-1/data/state/daemon-cert.pem", "/var/folders/x/workass-preflight-1/data/state"
+	if err := toolcli.WriteConfig(binding.File, damaged); err != nil {
+		t.Fatal(err)
+	}
+	second := jobStartTestManager(t, stateDir, "https://tools.localhost:18001")
+	_ = second
+	fixed, err := toolcli.ReadConfig(binding.File)
+	if err != nil || fixed.CAFile != filepath.Join(stateDir, "ca.pem") || fixed.StateDir != stateDir {
+		t.Fatalf("not repaired: %#v %v", fixed, err)
+	}
+}

@@ -112,6 +112,9 @@ func (m *Manager) loadJobStartTokens() {
 		return
 	}
 	for token, binding := range m.jobStartTokens {
+		if !m.ownsJobStartFile(binding) {
+			continue
+		}
 		current, readErr := toolcli.ReadConfig(binding.File)
 		if readErr != nil {
 			continue
@@ -198,7 +201,7 @@ func (m *Manager) IssueJobStartToken(tabID, chatID, owner, label, operationID st
 			continue
 		}
 		if binding.OperationID == operationID {
-			if _, statErr := os.Stat(binding.File); statErr == nil {
+			if _, statErr := os.Stat(binding.File); statErr == nil || !m.ownsJobStartFile(binding) {
 				return binding, true, nil
 			}
 			// Its file is gone (deleted by hand), so the answer to the retry is
@@ -356,6 +359,18 @@ func (m *Manager) RevokeJobStartTokensForChat(tabID, chatID string) {
 	for _, binding := range removed {
 		m.removeJobStartFile(binding)
 	}
+}
+
+// ownsJobStartFile reports whether the credential's file sits where this daemon
+// writes them. The in-app updater boots a test daemon on a clone of the state,
+// and the clone's index still names the live files by absolute path; only a
+// file under the daemon's own state directory is ever rewritten or recreated.
+func (m *Manager) ownsJobStartFile(binding JobStartBinding) bool {
+	root := m.JobStartCredentialDir()
+	if root == "" || binding.ID == "" {
+		return false
+	}
+	return filepath.Clean(binding.File) == filepath.Join(root, binding.ID, "context.json")
 }
 
 // removeJobStartFile deletes a credential's own directory, and only one that
