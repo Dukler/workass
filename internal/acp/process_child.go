@@ -620,15 +620,23 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 		cursor := rec.SpoolSeq
 		supervisorGone := rec.Item.Status == "running" && rec.Item.SupervisorPID != nil &&
 			!procchild.PIDAlive(*rec.Item.SupervisorPID)
+		silent := rec.Item.Status == "running" && rec.Item.Reporting == processReportingSilent
 		m.spawnedWorkMu.Unlock()
 
-		// The one read of the outbox this daemon performs, and only for the one
-		// case the report path cannot cover: the supervisor is dead, so nobody
-		// is left to re-send what it queued. A supervisor that crashed between
-		// writing its settle and delivering it is NOT lost, and reading the
-		// queue it left is the difference between the truth and a guess.
+		// The outbox is read, by work id and for a row this daemon holds, only
+		// in the two cases the report path cannot cover. The supervisor is
+		// dead, so nobody is left to re-send what it queued: a supervisor that
+		// crashed between writing its settle and delivering it is NOT lost, and
+		// reading the queue it left is the difference between the truth and a
+		// guess. Or the supervisor is alive and its reports have already been
+		// declared missing: it is still writing its queue, and a cancel or an
+		// outcome sitting there must not wait on a channel that has stopped
+		// working (bug-20261111-dc171619: after an update a supervisor kept
+		// supervising, never reached the daemon again, stopped its job on
+		// request and then held on for two minutes trying to say so). The row
+		// stays marked silent: nothing here is a report.
 		drained := []procchild.Event{}
-		if supervisorGone {
+		if supervisorGone || silent {
 			drained = m.drainProcessChildOutbox(workID, cursor)
 		}
 
@@ -670,11 +678,20 @@ func (m *Manager) reconcileProcessChildren(now time.Time) {
 			m.reportProcessChildHoldLocked(rec, now, &events)
 		}
 		hadOutbox := rec.SpoolFile != ""
+		appliedThrough := rec.SpoolSeq
 		m.spawnedWorkMu.Unlock()
 		if len(events) > 0 {
 			// The log first, for the reason RegisterProcessChild gives.
 			m.emitProcessChildLifecycle(events)
 			m.commitProcessChildChange(candidate.tabID, candidate.chatID)
+		}
+		if silent && !supervisorGone && len(drained) > 0 {
+			// What was read here is acknowledged exactly as a report's ack
+			// would be, and after the log, for the same reason. The live
+			// supervisor finds its queue empty and stops waiting to deliver an
+			// outcome this daemon already has, and the delivered rows are what
+			// the retirement below is allowed to remove.
+			m.acknowledgeProcessChildOutbox(workID, appliedThrough)
 		}
 		if terminal && hadOutbox {
 			// The outcome is durable in the receipt and the entity log by now,
@@ -822,7 +839,7 @@ const maxSilenceNoticeText = 900
 func processSilenceText(rec *spawnedWorkRecord, silent time.Duration) string {
 	if !rec.AwaitingFirstReport {
 		return fmt.Sprintf(
-			"Not reporting: its supervisor (pid %d) is still running but this machine has heard nothing from it for %s, so its progress and its outcome are unknown until it reports again.",
+			"Not reporting: its supervisor (pid %d) is still running but this machine has heard nothing from it for %s, so its progress is unknown until it reports again; whatever it queues on this machine, its outcome included, is still read from its outbox.",
 			supervisorPIDOf(rec), silent.Round(time.Second))
 	}
 	text := fmt.Sprintf(
@@ -925,6 +942,20 @@ func (m *Manager) closeProcessOutbox() {
 	m.processOutboxMu.Unlock()
 	if outbox != nil {
 		_ = outbox.Close()
+	}
+}
+
+// acknowledgeProcessChildOutbox marks one child's events delivered through a
+// seq this daemon has applied without a report carrying them.
+func (m *Manager) acknowledgeProcessChildOutbox(workID string, through uint64) {
+	outbox := m.processOutbox()
+	if outbox == nil || through == 0 {
+		return
+	}
+	if err := outbox.MarkDelivered(workID, through); err != nil {
+		m.opts.Logf("could not acknowledge a silent supervised job's outbox", map[string]any{
+			"workId": workID, "error": redactSensitiveText(err.Error()),
+		})
 	}
 }
 

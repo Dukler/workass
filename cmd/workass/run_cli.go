@@ -85,7 +85,10 @@ update status names the job. Every transition is REPORTED to
 this machine's daemon and acknowledged by it; the outbox (state/process-outbox.db)
 is the write-ahead copy, so a daemon that is down misses nothing and the backlog
 drains in order when it answers. A supervisor that cannot report says so on
-stderr and in its receipt, and keeps trying. A supervisor pid that is gone with
+stderr (with --quiet, in <output>.supervisor.log beside the job's output) and in
+its receipt, and keeps trying. Once this machine has marked such a job silent it
+reads that job's outbox itself, so a cancel or an outcome still lands. A
+supervisor pid that is gone with
 no settled event means lost, not running.
 
 `)
@@ -149,7 +152,15 @@ no settled event means lost, not running.
 
 	diagnostics := io.Writer(stderr)
 	if *quiet {
-		diagnostics = io.Discard
+		// Quiet keeps the supervisor's own lines off the caller's stream, never
+		// out of existence. "NOT REPORTING" and the reason a report was refused
+		// are the one record of a job that went silent (bug-20261111-dc171619:
+		// a quiet supervisor stopped reporting after an update and nothing on
+		// the machine said why), so they go next to the job's output.
+		diagnostics = quietSupervisorLog(resolvedStateDir, id, *label, strings.TrimSpace(*outputFile))
+		if closer, ok := diagnostics.(io.Closer); ok {
+			defer closer.Close()
+		}
 	}
 	spec := procchild.Spec{
 		StateDir: resolvedStateDir, OperationID: id, Label: *label, Role: *role,
@@ -325,4 +336,34 @@ func randomOperationID() (string, error) {
 	}
 	return "run-" + base64.RawURLEncoding.EncodeToString(buf) + "-" +
 		fmt.Sprintf("%d", time.Now().UTC().UnixNano()), nil
+}
+
+// quietSupervisorLog is where a --quiet run's diagnostics go: the same
+// <output>.supervisor.log a daemon-started supervisor writes, appended to, so a
+// daemon-started run that also passed --quiet still has one log. A log that
+// cannot be opened falls back to discarding, as --quiet always did: the run
+// itself must not fail for want of somewhere to complain.
+func quietSupervisorLog(stateDir, operationID, label, explicitOutput string) io.Writer {
+	childID, err := procchild.IDForOperation(operationID)
+	if err != nil {
+		return io.Discard
+	}
+	output, err := procchild.OutputPath(stateDir, childID, explicitOutput)
+	if err != nil {
+		return io.Discard
+	}
+	path := procchild.SupervisorLogPath(output)
+	if path == "" {
+		return io.Discard
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return io.Discard
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return io.Discard
+	}
+	fmt.Fprintf(file, "# workass run --quiet: supervisor for %s (%s), pid %d, started %s\n",
+		childID, label, os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	return file
 }

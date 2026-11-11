@@ -378,3 +378,47 @@ func TestAHeartbeatIsReportedOnTheDeclaredCadenceAndIsNotALifecycleEvent(t *test
 		t.Fatalf("the silence threshold must be three heartbeats, got %s", SilenceThreshold)
 	}
 }
+
+// bug-20261111-dc171619, the supervisor's half. A supervisor whose reports have
+// stopped arriving still finishes its closing wait the moment its queue is
+// acknowledged in the outbox — which is what the daemon does for a silent live
+// supervisor — instead of holding on for the whole deadline after a cancel.
+func TestTheClosingWaitEndsWhenTheOutboxIsAcknowledgedWithoutAReport(t *testing.T) {
+	state := t.TempDir()
+	childID, err := IDForOperation("op-" + t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := OpenOutbox(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbox.Close()
+	reporter := &recordingReporter{fail: errors.New("Workass tool connection failed or was cancelled")}
+	record := newJournal(childID, outbox, reporter, &bytes.Buffer{}, time.Now,
+		func() Report { return Report{ChildID: childID} }, 5*time.Millisecond, 30*time.Second)
+	if _, err := record.record(KindCancelRequested, map[string]any{"by": "a stop was requested"}); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := record.record(KindSettled, map[string]any{"outcome": OutcomeCancelled, "exitCode": ExitCancelled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := OpenOutboxForReading(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer daemon.Close()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = daemon.MarkDelivered(childID, settled.Seq)
+	}()
+	started := time.Now()
+	health := record.settle()
+	if waited := time.Since(started); waited > 5*time.Second {
+		t.Fatalf("an acknowledged queue must end the wait at once, waited %s", waited)
+	}
+	if !health.Delivered || health.Pending != 0 {
+		t.Fatalf("the outcome is delivered once the daemon has it, got %+v", health)
+	}
+}

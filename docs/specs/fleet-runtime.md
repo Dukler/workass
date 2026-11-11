@@ -631,11 +631,18 @@ torn last line, a reader that parses to find the end, a seq allocated outside
 the write that records it, or a directory listing standing in for an index.
 
 **The daemon never discovers a job by scanning anything.** It learns that a job
-exists from its report. It reads the outbox for exactly ONE case — a child it
-already holds a row for, whose supervisor has died with events still
-undelivered — and it looks that up by id, because a supervisor that crashed
+exists from its report. It reads the outbox for exactly TWO cases, both for a
+child it already holds a row for and both looked up by id. One: the supervisor
+has died with events still undelivered, because a supervisor that crashed
 between recording its settle and delivering it is not `lost`, and reading the
-queue it left is the difference between the truth and a guess. The outbox path
+queue it left is the difference between the truth and a guess. Two: the
+supervisor is alive and its row is already marked `reporting: silent`. It is
+still writing its queue, and a cancel or an outcome sitting there must not wait
+on a channel that has stopped working (bug-20261111-dc171619: after an app
+update a supervisor never reached the daemon again, stopped its job on request
+and held on for two minutes trying to say so). What is read is applied and
+acknowledged in the outbox, so the supervisor stops waiting; the row stays
+silent, because nothing read from a file is a report. The outbox path
 comes from the credential the daemon wrote or from `--state-dir`, never from
 the job's working directory: a relative state directory is refused before
 anything runs.
