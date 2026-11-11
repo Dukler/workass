@@ -6,7 +6,7 @@ import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
 import { NoticeLine } from './NoticeLine';
-import { IcDoc, IcTerminal, IcChanges, IcPreview, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
+import { IcDoc, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll, transcriptReaderLeftUnannounced } from '../transcript-scroll';
 import { syncFlowBlocks } from '../flow-window';
@@ -40,8 +40,8 @@ const SEARCH_WINDOW = 40;
 // transcripts around. The '\u00b7\u00b7\u00b7' menu returns when it has real options.
 
 // `title` replaces the chat title (a fork subsession shows its breadcrumb
-// there); without `onFind` the search button has nothing to search.
-export function Topbar({ chat, onFind, title }: { chat: Chat | null; onFind?: () => void; title?: ReactNode }) {
+// there).
+export function Topbar({ chat, title }: { chat: Chat | null; title?: ReactNode }) {
   const app = useApp();
   useProc(); // re-render the bg-process chip as proc:list / proc:changed land
   const pane = chatPane(chat); // this chat's right-column occupant (rail/browser/closed)
@@ -83,12 +83,8 @@ export function Topbar({ chat, onFind, title }: { chat: Chat | null; onFind?: ()
           background processes surface in the Tareas card + inline transcript
           rows only. */}
       <span className="ticons">
-        {onFind
-          ? <button className="tico" title="Buscar en este chat · ⌘F" aria-label="Buscar en este chat" onClick={onFind}><IcSearch /></button>
-          : <button className="tico soon" title="Buscar (no disponible en una subsesión)" aria-label="Buscar" disabled><IcSearch /></button>}
-        <button className="tico soon" title="Terminal (próximamente)"><IcTerminal /></button>
-        <button className="tico soon" title="Cambios (próximamente)"><IcChanges /></button>
-        <button className="tico soon" title="Vista previa (próximamente)"><IcPreview /></button>
+        {/* Buscar, Terminal, Cambios and Vista previa removed (owner
+            2026-11-11: "useless for now"). Chat search stays on ⌘F. */}
         {app.hasBrowserChannels && chat && localBrowserOwnsChat(chat.id, chat.machineId) && (
           <button className={`tico ${pane === 'browser' ? 'on' : ''}`} title="Navegador" aria-pressed={pane === 'browser'} onClick={() => store.toggleBrowser()}><IcBrowser /></button>
         )}
@@ -1241,7 +1237,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
 
   return (
     <>
-      <Topbar chat={chat} onFind={openFind} />
+      <Topbar chat={chat} />
       {findOpen && (
         <ChatFindBar
           inputRef={findInputRef}

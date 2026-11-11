@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --hair: color-mix(in srgb, var(--border) 85%, transparent);
+    --crit: #e5484d;
+    --fill: color-mix(in srgb, var(--foreground) 5%, transparent);
+    --fill2: color-mix(in srgb, var(--foreground) 9%, transparent);
+    --pop: var(--popover, var(--card));
+    --side: color-mix(in srgb, var(--card) 50%, var(--background));
+    --lift: 0 14px 36px rgb(0 0 0 / .22);
+    --acc: var(--accent);
+    --mf: var(--muted-foreground);
+  }
+  * { box-sizing: border-box; }
+  :focus, :focus-visible { outline: none; }
+  body { font: 13px/1.45 var(--font-sans); color: var(--foreground); padding: 4px 2px 20px; }
+  p { margin: 0; }
+  label { cursor: pointer; }
+  svg { display: block; flex: none; }
+  .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* state switch: radios, no script */
+  .gal { position: relative; }
+  .gal > input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+  .steps { display: flex; flex-wrap: wrap; gap: 2px; margin: 0 0 14px; font-size: 12px; color: var(--mf); }
+  .steps label { padding: 3px 10px; border-radius: 7px; white-space: nowrap; }
+  .gal > .r0:checked ~ .steps label:nth-of-type(1),
+  .gal > .r1:checked ~ .steps label:nth-of-type(2),
+  .gal > .r2:checked ~ .steps label:nth-of-type(3),
+  .gal > .r3:checked ~ .steps label:nth-of-type(4),
+  .gal > .r4:checked ~ .steps label:nth-of-type(5),
+  .gal > .r5:checked ~ .steps label:nth-of-type(6),
+  .gal > .r6:checked ~ .steps label:nth-of-type(7) { background: var(--fill2); color: var(--foreground); }
+  .gal > .r0:checked ~ .cols [data-s]:not([data-s~="0"]),
+  .gal > .r1:checked ~ .cols [data-s]:not([data-s~="1"]),
+  .gal > .r2:checked ~ .cols [data-s]:not([data-s~="2"]),
+  .gal > .r3:checked ~ .cols [data-s]:not([data-s~="3"]),
+  .gal > .r4:checked ~ .cols [data-s]:not([data-s~="4"]),
+  .gal > .r5:checked ~ .cols [data-s]:not([data-s~="5"]),
+  .gal > .r6:checked ~ .cols [data-s]:not([data-s~="6"]) { display: none !important; }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 26px 22px; align-items: start; }
+  .opt-h { display: flex; align-items: baseline; gap: 8px; margin: 0 0 3px; }
+  .opt-k { font: 600 12px var(--font-mono); color: var(--acc); }
+  .opt-n { font-weight: 600; font-size: 14px; }
+  .opt-d { color: var(--mf); font-size: 12px; margin: 0 0 10px; min-height: 70px; }
+
+  /* the popover on the left pane's foot; identical box in every state */
+  .stage { background: var(--side); border: 1px solid var(--hair); border-radius: 12px; padding: 10px 8px 8px; }
+  .pop { background: var(--pop); border: 1px solid var(--hair); border-radius: 11px; box-shadow: var(--lift); padding: 4px; }
+  .pop-h { font-size: 11.5px; color: var(--mf); padding: 6px 8px 4px; height: 26px; }
+  .foot { display: flex; gap: 2px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair); }
+  .fb { position: relative; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--mf); }
+  .fb.on { background: var(--fill2); color: var(--foreground); }
+  .fdot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--side); }
+  .fdot.c { background: var(--crit); }
+
+  /* one row = always two lines, always 44px, in every variant and state */
+  .row { position: relative; height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: 8px; }
+  .row:hover { background: var(--fill); }
+  .gl { width: 18px; height: 18px; display: grid; place-items: center; color: var(--mf); flex: none; position: relative; }
+  .gl svg.ic { width: 15px; height: 15px; }
+  .claude { color: #d97757; }
+  .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .n { font-size: 12.5px; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 17px; }
+  .s { font-size: 11.5px; color: var(--mf); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 16px; }
+  .s.err { color: var(--crit); }
+  .s.warn { color: var(--warning); }
+  .s.mono, .v { font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .v { color: var(--mf); white-space: nowrap; }
+  .v b { font-weight: 400; color: var(--acc); }
+  .rt { flex: none; display: flex; align-items: center; justify-content: flex-end; }
+
+  /* quiet actions: text, never a filled slab */
+  .act { font: inherit; font-size: 12px; font-weight: 500; line-height: 22px; height: 24px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--acc); white-space: nowrap; cursor: pointer; }
+  .act:hover { background: color-mix(in srgb, var(--acc) 12%, transparent); }
+  .act.warn { color: var(--warning); }
+  .act.warn:hover { background: color-mix(in srgb, var(--warning) 12%, transparent); }
+  .act.plain { color: var(--foreground); }
+  .act.plain:hover { background: var(--fill2); }
+
+  /* motion: transform/opacity only; runs under Reduce Motion */
+  @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* A · Línea: a hairline on the row's foot carries progress */
+  .hl { position: absolute; left: 36px; right: 8px; bottom: 3px; height: 1.5px; border-radius: 2px; overflow: hidden; background: var(--fill2); }
+  .hl > i { position: absolute; inset: 0; background: var(--acc); transform-origin: left; border-radius: 2px; }
+  .hl.det > i { transform: scaleX(.42); }
+  .hl.ind > i { width: 35%; animation: sweep 1.6s cubic-bezier(.45, 0, .25, 1) infinite; }
+  .a-slot { width: 92px; }
+
+  /* B · Anillo: the right slot morphs in place, App-Store style; fixed 76px */
+  .b-slot { width: 76px; height: 24px; display: flex; align-items: center; justify-content: flex-end; }
+  .pill { font: inherit; font-size: 11.5px; font-weight: 600; height: 22px; padding: 0 10px; border: 0; border-radius: 11px; background: var(--fill2); color: var(--acc); white-space: nowrap; cursor: pointer; }
+  .pill:hover { background: color-mix(in srgb, var(--foreground) 14%, transparent); }
+  .pill.warn { color: var(--warning); }
+  .pill.plain { color: var(--foreground); }
+  .ring { width: 20px; height: 20px; position: relative; flex: none; }
+  .ring svg { width: 20px; height: 20px; }
+  .ring .trk { stroke: var(--fill2); }
+  .ring .arc { stroke: var(--acc); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+  .ring.ind { animation: spin 1s linear infinite; }
+  .ring .stop { position: absolute; inset: 7px; border-radius: 1.5px; background: var(--acc); }
+
+  /* C · Pie: rows only report; the one action is the popover's last line */
+  .c-foot { height: 34px; margin-top: 2px; border-top: 1px solid var(--hair); display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; font-size: 12px; color: var(--mf); }
+  .c-foot .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .c-foot .t.err { color: var(--crit); }
+  .c-foot .t.warn { color: var(--warning); }
+  .c-foot .t b { font-weight: 500; color: var(--foreground); }
+  .mini { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--fill2); border-top-color: var(--acc); animation: spin .8s linear infinite; flex: none; }
+  .ok { width: 13px; height: 13px; color: var(--acc); }
+  .bad { color: var(--crit); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="dl" viewBox="0 0 16 16"><path d="M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13h10"/></symbol>
+  <symbol id="ck" viewBox="0 0 16 16"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></symbol>
+  <symbol id="al" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><path d="M8 5v3.4M8 10.8v.01"/></symbol>
+  <symbol id="cl" viewBox="0 0 16 16"><path d="M8 1.8v12.4M1.8 8h12.4M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8" stroke-width="1.7"/></symbol>
+  <symbol id="cx" viewBox="0 0 16 16"><path d="M8 1.8 13.4 5v6L8 14.2 2.6 11V5Z M6 6.6 7.6 8 6 9.4 M8.6 9.6h1.8"/></symbol>
+  <symbol id="gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></symbol>
+  <symbol id="user" viewBox="0 0 16 16"><circle cx="8" cy="5.6" r="2.6"/><path d="M2.8 14c.6-2.6 2.6-4 5.2-4s4.6 1.4 5.2 4"/></symbol>
+  <symbol id="clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.4"/></symbol>
+  <symbol id="bell" viewBox="0 0 16 16"><path d="M4 11V7.4a4 4 0 0 1 8 0V11l1.2 1.4H2.8Z M6.6 14h2.8"/></symbol>
+</svg>
+
+<div class="gal">
+  <input type="radio" name="s" id="s0" class="r0" checked>
+  <input type="radio" name="s" id="s1" class="r1">
+  <input type="radio" name="s" id="s2" class="r2">
+  <input type="radio" name="s" id="s3" class="r3">
+  <input type="radio" name="s" id="s4" class="r4">
+  <input type="radio" name="s" id="s5" class="r5">
+  <input type="radio" name="s" id="s6" class="r6">
+  <div class="steps">
+    <label for="s0">Al día</label>
+    <label for="s1">Bajando</label>
+    <label for="s2">Probando</label>
+    <label for="s3">Lista</label>
+    <label for="s4">Hay trabajo</label>
+    <label for="s5">Falló</label>
+    <label for="s6">Agente</label>
+  </div>
+
+  <div class="cols">
+
+    <!-- A · Línea -->
+    <section>
+      <div class="opt-h"><span class="opt-k">A</span><span class="opt-n">Línea</span></div>
+      <p class="opt-d">Every row is two lines, name over state, and never changes height. A thin line on the row's foot carries the progress. The action is green text on the right, in a slot that always keeps its width.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="pop-h">Actualizaciones</div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#dl"/></svg></span>
+            <span class="tx">
+              <span class="n">Workass</span>
+              <span class="s" data-s="0 6">al día</span>
+              <span class="s" data-s="1">Bajando 0.1.288 · 42%</span>
+              <span class="s" data-s="2">Probando 0.1.288 con tu estado · 1:12</span>
+              <span class="s" data-s="3">0.1.288 lista · solo reinicia</span>
+              <span class="s warn" data-s="4">Se detendrá 1 subagente</span>
+              <span class="s err" data-s="5" title="La 0.1.287 no pasó su prueba: no se pudo copiar el estado. Sigue la 0.1.286.">0.1.287 no pasó su prueba</span>
+            </span>
+            <span class="rt a-slot">
+              <span class="v" data-s="0 1 2 6">0.1.286</span>
+              <button class="act" data-s="3">Actualizar</button>
+              <button class="act warn" data-s="4">Actualizar igual</button>
+              <button class="act plain" data-s="5">Reintentar</button>
+            </span>
+            <span class="hl det" data-s="1"><i></i></span>
+            <span class="hl ind" data-s="2"><i></i></span>
+          </div>
+          <div class="row">
+            <span class="gl claude"><svg class="ic"><use href="#cl"/></svg></span>
+            <span class="tx">
+              <span class="n">Claude Code</span>
+              <span class="s" data-s="0 1 2 3 4 5">al día</span>
+              <span class="s mono" data-s="6">installing native build…</span>
+            </span>
+            <span class="rt a-slot"><span class="v" data-s="0 1 2 3 4 5">2.1.322</span><span class="v" data-s="6">→ <b>2.1.330</b></span></span>
+            <span class="hl ind" data-s="6"><i></i></span>
+          </div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#cx"/></svg></span>
+            <span class="tx"><span class="n">Codex</span><span class="s">al día</span></span>
+            <span class="rt a-slot"><span class="v">0.167.1</span></span>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="1 2 3 4 6"></i><i class="fdot c" data-s="5"></i></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- B · Anillo -->
+    <section>
+      <div class="opt-h"><span class="opt-k">B</span><span class="opt-n">Anillo</span></div>
+      <p class="opt-d">Like the App Store. The right slot turns in place: the version, then a small grey pill with green text, then a ring that fills while it downloads and turns while it tests. The slot is 76 px in every state.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="pop-h">Actualizaciones</div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#dl"/></svg></span>
+            <span class="tx">
+              <span class="n">Workass</span>
+              <span class="s" data-s="0 6">al día</span>
+              <span class="s" data-s="1">Bajando 0.1.288 · 42%</span>
+              <span class="s" data-s="2">Probando 0.1.288 · 1:12</span>
+              <span class="s" data-s="3">0.1.288 · solo reinicia</span>
+              <span class="s warn" data-s="4">Se detendrá 1 subagente</span>
+              <span class="s err" data-s="5" title="La 0.1.287 no pasó su prueba: no se pudo copiar el estado. Sigue la 0.1.286.">0.1.287 no pasó su prueba</span>
+            </span>
+            <span class="rt b-slot">
+              <span class="v" data-s="0 6">0.1.286</span>
+              <span class="ring" data-s="1"><svg viewBox="0 0 20 20" fill="none" stroke-width="2"><circle class="trk" cx="10" cy="10" r="8"/><circle class="arc" cx="10" cy="10" r="8" stroke-dasharray="50.3" stroke-dashoffset="29.2"/></svg><i class="stop"></i></span>
+              <span class="ring ind" data-s="2"><svg viewBox="0 0 20 20" fill="none" stroke-width="2"><circle class="trk" cx="10" cy="10" r="8"/><circle class="arc" cx="10" cy="10" r="8" stroke-dasharray="12 50.3"/></svg></span>
+              <button class="pill" data-s="3">Actualizar</button>
+              <button class="pill warn" data-s="4">Igual</button>
+              <button class="pill plain" data-s="5">Reintentar</button>
+            </span>
+          </div>
+          <div class="row">
+            <span class="gl claude"><svg class="ic"><use href="#cl"/></svg></span>
+            <span class="tx">
+              <span class="n">Claude Code</span>
+              <span class="s" data-s="0 1 2 3 4 5">al día</span>
+              <span class="s mono" data-s="6">→ 2.1.330 · installing…</span>
+            </span>
+            <span class="rt b-slot">
+              <span class="v" data-s="0 1 2 3 4 5">2.1.322</span>
+              <span class="ring ind" data-s="6"><svg viewBox="0 0 20 20" fill="none" stroke-width="2"><circle class="trk" cx="10" cy="10" r="8"/><circle class="arc" cx="10" cy="10" r="8" stroke-dasharray="12 50.3"/></svg></span>
+            </span>
+          </div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#cx"/></svg></span>
+            <span class="tx"><span class="n">Codex</span><span class="s">al día</span></span>
+            <span class="rt b-slot"><span class="v">0.167.1</span></span>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="1 2 3 4 6"></i><i class="fdot c" data-s="5"></i></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- C · Pie -->
+    <section>
+      <div class="opt-h"><span class="opt-k">C</span><span class="opt-n">Pie</span></div>
+      <p class="opt-d">The rows only report: a small spinner, check or warning sits where the version goes. The popover's last line is always there. It says what is happening and holds the one action, as green text. When nothing is pending it says when it last checked.</p>
+      <div class="stage">
+        <div class="pop">
+          <div class="pop-h">Actualizaciones</div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#dl"/></svg></span>
+            <span class="tx">
+              <span class="n">Workass</span>
+              <span class="s" data-s="0 6">al día</span>
+              <span class="s" data-s="1">bajando · 42%</span>
+              <span class="s" data-s="2">probando con tu estado · 1:12</span>
+              <span class="s" data-s="3 4">lista para instalar</span>
+              <span class="s err" data-s="5">no pasó su prueba</span>
+            </span>
+            <span class="rt" style="gap:7px">
+              <span class="v" data-s="0 6">0.1.286</span>
+              <span class="mini" data-s="1 2"></span><span class="v" data-s="1 2 3 4">→ <b>0.1.288</b></span>
+              <svg class="ic ok" data-s="3 4"><use href="#ck"/></svg>
+              <svg class="ic bad" data-s="5" style="width:13px;height:13px"><use href="#al"/></svg><span class="v" data-s="5">0.1.287</span>
+            </span>
+          </div>
+          <div class="row">
+            <span class="gl claude"><svg class="ic"><use href="#cl"/></svg></span>
+            <span class="tx">
+              <span class="n">Claude Code</span>
+              <span class="s" data-s="0 1 2 3 4 5">al día</span>
+              <span class="s mono" data-s="6">installing native build…</span>
+            </span>
+            <span class="rt" style="gap:7px"><span class="v" data-s="0 1 2 3 4 5">2.1.322</span><span class="mini" data-s="6"></span><span class="v" data-s="6">→ <b>2.1.330</b></span></span>
+          </div>
+          <div class="row">
+            <span class="gl"><svg class="ic"><use href="#cx"/></svg></span>
+            <span class="tx"><span class="n">Codex</span><span class="s">al día</span></span>
+            <span class="rt"><span class="v">0.167.1</span></span>
+          </div>
+          <div class="c-foot">
+            <span class="t" data-s="0">Revisado hace 3 min</span>
+            <span class="t" data-s="1 2">Workass sigue andando mientras tanto</span>
+            <span class="t" data-s="3">Actualizar solo reinicia Workass</span>
+            <span class="t warn" data-s="4">Se detendrá 1 subagente</span>
+            <span class="t err" data-s="5" title="No se pudo copiar el estado. Sigue la 0.1.286.">No se pudo copiar el estado</span>
+            <span class="t" data-s="6">Actualizando Claude Code</span>
+            <button class="act plain" data-s="0">Buscar</button>
+            <button class="act" data-s="3">Actualizar</button>
+            <button class="act warn" data-s="4">Actualizar igual</button>
+            <button class="act plain" data-s="5">Reintentar</button>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="fb"><svg class="ic"><use href="#gear"/></svg></span><span class="fb"><svg class="ic"><use href="#user"/></svg></span><span class="fb"><svg class="ic"><use href="#clock"/></svg></span><span class="fb"><svg class="ic"><use href="#bell"/></svg></span>
+          <span class="fb on"><svg class="ic"><use href="#dl"/></svg><i class="fdot" data-s="1 2 3 4 6"></i><i class="fdot c" data-s="5"></i></span>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+</body>
+</html>
