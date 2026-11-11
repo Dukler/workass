@@ -253,6 +253,12 @@ const LANBridgeJS = `(() => {
     accountsResetsRefresh: (providerId, force) => invoke('accounts:resets-refresh', { providerId, force: force === true }),
     // Automatizaciones: what is scheduled on this machine, and cancelling one scheduled message.
     automationsList: () => invoke('automations:list'), automationsCancel: (o) => invoke('automations:cancel', o || {}),
+    // Conectores + alerts (docs/specs/connectors-alerts.md): this daemon's connectors and their alerts.
+    connectorsList: () => invoke('connectors:list'), connectorsSet: (o) => invoke('connectors:set', o || {}), connectorsRemove: (o) => invoke('connectors:remove', o || {}),
+    connectorsTest: (o) => invoke('connectors:test', o || {}), connectorsRotateSecret: (o) => invoke('connectors:rotate-secret', o || {}),
+    // Moving the machine that listens: handover on the old daemon, adopt on the new one.
+    connectorsHandover: (o) => invoke('connectors:handover', o || {}), connectorsAdopt: (o) => invoke('connectors:adopt', o || {}),
+    alertsList: () => invoke('alerts:list'), alertsAct: (o) => invoke('alerts:act', o || {}),
     appChatAutoTitle: (o) => invoke('app-chat:auto-title', o || {}),
     // Ajustes > Herramientas: Workass tool groups and what each costs, one
     // switch per group, and the MCP servers each agent's CLI is configured with.
@@ -298,6 +304,7 @@ const LANBridgeJS = `(() => {
     onMachinesChanged: (cb) => on('machines:changed', cb),
     onSpawnedWorkChanged: (cb) => on('spawned-work:changed', cb),
     onForkChanged: (cb) => on('fork:changed', cb),
+    onAlertsChanged: (cb) => on('alerts:changed', cb), onConnectorsChanged: (cb) => on('connectors:changed', cb),
     onProvidersList: (cb) => on('providers:list', cb), onProvidersUpdates: (cb) => on('providers:updates', cb), onProvidersUpdateProgress: (cb) => on('providers:update-progress', cb), onAppUpdate: (cb) => on('app:update', cb),
   };
 })();`

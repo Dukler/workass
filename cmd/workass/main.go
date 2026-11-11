@@ -31,6 +31,7 @@ import (
 	"workass/internal/appinstall"
 	"workass/internal/artifacthost"
 	"workass/internal/chat"
+	"workass/internal/connectors"
 	"workass/internal/fleet"
 	"workass/internal/headlessupdate"
 	"workass/internal/httpserve"
@@ -412,6 +413,13 @@ func main() {
 		os.Exit(1)
 	}
 	artifactHosting.SetLogger(logger.Printf)
+	// Conectores: best effort like scheduled messages. A store that cannot be
+	// read leaves the channels answering "unavailable", not the daemon down.
+	connectorService, connectorErr := connectors.Open(connectors.Options{StateDir: stateDir, Broadcast: hub.Broadcast, Logf: logger.Printf})
+	if connectorErr != nil {
+		logger.Printf("[workass] connectors unavailable: %v", connectorErr)
+		connectorService = nil
+	}
 	channelCount := registerDaemonHandlers(hub, cwd, acpManager, daemonOptions{
 		StateDir:            stateDir,
 		ConfigPath:          appConfigPath,
@@ -420,6 +428,7 @@ func main() {
 		ChatControl:         chatControl,
 		ProviderChats:       providerChats,
 		Artifacts:           artifactHosting,
+		Connectors:          connectorService,
 	})
 	host := "127.0.0.1"
 	if *bind == "lan" {
@@ -543,6 +552,9 @@ func main() {
 			// closes. Every step it takes is durable, so stopping is safe.
 			stopImageStore()
 			imageStoreRun.Wait()
+			if connectorService != nil {
+				connectorService.Close()
+			}
 			fleetMesh.Close()
 			// The links go first, then the resyncs they started are joined, so
 			// no delivery races the actors' detach below.
@@ -578,6 +590,9 @@ func main() {
 	mux.HandleFunc("/workass/update/commit", updateControl.commit)
 	mux.HandleFunc("/workass/update/cancel", updateControl.cancel)
 	mux.HandleFunc("/workass/update/work", updateControl.work)
+	// Grafana's webhook contact point (mode webhook). Bearer secret per
+	// connector; it writes alerts only, never a chat.
+	mux.Handle(connectors.WebhookPrefix, connectorWebhookHandler(connectorService))
 	mux.Handle(toolsPath, newWorkassToolHandler(acpManager, agentControl, defaultBrowserControlFile(stateDir), providerChats))
 	// Retired Workass MCP routes are intentionally unavailable, including to old clients.
 	mux.HandleFunc("/workass/mcp/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
@@ -655,6 +670,9 @@ func main() {
 	}
 	if headlessUpdates != nil {
 		go headlessUpdates.Run(signalCtx)
+	}
+	if connectorService != nil && !updatePreflight {
+		connectorService.Start(signalCtx)
 	}
 	imageStoreCtx, cancelImageStore := context.WithCancel(signalCtx)
 	stopImageStore = cancelImageStore
@@ -1214,6 +1232,8 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 	count += 2
 	_, changesChannels := registerChangesHandlers(hub, acpManager, providerChats)
 	count += changesChannels
+	// Conectores + alerts need no agent manager: they never touch a chat.
+	count += registerConnectorHandlers(hub, opts.Connectors)
 	if acpManager != nil {
 		chatControl := opts.ChatControl
 		if chatControl == nil {

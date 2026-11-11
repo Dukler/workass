@@ -74,12 +74,40 @@ resets, `link` and `dismissedAt` clear, `history` keeps growing, and it is **ann
 | `connectors:remove` | `{id}` | `{ok}` | yes |
 | `connectors:test` | `{id}` or `{url, token}` | `{ok, error?, rules: n, firing: n}` | no |
 | `connectors:rotate-secret` | `{id}` | `{webhookSecret}` | yes |
+| `connectors:handover` | `{id}` (on the current listener) | `{connector, token?, webhookSecretHash?, alerts: Alert[]}` (every alert of the connector, a switched-off rule's too; removes nothing) | yes |
+| `connectors:adopt` | `{connector, token?, webhookSecretHash?, alerts, url?}` (on the new listener; `url` overrides the address) | `{connector}` | yes |
 | `alerts:list` | — | `{alerts: Alert[]}` | no |
 | `alerts:act` | `{ids: string[], action: "silence", minutes}` / `"unsilence"` / `"dismiss"` / `"undismiss"` / `{action:"link", ids, link:{machineId,tabId,chatId}}` | `{alerts: Alert[]}` | yes |
-| event `alerts:changed` | — | `{alerts: Alert[] (changed ones), announce: string[] (ids of new episodes)}` | — |
+| event `alerts:changed` | — | `{alerts: Alert[] (changed ones), announce: string[] (ids of new episodes), removed?: string[]}` | — |
 | event `connectors:changed` | — | `{connectors: Connector[]}` | — |
 
-Also add bridge methods in `internal/httpserve/lan_bridge.go` like `automationsList`.
+`connectors:set` also takes an optional `machineLabels: string[]` (empty = the default order).
+
+Bridge methods (`internal/httpserve/lan_bridge.go`): `connectorsList()`, `connectorsSet(o)`,
+`connectorsRemove({id})`, `connectorsTest(o)`, `connectorsRotateSecret({id})`, `connectorsHandover({id})`,
+`connectorsAdopt(o)`, `alertsList()`, `alertsAct(o)`, `onAlertsChanged(cb)`, `onConnectorsChanged(cb)`.
+
+`alerts:changed` cannot express an alert leaving the list, so the daemon adds `removed: [id]` when it
+prunes alerts or a connector is removed. Switching a rule off sends only `connectors:changed`; the client
+re-reads `alerts:list` on `connectors:changed`. `connectors:test` is a concurrent read (it never waits
+behind or holds the ordered lane); with `{id}` plus explicit `url`/`token`, the explicit ones win.
+
+### Moving the machine that listens
+
+One click in Conectores, three calls by the client, all mutating (controller-authorized):
+
+1. `connectors:handover {id}` on the current listener. Its reply is the only one that ever carries a
+   secret (the poll token and the webhook secret's SHA-256), only to the paired controller; it is never
+   logged and removes nothing.
+2. `connectors:adopt` on the new listener with that reply (plus `url` if the new machine reaches Grafana
+   by another address). It creates the connector under the SAME id (refused if that id already exists
+   there, unless identical: a retried adopt succeeds), imports the alerts as they were (link,
+   dismissedAt, silencedUntil, history, startsAt) WITHOUT announcing anything, and starts its poller. An
+   alert already firing stays the same episode on the next poll, so nothing re-announces.
+3. `connectors:remove {id}` on the old listener.
+
+Webhook mode: the secret hash moves, so Grafana's bearer stays valid; only the contact point's host
+changes.
 
 ## Transport
 
@@ -88,13 +116,24 @@ Also add bridge methods in `internal/httpserve/lan_bridge.go` like `automationsL
   service-account token is enough. It gives every rule (name, uid when present, folder/group, labels,
   state) and each alerting instance (labels, annotations, state, activeAt, value). Firing = instance
   state `Alerting`/`firing`; `Pending` is not firing; an instance that disappears is resolved
-  (`endsAt` = the poll time).
+  (`endsAt` = the poll time). The token is optional: without one no `Authorization` header is sent
+  (a proxy in front of Grafana may authenticate). Fixture: `internal/connectors/testdata/grafana13-rules-live.json`.
 - **webhook (Recibir)**: `POST /workass/connectors/<id>/webhook` on the daemon's HTTP mux, auth
   `Authorization: Bearer <secret>` (constant-time compare; 32 random bytes, base64url, stored hashed is
   fine but the daemon must show it once). Body = Grafana's webhook JSON (`alerts[]` with `status`,
   `labels`, `annotations`, `startsAt`, `endsAt`, `fingerprint`, `generatorURL`, `values`).
   Body cap 1 MiB. 401 on bad secret, 404 on unknown id or a poll-mode connector. The route answers
   before any chat is touched (it never touches a chat).
+- As built (daemon, `internal/connectors`):
+  - `NoData` and `Error` instance states (and `Alerting (…)`) count as firing, because Grafana notifies
+    for them; `Normal (NoData)` does not.
+  - `repeats` counts only webhook re-sends; a poll that sees the same firing again changes nothing and
+    sends no event unless labels, annotations or values changed.
+  - A firing alert whose start moved later (a resolve missed between two looks) is a new episode.
+  - A firing alert is never pruned, dismissed or not: pruning it would re-announce it on the next look.
+    Only resolved alerts are pruned, 7 days after `endsAt`.
+  - Silence survives a new episode (it is time-bounded).
+  - Poll mode: a rule that vanished from Grafana leaves `rules` unless the owner switched it off.
 - Secrets: `state/connectors/secrets/<id>.json`, mode 0600, never sent on the wire, never logged.
   Config `state/connectors/connectors.json`, alerts `state/connectors/alerts.json` (atomic writes).
   Redact labels/annotations with `acp.RedactSensitiveText`.

@@ -27,6 +27,19 @@ func TestServerFolderChannelsKeepReadsPassiveAndCreationMutating(t *testing.T) {
 	}
 }
 
+func TestConnectorChannelsKeepReadsPassiveAndDecisionsMutating(t *testing.T) {
+	for _, read := range []string{"connectors:list", "connectors:test", "alerts:list"} {
+		if _, ok := mutatingChannels[read]; ok {
+			t.Fatalf("%s must remain a passive read", read)
+		}
+	}
+	for _, write := range []string{"connectors:set", "connectors:remove", "connectors:rotate-secret", "connectors:handover", "connectors:adopt", "alerts:act"} {
+		if _, ok := mutatingChannels[write]; !ok {
+			t.Fatalf("%s must take the controller lease", write)
+		}
+	}
+}
+
 func TestUpdaterChannelsKeepDiagnosticsPassiveAndApplyOnTheControlMutationLane(t *testing.T) {
 	if _, ok := mutatingChannels["app:update-status"]; ok {
 		t.Fatal("reading updater failure evidence must remain passive")

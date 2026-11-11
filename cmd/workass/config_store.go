@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"workass/internal/artifacthost"
+	"workass/internal/connectors"
 )
 
 type daemonOptions struct {
@@ -24,6 +25,8 @@ type daemonOptions struct {
 	ChatControl         *chatControlCoordinator
 	ProviderChats       *providerChatRuntime
 	Artifacts           *artifacthost.Registry
+	// Conectores + alerts; nil answers "unavailable".
+	Connectors *connectors.Service
 }
 
 type daemonState struct {

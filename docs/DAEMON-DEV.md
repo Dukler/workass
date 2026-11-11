@@ -257,6 +257,12 @@ teams:share-link
 external:open
 review:open
 browser:set-active
+connectors:set
+connectors:remove
+connectors:rotate-secret
+connectors:handover
+connectors:adopt
+alerts:act
 ```
 
 Controller-only events: `lan:access-request` / `lan:access-request-closed`, `notify` and `show` are
