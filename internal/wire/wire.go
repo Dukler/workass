@@ -78,6 +78,7 @@ var mutatingChannels = map[string]struct{}{
 	"app:update-apply":            {},
 	"providers:detect":            {},
 	"providers:update":            {},
+	"providers:check-updates":     {},
 	"providers:toggle":            {},
 	"proc:kill":                   {},
 	"proc:kill-all":               {},

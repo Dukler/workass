@@ -1043,6 +1043,9 @@ export interface WorkassApi {
   // string (providers:update-unknown-provider | -no-pending | -in-progress).
   // Feature-detected — an older bridge omits it → copy-command stays primary.
   providersUpdate?: (providerId: string) => Promise<{ ok: boolean; providerId: string }>;
+  // "Buscar actualizaciones": run the agents' version check now. Resolves with
+  // the providers:updates payload (also emitted as that event). Additive.
+  providersCheckUpdates?: () => Promise<{ checkedAt: string; updates: ProviderUpdate[] }>;
   // R4/R5 (daemon channels landed; browser bridge does not map them yet — GAP).
   chatCheckpoints?: (opts: { chatId?: string; tabId?: string }) => Promise<ChatCheckpoint[]>;
   chatRewind?: (opts: { tabId: string; chatId: string; turnSeq: number; operationId: string }) => Promise<ChatRewindResult>;

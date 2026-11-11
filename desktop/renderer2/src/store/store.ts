@@ -7733,6 +7733,16 @@ export class Store {
       this.chainActive = false;
     }
   }
+  // "Buscar actualizaciones": the agents' version check now (the daemon
+  // otherwise checks on its own tick). Its reply is the providers:updates
+  // payload, applied here as the event would be. False on an older daemon.
+  async checkProviderUpdates(): Promise<boolean> {
+    if (!has('providersCheckUpdates') || !this.isConnected()) return false;
+    const result = await call('providersCheckUpdates');
+    if (result) this.onProvidersUpdates(result as ProvidersUpdates);
+    this.bumpApp(false);
+    return !!result;
+  }
   // Live progress for a provider, if any (undefined when nothing has run).
   updateProgressFor(providerId: string): ProviderUpdateProgress | undefined {
     return this.state.updateProgress[providerId];

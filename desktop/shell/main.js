@@ -442,7 +442,7 @@ function createWindow(url, browserReporter, isController) {
 	});
   ipcMain.handle('workass-updater:get-state', (event) => own(event) ? updateManager?.snapshot() || null : null);
   ipcMain.handle('workass-updater:diagnostics', (event) => own(event) ? updateManager?.diagnostics() || null : null);
-  ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.check() || null : null);
+  ipcMain.handle('workass-updater:check', async (event) => own(event) ? updateManager?.checkNow() || null : null);
   ipcMain.handle('workass-updater:apply', async (event) => own(event) ? updateManager?.startApply() || null : null);
   ipcMain.handle('workass-updater:apply-authorized', async (event, payload) => own(event) ? updateManager?.startAuthorizedApply(payload) || null : null);
   // "Instalar solo": the renderer mirrors the owner's setting from the daemon's

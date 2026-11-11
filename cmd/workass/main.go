@@ -1961,6 +1961,14 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		}
 		return manager.StartProviderUpdate(context.Background(), providerID)
 	})
+	// "Buscar actualizaciones" in the update popover: the agents' version check
+	// now, instead of at the next tick. It reports the same payload the
+	// providers:updates event carries, and emits that event too.
+	hub.Register("providers:check-updates", func(args []any) (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		return manager.CheckProviderUpdates(ctx), nil
+	})
 	hub.Register("providers:toggle", func(args []any) (any, error) {
 		arg := firstMapArg(args)
 		id := fieldString(arg, "id")

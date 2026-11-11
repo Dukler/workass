@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { appUpdateWorkWarning } from '../src/app-updater.ts';
 
+const rows = readFileSync(new URL('../src/update-rows.ts', import.meta.url), 'utf8');
 const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../../../internal/httpserve/lan_bridge.go', import.meta.url), 'utf8');
 const daemon = readFileSync(new URL('../../../cmd/workass/main.go', import.meta.url), 'utf8');
@@ -31,10 +32,10 @@ test('the warning names what stops and where', () => {
 
 test('the card arms on running work and the second click proceeds — a heads-up, never a gate', () => {
   assert.match(sidebar, /appUpdateWorkWarning\(\s*await call\('appUpdateWork'\)/);
-  assert.match(sidebar, /if \(warning\) \{ setSelfArmed\(warning\); return; \}/);
-  assert.match(sidebar, /if \(!selfArmed\) \{/);
-  assert.match(sidebar, /'Actualizar igual'/);
-  assert.match(sidebar, /setTimeout\(\(\) => setSelfArmed\(''\), UPDATE_ARM_MS\)/);
+  assert.match(sidebar, /if \(warning\) \{ setArmed\(warning\); return; \}/);
+  assert.match(sidebar, /if \(!armed\) \{/);
+  assert.match(rows, /'Actualizar igual'/);
+  assert.match(sidebar, /setTimeout\(\(\) => setArmed\(''\), UPDATE_ARM_MS\)/);
 });
 
 test('the count is an additive read-only channel on the local bridge', () => {

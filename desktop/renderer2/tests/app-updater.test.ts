@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, type AppUpdaterState } from '../src/app-updater.ts';
+import { providerUpdateRows, selfUpdateRow } from '../src/update-rows.ts';
 
 const sidebar = readFileSync(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8');
 const updaterSource = readFileSync(new URL('../src/app-updater.ts', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src/components/Settings.tsx', import.meta.url), 'utf8');
 const settingsTypes = readFileSync(new URL('../src/store/types.ts', import.meta.url), 'utf8');
 const updatesPage = readFileSync(new URL('../src/components/settings/ActualizacionesPage.tsx', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
 
 const state = (phase: AppUpdaterState['phase'], overrides: Partial<AppUpdaterState> = {}): AppUpdaterState => ({
   supported: true,
@@ -66,38 +68,29 @@ test('availability-check failure is distinct from an attempted update failure', 
   assert.equal(appUpdaterCardTitle(unavailable), 'No se pudo buscar actualizaciones');
 });
 
-// 2026-11-09 (owner): "the updater status button always shows the listo
-// notification after a workass update". After the restart the receipt reads
-// "healthy" for a while and every state push sealed a "Listo" card again.
-// "Listo" now seals only an install this window watched run.
-test('a Workass update never replays its "Listo" card after the restart', () => {
-  const effect = sidebar.slice(sidebar.indexOf("if (selfUpdate.phase === 'healthy' || selfUpdate.phase === 'installed') {"));
-  assert.match(effect.slice(0, 260), /setSelfPhase\(\(prev\) => \(prev === 'running' \? 'done' : prev === 'done' \|\| prev === 'exiting' \? prev : 'hidden'\)\);/);
-  assert.doesNotMatch(sidebar, /appUpdaterReceiptIsRecent/);
-  // The receipt object changes on every push; it must not re-run the seal.
-  assert.match(sidebar, /\}, \[selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate\.phase\]\);/);
-});
-
-// 2026-11-09: the owner approved Ajustes · Actualizaciones (mock page 8), so the
-// Workass updater now also has a Settings page. It is not a second updater: it
-// drives the same shell UpdateManager through useAppUpdater, with the same one
-// "Actualizar" (tests/settings-updates.test.ts holds the page to that).
-test('Workass updater keeps the footer update-card lifecycle, and its Settings page is the approved Actualizaciones page', () => {
-  const selfCard = sidebar.slice(sidebar.indexOf('{showSelfUpdate && ('), sidebar.indexOf('{showProvider && ('));
-  assert.match(selfCard, /className=\{`updslot/);
-  assert.match(selfCard, /className="updring"/);
-  assert.match(selfCard, /upd-run upd-done/);
-  assert.match(selfCard, /updcard upd-fail/);
-  assert.match(selfCard, /className="uretry"/);
-  assert.match(selfCard, /<button[\s\S]*type="button"[\s\S]*className=\{`updcard/);
-  assert.doesNotMatch(selfCard, /role:\s*'button'/);
+// 2026-11-11 (owner): the update popover is rows, variant A of
+// desktop/docs/mocks/update-popover/mock-v2.html: only what needs updating,
+// no card, no filled button, no spinning ring, one size in every state, and a
+// "Buscar actualizaciones" action that checks now.
+test('the update popover lists only what needs updating, as fixed rows with a quiet action', () => {
+  const pop = sidebar.slice(sidebar.indexOf('className="footpop"'));
+  assert.match(pop, /<div className="footpop-head"><span>Actualizaciones<\/span><CheckUpdatesButton \/><\/div>\s*<UpdateRows \/>/);
+  assert.doesNotMatch(sidebar, /updcard|updring|updslot|footvers|uretry/);
+  assert.doesNotMatch(css, /\.updcard|\.updring|@property --updring|\.footvers/);
+  assert.match(css, /\.uprow \{[^}]*height: 44px;/);
+  assert.match(css, /\.upact \{[^}]*background: transparent;/);
+  // "La actualización sigue esperando" never comes back: running chat work is
+  // not an updater gate (the comment that says so stays with the rows).
   assert.match(sidebar, /La actualización sigue esperando/);
-  assert.match(sidebar, /const selfAction = selfPending \|\| selfCheckFailed \|\| selfFailed \? selfUpdater\.apply : null/);
+  assert.match(sidebar, /const next = await selfUpdater\.apply\(\);/);
   assert.doesNotMatch(sidebar, /selfUpdater\.(download|install)/);
   assert.doesNotMatch(updaterSource, /\b(?:download|install)\(\):\s*Promise<AppUpdaterState>/);
-  assert.doesNotMatch(sidebar, /const selfActionLabel[\s\S]{0,180}'Reiniciar'/);
-  // The shell around the pages holds no updater of its own; the one page that
-  // shows it is Actualizaciones, never a separate "workass" section.
+  // The check button checks Workass and every agent, and holds its width.
+  const check = sidebar.slice(sidebar.indexOf('function CheckUpdatesButton()'));
+  assert.match(check, /updater\.check\(\)/);
+  assert.match(check, /store\.checkProviderUpdates\(\)/);
+  assert.match(css, /\.upcheck \{[^}]*min-width:/);
+  // The Settings page keeps its own rule: no check button there.
   assert.doesNotMatch(settings, /WorkassPanel|useAppUpdater|appUpdaterPhaseText/);
   assert.doesNotMatch(settingsTypes, /SettingsSection\s*=\s*[^;]*'workass'/);
   assert.match(settingsTypes, /SettingsSection\s*=\s*[^;]*'actualizaciones'/);
@@ -106,16 +99,45 @@ test('Workass updater keeps the footer update-card lifecycle, and its Settings p
   assert.doesNotMatch(updatesPage, /'Reiniciar'|Buscar ahora/);
 });
 
-test('provider updates keep the left footer card as their only renderer surface', () => {
-  const providerStart = sidebar.indexOf('{showProvider && (');
-  const providerEnd = sidebar.indexOf("// The left panel's foot", providerStart);
-  assert.ok(providerStart >= 0 && providerEnd > providerStart);
-  const providerCard = sidebar.slice(providerStart, providerEnd);
-  assert.match(sidebar, /<div className="foot">[\s\S]*<FooterBar \/>/);
-  assert.match(sidebar, /className="footpop"[\s\S]*<FooterUpdateCards \/>/, 'the cards live in the update icon\'s popover');
-  assert.match(providerCard, /className=\{`updslot/);
-  assert.match(providerCard, /className=\{`updcard/);
-  assert.doesNotMatch(providerCard, /addToast|fireNotify|<Toasts/);
+test('a Workass release is one row through every step, its action never a slab', () => {
+  const row = (phase: AppUpdaterState['phase'], extra: Partial<AppUpdaterState> = {}, armed = '') =>
+    selfUpdateRow({ state: state(phase, { targetVersion: '0.1.288', currentVersion: '0.1.286', ...extra }), armed, actionBusy: false, preflightSeconds: 72 });
+  assert.equal(row('current'), null, 'up to date: no row at all');
+  assert.equal(row('healthy'), null);
+  assert.equal(row('downloading', { progress: 0.42 })?.status, 'Bajando 0.1.288 · 42%');
+  assert.equal(row('downloading', { progress: 0.42 })?.progress, 0.42);
+  assert.equal(row('staging', { stagingStep: 'verify' })?.status, 'Verificando 0.1.288');
+  assert.equal(row('staging', { stagingStep: 'preflight' })?.status, 'Probando 0.1.288 con tu estado · 1:12');
+  assert.equal(row('staging')?.progress, 'ind');
+  assert.equal(row('ready')?.action?.label, 'Actualizar');
+  assert.equal(row('ready', {}, 'Se detendrá 1 subagente.')?.action?.label, 'Actualizar igual');
+  assert.equal(row('ready', {}, 'Se detendrá 1 subagente.')?.tone, 'warn');
+  const failed = row('failed', { targetVersion: '0.1.287', error: 'Workass 0.1.287 no pasó su prueba antes de instalarse (x). Sigue instalada 0.1.286.' });
+  assert.equal(failed?.status, 'La 0.1.287 no pasó su prueba');
+  assert.equal(failed?.tone, 'err');
+  assert.equal(failed?.action?.label, 'Reintentar');
+  assert.match(failed?.title ?? '', /no pasó su prueba antes de instalarse/, 'the whole reason on hover');
+  assert.equal(row('failed', { availableVersion: '0.1.289' })?.action?.label, 'Actualizar');
+});
+
+test('an agent has a row only while it needs updating, is updating, or failed', () => {
+  const updates = [
+    { providerId: 'claude', cli: 'claude', installed: '2.1.322', latest: '2.1.322', updateAvailable: false },
+    { providerId: 'codex', cli: 'codex', installed: '0.167.1', latest: '0.168.0', updateAvailable: true, hint: 'npm i -g @openai/codex' },
+  ];
+  const name = (id: string, cli: string) => ({ claude: 'Claude Code', codex: 'Codex' } as Record<string, string>)[id] ?? cli;
+  const idle = providerUpdateRows(updates, {}, null, name);
+  assert.deepEqual(idle.map((r) => r.name), ['Codex'], 'the agent that is up to date is not listed');
+  assert.equal(idle[0].status, '0.167.1 → 0.168.0');
+  assert.equal(idle[0].action?.label, 'Actualizar');
+  const running = providerUpdateRows(updates, { codex: { providerId: 'codex', status: 'running', startedAt: '', tail: 'added 1 package\nchanged 3 packages' } }, null, name);
+  assert.equal(running[0].status, 'changed 3 packages');
+  assert.equal(running[0].progress, 'ind');
+  assert.equal(running[0].action, null);
+  const failed = providerUpdateRows(updates, { codex: { providerId: 'codex', status: 'failed', startedAt: '', tail: '', error: 'EACCES' } }, 'codex', name);
+  assert.equal(failed[0].status, 'EACCES');
+  assert.equal(failed[0].action?.label, 'Reintentar');
+  assert.match(failed[0].title, /A mano: npm i -g @openai\/codex/);
 });
 
 // A shell with no updater (a release under its update preflight) answers null.

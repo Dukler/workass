@@ -3497,6 +3497,13 @@ class UpdateManager {
     return discovery;
   }
 
+  // "Buscar actualizaciones" (the update popover): the background check run
+  // now, with its own guards. A release it finds stages at once on the Mac,
+  // and a check never lands in the middle of a download or an install.
+  checkNow() {
+    return this.autoCheck();
+  }
+
   async autoCheck() {
     if (!this.state.supported || this.activeOperation || this.stagedRecoveryPromise) return this.snapshot();
     if (this.stageInBackground && this.state.phase === 'ready' && this.prepared) return this.restageIfNewer();

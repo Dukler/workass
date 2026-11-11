@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Chat } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
-import { call, has } from '../wire/api';
+import { call } from '../wire/api';
 import { IcSearch, IcAssist, IcChats, IcPlus, IcActivity, IcGear, IcFolder, ModelIcon } from '../icons';
 import { buildWorkspaceGroups, normalizeWorkspacePath, type WorkspaceGroup } from '../workspaces';
-import { nextUpdatePhase, brandForProvider, updateFailureTitle, updateFailureReason, DONE_HOLD_MS, EXIT_MS, type UpdatePhase } from '../update-card';
+import { brandForProvider } from '../update-card';
+import { providerUpdateRows, selfUpdateRow, type UpdateRow } from '../update-rows';
+import { agoText } from './settings/updates';
 import { chatHasLiveActivity } from '../chat-activity';
-import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, appUpdaterCardTitle, appUpdaterPhaseText, updatesNeedAttention, useAppUpdater } from '../app-updater';
+import { UPDATE_ARM_MS, appUpdateWorkWarning, appUpdaterBlockerText, updatesNeedAttention, useAppUpdater } from '../app-updater';
 import { pushEscapeLayer } from '../markdown/html-frames';
 import { WorkspaceBrowser } from './WorkspaceBrowser';
 import { AccountsFootButton, closeAccounts } from './AccountsPage';
@@ -375,316 +377,152 @@ function IcCheck() {
   );
 }
 
-// Last non-empty line of a redacted updater tail (single truncated line under
-// the progress card / row). Empty until the first throttled snapshot lands.
-function tailLine(tail: string | undefined): string {
-  if (!tail) return '';
-  const lines = tail.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  return lines.length ? lines[lines.length - 1] : '';
-}
-
-function copyUpdateHint(hint: string) {
-  const done = () => store.addToast('Comando copiado', hint);
-  try {
-    const p = navigator.clipboard?.writeText(hint);
-    if (p && typeof p.then === 'function') { p.then(done).catch(() => store.addToast('Comando', hint)); }
-    else done();
-  } catch { store.addToast('Comando', hint); }
-}
-
-// The footer provider-updates card IS the update button: one click runs the
-// daemon updater for every pending CLI, sequentially, with live progress + a
-// border-illumination spinner right here — no navigation, so a coding session is
-// never interrupted. Per-CLI management lives in Ajustes·Agentes.
-export function FooterUpdateCards() {
+// The update popover's rows (owner 2026-11-11, mock update-popover/mock-v2.html
+// variant A): only what needs updating, one fixed-height row each, the action
+// as quiet text in the row's right slot, progress as a hairline on its foot.
+// Never restore the legacy "La actualización sigue esperando" copy: active
+// chat work is not an updater gate.
+export function UpdateRows() {
   const app = useApp();
   const selfUpdater = useAppUpdater();
   const selfUpdate = selfUpdater.state;
-  const provUpdates = app.providersUpdates.filter((u) => u.updateAvailable);
-  const running = store.runningUpdate();
-  const chain = app.updateChain;
-  const failedId = chain?.failedId ?? null;
-  const canUpdate = has('providersUpdate');
   const connected = app.connection === 'connected';
-
-  const cliFor = (id: string) => app.providersUpdates.find((u) => u.providerId === id)?.cli || id;
-
-  // Success-path lifecycle. `active` is true while a CLI streams or the chain is
-  // still walking between CLIs (no failure yet); this keeps the card in `running`
-  // across the microscopic gaps between sequential updates so it never flickers
-  // to resting. On the terminal edge the machine seals to `done`, and the timers
-  // below carry it done → exiting → hidden so it slides out instead of blinking.
-  const active = !!running || (!!chain && !failedId);
-  const pending = provUpdates.length;
-  const [phase, setPhase] = useState<UpdatePhase>(() => nextUpdatePhase('hidden', { active, pending }));
-  // Remember the CLI + provider that ran live, so the sealed "done" card can name
-  // it and keep showing its brand mark after the live progress entry is gone.
-  const lastCli = useRef('');
-  const lastProviderId = useRef('');
-  if (running) { lastCli.current = cliFor(running.providerId); lastProviderId.current = running.providerId; }
-
-  // Data-driven transitions. A failure preempts this machine (its own card), so
-  // reset to a neutral phase and let a later success re-run cleanly.
-  useEffect(() => {
-    if (failedId) { setPhase(pending > 0 ? 'resting' : 'hidden'); return; }
-    setPhase((prev) => nextUpdatePhase(prev, { active, pending }));
-  }, [active, pending, failedId]);
-
-  // Time-driven transitions: hold the green seal, then run the slide-out.
-  useEffect(() => {
-    if (phase === 'done') {
-      const t = setTimeout(() => setPhase('exiting'), DONE_HOLD_MS);
-      return () => clearTimeout(t);
-    }
-    if (phase === 'exiting') {
-      const t = setTimeout(() => setPhase('hidden'), EXIT_MS);
-      return () => clearTimeout(t);
-    }
-    return undefined;
-  }, [phase]);
-
-  const sealing = phase === 'done' || phase === 'exiting';
-  const selfActive = ['checking', 'downloading', 'staging', 'installing'].includes(selfUpdate.phase);
-  const selfPending = ['available', 'ready', 'busy'].includes(selfUpdate.phase);
-  const selfCheckFailed = selfUpdate.phase === 'check_failed';
-  const selfFailed = selfUpdate.phase === 'failed' || selfUpdate.phase === 'rollback_healthy';
-  const [selfPhase, setSelfPhase] = useState<UpdatePhase>('hidden');
-  const [selfActionBusy, setSelfActionBusy] = useState(false);
-  // Armed = the first click found running work; the card says what an update
+  const [actionBusy, setActionBusy] = useState(false);
+  // Armed = the first click found running work; the row says what the update
   // would stop and the next click proceeds anyway. Disarms on its own so a
   // stale warning never stands in for a fresh count.
-  const [selfArmed, setSelfArmed] = useState('');
+  const [armed, setArmed] = useState('');
   useEffect(() => {
-    if (!selfArmed) return undefined;
-    const timer = setTimeout(() => setSelfArmed(''), UPDATE_ARM_MS);
+    if (!armed) return undefined;
+    const timer = setTimeout(() => setArmed(''), UPDATE_ARM_MS);
     return () => clearTimeout(timer);
-  }, [selfArmed]);
+  }, [armed]);
 
-  // Mirror the provider card's one-element lifecycle. "Listo" seals only an
-  // install this window watched run. After the updater restarts Workass the
-  // receipt says "healthy" for a while, and replaying it as a "Listo" card
-  // (owner 2026-11-09: "always shows the listo notification after an update")
-  // was noise: every state push from the shell sealed it again. The restart
-  // itself is the news; the versions list below says what is installed.
+  // The preflight runs for minutes: its clock starts when the shell says so.
+  const preflight = selfUpdate.phase === 'staging' && selfUpdate.stagingStep === 'preflight';
+  const preflightSince = useRef<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  if (preflight && preflightSince.current == null) preflightSince.current = Date.now();
+  if (!preflight) preflightSince.current = null;
   useEffect(() => {
-    if (selfCheckFailed || selfFailed) { setSelfPhase('hidden'); return; }
-    if (selfActive) { setSelfPhase('running'); return; }
-    if (selfUpdate.phase === 'healthy' || selfUpdate.phase === 'installed') {
-      setSelfPhase((prev) => (prev === 'running' ? 'done' : prev === 'done' || prev === 'exiting' ? prev : 'hidden'));
-      return;
-    }
-    if (selfPending) { setSelfPhase('resting'); return; }
-    setSelfPhase('hidden');
-  }, [selfActive, selfCheckFailed, selfFailed, selfPending, selfUpdate.phase]);
+    if (!preflight) return undefined;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [preflight]);
 
-  useEffect(() => {
-    if (selfPhase === 'done') {
-      const timer = setTimeout(() => setSelfPhase('exiting'), DONE_HOLD_MS);
-      return () => clearTimeout(timer);
-    }
-    if (selfPhase === 'exiting') {
-      const timer = setTimeout(() => setSelfPhase('hidden'), EXIT_MS);
-      return () => clearTimeout(timer);
-    }
-    return undefined;
-  }, [selfPhase]);
-
-  const selfSealing = selfPhase === 'done' || selfPhase === 'exiting';
-  const showProvider = !!failedId || !!running || pending > 0 || sealing;
-  const showSelfUpdate = selfUpdate.supported && (selfCheckFailed || selfFailed || selfPhase !== 'hidden');
-  if (!showSelfUpdate && !showProvider) return null;
-
-  const one = pending === 1 ? provUpdates[0] : null;
-  const provTitle = one ? `${one.cli} ${one.latest}` : 'Actualizaciones de agentes';
-  const provSub = one
-    ? `instalada ${one.installed}`
-    : provUpdates.map((u) => `${u.cli} ${u.latest}`).join(' · ');
-  const doneSub = lastCli.current ? `${lastCli.current} actualizado` : 'Actualización completa';
-  // Provider whose brand mark sits on the right of the live card: the running CLI,
-  // the one that just sealed, or the single pending update. Empty when several
-  // agents are pending at once (no single brand to show).
-  const iconProviderId = running ? running.providerId : sealing ? lastProviderId.current : one ? one.providerId : '';
-  const iconBrand = brandForProvider(iconProviderId, app.providers, app.groups);
-
-  // Resting card is the update button (or opens Ajustes on an older bridge). It
-  // shares the .updcard box as a role=button div so it lives inside the same
-  // .updslot element across the whole lifecycle — the enter/exit slide plays on
-  // that stable wrapper, never re-firing when the inner mode swaps.
-  const restOpen = canUpdate ? () => void store.startUpdateChain() : () => store.openSettings('agentes');
-  const restDisabled = canUpdate && !connected;
-
-  const selfRunning = selfPhase === 'running';
-  const selfAction = selfPending || selfCheckFailed || selfFailed ? selfUpdater.apply : null;
-  const selfTitle = appUpdaterCardTitle(selfUpdate);
-  const selfActionLabel = selfActionBusy
-    ? 'Comprobando…'
-    : selfArmed
-    ? 'Actualizar igual'
-    : selfUpdate.phase === 'busy'
-    ? 'Reintentar'
-    : 'Actualizar';
-  const runSelfAction = async () => {
-    if (!selfAction || selfActionBusy) return;
-    setSelfActionBusy(true);
+  const runSelf = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
     try {
-      if (!selfArmed) {
-        // A daemon without the count answers undefined → update straight away,
-        // exactly as before this step existed.
+      if (!armed) {
+        // A daemon without the count answers undefined → update straight away.
         const warning = appUpdateWorkWarning(
           await call('appUpdateWork'),
           (tabId) => app.chats.find((chat) => chat.id === tabId)?.title ?? '',
         );
-        if (warning) { setSelfArmed(warning); return; }
+        if (warning) { setArmed(warning); return; }
       }
-      setSelfArmed('');
-      const next = await selfAction();
-      if (next.phase === 'busy') {
-        // Never restore the legacy "La actualización sigue esperando" copy:
-        // active chat work is not an updater gate.
-        store.addToast('La actualización necesita reintento', appUpdaterBlockerText(next.blockers));
-      }
+      setArmed('');
+      const next = await selfUpdater.apply();
+      if (next.phase === 'busy') store.addToast('La actualización necesita reintento', appUpdaterBlockerText(next.blockers));
     } catch (error) {
       store.addToast('No se pudo actualizar', String((error as Error)?.message || error));
     } finally {
-      setSelfActionBusy(false);
+      setActionBusy(false);
     }
   };
 
+  const self = selfUpdateRow({
+    state: selfUpdate, armed, actionBusy,
+    preflightSeconds: preflight && preflightSince.current != null ? (now - preflightSince.current) / 1000 : null,
+  });
+  const rows = [
+    ...(self ? [self] : []),
+    ...providerUpdateRows(app.providersUpdates, app.updateProgress, app.updateChain?.failedId ?? null,
+      (id, cli) => store.providerName(id) || cli),
+  ];
+
+  const onAction = (row: UpdateRow) => {
+    if (!row.action || row.action.disabled) return;
+    if (row.action.kind === 'self') { void runSelf(); return; }
+    if (!connected) return;
+    void store.updateProvider(row.providerId);
+  };
+
+  if (!rows.length) {
+    const checked = agoText(latestIso(selfUpdate.checkedAt, app.providersCheckedAt));
+    return (
+      <div className="uprow upempty">
+        <span className="upgl" aria-hidden="true"><IcCheck /></span>
+        <span className="uptx"><span className="upn">Todo al día</span><span className="ups">{checked ? `Revisado ${checked}` : 'Sin nada que actualizar'}</span></span>
+      </div>
+    );
+  }
   return (
-    <div className="updcards">
-      {showSelfUpdate && (
-        <div className={`updslot${selfPhase === 'exiting' ? ' card-exit' : ''}`}>
-          {selfCheckFailed || selfFailed ? (
-            <div className="updcard upd-fail" title={appUpdaterPhaseText(selfUpdate)}>
-              <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
-              <span className="ubody">
-                <span className="ut">{selfTitle}</span>
-                <span className={`us${selfArmed ? ' us-warn' : ''}`}>{selfArmed || appUpdaterPhaseText(selfUpdate)}</span>
-                <span className="ufail-act">
-                  <button className="uretry" disabled={selfActionBusy} onClick={() => void runSelfAction()}>
-                    {selfActionBusy ? 'Reintentando…' : selfArmed ? 'Actualizar igual' : selfUpdate.availableVersion ? 'Actualizar' : 'Reintentar'}
-                  </button>
-                </span>
+    <div className="uprows">
+      {rows.map((row) => {
+        const brand = row.providerId ? brandForProvider(row.providerId, app.providers, app.groups) : '';
+        return (
+          <div className="uprow" key={row.key} title={row.title || undefined}>
+            <span className="upgl" aria-hidden="true">{brand ? <ModelIcon provider={brand} /> : <IcDownload />}</span>
+            <span className="uptx">
+              <span className="upn">{row.name}</span>
+              <span className={`ups${row.tone ? ` ${row.tone}` : ''}`}>{row.status}</span>
+            </span>
+            <span className="upslot">
+              {row.action ? (
+                <button type="button" className={`upact${row.action.tone ? ` ${row.action.tone}` : ''}`}
+                  disabled={row.action.disabled || (row.action.kind !== 'self' && !connected)}
+                  onClick={() => onAction(row)}>{row.action.label}</button>
+              ) : <span className="upv">{row.version}</span>}
+            </span>
+            {row.progress != null && (
+              <span className={`upline${row.progress === 'ind' ? ' ind' : ''}`} aria-hidden="true">
+                <i style={row.progress === 'ind' ? undefined : { transform: `scaleX(${row.progress})` }} />
               </span>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className={`updcard${selfRunning ? ' upd-run' : ''}${selfSealing ? ' upd-run upd-done' : ''}${selfActionBusy ? ' upd-off' : ''}${selfArmed && !selfRunning && !selfSealing ? ' upd-warn' : ''}`}
-              disabled={selfRunning || selfSealing || !selfAction || selfActionBusy}
-              onClick={() => void runSelfAction()}
-              title={appUpdaterPhaseText(selfUpdate)}
-            >
-              <span className="updring" aria-hidden="true" />
-              <span className={`uico${selfSealing ? ' udone' : ''}`} aria-hidden="true">
-                <span className="uglyph" key={selfSealing ? 'check' : 'dl'}>
-                  {selfSealing ? <IcCheck /> : <IcDownload />}
-                </span>
-              </span>
-              <span className="ubody" key={selfRunning ? selfUpdate.phase : selfSealing ? 'done' : 'rest'}>
-                <span className="ut">{selfTitle}</span>
-                <span className={`us${selfArmed && !selfRunning ? ' us-warn' : ''}`}>{selfArmed && !selfRunning ? selfArmed : appUpdaterPhaseText(selfUpdate)}</span>
-              </span>
-              {selfAction && !selfRunning && !selfSealing && <span className="uarrow updo" aria-hidden="true">{selfActionLabel}</span>}
-            </button>
-          )}
-        </div>
-      )}
-      {showProvider && (
-        <div className={`updslot${phase === 'exiting' ? ' card-exit' : ''}`}>
-          {failedId ? (
-            // Failure: the failed CLI inline with a Reintentar button + the manual
-            // command as a copy-chip fallback; remaining pending CLIs stay listed.
-            <div className="updcard upd-fail" key="fail">
-              <span className="uico ufail" aria-hidden="true"><IcDownload /></span>
-              <span className="ubody">
-                <span className="ut">{updateFailureTitle(cliFor(failedId), app.updateProgress[failedId])}</span>
-                {updateFailureReason(app.updateProgress[failedId], app.providersUpdates.find((u) => u.providerId === failedId)) && (
-                  <span className="us us-warn">{updateFailureReason(app.updateProgress[failedId], app.providersUpdates.find((u) => u.providerId === failedId))}</span>
-                )}
-                {provUpdates.some((u) => u.providerId !== failedId) && (
-                  <span className="us">Pendientes: {provUpdates.filter((u) => u.providerId !== failedId).map((u) => u.cli).join(' · ')}</span>
-                )}
-                <span className="ufail-act">
-                  <button
-                    className="uretry"
-                    disabled={!connected}
-                    onClick={() => void store.startUpdateChain()}
-                    title={connected ? 'Reintentar la actualización' : 'Sin conexión con el daemon'}
-                  >Reintentar</button>
-                  {(app.providersUpdates.find((u) => u.providerId === failedId)?.hint) && (
-                    <code
-                      className="ucopy" role="button" tabIndex={0} title="Copiar comando"
-                      onClick={() => copyUpdateHint(app.providersUpdates.find((u) => u.providerId === failedId)!.hint!)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copyUpdateHint(app.providersUpdates.find((u) => u.providerId === failedId)!.hint!); } }}
-                    >{app.providersUpdates.find((u) => u.providerId === failedId)!.hint}</code>
-                  )}
-                </span>
-              </span>
-            </div>
-          ) : (
-            // One stable "live" card across resting → running → done, so the
-            // enter slide plays once and the ring seals in place — no re-blink on
-            // each transition. Child order is fixed (ring, icon, body, arrow) so
-            // React never morphs one slot's element into another; the ring stays
-            // in the DOM (hidden via CSS) while resting to hold that order. The
-            // glyph and body are keyed by mode so they cross-fade on every swap
-            // instead of hard-cutting.
-            <div
-              key="live"
-              className={`updcard${running ? ' upd-run' : ''}${sealing ? ' upd-run upd-done' : ''}${!running && !sealing && restDisabled ? ' upd-off' : ''}`}
-              {...(running || sealing ? {} : {
-                role: 'button',
-                tabIndex: restDisabled ? -1 : 0,
-                'aria-disabled': restDisabled || undefined,
-                onClick: restDisabled ? undefined : restOpen,
-                onKeyDown: restDisabled ? undefined : (e: ReactKeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); restOpen(); } },
-              })}
-              title={
-                running ? `Actualizando ${cliFor(running.providerId)}…`
-                  : sealing ? doneSub
-                  : canUpdate ? (connected ? 'Actualizar ahora' : 'Sin conexión con el daemon') : 'Ver en Ajustes · Agentes'
-              }
-            >
-              {/* The border ring is the only spinner while updating (no glyph
-                  spinner "line" in the icon slot). The left glyph is the status
-                  mark — a static download while pending/updating, a check once
-                  sealed — keyed by identity so it only cross-fades at that swap. */}
-              <span className="updring" aria-hidden="true" />
-              <span className={`uico${sealing ? ' udone' : ''}`} aria-hidden="true">
-                <span className="uglyph" key={sealing ? 'check' : 'dl'}>
-                  {sealing ? <IcCheck /> : <IcDownload />}
-                </span>
-              </span>
-              <span className="ubody" key={running ? 'run' : sealing ? 'done' : 'rest'}>
-                {running ? (
-                  <>
-                    <span className="ut">
-                      Actualizando {cliFor(running.providerId)}…
-                      {chain && chain.ids.length > 1 && <span className="ucount"> ({chain.index}/{chain.ids.length})</span>}
-                    </span>
-                    <span className="us mono">{tailLine(running.tail) || 'iniciando…'}</span>
-                  </>
-                ) : sealing ? (
-                  <>
-                    <span className="ut">Listo</span>
-                    <span className="us">{doneSub}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="ut">{provTitle}</span>
-                    <span className="us">{provSub}</span>
-                  </>
-                )}
-              </span>
-              {/* Right slot: the model provider's brand mark (replaces the old
-                  "Actualizar" label). Empty when no single brand applies. */}
-              {iconBrand && <span className="uend mico" aria-hidden="true"><ModelIcon provider={iconBrand} /></span>}
-            </div>
-          )}
-        </div>
-      )}
+            )}
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+function latestIso(...values: Array<string | null | undefined>): string {
+  let best = '';
+  let bestAt = -Infinity;
+  for (const value of values) {
+    const at = value ? Date.parse(value) : NaN;
+    if (Number.isFinite(at) && at > bestAt) { best = value as string; bestAt = at; }
+  }
+  return best;
+}
+
+// "Buscar actualizaciones": Workass and every agent, now. Its label holds a
+// fixed width so the header never shifts while it looks.
+function CheckUpdatesButton() {
+  const updater = useAppUpdater();
+  const [checking, setChecking] = useState(false);
+  const run = async () => {
+    if (checking) return;
+    setChecking(true);
+    const started = Date.now();
+    try {
+      await Promise.all([
+        updater.state.supported ? updater.check().catch(() => undefined) : undefined,
+        store.checkProviderUpdates().catch(() => false),
+      ]);
+    } finally {
+      // Long enough to read, even when both answer at once.
+      const left = 600 - (Date.now() - started);
+      if (left > 0) await new Promise((resolve) => setTimeout(resolve, left));
+      setChecking(false);
+    }
+  };
+  return (
+    <button type="button" className="upact plain upcheck" disabled={checking} onClick={() => void run()}>
+      {checking ? 'Buscando…' : 'Buscar actualizaciones'}
+    </button>
   );
 }
 
@@ -712,18 +550,6 @@ export function FooterBar() {
 
   const attention = updatesNeedAttention(self, app.providersUpdates, !!store.runningUpdate(), app.updateChain);
   const title = attention ? 'Actualizaciones' : 'Todo al día';
-  // The agents you have on (or one with an update waiting), by their own name.
-  const enabled = new Set(app.providers.filter((p) => p.enabled && !p.disabledByUser).map((p) => p.id));
-  const versions = [
-    ...(self.supported && self.currentVersion ? [{ key: 'workass', name: 'Workass', brand: '', installed: self.currentVersion, latest: '' }] : []),
-    ...app.providersUpdates
-      .filter((u) => enabled.has(u.providerId) || u.updateAvailable)
-      .map((u) => ({
-        key: u.providerId, name: store.providerName(u.providerId) || u.cli,
-        brand: brandForProvider(u.providerId, app.providers, app.groups) ?? '',
-        installed: u.installed, latest: u.updateAvailable ? u.latest : '',
-      })),
-  ];
 
   return (
     <div className="footbar" ref={ref}>
@@ -741,19 +567,8 @@ export function FooterBar() {
       </button>
       {open && (
         <div className="footpop" role="dialog" aria-label="Actualizaciones">
-          <div className="footpop-head">{title}</div>
-          <FooterUpdateCards />
-          {versions.length > 0 && (
-            <ul className="footvers">
-              {versions.map((v) => (
-                <li key={v.key}>
-                  <span className="fvi" aria-hidden="true">{v.brand ? <ModelIcon provider={v.brand} /> : <IcDownload />}</span>
-                  <span className="fvn">{v.name}</span>
-                  <span className="fvv">{v.installed || '—'}{v.latest ? <span className="fvl"> → {v.latest}</span> : null}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className="footpop-head"><span>Actualizaciones</span><CheckUpdatesButton /></div>
+          <UpdateRows />
         </div>
       )}
     </div>

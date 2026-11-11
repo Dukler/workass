@@ -213,130 +213,44 @@ aside.side {
 .footbtn svg { width: 16px; height: 16px; stroke-width: 1.3; }
 .footdot { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--side); }
 .footpop { position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 8px; z-index: 30; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; padding: 6px; box-shadow: 0 10px 34px rgba(0,0,0,.4); }
-.footpop-head { font-size: 11.5px; color: var(--muted); padding: 5px 8px 6px; }
-.footpop .updcards { margin: 0 0 6px; }
-.footvers { list-style: none; margin: 0; padding: 2px 0 0; }
-.footvers li { display: flex; align-items: baseline; gap: 10px; padding: 5px 8px; font-size: 12px; color: var(--ink2); }
-.footvers .fvi { width: 16px; height: 16px; display: grid; place-items: center; flex: none; color: var(--muted); align-self: center; }
-.footvers .fvi svg { width: 14px; height: 14px; }
-.footvers .fvn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.footvers .fvv { flex: none; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
-.footvers .fvl { color: var(--acc); }
+.footpop-head { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 2px 0 8px; font-size: 11.5px; color: var(--muted); }
+.footpop-head > span { flex: 1; min-width: 0; }
+
+/* Update rows (owner 2026-11-11, mock update-popover/mock-v2.html, variant A).
+   Only what needs updating. Every row is two lines and 44px in every state;
+   the right slot holds the version or one quiet text action; a hairline on
+   the row's foot carries the progress. No card, no filled button, no ring. */
+.uprows { display: flex; flex-direction: column; }
+.uprow { position: relative; height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: 8px; }
+.uprow:hover { background: var(--line); }
+.uprow.upempty:hover { background: transparent; }
+.upgl { width: 18px; height: 18px; display: grid; place-items: center; flex: none; color: var(--muted); }
+.upgl svg { width: 15px; height: 15px; stroke-width: 1.3; }
+.upempty .upgl { color: var(--acc); }
+.uptx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.upn { font-size: 12.5px; line-height: 17px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ups { font-size: 11.5px; line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ups.warn { color: var(--amber); }
+.ups.err { color: var(--del); }
+.ups.mono, .upv { font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+.upslot { flex: none; min-width: 72px; display: flex; justify-content: flex-end; }
+.upv { color: var(--muted); white-space: nowrap; }
+.upact { height: 24px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--acc); font: inherit; font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer; transition: background .15s ease; }
+.upact:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 12%, transparent); }
+.upact.warn { color: var(--amber); }
+.upact.warn:hover:not(:disabled) { background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.upact.plain { color: var(--ink2); }
+.upact.plain:hover:not(:disabled) { background: var(--line); color: var(--ink); }
+.upact:disabled { opacity: .55; cursor: default; }
+.upcheck { font-weight: 400; font-size: 11.5px; min-width: 142px; text-align: right; }
+/* The hairline: scaleX for a known fraction, a sweeping segment otherwise.
+   transform only, so it runs on the GPU; not gated on Reduce Motion. */
+.upline { position: absolute; left: 36px; right: 8px; bottom: 3px; height: 1.5px; border-radius: 2px; overflow: hidden; background: var(--line2); }
+.upline > i { position: absolute; inset: 0; border-radius: 2px; background: var(--acc); transform-origin: left; transition: transform .3s ease; }
+.upline.ind > i { width: 35%; animation: upline-sweep 1.6s cubic-bezier(.45, 0, .25, 1) infinite; }
+@keyframes upline-sweep { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 .side-empty { color: var(--faint); font-size: 12px; padding: 6px 9px; }
 
-/* Update cards, inside the foot's update popover. Hairline, 11px radius; NO
-   green fill; icon muted; hover swaps the background, no translate. */
-.updcards { display: flex; flex-direction: column; gap: 6px; margin: 0 -2px 8px; }
-.updcard { display: flex; align-items: center; gap: 9px; width: 100%; box-sizing: border-box; padding: 7px 9px; background: var(--panel); border: 1px solid var(--line2); border-radius: 11px; color: var(--ink2); font-family: inherit; font-size: inherit; text-align: left; cursor: pointer; transition: background .15s ease, color .15s ease; }
-.updcard:hover { background: var(--line); color: var(--ink); }
-.updcard .uico { width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted); flex: none; }
-.updcard .uico svg { width: 16px; height: 16px; stroke-width: 1.3; }
-.updcard:hover .uico { color: var(--ink); }
-.updcard .ubody { flex: 1; min-width: 0; }
-.updcard .ut { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.updcard .us { display: block; margin-top: 1px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.updcard .utag { margin-left: 5px; padding: 0 4px; font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line2); border-radius: 4px; vertical-align: 1px; }
-.updcard .uarrow { margin-left: auto; color: var(--faint); flex: none; font-size: 14px; line-height: 1; }
-.updcard:hover .uarrow { color: var(--muted); }
-.updcard:disabled { opacity: .55; cursor: default; }
-.updcard:disabled:hover { background: var(--panel); color: var(--ink2); }
-.updcard.upd-run:disabled { opacity: 1; }
-.updcard .us.mono { font-family: ui-monospace, Menlo, monospace; }
-/* Resting update-me card: the whole card is the button; an accent "Actualizar"
-   tag replaces the chevron. */
-.updcard .uarrow.updo { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--acc); }
-.updcard:hover .uarrow.updo { color: var(--acc); }
-/* Armed: the first click found running work. The subtitle says what the next
-   click stops (wrapping, so it is read whole) and the action turns amber. */
-.updcard .us.us-warn { color: var(--amber); white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
-.updcard.upd-warn { border-color: color-mix(in srgb, var(--amber) 45%, var(--line2)); }
-.updcard.upd-warn .uarrow.updo, .updcard.upd-warn:hover .uarrow.updo { color: var(--amber); }
-/* Right slot brand mark (the model provider icon, replacing the "Actualizar"
-   label). Reuses .mico sizing; the GPT knot follows this colour, the Claude burst
-   keeps its own hue. Pushed to the trailing edge and slightly dimmed at rest. */
-.updcard .uend { margin-left: auto; color: var(--muted); }
-.updcard:hover .uend { color: var(--ink2); }
-
-/* Progress mode: a small accent spinner glyph + the circling border ring. The
-   ring is a static element whose conic-gradient `from` angle animates, so the
-   bright accent arc traces the card's actual rounded-rect border (rotating the
-   element would spin a rectangle, not follow the corners). Plays regardless of
-   reduced-motion by standing decision. */
-.updcard.upd-run, .updcard.upd-fail { cursor: default; position: relative; }
-.updcard.upd-run:hover, .updcard.upd-fail:hover { background: var(--panel); color: var(--ink2); }
-.updcard.upd-run:hover .uico, .updcard.upd-fail:hover .uico { color: var(--muted); }
-.updcard .uspin { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--line2); border-top-color: var(--acc); animation: conn-spin .7s linear infinite; }
-@property --updring { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
-.updcard .updring {
-  position: absolute; inset: 0; border-radius: inherit; padding: 1.6px; pointer-events: none;
-  background: conic-gradient(from var(--updring), transparent 0deg 250deg, color-mix(in srgb, var(--acc) 22%, transparent) 300deg, var(--acc) 342deg, transparent 360deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--acc) 55%, transparent));
-  animation: updring 1.15s linear infinite;
-}
-@keyframes updring { to { --updring: 360deg; } }
-.updcard .ucount { color: var(--muted); font-weight: 500; }
-
-/* Failure mode: failed CLI + Reintentar button + copy-command fallback chip. */
-.updcard.upd-fail { align-items: flex-start; }
-.updcard.upd-fail .uico.ufail { color: var(--del); margin-top: 1px; }
-.updcard .ufail-act { margin-top: 7px; display: flex; align-items: center; gap: 6px; min-width: 0; }
-.updcard .ufail-act .ucopy { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.updcard .uretry { border: 1px solid color-mix(in srgb, var(--acc) 42%, transparent); background: color-mix(in srgb, var(--acc) 9%, transparent); color: var(--acc); border-radius: 7px; padding: 3px 9px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; transition: background .15s ease; }
-.updcard .uretry:hover:not(:disabled) { background: color-mix(in srgb, var(--acc) 16%, transparent); }
-.updcard .uretry:disabled { opacity: .55; cursor: default; }
-.updcard .ucopy { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--muted); background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 2.5px 7px; cursor: pointer; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
-.updcard .ucopy:hover { color: var(--ink); border-color: var(--line2); }
-/* Resting card rendered as a role=button div (so it stays one element across the
-   whole lifecycle): mirror the native :disabled damping when offline. */
-.updcard.upd-off { opacity: .55; cursor: default; }
-.updcard.upd-off:hover { background: var(--panel); color: var(--ink2); }
-.updcard.upd-off:hover .uico { color: var(--muted); }
-.updcard.upd-off:hover .uarrow.updo { color: var(--acc); }
-
-/* Enter / exit slide. The card lives inside a stable .updslot wrapper so this
-   plays once on appear and once on leave, never re-firing when the inner mode
-   swaps (resting → running → done). It slides in from the sidebar edge and, once
-   sealed green, slides back out to the left while collapsing the footer gap. */
-.updslot { animation: updslot-in .26s cubic-bezier(.16, .84, .44, 1) both; }
-.updslot.card-exit { animation: updslot-out .34s cubic-bezier(.4, 0, 1, 1) both; overflow: hidden; pointer-events: none; }
-@keyframes updslot-in { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
-@keyframes updslot-out {
-  from { opacity: 1; transform: translateX(0); max-height: 64px; }
-  to { opacity: 0; transform: translateX(-20px); max-height: 0; }
-}
-
-/* Done seal: the same border ring, but its accent arc sweeps once from the top
-   all the way around — the spinner resolving into a complete green loop — and
-   holds solid. The spinner glyph is replaced by a check that pops in, and the
-   title/icon go accent-green. Green stays an accent (border + check + one word);
-   no green fill, per design law. */
-@property --updseal { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
-.updcard.upd-done .updring {
-  background: conic-gradient(from -90deg, var(--acc) 0deg var(--updseal), color-mix(in srgb, var(--acc) 12%, transparent) var(--updseal) 360deg);
-  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--acc) 60%, transparent));
-  animation: upd-seal .5s cubic-bezier(.3, 0, .15, 1) forwards;
-}
-@keyframes upd-seal { from { --updseal: 0deg; } to { --updseal: 360deg; } }
-.updcard.upd-done .ut { color: var(--acc); }
-.updcard.upd-done .uico.udone { color: var(--acc); }
-.updcard.upd-done .uico.udone svg { width: 15px; height: 15px; stroke-width: 1.6; }
-@keyframes upd-check-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-
-/* No-blink state swaps. The card is one stable element whose mode changes in
-   place; keeping the ring in the DOM (just hidden) while resting holds the child
-   order fixed so React never hard-swaps element slots. The glyph + body are
-   keyed by mode, so they remount and gently cross-fade on each transition rather
-   than snapping; the title colour eases alongside. */
-.updcard:not(.upd-run):not(.upd-done) .updring { display: none; }
-.updcard .uglyph { display: grid; place-items: center; animation: upd-fadein .2s ease both; }
-.updcard .ubody { animation: upd-fadein .2s ease both; }
-.updcard .ut { transition: color .2s ease; }
-.updcard.upd-done .uglyph { animation: upd-check-pop .34s cubic-bezier(.2, .9, .3, 1.35) .03s both; }
-@keyframes upd-fadein { from { opacity: 0; } to { opacity: 1; } }
 
 /* ============ main ============ */
 main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }

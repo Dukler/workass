@@ -293,10 +293,13 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	"StartProviderDetection": {},
 	"StartProviderStartup":   {},
 	"StartProviderUpdate":    {},
-	"StateDir":               {},
-	"Stats":                  {},
-	"ToggleProvider":         {},
-	"UpdateWorkInProgress":   {},
+	// "Buscar actualizaciones": the agents' version check now. Machine-level,
+	// touches no chat actor.
+	"CheckProviderUpdates": {},
+	"StateDir":             {},
+	"Stats":                {},
+	"ToggleProvider":       {},
+	"UpdateWorkInProgress": {},
 	// Ajustes > Herramientas: a wiring setter for where the tool groups switched
 	// off are read, that read, the guide text composed for a set of groups, and
 	// the MCP servers read from each agent CLI's own config files. None of them
