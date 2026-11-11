@@ -14,6 +14,8 @@
 //  - Máquinas y acceso: this machine's name, other Workass, the phone, and
 //    the clients that keep access (lan:devices / access-request / revoke).
 //  - Trabajos (settings/TrabajosPage): job notices and resource holders.
+//  - Conectores (settings/ConectoresPage): Grafana connectors on every
+//    connected machine, their rules, notices and where a hand-off chat opens.
 //  - Actualizaciones (settings/ActualizacionesPage): this Mac, "Instalar
 //    solo", paired machines and agent CLIs, all on the one updater.
 //  - Atajos: the keyboard shortcuts.
@@ -33,13 +35,14 @@ import { GeneralPage } from './settings/GeneralPage';
 import { PermisosPage } from './settings/PermisosPage';
 import { HerramientasPage } from './settings/HerramientasPage';
 import { TrabajosPage } from './settings/TrabajosPage';
+import { ConectoresPage } from './settings/ConectoresPage';
 import { ActualizacionesPage } from './settings/ActualizacionesPage';
 import { MantenimientoPage } from './settings/MantenimientoPage';
 import { FooterBar } from './Sidebar';
 
 const SECTION_NAME: Record<SettingsSection, string> = {
   general: 'General', apariencia: 'Apariencia', agentes: 'Agentes y modelos', permisos: 'Permisos',
-  herramientas: 'Herramientas', maquinas: 'Máquinas y acceso', trabajos: 'Trabajos',
+  herramientas: 'Herramientas', maquinas: 'Máquinas y acceso', trabajos: 'Trabajos', conectores: 'Conectores',
   actualizaciones: 'Actualizaciones', atajos: 'Atajos', mantenimiento: 'Mantenimiento',
 };
 
@@ -51,6 +54,8 @@ const NavIcon: Record<SettingsSection, ReactNode> = {
   permisos: <Svg><path d="M8 1.8 13 4v4c0 3-2.2 5.2-5 6.2C5.2 13.2 3 11 3 8V4z" /><path d="M6 8.2 7.5 9.7 10.2 6.8" /></Svg>,
   herramientas: <Svg><path d="M10.5 2.5a3 3 0 0 0-3.4 4L2.8 10.8a1.3 1.3 0 0 0 1.9 1.9L9 8.4a3 3 0 0 0 4-3.4l-1.8 1.8-1.7-.4-.4-1.7z" /></Svg>,
   trabajos: <Svg><path d="M4 2.5h8M4 13.5h8M5 2.5c0 3 6 3.5 6 5.5s-6 2.5-6 5.5M11 2.5c0 3-6 3.5-6 5.5" /></Svg>,
+  // A plug: something from outside connected in.
+  conectores: <Svg><path d="M6 2v3M10 2v3" /><path d="M4.6 5h6.8v2.4a3.4 3.4 0 0 1-6.8 0z" /><path d="M8 10.8V14" /></Svg>,
   actualizaciones: <Svg><path d="M8 2.5v7M5 6.5l3 3 3-3M3 12.5h10" /></Svg>,
   agentes: <Svg><rect x="2.5" y="3" width="11" height="8" rx="2" /><circle cx="6" cy="7" r="1" /><circle cx="10" cy="7" r="1" /><path d="M8 11v2M5 14h6" /></Svg>,
   maquinas: <Svg><rect x="1.8" y="3" width="12.4" height="8" rx="1.6" /><path d="M5.5 13.5h5M8 11v2.5" /></Svg>,
@@ -376,13 +381,13 @@ function MaquinasYAccesoPanel() {
 const PANELS: Record<SettingsSection, () => ReactNode> = {
   general: GeneralPage, apariencia: AparienciaPanel, agentes: () => <AgentsPage />,
   permisos: PermisosPage, herramientas: HerramientasPage, maquinas: MaquinasYAccesoPanel,
-  trabajos: TrabajosPage, actualizaciones: ActualizacionesPage, atajos: AtajosPanel, mantenimiento: MantenimientoPage,
+  trabajos: TrabajosPage, conectores: ConectoresPage, actualizaciones: ActualizacionesPage, atajos: AtajosPanel, mantenimiento: MantenimientoPage,
 };
 // The mock's grouped navigation.
 const NAV: ReadonlyArray<{ label?: string; items: SettingsSection[] }> = [
   { items: ['general', 'apariencia'] },
   { label: 'Agentes', items: ['agentes', 'permisos', 'herramientas'] },
-  { label: 'Tus máquinas', items: ['maquinas', 'trabajos'] },
+  { label: 'Tus máquinas', items: ['maquinas', 'trabajos', 'conectores'] },
   { label: 'Sistema', items: ['actualizaciones', 'atajos', 'mantenimiento'] },
 ];
 

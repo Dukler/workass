@@ -362,7 +362,7 @@ export interface FleetKeyView {
 }
 
 export type SettingsSection = 'general' | 'apariencia' | 'agentes' | 'permisos' | 'herramientas'
-  | 'maquinas' | 'trabajos' | 'actualizaciones' | 'atajos' | 'mantenimiento';
+  | 'maquinas' | 'trabajos' | 'conectores' | 'actualizaciones' | 'atajos' | 'mantenimiento';
 
 export interface AppState {
   chats: Chat[];

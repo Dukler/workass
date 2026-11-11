@@ -2897,3 +2897,130 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .auto-src { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; color: var(--muted); text-align: right; }
 .auto-act { display: grid; place-items: center; }
 .auto-act .auto-x { grid-row: auto; }
+
+/* ============ Alertas: the bell and its Parte ============
+   Owner 2026-11-10, desktop/docs/mocks/connectors-alerts/popover-v2.html
+   section 0 + variant A. No number on the bell: a dot in the worst undecided
+   severity, a hollow ring when every firing alert has a chat or is silenced.
+   The swing is deliberately NOT gated on prefers-reduced-motion (this Mac runs
+   Reduce Motion on and the owner wants the one swing). */
+.footdot.sev-c { background: var(--del); }
+.footdot.sev-w { background: var(--amber); }
+.footdot.sev-i { background: var(--muted); }
+.footdot.ring { background: var(--side); box-shadow: inset 0 0 0 1.5px var(--muted), 0 0 0 2px var(--side); }
+.footbtn.bell.swing { color: var(--ink); }
+.footbtn.bell.swing svg { animation: bell-swing .9s ease-in-out 1; transform-origin: 50% 12%; }
+@keyframes bell-swing { 0% { transform: rotate(0); } 20% { transform: rotate(-18deg); } 45% { transform: rotate(13deg); } 70% { transform: rotate(-7deg); } 100% { transform: rotate(0); } }
+
+.parte { --fill: color-mix(in srgb, var(--ink) 5%, transparent); --fill2: color-mix(in srgb, var(--ink) 9%, transparent);
+  position: fixed; z-index: 60; width: 476px; max-width: calc(100vw - 20px); max-height: calc(100vh - 90px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 13px; box-shadow: 0 14px 36px rgb(0 0 0 / .22);
+  padding: 14px 18px 13px; font-size: 13px; line-height: 1.5; color: var(--ink); scrollbar-width: thin; }
+.parte :focus, .parte :focus-visible { outline: none; }
+.parte p { margin: 0; }
+.parte .mut { color: var(--muted); }
+.parte .sm { font-size: 12px; }
+.parte .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+.parte .sp { flex: 1; }
+.parte .caps { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.pa-cap { display: flex; align-items: baseline; margin-bottom: 9px; }
+.pa-cap .mono { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+.parte .sit ~ .sit { margin-top: 18px; }
+.sit-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 1px; }
+.sit-h b { font-weight: 600; font-size: 14px; }
+.parte .sev { font-size: 11.5px; white-space: nowrap; }
+.parte .sev.c { color: var(--del); }
+.parte .sev.w { color: var(--amber); }
+.parte .sev.i { color: var(--muted); }
+.parte .rule { font-weight: 500; }
+.sit .ev { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.parte .verbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; margin-top: 8px; color: var(--muted); white-space: nowrap; }
+.parte .verbs button { border: 0; background: transparent; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.parte .verbs button:hover { color: var(--ink); }
+.parte .verbs .main { color: var(--ink); font-weight: 500; }
+.parte .tg { display: inline-flex; align-items: center; gap: 3px; }
+.parte .tg svg { width: 12px; height: 12px; stroke-width: 1.3; transform: translateY(1px); }
+.parte .tg.on { color: var(--ink); }
+.parte .log { font: 11.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace; background: var(--fill); border-radius: 8px; padding: 7px 10px; }
+.parte .ll { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 0 8px; }
+.parte .ll > i { font-style: normal; color: var(--muted); }
+.parte .ll > span { overflow-wrap: anywhere; }
+.parte .ll.quiet > span { color: var(--muted); }
+.parte .pa-ext { color: inherit; text-decoration: none; white-space: nowrap; }
+.parte .pa-ext:hover { color: var(--ink); }
+.parte .tail { border-left: 2px solid var(--line2); padding: 1px 0 1px 10px; }
+.parte .tail-h { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.parte .hand { display: flex; flex-direction: column; gap: 10px; margin-top: 2px; }
+.parte .tok { font: inherit; font-weight: 500; color: var(--ink); background: transparent; border: 0; border-bottom: 1px dashed var(--muted); border-radius: 0; padding: 0; white-space: nowrap; cursor: pointer; }
+.parte .tok.on { border-bottom-color: transparent; background: var(--fill2); border-radius: 5px; padding: 1px 6px; margin: 0 -1px; }
+.parte .say { border-left: 2px solid var(--ink); padding: 1px 0 1px 11px; }
+.parte .say textarea { display: block; width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; line-height: 1.5; resize: none; padding: 0; overflow: hidden; }
+.parte .hand-b { display: flex; align-items: center; gap: 8px; }
+.parte .hand-b .q { margin-left: -4px; }
+.parte .pair { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.parte .btn { font-size: 12px; line-height: 18px; padding: 3px 10px; border-radius: 7px; border: 1px solid var(--line2); color: var(--ink); background: transparent; white-space: nowrap; cursor: pointer; }
+.parte .btn:hover:not(:disabled) { background: var(--line); }
+.parte .btn.pri { background: var(--ink); color: var(--bg); border-color: transparent; }
+.parte .btn.pri:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 86%, var(--bg)); }
+.parte .btn.q { border-color: transparent; color: var(--muted); padding-left: 4px; padding-right: 4px; }
+.parte .btn.q:hover { background: transparent; color: var(--ink); }
+.parte .btn:disabled { opacity: .45; cursor: default; }
+.parte .ag { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px 8px; align-items: baseline; }
+.parte .ag .o { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 4px; margin-left: -8px; }
+.parte .oi { padding: 1px 8px; border-radius: 6px; border: 0; background: transparent; font: inherit; color: var(--muted); white-space: nowrap; cursor: pointer; }
+.parte .oi.mono { font-size: 12px; }
+.parte .oi:hover { color: var(--ink); }
+.parte .oi.on { background: var(--fill2); color: var(--ink); }
+.parte .oi-in { min-width: 150px; margin-left: 8px; border: 0; border-bottom: 1px dashed var(--line2); background: transparent; color: var(--ink); font-size: 12px; padding: 1px 0; outline: 0; }
+.parte .past { border-top: 1px solid var(--line); padding-top: 11px; margin-top: 18px; }
+.parte .past .verbs { font-size: 12px; }
+.parte .pa-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.parte .pa-past + .pa-past { margin-top: 4px; }
+.parte .pa-link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--ink); text-decoration: underline; text-decoration-color: var(--line2); text-underline-offset: 2px; cursor: pointer; }
+
+/* ============ Ajustes · Conectores ============
+   mock.html section 1: the list of connectors beside the chosen one, flat. */
+.stgs .cn-item { gap: 9px; padding: 8px; }
+.stgs .cn-logo { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; flex: none; background: var(--field); color: var(--ink2); }
+.stgs .cn-logo svg { width: 14px; height: 14px; }
+.stgs .cn-add { margin-top: 8px; }
+.stgs .cn-add .cn-logo svg { width: 12px; height: 12px; }
+.stgs .cn-add .ag-n { color: var(--muted); font-weight: 400; }
+.stgs .cn-st { font-size: 9px; vertical-align: 1px; }
+.stgs .cn-st.ok { color: var(--acc); }
+.stgs .cn-st.err { color: var(--del); }
+.stgs .cn-st.idle { color: var(--faint); }
+.stgs .cn-ttl { display: flex; align-items: center; gap: 10px; padding: 4px 0 10px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.stgs .cn-pill { font-size: 11px; font-weight: 400; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); }
+.stgs .btn.q { border-color: transparent; color: var(--muted); }
+.stgs .btn.q:hover { background: var(--line); color: var(--ink); }
+.stgs .cn-remove { margin-left: auto; font-weight: 400; }
+.stgs .cn-remove.armed { color: var(--del); }
+.stgs .cn-det .cn-first { border-top: 0; }
+.stgs .cn-det .cn-first .set:first-child { padding-top: 0; }
+.stgs .cn-fld { font-size: 12px; padding: 3px 8px; border: 1px solid var(--line2); border-radius: 6px; color: var(--ink); white-space: nowrap; }
+.stgs .cn-url { max-width: 250px; overflow: hidden; text-overflow: ellipsis; }
+.stgs .inp.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.stgs .cn-det .inp.mono:not(.cn-folder) { width: 210px; }
+.stgs .cn-folder { width: 190px; }
+.stgs .cn-det select.inp { max-width: 150px; }
+.stgs .cn-rule { padding: 7px 0; min-height: 0; }
+.stgs .cn-over { padding-left: 14px; }
+.stgs .cn-sev { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.stgs .cn-sev.c { background: var(--del); }
+.stgs .cn-sev.w { background: var(--amber); }
+.stgs .cn-sev.i { background: var(--muted); }
+.stgs .cn-sev.none { background: transparent; }
+.stgs .cn-r { margin-left: auto; }
+.stgs .cn-err { color: var(--del); }
+.stgs .cn-ok { color: var(--ink2); }
+.stgs .cn-errline { font-size: 12px; margin: 0 0 8px; }
+.stgs .cn-link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--ink2); text-decoration: underline; text-decoration-color: var(--line2); text-underline-offset: 2px; cursor: pointer; }
+.stgs .cn-link.mut { color: var(--muted); text-decoration: none; font-size: 13px; }
+.stgs .cn-link.mut:hover:not(:disabled) { color: var(--ink); }
+.stgs .cn-link:disabled { cursor: default; opacity: .6; }
+.stgs .cn-reset { padding: 2px 6px; }
+.stgs .cn-det .btn:disabled, .stgs .cn-det select:disabled { opacity: .45; cursor: default; }
+.stgs .cn-det .btn.acc:disabled:hover { background: var(--acc); }
+.stgs .cn-det select.inp.cn-change { max-width: 110px; color: var(--ink2); }
+.stgs .cn-move .d .mono { font-size: 11.5px; overflow-wrap: anywhere; }
