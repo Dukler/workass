@@ -7,6 +7,7 @@ import { loadComposerDraft, saveComposerDraft } from '../composer-drafts';
 // (message list, running state, tabs, catalog) bump `app`.
 
 import { useSyncExternalStore } from 'react';
+import { primeSentImages } from '../sent-images';
 import type { AppState, BrowserPresentation, Chat, Msg, MessageImage, ThinkingEvent, ToolEvent, ThemePref, Density, SettingsSection, Toast, DraftImage, QueuedMsg, PlanEntry } from './types';
 import type { JobEvent, PublicJob, AcpEvent, PermissionRequest, PermissionResolved, ChatCatalog, ChatCompacted, ChatGoalEvent, ModelOption, ModeOption, PermissionIntent, ProcChanged, AccessRequest, ProcessSummary, CatalogGroup, ChatCheckpoint, CheckpointRestored, NotifyEvent, NotifyBacklog, AgentApply, AgentRouteRequest, AgentRouteResponse, ChatCommandsEvent, ChatStructuredError, StartJobOpts, StartJobReply, PlanUsageSnapshot, ProviderRecord, ProvidersUpdates, ProviderUpdateProgress, AppUpdate, AppUpdateWork, ProviderUpdate, SpawnedWorkChanged, SpawnedWorkItem, SpawnedWorkRead, SpawnedWorkStop, SpawnedWorkSummary, ChatEnvPayload, StateDigest, StateDigestChat } from '../wire/types';
 import { call, callThrow, has, on, bridgeReady, wireBusy } from '../wire/api';
@@ -6493,6 +6494,9 @@ export class Store {
         return true;
       }
     }
+    // The receipt names each sent image's reference: keep the bytes in hand
+    // under it, so the row by reference paints at once (sent-images.ts).
+    if (job && !isQueuedJobStart(job)) primeSentImages(messageImages(images), job.userImages);
     if (isQueuedJobStart(job)) {
       const current = this.chat(tabId);
       if (!sameChatPair(current, tabId, chatId)) {

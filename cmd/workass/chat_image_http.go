@@ -37,7 +37,7 @@ func newChatImageHTTPHandler(chats *providerChatRuntime) http.Handler {
 	if chats == nil {
 		return nil
 	}
-	return chatImageHTTP{chats: chats, thumbs: newChatImageThumbs(filepath.Dir(chats.sessions.path))}
+	return chatImageHTTP{chats: chats, thumbs: chatImageThumbsFor(filepath.Dir(chats.sessions.path))}
 }
 
 // chatImageRequests marks image reads in progress for background maintenance

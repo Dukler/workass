@@ -4,6 +4,7 @@ import { messageImageSrc } from '../image-drafts';
 import { call } from '../wire/api';
 import { transcriptImageGate } from '../transcript-images';
 import { chatImageRenditionWidth, chatImageURL, chatImageURLWidth, fullChatImageURL, sameChatImage } from '../chat-image-url';
+import { sentImageSrc } from '../sent-images';
 
 // A message image the daemon sent by reference (archive reads with
 // deferImages, 2026-10-13): the chat's text paints first, and each image's
@@ -12,6 +13,11 @@ import { chatImageRenditionWidth, chatImageURL, chatImageURLWidth, fullChatImage
 // windowed transcript remounts rows as the reader scrolls, so it holds more.
 const loaded = new Map<string, string>();
 const CACHE_LIMIT = 48;
+
+// Bytes for ref already in hand: read before, or just sent from here.
+function inHand(ref: string): string | undefined {
+  return loaded.get(ref) ?? sentImageSrc(ref);
+}
 
 function remember(ref: string, src: string) {
   loaded.delete(ref);
@@ -57,7 +63,7 @@ function renditionWidth(frame: Element | null, image: MessageImage): number {
 
 export function cachedImageSrc(image: MessageImage, tabId?: string): string {
   if (!image.deferredImageRef) return messageImageSrc(image);
-  const bytes = loaded.get(image.deferredImageRef);
+  const bytes = inHand(image.deferredImageRef);
   if (bytes) return bytes;
   const url = tabId === undefined ? '' : imageURL(tabId, image);
   return (url && loadedURLs.get(url)) || '';
@@ -72,6 +78,9 @@ export function cachedImageSrc(image: MessageImage, tabId?: string): string {
 // on screen now), and a read whose image has left the transcript before its
 // turn is dropped; it is asked for again if the image comes back.
 export const IMAGE_READS_AT_ONCE = 3;
+
+/** How long a failed image read waits before each new try. */
+const RETRY_MS = [600, 1500, 4000];
 
 type ImageRead = {
   ref: string;
@@ -140,7 +149,7 @@ function queueImageRead(tabId: string, image: MessageImage, pinned: boolean): Im
 export function loadImageSrc(tabId: string, image: MessageImage): Promise<string | null> {
   const ref = image.deferredImageRef;
   if (!ref) return Promise.resolve(messageImageSrc(image));
-  const hit = loaded.get(ref);
+  const hit = inHand(ref);
   if (hit) { remember(ref, hit); return Promise.resolve(hit); }
   // By URL the viewer's own <img> fetches it (from the cache when it is shown).
   const url = imageURL(tabId, image);
@@ -157,7 +166,7 @@ export function loadImageSrc(tabId: string, image: MessageImage): Promise<string
 export function requestImageSrc(tabId: string, image: MessageImage): { promise: Promise<string | null>; release: () => void } {
   const ref = image.deferredImageRef;
   if (!ref) return { promise: Promise.resolve(messageImageSrc(image)), release: () => {} };
-  const hit = loaded.get(ref);
+  const hit = inHand(ref);
   if (hit) { remember(ref, hit); return { promise: Promise.resolve(hit), release: () => {} }; }
   const read = queueImageRead(tabId, image, false);
   read.holders++;
@@ -182,6 +191,8 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
   const [failed, setFailed] = useState(false);
   // Bumped when a URL fails, so the image is asked for again over the socket.
   const [attempt, setAttempt] = useState(0);
+  // Failed reads asked again for this image (RETRY_MS), reset per image.
+  const retried = useRef<{ ref: string | undefined; count: number }>({ ref: undefined, count: 0 });
   const loadedRef = useRef<() => void>(() => {});
   useEffect(() => {
     const now = cachedImageSrc(image, tabId);
@@ -191,6 +202,7 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
     if (now || !image.deferredImageRef || !target.current) return;
     let current = true;
     let request: ReturnType<typeof requestImageSrc> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const url = imageURL(tabId, image);
     const frame = target.current;
     const gate = transcriptImageGate().watch(frame, {
@@ -203,7 +215,21 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
           // A read given up on (the image left first) settles without bytes;
           // that is not a failure. Bytes it did bring are cached for next time.
           if (!current || request !== mine) return;
-          if (next) { setSrc(next); gate.loaded(); } else setFailed(true);
+          if (next) { setSrc(next); gate.loaded(); return; }
+          setFailed(true);
+          // A read can fail for a moment (the daemon restarting, an image it
+          // did not count as this chat's yet): ask again, URL first, a few
+          // times before the frame stays broken.
+          if (retried.current.ref !== image.deferredImageRef) retried.current = { ref: image.deferredImageRef, count: 0 };
+          const wait = RETRY_MS[retried.current.count];
+          if (wait === undefined) return;
+          retried.current.count++;
+          retryTimer = setTimeout(() => {
+            if (!current) return;
+            const full = chatImageURL(tabId, image);
+            if (full) brokenURLs.delete(full);
+            setAttempt((value) => value + 1);
+          }, wait);
         });
       },
       cancel: () => {
@@ -215,7 +241,7 @@ export function useMessageImageSrc(tabId: string, image: MessageImage) {
       },
     });
     loadedRef.current = gate.loaded;
-    return () => { current = false; gate.stop(); request?.release(); };
+    return () => { current = false; gate.stop(); request?.release(); if (retryTimer) clearTimeout(retryTimer); };
   }, [tabId, image, attempt]);
   const onLoaded = (loadedSrc: string) => {
     if (loadedSrc && !loadedSrc.startsWith('data:')) rememberURL(loadedSrc);

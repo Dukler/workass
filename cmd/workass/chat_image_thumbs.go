@@ -95,6 +95,29 @@ func newChatImageThumbs(stateDir string) *chatImageThumbs {
 	}
 }
 
+// sharedChatImageThumbs holds one rendition cache per state dir, shared by
+// the HTTP route (the desktop) and the socket read (the phone): a rendition is
+// made once whichever client asks first, concurrent asks wait on one render,
+// and the disk bound is counted once.
+var sharedChatImageThumbs struct {
+	mu    sync.Mutex
+	byDir map[string]*chatImageThumbs
+}
+
+func chatImageThumbsFor(stateDir string) *chatImageThumbs {
+	sharedChatImageThumbs.mu.Lock()
+	defer sharedChatImageThumbs.mu.Unlock()
+	if sharedChatImageThumbs.byDir == nil {
+		sharedChatImageThumbs.byDir = make(map[string]*chatImageThumbs)
+	}
+	thumbs := sharedChatImageThumbs.byDir[stateDir]
+	if thumbs == nil {
+		thumbs = newChatImageThumbs(stateDir)
+		sharedChatImageThumbs.byDir[stateDir] = thumbs
+	}
+	return thumbs
+}
+
 // rendition returns the image at most width pixels wide. original reads the
 // verified full image; it runs only when no cached rendition exists.
 func (t *chatImageThumbs) rendition(digest string, width int, original func() ([]byte, error)) ([]byte, string, error) {

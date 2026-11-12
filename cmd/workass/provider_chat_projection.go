@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -735,6 +737,39 @@ func (r *providerChatRuntime) ProjectToolImageByTab(tabID, ref string) ([]any, b
 		return nil, false, err
 	}
 	return []any{map[string]any{"data": data}}, true, nil
+}
+
+// ProjectToolImageRenditionByTab is ProjectToolImageByTab at most width
+// pixels wide, rounded up to a rendition width (chat_image_thumbs.go), as a
+// data URL. The phone draws a message's image as a thumbnail: a 1290x2796
+// screenshot is 574 KB of base64 whole and ~66 KB at 480 px, which is less to
+// send over a phone link and far less to decode. It shares the desktop's
+// rendition cache. An image already narrow enough, or one that cannot be
+// resized, comes back whole; a width of 0 or past the largest rendition is
+// the plain read.
+func (r *providerChatRuntime) ProjectToolImageRenditionByTab(tabID, ref string, requested int) ([]any, bool, error) {
+	width := 0
+	if requested > 0 {
+		width = chatImageThumbWidth(strconv.Itoa(requested))
+	}
+	if width <= 0 {
+		return r.ProjectToolImageByTab(tabID, ref)
+	}
+	found, err := r.authorizeSessionImageByTab(tabID, ref)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	digest, _ := validSessionImageRef(ref)
+	stateDir := filepath.Dir(r.sessions.path)
+	data, contentType, err := chatImageThumbsFor(stateDir).rendition(digest, width, func() ([]byte, error) { return readChatImageBytes(ref, stateDir) })
+	if err != nil {
+		return nil, false, err
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		// Not a raster image (an SVG): its stored form, exactly as before.
+		return r.ProjectToolImageByTab(tabID, ref)
+	}
+	return []any{map[string]any{"data": "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)}}, true, nil
 }
 
 // authorizeSessionImageByTab is the one ownership check every chat image read

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,7 +46,8 @@ func TestJustSentImageIsReadableBeforeItsLaneAttaches(t *testing.T) {
 	defer client.conn.Close()
 	images := newChatImageHTTPHandler(providerChats)
 	const tabID, chatID = "just-sent-tab", "just-sent-chat"
-	png := testPNG(t, 64, 40)
+	// Wider than a phone thumbnail, so the {width} read makes a rendition.
+	png := testPNG(t, 1000, 600)
 	createWireActorChat(t, client, 1, tabID, chatID, "pi")
 
 	// The phone's send: the job carries the image's bytes.
@@ -87,6 +89,26 @@ func TestJustSentImageIsReadableBeforeItsLaneAttaches(t *testing.T) {
 	}
 	if data := fieldString(mapFromAnyMain(anySlice(read.Result)[0]), "data"); data != base64.StdEncoding.EncodeToString(png) {
 		t.Fatalf("phone read returned %d base64 bytes, want the image", len(data))
+	}
+	// Phone thumbnail: {imageRef, width} answers a rendition (300 rounds up
+	// to 320), as a data URL, from the cache the desktop's ?w= uses.
+	client.invoke(t, 4, "chat:archive-load", tabID, map[string]any{"imageRef": ref, "width": 300})
+	thumb := client.waitReply(t, 4, 5*time.Second)
+	if thumb.Error != nil {
+		t.Fatalf("phone thumbnail read: %s", *thumb.Error)
+	}
+	url := fieldString(mapFromAnyMain(anySlice(thumb.Result)[0]), "data")
+	encoded, ok := strings.CutPrefix(url, "data:image/png;base64,")
+	if !ok {
+		t.Fatalf("phone thumbnail = %.40q, want a PNG data URL", url)
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || config.Width != 320 || len(raw) >= len(png) {
+		t.Fatalf("phone thumbnail = %dx%d, %d bytes (err %v); want 320 wide and smaller than the %d-byte image", config.Width, config.Height, len(raw), err, len(png))
 	}
 	client.waitJobEvent(t, fieldString(receipt, "id"), "end", 10*time.Second)
 }

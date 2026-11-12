@@ -63,7 +63,10 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				return detail, nil
 			}
 			if _, requested := options["imageRef"]; requested {
-				image, found, err := providerChats.ProjectToolImageByTab(stringArg(args, 0), fieldString(options, "imageRef"))
+				// Additive {width}: a rendition at most that wide, for a
+				// thumbnail (ProjectToolImageRenditionByTab). Without it, or
+				// from an older client, the whole image as before.
+				image, found, err := providerChats.ProjectToolImageRenditionByTab(stringArg(args, 0), fieldString(options, "imageRef"), intValue(options["width"]))
 				if err != nil {
 					return nil, err
 				}
