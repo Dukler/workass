@@ -63,26 +63,6 @@ func claudeNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecuta
 	if _, set := env["CLAUDE_CODE_FORK_SUBAGENT"]; !set && os.Getenv("CLAUDE_CODE_FORK_SUBAGENT") == "" {
 		env["CLAUDE_CODE_FORK_SUBAGENT"] = "1"
 	}
-	// The Agent SDK labels every process it starts "sdk-ts" unless told
-	// otherwise, and Anthropic's 5-hour meter charges that label about 1.7x
-	// to 3x more than the interactive CLI for the same tokens (measured by
-	// t3code, pingdotgg/t3code#24649). Workass names itself instead; the
-	// requests still carry agent-sdk/<version> and the client-app below, so
-	// nothing about what is calling is hidden. A provider setting wins.
-	if _, set := env["CLAUDE_CODE_ENTRYPOINT"]; !set {
-		env["CLAUDE_CODE_ENTRYPOINT"] = claudeWorkassEntrypoint
-	}
-	if _, set := env["CLAUDE_AGENT_SDK_CLIENT_APP"]; !set {
-		env["CLAUDE_AGENT_SDK_CLIENT_APP"] = claudeWorkassEntrypoint
-	}
-	// Claude Code turns its Artifact tools off only for the sdk-* labels. Under
-	// any other name it loads Artifact, ArtifactComments and ArtifactData into
-	// every request (about 26k more characters of tool definitions), which
-	// Workass chats never had. Off unless the provider or the daemon's own
-	// environment says otherwise.
-	if _, set := env["CLAUDE_CODE_ARTIFACT"]; !set && os.Getenv("CLAUDE_CODE_ARTIFACT") == "" {
-		env["CLAUDE_CODE_ARTIFACT"] = "0"
-	}
 	env["WORKASS_CLAUDE_SDK_MODULE"] = sdkModule
 	provider.Command = node
 	provider.ResolvedCommand = ""
@@ -91,9 +71,36 @@ func claudeNativeHostLaunch(provider ProviderConfig, opts Options, daemonExecuta
 	return provider, nil
 }
 
-// claudeWorkassEntrypoint is how Workass's Claude processes name themselves
-// (CLAUDE_CODE_ENTRYPOINT and CLAUDE_AGENT_SDK_CLIENT_APP).
-const claudeWorkassEntrypoint = "workass"
+// claudeIdentityEnv is set on every Claude process Workass starts (chats,
+// spares, subagents, session forks, fork runs, chat titles) unless the
+// provider's own environment sets the same name. It is applied by the Claude
+// launch policy (mergedEnv), so no launch path can miss it.
+//
+//   - CLAUDE_CODE_ENTRYPOINT: the Agent SDK labels its processes "sdk-ts" and
+//     `claude -p` labels itself "sdk-cli". t3code measured Anthropic's 5-hour
+//     meter charging those labels about 1.6x to 1.7x more than the
+//     interactive CLI for the same tokens (pingdotgg/t3code#24649; the weekly
+//     meter was unaffected), and fixed it by naming their app. Workass does
+//     the same. The User-Agent still carries agent-sdk/<version> and the
+//     client-app tag, so the request says what is calling.
+//   - CLAUDE_AGENT_SDK_CLIENT_APP: Claude Code's own field for the app on top
+//     of the SDK (x-client-app header, client-app/ in the User-Agent).
+//   - CLAUDE_CODE_ARTIFACT=0: Claude Code turns its Artifact tools off only
+//     for the sdk-* labels; under any other name Artifact, ArtifactComments
+//     and ArtifactData add about 26k characters of tool definitions to every
+//     request. A daemon environment value is kept (it is not a host-session
+//     variable).
+//
+// Under a non-SDK label Claude Code 2.1.322 also adds its claude-code-guide
+// agent and an AskUserQuestion preview paragraph, records the label in the
+// session transcript (so a terminal `claude -c` or /resume in the same folder
+// lists Workass sessions), and makes background memory consolidation
+// (autoDream) eligible; the host turns that one off (claude-native-host.mjs).
+var claudeIdentityEnv = map[string]string{
+	"CLAUDE_CODE_ENTRYPOINT":      "workass",
+	"CLAUDE_AGENT_SDK_CLIENT_APP": "workass",
+	"CLAUDE_CODE_ARTIFACT":        "0",
+}
 
 // claudeHostSessionEnv is what a Claude Code session exports to the processes it
 // starts. A daemon started from inside one (a dev rig run from a chat) would

@@ -131,15 +131,17 @@ type chatTitler struct {
 	// settlePoll is how often a generated title checks whether the
 	// first-message title has landed.
 	settlePoll time.Duration
+	// env is the environment the agent's one-shot runs with (nil: the daemon's).
+	env func(providerID string) []string
 	// run executes one command and returns its stdout; replaced in tests.
-	run func(ctx context.Context, argv []string, stdin string) (string, error)
+	run func(ctx context.Context, argv, env []string, stdin string) (string, error)
 }
 
 func newChatTitler(manager *acp.Manager, chats *providerChatRuntime, settings func() map[string]any, logf func(string, ...any)) *chatTitler {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &chatTitler{command: manager.OneShotCommand, chats: chats, settings: settings, logf: logf, slots: make(chan struct{}, 2), settlePoll: 300 * time.Millisecond, run: runChatTitleCommand}
+	return &chatTitler{command: manager.OneShotCommand, env: manager.OneShotEnv, chats: chats, settings: settings, logf: logf, slots: make(chan struct{}, 2), settlePoll: 300 * time.Millisecond, run: runChatTitleCommand}
 }
 
 // Start begins naming one chat in the background. It answers at once: false
@@ -169,6 +171,10 @@ func (t *chatTitler) Start(req chatTitleRequest) (bool, string) {
 	if refused != "" {
 		return false, refused
 	}
+	var env []string
+	if t.env != nil {
+		env = t.env(cfg.ProviderID)
+	}
 	select {
 	case t.slots <- struct{}{}:
 	default:
@@ -178,7 +184,7 @@ func (t *chatTitler) Start(req chatTitleRequest) (bool, string) {
 		defer func() { <-t.slots }()
 		ctx, cancel := context.WithTimeout(context.Background(), chatTitleTimeout)
 		defer cancel()
-		answer, err := t.run(ctx, argv, text)
+		answer, err := t.run(ctx, argv, env, text)
 		if err != nil {
 			t.logf("[titles] %s could not name a chat: %v", cfg.ProviderID, err)
 			return
@@ -205,7 +211,7 @@ func (t *chatTitler) Start(req chatTitleRequest) (bool, string) {
 
 // runChatTitleCommand runs the agent once in an empty folder, so no project
 // file or instruction file is read, with the message on stdin.
-func runChatTitleCommand(ctx context.Context, argv []string, stdin string) (string, error) {
+func runChatTitleCommand(ctx context.Context, argv, env []string, stdin string) (string, error) {
 	if len(argv) == 0 {
 		return "", errors.New("no command")
 	}
@@ -216,6 +222,7 @@ func runChatTitleCommand(ctx context.Context, argv []string, stdin string) (stri
 	defer os.RemoveAll(dir)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	cmd.Env = env
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

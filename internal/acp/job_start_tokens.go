@@ -97,12 +97,20 @@ func (m *Manager) loadJobStartTokens() {
 	if json.Unmarshal(data, &records) != nil {
 		return
 	}
+	root := m.JobStartCredentialDir()
 	for _, record := range records {
 		token := strings.TrimSpace(record.Token)
-		if !strings.HasPrefix(token, jobStartTokenPrefix) || record.ID == "" || record.TabID == "" || record.ChatID == "" {
+		if !strings.HasPrefix(token, jobStartTokenPrefix) || record.ID == "" || record.TabID == "" || record.ChatID == "" ||
+			record.ID != filepath.Base(record.ID) || strings.HasPrefix(record.ID, ".") {
 			continue
 		}
-		m.jobStartTokens[token] = record.JobStartBinding
+		// The file lives where this daemon keeps credentials, whatever the index
+		// recorded: a clone of the state (the updater's test daemon) names the
+		// live files there, and a state directory spelled differently since the
+		// last boot must still own its own.
+		binding := record.JobStartBinding
+		binding.File = filepath.Join(root, binding.ID, "context.json")
+		m.jobStartTokens[token] = binding
 	}
 	// A timer holds its file for months, across restarts that may move this
 	// daemon's endpoint or certificate. Each file still on disk is brought up to

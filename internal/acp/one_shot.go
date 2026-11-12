@@ -1,6 +1,9 @@
 package acp
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 // A one-shot prompt: the provider's CLI answers one message read from stdin
 // and exits, with no tools, project, settings, MCP servers or saved session.
@@ -28,6 +31,17 @@ func OneShotModels(providerID string) []OneShotModel {
 		return nil
 	}
 	return append([]OneShotModel(nil), strategy.Models()...)
+}
+
+// OneShotEnv is the environment a one-shot prompt runs with: the provider's
+// own settings over the daemon's, filtered and completed by the provider's
+// launch policy, as its chats get.
+func (m *Manager) OneShotEnv(providerID string) []string {
+	extra := map[string]string(nil)
+	if cfg, ok := m.providerSnapshot(providerID); ok {
+		extra = effectiveProviderEnv(cfg)
+	}
+	return mergedEnv(os.Environ(), extra, providerAdapterForID(providerID).launch.EnvironmentPolicy())
 }
 
 // OneShotCommand is the command line for one one-shot prompt to an enabled

@@ -171,39 +171,29 @@ func TestClaudeBridgeLaunchUsesWorkassSDKHostAndOfficialExecutable(t *testing.T)
 		t.Fatalf("a daemon environment setting must pass through untouched: %#v err=%v", inherited.Env, err)
 	}
 
-	// Claude names itself Workass, not the Agent SDK's default "sdk-ts" that
-	// Anthropic's 5-hour meter charges more, and keeps the Artifact tools that
-	// any non-SDK label switches on out of every request.
-	if launch.Env["CLAUDE_CODE_ENTRYPOINT"] != "workass" || launch.Env["CLAUDE_AGENT_SDK_CLIENT_APP"] != "workass" || launch.Env["CLAUDE_CODE_ARTIFACT"] != "0" {
-		t.Fatalf("Claude identity defaults = entrypoint %q client-app %q artifact %q", launch.Env["CLAUDE_CODE_ENTRYPOINT"], launch.Env["CLAUDE_AGENT_SDK_CLIENT_APP"], launch.Env["CLAUDE_CODE_ARTIFACT"])
-	}
-	explicit, err := claudeNativeHostLaunch(ProviderConfig{
-		ID: "claude", Command: claude, CWD: root,
-		Env: map[string]string{"CLAUDE_CODE_ENTRYPOINT": "mine", "CLAUDE_AGENT_SDK_CLIENT_APP": "mine", "CLAUDE_CODE_ARTIFACT": "1"},
-	}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
-	if err != nil || explicit.Env["CLAUDE_CODE_ENTRYPOINT"] != "mine" || explicit.Env["CLAUDE_AGENT_SDK_CLIENT_APP"] != "mine" || explicit.Env["CLAUDE_CODE_ARTIFACT"] != "1" {
-		t.Fatalf("a provider setting must win over the Claude identity defaults: %#v err=%v", explicit.Env, err)
-	}
-	t.Setenv("CLAUDE_CODE_ARTIFACT", "1")
-	artifacts, err := claudeNativeHostLaunch(ProviderConfig{ID: "claude", Command: claude, CWD: root}, Options{RootDir: root}, filepath.Join(t.TempDir(), "workass"))
-	if _, set := artifacts.Env["CLAUDE_CODE_ARTIFACT"]; err != nil || set {
-		t.Fatalf("an Artifact setting in the daemon environment must pass through untouched: %#v err=%v", artifacts.Env, err)
+	// The identity defaults live in the launch policy, not in this map, so a
+	// path that never calls claudeNativeHostLaunch still gets them.
+	for _, key := range []string{"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_CODE_ARTIFACT"} {
+		if _, set := launch.Env[key]; set {
+			t.Fatalf("%s belongs to the Claude launch policy, not the host launch env: %#v", key, launch.Env)
+		}
 	}
 }
 
 // A daemon started from inside a Claude Code session (a dev rig run from a
 // chat) carries that session's variables. The Claude it launches must not join
-// that session, take its effort or keep its "sdk-ts" label; what the provider
-// launch sets still passes, and other providers keep the whole environment.
+// that session, take its effort or keep its "sdk-ts" label; it is named
+// Workass and keeps Artifact tools off. What the provider launch sets still
+// wins, user configuration passes, and other providers keep the whole
+// environment.
 func TestClaudeChildEnvironmentDropsTheLaunchingClaudeSession(t *testing.T) {
 	daemon := []string{
 		"PATH=/usr/bin", "HOME=/home/u", "ANTHROPIC_BASE_URL=https://proxy.example",
 		"CLAUDECODE=1", "CLAUDE_CODE_ENTRYPOINT=sdk-ts", "CLAUDE_CODE_SESSION_ID=host-session",
 		"CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc.sock", "CLAUDE_CODE_MESSAGING_TOKEN=secret",
 		"CLAUDE_EFFORT=xhigh", "CLAUDE_PID=4242", "CLAUDE_AGENT_SDK_VERSION=0.3.1", "claude_code_child_session=1",
-		"CLAUDE_PLUGIN_DATA=/home/u/.claude/plugins/data/x", "CLAUDE_CODE_FORK_SUBAGENT=0",
+		"CLAUDE_AGENT_SDK_CLIENT_APP=other", "CLAUDE_PLUGIN_DATA=/home/u/.claude/plugins/data/x", "CLAUDE_CODE_FORK_SUBAGENT=0",
 	}
-	launch := map[string]string{"CLAUDE_CODE_ENTRYPOINT": "workass", "CLAUDE_EFFORT": "low", "WORKASS_CLAUDE_EXECUTABLE": "/bin/claude"}
 	envMap := func(items []string) map[string]string {
 		out := map[string]string{}
 		for _, item := range items {
@@ -212,23 +202,90 @@ func TestClaudeChildEnvironmentDropsTheLaunchingClaudeSession(t *testing.T) {
 		}
 		return out
 	}
-	{
-		got := envMap(mergedEnv(daemon, launch, providerAdapterForID("claude").launch.EnvironmentPolicy()))
-		for _, gone := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "CLAUDE_AGENT_SDK_VERSION", "claude_code_child_session", "CLAUDE_PLUGIN_DATA"} {
-			if _, ok := got[gone]; ok {
-				t.Fatalf("the launching Claude session's %s reached the child: %#v", gone, got)
-			}
-		}
-		if got["CLAUDE_CODE_ENTRYPOINT"] != "workass" || got["CLAUDE_EFFORT"] != "low" || got["WORKASS_CLAUDE_EXECUTABLE"] != "/bin/claude" {
-			t.Fatalf("the launch's own settings must win: %#v", got)
-		}
-		if got["PATH"] != "/usr/bin" || got["ANTHROPIC_BASE_URL"] != "https://proxy.example" || got["CLAUDE_CODE_FORK_SUBAGENT"] != "0" {
-			t.Fatalf("ordinary and user configuration must pass through: %#v", got)
+	policy := providerAdapterForID("claude").launch.EnvironmentPolicy()
+
+	got := envMap(mergedEnv(daemon, map[string]string{"CLAUDE_EFFORT": "low", "WORKASS_CLAUDE_EXECUTABLE": "/bin/claude"}, policy))
+	for _, gone := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "CLAUDE_AGENT_SDK_VERSION", "claude_code_child_session", "CLAUDE_PLUGIN_DATA"} {
+		if _, ok := got[gone]; ok {
+			t.Fatalf("the launching Claude session's %s reached the child: %#v", gone, got)
 		}
 	}
+	if got["CLAUDE_CODE_ENTRYPOINT"] != "workass" || got["CLAUDE_AGENT_SDK_CLIENT_APP"] != "workass" || got["CLAUDE_CODE_ARTIFACT"] != "0" {
+		t.Fatalf("Claude identity = entrypoint %q client-app %q artifact %q", got["CLAUDE_CODE_ENTRYPOINT"], got["CLAUDE_AGENT_SDK_CLIENT_APP"], got["CLAUDE_CODE_ARTIFACT"])
+	}
+	if got["CLAUDE_EFFORT"] != "low" || got["WORKASS_CLAUDE_EXECUTABLE"] != "/bin/claude" {
+		t.Fatalf("the launch's own settings must win: %#v", got)
+	}
+	if got["PATH"] != "/usr/bin" || got["ANTHROPIC_BASE_URL"] != "https://proxy.example" || got["CLAUDE_CODE_FORK_SUBAGENT"] != "0" {
+		t.Fatalf("ordinary and user configuration must pass through: %#v", got)
+	}
+
+	explicit := envMap(mergedEnv(daemon, map[string]string{"CLAUDE_CODE_ENTRYPOINT": "mine", "CLAUDE_AGENT_SDK_CLIENT_APP": "mine", "CLAUDE_CODE_ARTIFACT": "1"}, policy))
+	if explicit["CLAUDE_CODE_ENTRYPOINT"] != "mine" || explicit["CLAUDE_AGENT_SDK_CLIENT_APP"] != "mine" || explicit["CLAUDE_CODE_ARTIFACT"] != "1" {
+		t.Fatalf("a provider setting must win over the identity defaults: %#v", explicit)
+	}
+	artifacts := envMap(mergedEnv(append([]string{"CLAUDE_CODE_ARTIFACT=1"}, daemon...), nil, policy))
+	if artifacts["CLAUDE_CODE_ARTIFACT"] != "1" || artifacts["CLAUDE_CODE_ENTRYPOINT"] != "workass" {
+		t.Fatalf("a daemon Artifact setting is user configuration and must pass: %#v", artifacts)
+	}
+	// Empty is not off: Claude Code would load the Artifact tools.
+	blank := envMap(mergedEnv(append([]string{"CLAUDE_CODE_ARTIFACT="}, daemon...), map[string]string{"CLAUDE_AGENT_SDK_CLIENT_APP": " "}, policy))
+	if blank["CLAUDE_CODE_ARTIFACT"] != "0" || blank["CLAUDE_AGENT_SDK_CLIENT_APP"] != "workass" {
+		t.Fatalf("an empty value must take the default: %#v", blank)
+	}
+
 	other := envMap(mergedEnv(daemon, nil, providerAdapterForID("codex").launch.EnvironmentPolicy()))
-	if other["CLAUDECODE"] != "1" || other["CLAUDE_CODE_SESSION_ID"] != "host-session" {
-		t.Fatalf("a non-Claude provider lost environment it never had filtered: %#v", other)
+	if other["CLAUDECODE"] != "1" || other["CLAUDE_CODE_SESSION_ID"] != "host-session" || other["CLAUDE_CODE_ENTRYPOINT"] != "sdk-ts" {
+		t.Fatalf("a non-Claude provider lost or gained environment: %#v", other)
+	}
+	if _, ok := other["CLAUDE_CODE_ARTIFACT"]; ok {
+		t.Fatalf("a non-Claude provider got Claude's defaults: %#v", other)
+	}
+}
+
+// Fork runs (`claude -p --fork-session`) and chat titles (`claude -p`) never
+// go through the SDK host; they must get the same identity and scrub, or they
+// go out as "sdk-cli" carrying whatever session launched the daemon.
+func TestClaudeForkRunsAndOneShotsUseTheClaudeLaunchEnvironment(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "sdk-ts")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session")
+	t.Setenv("CLAUDE_CODE_ARTIFACT", "")
+	claude := filepath.Join(t.TempDir(), executableName("claude"))
+	writeExecutable(t, claude, nativeNoopScript())
+	manager := NewManager(Options{
+		RootDir: t.TempDir(),
+		Providers: []ProviderConfig{{
+			ID: "claude", Name: "Claude Code", Command: claude, Enabled: true, Badge: "native",
+			Env: map[string]string{"CLAUDE_CONFIG_DIR": "/cfg/instance"},
+		}},
+		DefaultProviderID:  "claude",
+		ProviderConfigFile: filepath.Join(t.TempDir(), "providers.json"),
+		RSSSampleInterval:  time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	fork, err := manager.ForkLaunch("claude")
+	if err != nil {
+		t.Fatalf("fork launch: %v", err)
+	}
+	for name, env := range map[string][]string{"fork run": fork.Env, "one-shot": manager.OneShotEnv("claude")} {
+		got := map[string]string{}
+		for _, item := range env {
+			k, v, _ := strings.Cut(item, "=")
+			got[k] = v
+		}
+		if got["CLAUDE_CODE_ENTRYPOINT"] != "workass" || got["CLAUDE_AGENT_SDK_CLIENT_APP"] != "workass" || got["CLAUDE_CODE_ARTIFACT"] != "0" {
+			t.Fatalf("%s identity = %#v", name, got)
+		}
+		if _, ok := got["CLAUDECODE"]; ok {
+			t.Fatalf("%s carries the launching session: %#v", name, got)
+		}
+		if _, ok := got["CLAUDE_CODE_SESSION_ID"]; ok {
+			t.Fatalf("%s carries the launching session id: %#v", name, got)
+		}
+		if got["CLAUDE_CONFIG_DIR"] != "/cfg/instance" {
+			t.Fatalf("%s lost the provider's own setting: %#v", name, got)
+		}
 	}
 }
 

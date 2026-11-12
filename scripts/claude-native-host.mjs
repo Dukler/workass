@@ -33,6 +33,7 @@ const transientOAuthRefreshError = 'Failed to authenticate: OAuth session expire
 // 2026-10-31) even though a direct `claude -p` on the same machine printed a
 // clean failure in seconds. ANY message at all disarms this watchdog — it
 // exists only for total silence, never to race a provider that is working.
+const claudeWorkassSettings = JSON.stringify({ autoDreamEnabled: false });
 const claudeFirstSignalTimeoutMs = Number(process.env.WORKASS_CLAUDE_FIRST_SIGNAL_TIMEOUT_MS) > 0
   ? Number(process.env.WORKASS_CLAUDE_FIRST_SIGNAL_TIMEOUT_MS) : 60000;
 
@@ -589,6 +590,10 @@ class ClaudeSession {
         ? { effort: this.currentEffort }
         : {}),
       ...(Object.keys(servers).length ? { mcpServers: servers } : {}),
+      // Claude Code's background memory consolidation is off for the SDK's own
+      // labels; under Workass's label (internal/acp/native_claude.go) it would
+      // become eligible and spend the plan in the background. Kept off.
+      settings: claudeWorkassSettings,
       ...(resumeExisting ? { resume: this.providerSessionId } : { sessionId: this.sessionId }),
       stderr: (data) => this.noteStderr(data),
       canUseTool: (toolName, input, options) => this.canUseTool(toolName, input, options),
@@ -727,9 +732,11 @@ class ClaudeSession {
     await this.queryRetirement;
     const sdk = await loadSDK();
     const generation = ++this.generation;
-    const query = sdk.query({ prompt: this.input, options: this.queryOptions(resumeExisting) });
+    const options = this.queryOptions(resumeExisting);
+    const query = sdk.query({ prompt: this.input, options });
     this.query = query;
     this.queryNeedsRestart = false;
+    this.queryEffort = options.effort;
     void this.consume(query, generation);
     const initialized = await query.initializationResult();
     const accountIdentity = initialized?.account?.email || initialized?.account?.id || '';
@@ -1737,9 +1744,12 @@ class ClaudeSession {
       if (!effortRowsForModel(this.modelRow()).some((effort) => effort.value === normalized)) {
         throw new Error(`Unsupported Claude effort for ${this.currentModel || 'current model'}: ${normalized}`);
       }
-      if (this.activePrompt) throw new Error('Cannot change Claude effort during an active turn');
+      // Re-selecting the effort the live process already runs at is not a
+      // change: restarting would drop the process and resume it for nothing.
+      const live = this.query && !this.queryNeedsRestart && this.queryEffort === normalized;
+      if (!live && this.activePrompt) throw new Error('Cannot change Claude effort during an active turn');
       this.currentEffort = normalized;
-      this.invalidateQueryForOptions();
+      if (!live) this.invalidateQueryForOptions();
     } else {
       throw new Error(`Unknown Claude config option: ${configId}`);
     }

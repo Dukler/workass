@@ -76,6 +76,9 @@ func claudeForkArgs(spec forkTurnSpec) []string {
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--resume", spec.ResumeSessionID, "--fork-session",
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+		// As in the chat host: background memory consolidation stays off under
+		// Workass's label (claudeIdentityEnv).
+		"--settings", `{"autoDreamEnabled":false}`,
 	}
 	if model := strings.TrimSpace(spec.ModelID); model != "" && !strings.EqualFold(model, "default") {
 		args = append(args, "--model", model)

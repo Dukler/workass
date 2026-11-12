@@ -109,7 +109,7 @@ func TestChatTitlerAsksTheAgentOnceInIsolationAndAppliesItsAnswer(t *testing.T) 
 	var mu sync.Mutex
 	var gotArgv []string
 	var gotStdin string
-	titler.run = func(ctx context.Context, argv []string, stdin string) (string, error) {
+	titler.run = func(ctx context.Context, argv, env []string, stdin string) (string, error) {
 		mu.Lock()
 		gotArgv, gotStdin = argv, stdin
 		mu.Unlock()
@@ -148,7 +148,7 @@ func TestChatTitlerDoesNothingWhenTheSettingIsOff(t *testing.T) {
 		command:  fakeOneShot,
 		settings: func() map[string]any { return normalizeSettings(nil) },
 		slots:    make(chan struct{}, 2),
-		run: func(context.Context, []string, string) (string, error) {
+		run: func(context.Context, []string, []string, string) (string, error) {
 			t.Fatal("the agent ran with the setting off")
 			return "", nil
 		},
@@ -171,7 +171,7 @@ func TestChatTitlerUsesTheAgentAndModelTheAppSends(t *testing.T) {
 		logf:       func(string, ...any) {},
 		slots:      make(chan struct{}, 2),
 		settlePoll: 10 * time.Millisecond,
-		run: func(_ context.Context, argv []string, _ string) (string, error) {
+		run: func(_ context.Context, argv, _ []string, _ string) (string, error) {
 			ran <- argv
 			return "Saludo", nil
 		},
@@ -211,7 +211,7 @@ func TestChatTitlerWaitsForTheFirstMessageTitleToLand(t *testing.T) {
 		logf:       func(string, ...any) {},
 		slots:      make(chan struct{}, 2),
 		settlePoll: 10 * time.Millisecond,
-		run:        func(context.Context, []string, string) (string, error) { return "Saludo inicial", nil },
+		run:        func(context.Context, []string, []string, string) (string, error) { return "Saludo inicial", nil },
 	}
 	if started, reason := titler.Start(chatTitleRequest{TabID: tabID, ChatID: chatID, Text: "hola, ¿cómo va?", Expect: "hola, ¿cómo va?", ProviderID: "agent-a", Model: "small"}); !started {
 		t.Fatalf("not started: %s", reason)

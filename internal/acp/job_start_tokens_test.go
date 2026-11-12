@@ -3,6 +3,7 @@ package acp
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"workass/internal/toolcli"
@@ -149,5 +150,41 @@ func TestJobStartCredentialFileDamagedByAnUpdateIsRepairedAtBoot(t *testing.T) {
 	fixed, err := toolcli.ReadConfig(binding.File)
 	if err != nil || fixed.CAFile != filepath.Join(stateDir, "ca.pem") || fixed.StateDir != stateDir {
 		t.Fatalf("not repaired: %#v %v", fixed, err)
+	}
+}
+
+// The index's recorded path is not trusted: a daemon finds each credential's
+// file under its own state directory, so a state directory spelled differently
+// since the last boot keeps its credentials current, and a path recorded
+// elsewhere is never written.
+func TestJobStartCredentialFileIsFoundUnderThisStateWhateverTheIndexSays(t *testing.T) {
+	stateDir := t.TempDir()
+	first := jobStartTestManager(t, stateDir, "https://tools.localhost:18001")
+	binding, _, err := first.IssueJobStartToken("tab-a", "chat-a", "wa:m-x/chat/chat-a", "daily builder", "op-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Reset()
+	index := filepath.Join(stateDir, "tool-contexts", "job-start-tokens.json")
+	data, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "job-credentials", binding.ID, "context.json")
+	data = []byte(strings.ReplaceAll(string(data), strings.ReplaceAll(binding.File, `\`, `\\`), strings.ReplaceAll(elsewhere, `\`, `\\`)))
+	if err := os.WriteFile(index, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := jobStartTestManager(t, stateDir, "https://tools.localhost:18002")
+	listed := second.ListJobStartTokens("tab-a", "chat-a")
+	if len(listed) != 1 || listed[0].File != binding.File {
+		t.Fatalf("listed = %#v, want the file under this state %s", listed, binding.File)
+	}
+	moved, err := toolcli.ReadConfig(binding.File)
+	if err != nil || moved.Endpoint != "https://tools.localhost:18002/workass/tools" {
+		t.Fatalf("this daemon's own file was not kept current: %#v %v", moved, err)
+	}
+	if _, err := os.Stat(elsewhere); !os.IsNotExist(err) {
+		t.Fatal("a path recorded outside this state was written")
 	}
 }

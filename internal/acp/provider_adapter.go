@@ -76,6 +76,9 @@ type providerEnvironmentPolicy struct {
 	// inheritedBlockedKeys are dropped from the daemon's own environment only.
 	// The same key set by the provider's launch still reaches the child.
 	inheritedBlockedKeys []string
+	// defaults fill keys that neither the launch nor the daemon's allowed
+	// environment set.
+	defaults             map[string]string
 	sanitizationRevision int
 }
 

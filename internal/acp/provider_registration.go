@@ -343,7 +343,7 @@ var providerRegistrations = map[string]providerRegistration{
 			},
 			catalog:             claudeProviderCatalogStrategy{},
 			instructions:        nativeInstructionDelivery{HostEnvironment: "WORKASS_CLAUDE_EXECUTABLE"},
-			launch:              nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch, environment: providerEnvironmentPolicy{inheritedBlockedKeys: claudeHostSessionEnv}},
+			launch:              nativeHostLaunchStrategy{command: "claude", prepare: claudeNativeHostLaunch, environment: providerEnvironmentPolicy{inheritedBlockedKeys: claudeHostSessionEnv, defaults: claudeIdentityEnv}},
 			fork:                claudeForkStrategy{},
 			oneShot:             claudeOneShotStrategy{},
 			mcpConfig:           claudeMCPConfigStrategy{},

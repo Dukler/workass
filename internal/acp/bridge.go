@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -456,11 +457,33 @@ func mergedEnv(inherited []string, extra map[string]string, policy providerEnvir
 			env[k] = v
 		}
 	}
+	for k, v := range policy.defaults {
+		name, set := envKey(env, k)
+		if !set || strings.TrimSpace(env[name]) == "" {
+			env[name] = v
+		}
+	}
 	out := make([]string, 0, len(env))
 	for k, v := range env {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// envKey finds key in env the way the platform matches names (Windows ignores
+// case) and returns the spelling present, or key itself when absent.
+func envKey(env map[string]string, key string) (string, bool) {
+	if _, ok := env[key]; ok {
+		return key, true
+	}
+	if runtime.GOOS == "windows" {
+		for name := range env {
+			if strings.EqualFold(name, key) {
+				return name, true
+			}
+		}
+	}
+	return key, false
 }
 
 func (b *Bridge) readStdout(r io.Reader) {
