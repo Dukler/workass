@@ -546,7 +546,7 @@ class FixtureQuery {
             header: 'Deploy target',
             multiSelect: false,
             options: [
-              { label: 'El nodo de build', description: 'Canary; ya tiene el artefacto' },
+              { label: 'El nodo de build', description: 'Canary; ya tiene el artefacto', preview: '\n```\n  build-01  ✓ artefacto 0.1.290\n```\n' },
               { label: 'Gold', description: 'Producción, sigue offline' },
             ],
           }],

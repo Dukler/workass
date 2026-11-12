@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  /* App variables mapped onto the chat frame's injected theme. */
+  :root {
+    --ink: var(--foreground);
+    --ink2: color-mix(in srgb, var(--foreground) 86%, transparent);
+    --muted: var(--muted-foreground);
+    --faint: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+    --panel: var(--card);
+    --line2: var(--border);
+    --acc: var(--accent);
+    --bg: var(--background);
+  }
+  * { box-sizing: border-box; }
+  body { font-family: var(--font-sans); padding: 4px 2px 24px; }
+  .variant { max-width: 720px; margin: 0 auto 34px; }
+  .vhead { display: flex; align-items: baseline; gap: 10px; margin: 0 4px 10px; }
+  .vletter { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .vname { font-size: 13px; color: var(--ink2); }
+  .vnote { margin: 10px 6px 0; font-size: 12px; line-height: 17px; color: var(--muted); }
+
+  /* ---- The question card, as it is today (app.css .qdock) ---- */
+  .qdock {
+    --q-tile: color-mix(in srgb, var(--ink) 4.5%, transparent);
+    --q-tile-hover: color-mix(in srgb, var(--ink) 8%, transparent);
+    --q-outer: 11px; --q-inner: 4px;
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    background: var(--panel); border: 1px solid var(--line2); border-radius: 17px; padding: 6px;
+    box-shadow: 0 18px 40px -28px rgba(0, 0, 0, .55);
+  }
+  .qdock-head { display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 14px 12px; }
+  .qdock-heading { flex: 1; min-width: 0; }
+  .qdock-eyebrow { margin: 0 0 3px; font-size: 12px; line-height: 16px; color: var(--muted); }
+  .qdock-title { margin: 0; font-size: 15px; line-height: 22px; font-weight: 500; color: var(--ink); }
+  .qclose { width: 28px; height: 28px; margin-top: -3px; border: 0; border-radius: 8px; background: transparent; color: var(--faint); display: inline-flex; align-items: center; justify-content: center; }
+  .qclose svg { width: 13px; height: 13px; }
+  .qdock-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .qchoice {
+    position: relative; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 44px; margin: 0;
+    padding: 11px 14px 11px 16px; border: 0; border-radius: var(--q-inner);
+    background: var(--q-tile); color: var(--ink2); text-align: left; font: inherit; cursor: pointer;
+    transition: background .12s ease;
+  }
+  .qdock-list > .qchoice:first-child, .qdock-list > .qrow:first-child .qchoice { border-top-left-radius: var(--q-outer); border-top-right-radius: var(--q-outer); }
+  .qdock-list > .qchoice:last-child, .qdock-list > .qrow:last-child .qchoice { border-bottom-left-radius: var(--q-outer); border-bottom-right-radius: var(--q-outer); }
+  .qchoice::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 0 2px 2px 0; background: var(--acc); opacity: 0; transform: scaleY(.4); transition: opacity .14s ease, transform .18s cubic-bezier(.2,.8,.2,1); }
+  .qchoice:hover, .qchoice:focus-visible, .qchoice.peek { background: var(--q-tile-hover); outline: none; }
+  .qchoice:hover::before, .qchoice:focus-visible::before, .qchoice.peek::before { opacity: 1; transform: none; }
+  .qchoice.on { background: color-mix(in srgb, var(--acc) 15%, transparent); }
+  .qchoice.on::before { opacity: 1; transform: none; }
+  .qchoice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .qchoice-label { font-size: 13.5px; line-height: 20px; font-weight: 500; color: var(--ink); }
+  .qchoice-desc { font-size: 12.5px; line-height: 18px; color: var(--muted); }
+  .qchoice-end { flex: none; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .qchoice.on .qchoice-end { color: var(--acc); }
+
+  /* The preview itself: markdown rendered; here a code block. */
+  .pv { margin: 0; font-family: var(--font-mono); font-size: 12px; line-height: 17px; color: var(--ink2); white-space: pre; overflow-x: auto; }
+  .pvtile { background: var(--code-background); border-radius: var(--q-inner); padding: 12px 14px; min-width: 0; }
+  .pvlabel { margin: 0 0 8px; font-family: var(--font-sans); font-size: 11.5px; line-height: 16px; color: var(--muted); }
+  .pvlabel b { font-weight: 500; color: var(--ink2); }
+
+  /* A — side by side */
+  .vA .qbody { display: grid; grid-template-columns: minmax(200px, 5fr) minmax(0, 7fr); gap: 2px; }
+  .vA .qdock-list .qchoice:first-child { border-top-right-radius: var(--q-inner); }
+  .vA .qdock-list .qchoice:last-child { border-bottom-right-radius: var(--q-inner); }
+  .vA .pvtile { border-top-right-radius: var(--q-outer); border-bottom-right-radius: var(--q-outer); display: grid; align-content: start; }
+  .vA .pvstack, .vB .pvstack { display: grid; }
+  .vA .pvstack > *, .vB .pvstack > * { grid-area: 1 / 1; visibility: hidden; }
+  .vA .pvstack > .shown, .vB .pvstack > .shown { visibility: visible; }
+  @container (max-width: 520px) { .vA .qbody { grid-template-columns: minmax(0, 1fr); } }
+  .vA .qdock { container-type: inline-size; }
+
+  /* B — below the list */
+  .vB .qdock-list .qchoice:last-child { border-bottom-left-radius: var(--q-inner); border-bottom-right-radius: var(--q-inner); }
+  .vB .pvtile { margin-top: 2px; border-bottom-left-radius: var(--q-outer); border-bottom-right-radius: var(--q-outer); }
+
+  /* C — inside each row */
+  .vC .qchoice { align-items: flex-start; }
+  .vC .qchoice-end { margin-top: 1px; }
+  .vC .pvin { margin-top: 8px; background: var(--code-background); border-radius: 6px; padding: 10px 12px; position: relative; max-height: 104px; overflow: hidden; }
+  .vC .pvin.long::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 26px; background: linear-gradient(to bottom, transparent, var(--code-background)); }
+
+  /* D — expand on demand */
+  .vD .qrow { display: flex; flex-direction: column; }
+  .vD .qchoice { padding-right: 8px; }
+  .qpeek { flex: none; height: 26px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .qpeek:hover { background: var(--q-tile-hover); color: var(--ink); }
+  .qpeek svg { width: 11px; height: 11px; transition: transform .16s ease; }
+  .qrow.open .qpeek svg { transform: rotate(180deg); }
+  .vD .pvopen { display: none; margin: 2px 0 0; }
+  .vD .qrow.open .pvopen { display: block; }
+  .vD .qrow.open .qchoice { border-bottom-left-radius: var(--q-inner) !important; border-bottom-right-radius: var(--q-inner) !important; }
+  .vD .qrow:last-child.open .pvtile { border-bottom-left-radius: var(--q-outer); border-bottom-right-radius: var(--q-outer); }
+</style>
+</head>
+<body>
+
+<template id="previews">
+<pre class="pv" data-p="0">┌────────────────────────────────────────┐
+│ ● Trabajando · 1 min 12 s    Detener   │
+└────────────────────────────────────────┘
+  Una línea fija sobre el composer.
+  Sin pasos ni detalle.</pre>
+<pre class="pv" data-p="1">● Trabajando · paso 3 de 5
+  ✓ Leer bridge.go y native_claude.go
+  ✓ Editar mergedEnv
+  ◌ Correr go test ./internal/acp
+  · Commit
+  · Avisar al chat que lo pidió</pre>
+<pre class="pv" data-p="2">// rail derecho, tarjeta Tareas
+type TaskRow = {
+  label: string      // "Corriendo tests"
+  elapsedMs: number
+  stop?: () => void
+}
+// el chat queda sin barra propia</pre>
+</template>
+
+<script>
+  const OPTIONS = [
+    { label: 'Compacta', desc: 'Una línea con estado y tiempo.' },
+    { label: 'Con pasos', desc: 'La lista de pasos del agente, el actual marcado.' },
+    { label: 'Solo en el rail', desc: 'Nada en el chat; todo en Tareas.' },
+  ];
+  const Q = { eyebrow: 'Barra de estado', title: '¿Cómo mostramos lo que está haciendo el agente?' };
+  const close = '<button class="qclose" aria-label="Descartar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>';
+  const head = `<header class="qdock-head"><div class="qdock-heading"><p class="qdock-eyebrow">${Q.eyebrow}</p><h3 class="qdock-title">${Q.title}</h3></div>${close}</header>`;
+  const pv = (i) => document.getElementById('previews').content.querySelector(`[data-p="${i}"]`).outerHTML;
+  const choice = (o, i, extra = '', inner = '') => `<button class="qchoice" data-i="${i}"><span class="qchoice-body"><span class="qchoice-label">${o.label}</span><span class="qchoice-desc">${o.desc}</span>${inner}</span>${extra}<span class="qchoice-end">${i + 1}</span></button>`;
+  const chevron = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5L6 7.5L9 4.5"/></svg>';
+
+  const variants = {
+    A: { name: 'Al lado — como Claude Code en la terminal',
+      note: 'La vista previa sigue a la opción bajo el mouse o el foco (↑↓); arranca en la primera. Clic o 1–3 elige, como hoy. Alto fijo = la vista previa más alta, nada salta. En pantallas angostas y en el teléfono pasa a ir debajo; ahí un primer toque muestra la vista previa y el segundo elige.',
+      card: () => `<section class="qdock">${head}<div class="qbody"><div class="qdock-list">${OPTIONS.map((o, i) => choice(o, i)).join('')}</div><div class="pvtile"><div class="pvstack">${OPTIONS.map((o, i) => `<div data-s="${i}"><p class="pvlabel">Vista previa · <b>${o.label}</b></p>${pv(i)}</div>`).join('')}</div></div></div></section>` },
+    B: { name: 'Debajo de la lista',
+      note: 'La lista queda igual que hoy; una sola vista previa debajo cambia con el mouse o el foco. Alto fijo. En el teléfono: primer toque muestra, segundo elige.',
+      card: () => `<section class="qdock">${head}<div class="qdock-list">${OPTIONS.map((o, i) => choice(o, i)).join('')}</div><div class="pvtile"><div class="pvstack">${OPTIONS.map((o, i) => `<div data-s="${i}"><p class="pvlabel">Vista previa · <b>${o.label}</b></p>${pv(i)}</div>`).join('')}</div></div></section>` },
+    C: { name: 'Dentro de cada opción',
+      note: 'Todas visibles a la vez, sin depender del mouse: funciona igual en el teléfono (un toque elige). Cada vista previa se corta a ~6 líneas con un fundido; la tarjeta crece con la cantidad de opciones.',
+      card: () => `<section class="qdock">${head}<div class="qdock-list">${OPTIONS.map((o, i) => choice(o, i, '', `<div class="pvin">${pv(i)}</div>`)).join('')}</div></section>` },
+    D: { name: 'Se despliega a pedido',
+      note: 'Cada opción con vista previa suma un botón "Ver" que la abre debajo (una a la vez). La tarjeta arranca igual de chica que hoy; agrega un control por fila.',
+      card: () => `<section class="qdock">${head}<div class="qdock-list">${OPTIONS.map((o, i) => `<div class="qrow" data-r="${i}">${choice(o, i, `<span class="qpeek" role="button" data-peek="${i}">Ver ${chevron}</span>`)}<div class="pvopen"><div class="pvtile">${pv(i)}</div></div></div>`).join('')}</div></section>` },
+  };
+
+  for (const [letter, v] of Object.entries(variants)) {
+    const wrap = document.createElement('div');
+    wrap.className = `variant v${letter}`;
+    wrap.innerHTML = `<div class="vhead"><span class="vletter">${letter}</span><span class="vname">${v.name}</span></div>${v.card()}<p class="vnote">${v.note}</p>`;
+    document.body.appendChild(wrap);
+    const rows = [...wrap.querySelectorAll('.qchoice')];
+    const show = (i) => {
+      wrap.querySelectorAll('[data-s]').forEach((el) => el.classList.toggle('shown', el.dataset.s === String(i)));
+      rows.forEach((r) => r.classList.toggle('peek', r.dataset.i === String(i)));
+    };
+    if (letter === 'A' || letter === 'B') {
+      show(0);
+      rows.forEach((r) => { r.addEventListener('mouseenter', () => show(r.dataset.i)); r.addEventListener('focus', () => show(r.dataset.i)); });
+    }
+    rows.forEach((r) => r.addEventListener('click', (e) => {
+      if (e.target.closest('[data-peek]')) return;
+      rows.forEach((x) => x.classList.toggle('on', x === r));
+    }));
+    wrap.addEventListener('keydown', (e) => {
+      const at = rows.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { const n = rows[at + (e.key === 'ArrowDown' ? 1 : -1)]; if (n) { e.preventDefault(); n.focus(); } }
+    });
+    wrap.querySelectorAll('[data-peek]').forEach((b) => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = b.closest('.qrow');
+      const open = !row.classList.contains('open');
+      wrap.querySelectorAll('.qrow').forEach((x) => x.classList.remove('open'));
+      row.classList.toggle('open', open);
+    }));
+    wrap.querySelectorAll('.pvin').forEach((p) => { if (p.scrollHeight > p.clientHeight + 2) p.classList.add('long'); });
+  }
+</script>
+</body>
+</html>

@@ -2,6 +2,8 @@ import { memo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent 
 import { flushSync } from 'react-dom';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
+import { parseBlocks } from '../markdown/blocks';
+import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { IcShield, IcCheck, IcArrowUp, IcClose, ModelIcon, ActionGlyph } from '../icons';
 import { store } from '../store/store';
 import { ImagePlaceholder, imageFrameSize, useReservedImage } from './MessageImage';
@@ -549,7 +551,7 @@ export function nodeDuration(n: SubagentNode, nowMs: number): string {
 // state hooks stay PermCard's and the textarea stays a direct child of the root.
 const QUESTION_KEY_LIMIT = 9;
 
-interface QuestionChoice { optionId: string; label: string; description?: string }
+interface QuestionChoice { optionId: string; label: string; description?: string; preview?: string }
 interface QuestionViewArgs {
   perm: PermissionState;
   decide: (optionId: string) => void;
@@ -557,13 +559,20 @@ interface QuestionViewArgs {
   setSelected: (next: string[] | ((current: string[]) => string[])) => void;
   freeText: string;
   setFreeText: (next: string) => void;
+  // Which choice's preview the side pane shows (approved mock A, 2026-11-12):
+  // the one under the pointer or the keyboard focus, the first until then.
+  peek: number;
+  setPeek: (index: number) => void;
+  // How the last press on a choice began, and whether that choice was already
+  // the one previewed: on touch the first tap previews, the second answers.
+  press: { current: { pointer: string; peeked: boolean } };
 }
 
 function questionRows(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>('[data-qrow]'));
 }
 
-function renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText }: QuestionViewArgs) {
+function renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText, peek, setPeek, press }: QuestionViewArgs) {
   const q = perm.question!;
   const workassTool = !!q.workassTool;
   const multi = workassTool && !!q.multiSelect;
@@ -571,8 +580,10 @@ function renderQuestion({ perm, decide, selected, setSelected, freeText, setFree
   const canSubmit = workassTool && (multi || allowText);
   const pending = !!perm.resolved;
   const choices: QuestionChoice[] = workassTool
-    ? q.options.filter((o) => !!o.id).map((o) => ({ optionId: o.id!, label: o.label, description: o.description }))
-    : perm.options.filter((o) => o.kind === 'answer').map((o, i) => ({ optionId: o.optionId, label: o.name, description: q.options[i]?.description }));
+    ? q.options.filter((o) => !!o.id).map((o) => ({ optionId: o.id!, label: o.label, description: o.description, preview: o.preview }))
+    : perm.options.filter((o) => o.kind === 'answer').map((o, i) => ({ optionId: o.optionId, label: o.name, description: q.options[i]?.description, preview: q.options[i]?.preview }));
+  const withPreviews = choices.some((choice) => !!choice.preview?.trim());
+  const shown = Math.min(Math.max(peek, 0), Math.max(choices.length - 1, 0));
   const skip = workassTool ? undefined : perm.options.find((o) => o.kind !== 'answer');
   const hasAnswer = selected.length > 0 || freeText.trim().length > 0;
   const isChosen = (optionId: string) => workassTool ? selected.includes(optionId) : perm.resolved === optionId;
@@ -628,10 +639,52 @@ function renderQuestion({ perm, decide, selected, setSelected, freeText, setFree
   const footerSend = multi && !allowText;
   const closeLabel = workassTool ? 'Descartar' : skip?.name;
 
+  const list = choices.length > 0 && (
+    <div className="qdock-list" role="group" aria-labelledby={titleId}>
+      {choices.map((choice, index) => {
+        const on = isChosen(choice.optionId);
+        return (
+          <button
+            key={choice.optionId}
+            type="button"
+            className={`qchoice${on ? ' on' : ''}${withPreviews && index === shown ? ' peek' : ''}`}
+            data-qrow=""
+            data-testid={workassTool ? 'workass-question-option' : undefined}
+            aria-pressed={multi ? on : undefined}
+            aria-keyshortcuts={index < QUESTION_KEY_LIMIT ? String(index + 1) : undefined}
+            disabled={pending}
+            onMouseEnter={withPreviews ? () => setPeek(index) : undefined}
+            onFocus={withPreviews ? () => setPeek(index) : undefined}
+            onPointerDown={withPreviews ? (event) => { press.current = { pointer: event.pointerType, peeked: index === shown }; } : undefined}
+            onClick={(event) => {
+              // A tap that lands on a choice whose preview is not up yet shows
+              // it; the next tap answers. Mouse, pen and keyboard answer at once.
+              if (withPreviews && (event?.detail ?? 0) > 0 && press.current.pointer === 'touch' && !press.current.peeked) {
+                setPeek(index);
+                press.current = { pointer: 'touch', peeked: true };
+                return;
+              }
+              pick(choice.optionId);
+            }}
+          >
+            <span className="qchoice-body">
+              <span className="qchoice-label">{choice.label}</span>
+              {choice.description && <span className="qchoice-desc">{choice.description}</span>}
+            </span>
+            <span className="qchoice-end" aria-hidden="true">
+              {pending && on && !multi ? <span className="qspin" /> : multi && on ? <IcCheck /> : index < QUESTION_KEY_LIMIT ? index + 1 : null}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <section
       className="qdock"
       data-testid={workassTool ? 'workass-question-card' : undefined}
+      data-preview={withPreviews ? '' : undefined}
       data-state={pending ? 'sending' : 'waiting'}
       data-mode={multi ? 'multi' : 'single'}
       aria-labelledby={titleId}
@@ -655,34 +708,24 @@ function renderQuestion({ perm, decide, selected, setSelected, freeText, setFree
           ><IcClose /></button>
         )}
       </header>
-      {choices.length > 0 && (
-        <div className="qdock-list" role="group" aria-labelledby={titleId}>
-          {choices.map((choice, index) => {
-            const on = isChosen(choice.optionId);
-            return (
-              <button
-                key={choice.optionId}
-                type="button"
-                className={`qchoice${on ? ' on' : ''}`}
-                data-qrow=""
-                data-testid={workassTool ? 'workass-question-option' : undefined}
-                aria-pressed={multi ? on : undefined}
-                aria-keyshortcuts={index < QUESTION_KEY_LIMIT ? String(index + 1) : undefined}
-                disabled={pending}
-                onClick={() => pick(choice.optionId)}
-              >
-                <span className="qchoice-body">
-                  <span className="qchoice-label">{choice.label}</span>
-                  {choice.description && <span className="qchoice-desc">{choice.description}</span>}
-                </span>
-                <span className="qchoice-end" aria-hidden="true">
-                  {pending && on && !multi ? <span className="qspin" /> : multi && on ? <IcCheck /> : index < QUESTION_KEY_LIMIT ? index + 1 : null}
-                </span>
-              </button>
-            );
-          })}
+      {withPreviews ? (
+        <div className="qbody">
+          {list}
+          {/* Every preview sits in the same cell and only the shown one is
+              visible, so the card keeps the tallest one's height and nothing
+              moves while the pointer runs down the list. */}
+          <div className="qpreview" data-testid="question-preview">
+            {choices.map((choice, index) => (
+              <div key={choice.optionId} className={`qpreview-item${index === shown ? ' shown' : ''}`} aria-hidden={index !== shown}>
+                <p className="qpreview-label">Vista previa · <b>{choice.label}</b></p>
+                {choice.preview?.trim()
+                  ? parseBlocks(choice.preview).map((block, blockIndex) => <MarkdownBlock key={`${blockIndex}-${block.sig}`} sb={block} />)
+                  : <p className="qpreview-none">Esta opción no trae vista previa.</p>}
+              </div>
+            ))}
+          </div>
         </div>
-      )}
+      ) : list}
       {allowText && (
         <textarea
           className="qfree"
@@ -717,10 +760,12 @@ export function PermCard({ perm, tabId, msgId }: { perm: PermissionState; tabId:
   const decide = (optionId: string) => { if (!perm.resolved) void store.decidePermission(tabId, msgId, perm.id, optionId); };
   const [selected, setSelected] = useState<string[]>([]);
   const [freeText, setFreeText] = useState('');
+  const [peek, setPeek] = useState(0);
+  const press = useRef({ pointer: 'mouse', peeked: true });
   // A question carries its own answers, so it is answered rather than
   // allowed/rejected. Falls back to the permission card if the daemon predates
   // the question field.
-  if (perm.question) return renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText });
+  if (perm.question) return renderQuestion({ perm, decide, selected, setSelected, freeText, setFreeText, peek, setPeek, press });
   return <PermissionCard perm={perm} tabId={tabId} decide={decide} />;
 }
 

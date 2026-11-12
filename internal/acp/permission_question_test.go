@@ -382,3 +382,36 @@ func TestQuestionHasNoPermissionContext(t *testing.T) {
 		t.Fatalf("empty tool call produced a context: %+v", context)
 	}
 }
+
+// Claude Code lets the model attach a preview (markdown mockup or snippet) to
+// each option; the card shows it beside the choices. Its indentation is
+// content, only blank edges go, and it is bounded and redacted like the rest.
+func TestPermissionQuestionCarriesOptionPreviewsBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
+	art := "\n\n```\n  ┌──────┐\n  │ Hola │\n  └──────┘\n```\n  \n"
+	question := permissionQuestion(map[string]any{
+		"question": "¿Cuál?",
+		"options": []any{
+			map[string]any{"label": "Caja", "preview": art},
+			map[string]any{"label": "Larga", "preview": strings.Repeat("z", 9000)},
+			map[string]any{"label": "Secreta", "preview": "export TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"},
+			map[string]any{"label": "Sin", "preview": "  \n\t "},
+		},
+	})
+	options := anySlice(question["options"])
+	if len(options) != 4 {
+		t.Fatalf("options = %#v", options)
+	}
+	if got := asString(mapFromAny(options[0])["preview"]); got != "```\n  ┌──────┐\n  │ Hola │\n  └──────┘\n```" {
+		t.Fatalf("preview lost its shape: %q", got)
+	}
+	if runes := []rune(asString(mapFromAny(options[1])["preview"])); len(runes) > permissionQuestionPreviewMaxRunes+1 {
+		t.Fatalf("preview not clipped: %d runes", len(runes))
+	}
+	if got := asString(mapFromAny(options[2])["preview"]); strings.Contains(got, "ghp_abcdefghijklmnopqrstuvwxyz") {
+		t.Fatalf("secret survived into a preview: %q", got)
+	}
+	if _, ok := mapFromAny(options[3])["preview"]; ok {
+		t.Fatalf("a blank preview must be absent: %#v", options[3])
+	}
+}

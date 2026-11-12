@@ -965,6 +965,40 @@ table.mdtable tbody tr:last-child td { border-bottom: 0; }
 
 /* Free-text tile: the last member of the stack. The textarea and its round send
    share one grid cell so the textarea stays a direct child of the dock. */
+/* Option previews (approved mock A, 2026-11-12): the choices on the left, the
+   previewed one's mockup or snippet on the right; stacked when the card is
+   narrow. The pane holds every preview in one cell (only one visible), so the
+   card keeps the tallest height and nothing moves as the pointer runs down. */
+.qdock[data-preview] { container-type: inline-size; }
+.qbody { grid-row: 2; display: grid; grid-template-columns: minmax(200px, 5fr) minmax(0, 7fr); gap: 2px; min-width: 0; }
+.qbody > .qdock-list { grid-row: 1; grid-column: 1; }
+.qbody > .qpreview { grid-row: 1; grid-column: 2; }
+.qbody .qchoice:first-child { border-top-right-radius: var(--q-inner); }
+.qbody .qchoice:last-child { border-bottom-right-radius: var(--q-inner); }
+.qchoice.peek { background: var(--q-tile-hover); }
+.qchoice.peek::before { opacity: 1; transform: none; }
+.qchoice.on.peek { background: color-mix(in srgb, var(--acc) 15%, transparent); }
+.qpreview {
+  display: grid; min-width: 0; max-height: 380px; overflow: auto; overscroll-behavior: contain;
+  padding: 12px 14px 4px; border-radius: var(--q-inner) var(--q-outer) var(--q-outer) var(--q-inner);
+  background: var(--q-tile);
+}
+.qpreview-item { grid-area: 1 / 1; min-width: 0; visibility: hidden; }
+.qpreview-item.shown { visibility: visible; }
+.qpreview-label { margin: 0 0 8px; font-size: 11.5px; line-height: 16px; color: var(--muted); }
+.qpreview-label b { font-weight: 500; color: var(--ink2); }
+.qpreview-none { margin: 0 0 10px; font-size: 12.5px; line-height: 18px; color: var(--faint); }
+.qpreview .p { margin: 0 0 8px; font-size: 13px; line-height: 19px; }
+.qpreview .mdh { margin: 4px 0 6px; }
+.qpreview ul.doclist, .qpreview ol.doclist { margin-bottom: 8px; }
+.qpreview .codebox { margin: 0 0 8px; }
+@container (max-width: 520px) {
+  .qbody { grid-template-columns: minmax(0, 1fr); }
+  .qbody > .qpreview { grid-row: 2; grid-column: 1; }
+  .qbody .qchoice:first-child { border-top-right-radius: var(--q-outer); }
+  .qbody .qchoice:last-child { border-bottom-left-radius: var(--q-inner); }
+  .qpreview { border-radius: var(--q-inner) var(--q-inner) var(--q-outer) var(--q-outer); }
+}
 .qfree, .qsend { grid-row: 3; grid-column: 1; }
 .qdock-list ~ .qfree { margin-top: 2px; border-top-left-radius: var(--q-inner); border-top-right-radius: var(--q-inner); }
 .qfree {

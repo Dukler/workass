@@ -805,10 +805,17 @@ class ClaudeSession {
           rawInput: {
             question: String(entry?.question || '').trim(),
             header,
-            options: choices.map((choice) => ({
-              label: String(choice.label).trim(),
-              description: String(choice.description || '').trim(),
-            })),
+            options: choices.map((choice) => {
+              // Under Workass's own label Claude Code offers the model a
+              // per-option preview (markdown: a mockup, a snippet); the card
+              // shows it beside the choices (approved mock A, 2026-11-12).
+              const preview = typeof choice.preview === 'string' ? choice.preview.replace(/^\s*\n|\s+$/g, '') : '';
+              return {
+                label: String(choice.label).trim(),
+                description: String(choice.description || '').trim(),
+                ...(preview ? { preview } : {}),
+              };
+            }),
             multiSelect: entry?.multiSelect === true,
           },
         },

@@ -138,6 +138,14 @@ func TestClaudeNativeQuestionReachesTheClientAndItsAnswerReachesTheModel(t *test
 	if got := asString(question["header"]); got != "Deploy target" {
 		t.Fatalf("header = %q", got)
 	}
+	// An option's preview reaches the card with its indentation, blank edges gone.
+	choices := anySlice(question["options"])
+	if len(choices) != 2 || asString(mapFromAny(choices[0])["preview"]) != "```\n  build-01  ✓ artefacto 0.1.290\n```" {
+		t.Fatalf("option previews = %#v", choices)
+	}
+	if _, ok := mapFromAny(choices[1])["preview"]; ok {
+		t.Fatalf("an option without a preview gained one: %#v", choices[1])
+	}
 	// The card's title is the question's header, not the tool name.
 	if got := asString(request["title"]); got != "Deploy target" {
 		t.Fatalf("card title = %q, want the header instead of the tool name", got)

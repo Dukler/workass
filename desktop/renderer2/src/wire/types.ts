@@ -397,7 +397,9 @@ export interface PermissionRequest {
 export interface PermissionQuestion {
   question: string;
   header: string;
-  options: Array<{ id?: string; label: string; description: string }>;
+  // preview: additive. The option's own mockup or snippet (markdown) that
+  // Claude Code lets the model attach; older daemons never send it.
+  options: Array<{ id?: string; label: string; description: string; preview?: string }>;
   multiSelect: boolean;
   // Additive provider-neutral Workass CLI question metadata. Native SDK
   // questions omit these fields and keep the existing one-click behavior.

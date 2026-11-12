@@ -143,6 +143,11 @@ test('actual single-choice option callbacks preserve yes/no ids through the mach
       if (!(index in hooks)) hooks[index] = initial;
       return [hooks[index], (value: unknown) => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value; }];
     },
+    useRef(initial: unknown) {
+      const index = hookIndex++;
+      if (!(index in hooks)) hooks[index] = { current: initial };
+      return hooks[index];
+    },
   };
   const findOptions = (node: any, found: any[] = []): any[] => {
     if (!node) return found;
@@ -277,5 +282,107 @@ test('a rejected question answer unlocks the same card for an idempotent retry',
   } finally {
     if (previousWindow === undefined) delete (globalThis as any).window;
     else (globalThis as any).window = previousWindow;
+  }
+});
+
+// Approved mock A (2026-11-12): a native question whose options carry
+// previews shows the choices beside a preview pane. The pane follows the
+// pointer and keyboard focus, keeps every preview in one cell (one visible),
+// and on touch the first tap previews while the second answers.
+const previewQuestion = {
+  id: 'preview-request', title: 'Barra de estado', kind: 'permission', resolved: null,
+  options: [
+    { optionId: 'answer-0', name: 'Compacta', kind: 'answer' },
+    { optionId: 'answer-1', name: 'Con pasos', kind: 'answer' },
+    { optionId: 'answer-2', name: 'Solo en el rail', kind: 'answer' },
+    { optionId: 'question-cancel', name: 'Responder en el chat', kind: 'reject_once' },
+  ],
+  question: { question: '¿Cómo mostramos lo que hace el agente?', header: 'Barra de estado', multiSelect: false, options: [
+    { label: 'Compacta', description: 'Una línea.', preview: '```\n● Trabajando · 1 min 12 s\n```' },
+    { label: 'Con pasos', description: 'Lista de pasos.', preview: '- ✓ Leer\n- ◌ Correr tests' },
+    { label: 'Solo en el rail', description: 'Nada en el chat.' },
+  ] },
+};
+
+test('question options with previews render the side preview pane, first preview shown', () => {
+  const html = renderToStaticMarkup(React.createElement(PermCard, { tabId: 'preview-tab', msgId: 'preview-message', perm: previewQuestion }));
+  assert.match(html, /class="qdock" data-preview=""/);
+  assert.match(html, /class="qbody"/);
+  assert.match(html, /data-testid="question-preview"/);
+  assert.equal((html.match(/class="qpreview-item/g) ?? []).length, 3, 'every option keeps a cell so the height never changes');
+  assert.match(html, /class="qpreview-item shown" aria-hidden="false"><p class="qpreview-label">Vista previa · <b>Compacta<\/b>/);
+  assert.match(html, /class="codebox"/, 'the preview is markdown, rendered like the transcript');
+  assert.match(html, /Esta opción no trae vista previa\./);
+  assert.match(html, /class="qchoice peek"/);
+  assert.match(html, /Responder en el chat/);
+
+  const plain = renderToStaticMarkup(React.createElement(PermCard, { tabId: 'preview-tab', msgId: 'preview-message', perm: {
+    ...previewQuestion, question: { ...previewQuestion.question, options: previewQuestion.question.options.map(({ preview: _drop, ...rest }) => rest) },
+  } }));
+  assert.doesNotMatch(plain, /data-preview|qbody|qpreview|peek/, 'a question without previews renders exactly as before');
+});
+
+test('the preview pane follows hover and focus; on touch the first tap previews and the second answers', () => {
+  const reactInternals = (React as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const previousDispatcher = reactInternals.H;
+  const previousDecide = rendererStore.decidePermission;
+  const hooks: any[] = [];
+  let hookIndex = 0;
+  reactInternals.H = {
+    useState(initial: unknown) {
+      const index = hookIndex++;
+      if (!(index in hooks)) hooks[index] = initial;
+      return [hooks[index], (value: unknown) => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value; }];
+    },
+    useRef(initial: unknown) {
+      const index = hookIndex++;
+      if (!(index in hooks)) hooks[index] = { current: initial };
+      return hooks[index];
+    },
+  };
+  const decided: string[] = [];
+  rendererStore.decidePermission = async (_tab: string, _msg: string, _id: string, optionId: string) => { decided.push(optionId); };
+  const collect = (node: any, match: (node: any) => boolean, found: any[] = []): any[] => {
+    if (!node) return found;
+    if (Array.isArray(node)) { for (const child of node) collect(child, match, found); return found; }
+    if (match(node)) found.push(node);
+    collect(node.props?.children, match, found);
+    return found;
+  };
+  const render = () => { hookIndex = 0; return PermCard({ tabId: 'preview-tab', msgId: 'preview-message', perm: previewQuestion }); };
+  const rows = (tree: any) => collect(tree, (node) => node.type === 'button' && /^qchoice( |$)/.test(node.props?.className ?? ''));
+  const shownLabel = (tree: any) => {
+    const item = collect(tree, (node) => node.props?.className === 'qpreview-item shown')[0];
+    return collect(item, (node) => node.type === 'b')[0]?.props.children;
+  };
+  try {
+    let tree = render();
+    assert.equal(shownLabel(tree), 'Compacta');
+    rows(tree)[1].props.onMouseEnter();
+    tree = render();
+    assert.equal(shownLabel(tree), 'Con pasos');
+    assert.match(rows(tree)[1].props.className, /peek/);
+    rows(tree)[2].props.onFocus();
+    tree = render();
+    assert.equal(shownLabel(tree), 'Solo en el rail');
+
+    // Touch on a choice that is not previewed: first tap previews only.
+    rows(tree)[0].props.onPointerDown({ pointerType: 'touch' });
+    rows(tree)[0].props.onClick({ detail: 1 });
+    tree = render();
+    assert.equal(shownLabel(tree), 'Compacta');
+    assert.deepEqual(decided, [], 'the first tap must not answer');
+    rows(tree)[0].props.onPointerDown({ pointerType: 'touch' });
+    rows(tree)[0].props.onClick({ detail: 1 });
+    assert.deepEqual(decided, ['answer-0'], 'the second tap answers');
+
+    // Mouse and keyboard answer at once.
+    rows(tree)[1].props.onPointerDown({ pointerType: 'mouse' });
+    rows(tree)[1].props.onClick({ detail: 1 });
+    rows(tree)[2].props.onClick({ detail: 0 });
+    assert.deepEqual(decided, ['answer-0', 'answer-1', 'answer-2']);
+  } finally {
+    reactInternals.H = previousDispatcher;
+    rendererStore.decidePermission = previousDecide;
   }
 });

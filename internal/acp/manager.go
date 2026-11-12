@@ -2559,10 +2559,17 @@ func permissionQuestion(raw any) map[string]any {
 		if label == "" {
 			continue
 		}
-		options = append(options, map[string]any{
+		entry := map[string]any{
 			"label":       clipPermissionText(label, 120),
 			"description": clipPermissionText(strings.TrimSpace(asString(option["description"])), 240),
-		})
+		}
+		// A preview is the option's own mockup or snippet (markdown), shown
+		// beside the choices. Its indentation is content, so only blank edges
+		// go; bounded and redacted like the rest of the card.
+		if preview := strings.TrimRight(strings.TrimLeft(asString(option["preview"]), "\r\n"), " \t\r\n"); strings.TrimSpace(preview) != "" {
+			entry["preview"] = clipPermissionText(preview, permissionQuestionPreviewMaxRunes)
+		}
+		options = append(options, entry)
 		if len(options) >= 4 {
 			break
 		}
@@ -2582,6 +2589,10 @@ func permissionQuestion(raw any) map[string]any {
 // A model-authored question usually ends in the ask itself: 400 runes cut
 // "Which model should be the…" off a two-option decision (2026-10-19).
 const permissionQuestionMaxRunes = 2000
+
+// permissionQuestionPreviewMaxRunes bounds one option's preview: room for a
+// screen-sized mockup or a function, not a file.
+const permissionQuestionPreviewMaxRunes = 4000
 
 func clipPermissionText(s string, max int) string {
 	s = redactSensitiveText(s)
