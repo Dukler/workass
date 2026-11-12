@@ -1527,6 +1527,10 @@ func (b *Bridge) flushStdout(job *Job) {
 	b.manager.jobMu.Lock()
 	timer := job.stdoutTimer
 	chunk := job.stdoutBuf.String()
+	// Where the chunk starts in the turn's output, in bytes: everything queued
+	// goes to job.output and to the buffer together, so the unflushed buffer is
+	// exactly output's tail.
+	offset := job.output.Len() - len(chunk)
 	phase := job.stdoutPhase
 	bufferedSince := job.stdoutBufStartedAt
 	job.stdoutBuf.Reset()
@@ -1548,6 +1552,13 @@ func (b *Bridge) flushStdout(job *Job) {
 		payload := map[string]any{"type": "data", "id": job.ID, "stream": "stdout", "chunk": chunk}
 		if phase != "" {
 			payload["phase"] = phase
+		}
+		// Additive. A client that knows where the previous chunk ended can
+		// tell a chunk it missed (a socket that died while the phone was
+		// locked, a reconnect mid-turn) from one that follows, and re-read
+		// the turn instead of showing a reply with a hole in it.
+		if offset >= 0 {
+			payload["offset"] = offset
 		}
 		b.manager.emit("job:event", payload)
 		job.startupTiming.mark(startupContentPublished)
@@ -1597,6 +1608,7 @@ func (b *Bridge) flushJobBuffers(job *Job) {
 	job.stdoutTimer = nil
 	job.thinkTimer = nil
 	stdout := job.stdoutBuf.String()
+	stdoutOffset := job.output.Len() - len(stdout)
 	stdoutPhase := job.stdoutPhase
 	thinking := job.thoughtBuf
 	job.stdoutBuf.Reset()
@@ -1613,6 +1625,9 @@ func (b *Bridge) flushJobBuffers(job *Job) {
 		payload := map[string]any{"type": "data", "id": job.ID, "stream": "stdout", "chunk": stdout}
 		if stdoutPhase != "" {
 			payload["phase"] = stdoutPhase
+		}
+		if stdoutOffset >= 0 {
+			payload["offset"] = stdoutOffset // see flushStdout
 		}
 		b.manager.emit("job:event", payload)
 		job.startupTiming.mark(startupContentPublished)
