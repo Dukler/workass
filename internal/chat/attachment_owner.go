@@ -11,7 +11,8 @@ type AttachmentOwnership struct {
 
 // AttachmentRefOwnership reports whether ref names an attachment this chat
 // owns: a ledger row's own attachment, a tool attachment in a row's timeline,
-// one of the foreground turn's, or a pending steer's. It reads under the
+// one of the foreground turn's, a pending steer's, or one of input still
+// queued or staged (everything a projection can show). It reads under the
 // engine lock and copies nothing. Image reads used Snapshot, which clones the
 // whole actor: on a
 // 225 MB chat each image read cost about 15 ms of cloning, and a reader
@@ -40,6 +41,23 @@ func (e *Engine) AttachmentRefOwnership(ref string) AttachmentOwnership {
 	// with its images deferred like any other message's.
 	for pending := state.PendingSteer; pending != nil; pending = pending.Next {
 		if attachmentsOwn(pending.Attachments, ref) {
+			return AttachmentOwnership{Owned: true}
+		}
+	}
+	// Input not yet in the foreground is shown too, so it is owned too. A
+	// direct send waits in Queue while its lane is created or resumed, and
+	// PresentationState already draws it as the running turn's user row; the
+	// job:start receipt names its images (userImages). Before this, every
+	// client's first read of a just-sent image failed until the lane attached
+	// (2.5 s for a resumed Claude session), and no client read it again.
+	// Queued and staged rows are projected with their images as well.
+	for index := range state.Queue {
+		if attachmentsOwn(state.Queue[index].Attachments, ref) {
+			return AttachmentOwnership{Owned: true}
+		}
+	}
+	for index := range state.StagedQueue {
+		if attachmentsOwn(state.StagedQueue[index].Attachments, ref) {
 			return AttachmentOwnership{Owned: true}
 		}
 	}
