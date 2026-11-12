@@ -11,8 +11,9 @@ package wire
 // Additive both ways: an older daemon ignores the parameter, and a client that
 // does not send it gets every event exactly as before. What a lean client
 // still gets is everything a client needs to follow chats: turn start, end,
-// error and streamed text (job:event start/end/error/data), thoughts and the
-// turn heartbeat, permissions, lease, pairing, fleet, session refresh,
+// error and streamed text (job:event start/end/error/data), thoughts, the
+// turn heartbeat, steer receipts and each tool step without its input,
+// output and images, permissions, lease, pairing, fleet, session refresh,
 // spawned work and machines.
 
 // leanDroppedChannels are whole channels a lean client is not sent.
@@ -24,32 +25,53 @@ var leanDroppedChannels = map[string]struct{}{
 	"proc:changed":      {},
 }
 
-// leanDrops reports whether a lean client is not sent this event.
-func leanDrops(channel string, payload any) bool {
+// leanForm is what a lean client is sent of an event: send false when it is
+// not sent at all; otherwise form, which is the payload itself unless
+// changed is true (a tool step without its input, output and images).
+func leanForm(channel string, payload any) (form any, send bool, changed bool) {
 	if _, drop := leanDroppedChannels[channel]; drop {
-		return true
+		return nil, false, false
 	}
 	if channel != "job:event" {
-		return false
+		return payload, true, false
 	}
 	event, ok := payload.(map[string]any)
 	if !ok {
-		return false
+		return payload, true, false
 	}
 	switch event["type"] {
 	case "usage", "assistant-media":
-		return true
+		return nil, false, false
 	case "acp":
-		// Tool calls (inputs, outputs, images) and plans are the bulk of a
-		// turn's events. Kept: the heartbeat (a few bytes, what the turn is
-		// doing) and thoughts, which a client shows as the reply's live last
-		// line; an agent often says what it is doing only there.
 		inner, _ := event["event"].(map[string]any)
 		if inner == nil {
-			return true
+			return nil, false, false
 		}
-		kind := inner["kind"]
-		return kind != "turn-heartbeat" && kind != "thinking"
+		switch inner["kind"] {
+		case "plan":
+			// The plan is redrawn whole on every step; a lean client has
+			// no plan view.
+			return nil, false, false
+		case "tool":
+			// The step itself is what a client follows a turn by (its
+			// Working line: what runs now, how many steps); the input,
+			// output and images are read on demand when a step is opened.
+			// Images were the heavy part: one screenshot was 623 KB.
+			slim := make(map[string]any, len(inner))
+			for key, value := range inner {
+				switch key {
+				case "input", "output", "images":
+					continue
+				}
+				slim[key] = value
+			}
+			outer := make(map[string]any, len(event))
+			for key, value := range event {
+				outer[key] = value
+			}
+			outer["event"] = slim
+			return outer, true, true
+		}
 	}
-	return false
+	return payload, true, false
 }

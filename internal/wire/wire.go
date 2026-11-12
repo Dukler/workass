@@ -900,7 +900,8 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	}
 	encoded := encodeTextFrame(frame)
 	h.recordChannel(&h.eventStats, channel, 0, len(encoded))
-	leanDrop := leanDrops(channel, payload)
+	leanPayload, leanSend, leanChanged := leanForm(channel, payload)
+	var leanEncoded []byte
 
 	h.mu.RLock()
 	clients := make([]*client, 0, len(h.clients))
@@ -917,10 +918,23 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 		if include != nil && !include(c) {
 			continue
 		}
-		if leanDrop && c.lean {
-			continue
+		frameBytes := encoded
+		if c.lean {
+			if !leanSend {
+				continue
+			}
+			if leanChanged {
+				if leanEncoded == nil {
+					leanFrame, err := json.Marshal(eventFrame{T: "event", Channel: channel, Payload: leanPayload})
+					if err != nil {
+						continue
+					}
+					leanEncoded = encodeTextFrame(leanFrame)
+				}
+				frameBytes = leanEncoded
+			}
 		}
-		if err := c.admitEvent(outboundFrame{payload: encoded}); err != nil {
+		if err := c.admitEvent(outboundFrame{payload: frameBytes}); err != nil {
 			// admitEvent already logged a client that cannot keep up.
 			if !errors.Is(err, errClientCannotKeepUp) {
 				frames, bytes := c.outboundSnapshot()
@@ -2532,8 +2546,12 @@ func (c *client) sendControllerEventAndWait(channel string, payload any) error {
 }
 
 func (c *client) sendEventWithScope(channel string, payload any, controllerOnly, wait bool) error {
-	if c.lean && leanDrops(channel, payload) {
-		return nil
+	if c.lean {
+		form, send, _ := leanForm(channel, payload)
+		if !send {
+			return nil
+		}
+		payload = form
 	}
 	frame, err := json.Marshal(eventFrame{T: "event", Channel: channel, Payload: payload})
 	if err != nil {
