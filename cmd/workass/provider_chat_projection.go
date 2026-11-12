@@ -207,6 +207,9 @@ func (r *providerChatRuntime) projectSession(encodedRows bool, opts ...archiveRe
 		if err := projectActorChatWithHistoryWindow(projected, state, history, sessionProjectionMessageTail, window); err != nil {
 			return nil, fmt.Errorf("project actor-native chat %q: %w", state.ChatID, err)
 		}
+		if shell && history == actorHistoryTail && sessionRunningStubRead(opts) {
+			projected["messages"] = runningMessageStubs(anySlice(projected["messages"]))
+		}
 		for _, opt := range opts {
 			opt.beforeBudget(anySlice(projected["messages"]))
 		}
@@ -392,6 +395,9 @@ type archiveReadOptions struct {
 	// can show; see session_page.go. Only session:get sets it: archive reads
 	// compare their options as cache keys.
 	page *sessionPage
+	// runningStub (session:get {shell, runningTail: "stub"}) sends a running
+	// chat's tail as stubs of its running rows only; see runningMessageStubs.
+	runningStub bool
 }
 
 func sessionPageRead(opts []archiveReadOptions) *sessionPage {
@@ -421,7 +427,45 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 		leanTitles:         options["leanTitles"] == true,
 		sessionShell:       options["shell"] == true,
 		toolSummaries:      options["toolSummaries"] == true,
+		runningStub:        options["runningTail"] == "stub",
 	}
+}
+
+func sessionRunningStubRead(opts []archiveReadOptions) bool {
+	for _, opt := range opts {
+		if opt.runningStub {
+			return true
+		}
+	}
+	return false
+}
+
+// runningMessageStubs is what a list needs of a running chat's tail: which
+// turn runs and since when, nothing it would draw. A shell read keeps a
+// running chat's whole tail (the desktop shows the turn from it), which was
+// 572 KB of a 882 KB shell for one tool-heavy chat on 2026-11-12, re-read by
+// the phone on every turn start and end. The phone asks for stubs
+// ({runningTail: "stub"}, additive: an older daemon sends the tail, which it
+// reads the same way). Only running and pending rows are kept, with their
+// identity and timing fields.
+func runningMessageStubs(messages []any) []any {
+	stubs := make([]any, 0, 1)
+	for _, raw := range messages {
+		message := mapFromAnyMain(raw)
+		status := fieldString(message, "status")
+		if status != "running" && status != "pending" {
+			continue
+		}
+		stub := map[string]any{}
+		for _, key := range []string{"id", "role", "status", "jobId", "turnRootId", "turnStartedAt", "at"} {
+			if value, ok := message[key]; ok {
+				stub[key] = value
+			}
+		}
+		stub["content"] = ""
+		stubs = append(stubs, stub)
+	}
+	return stubs
 }
 
 // beforeBudget runs before the byte budget measures a page, so a lean page
