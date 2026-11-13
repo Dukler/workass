@@ -247,7 +247,7 @@ type pageMemoKey struct {
 }
 
 func (k pageMemoKey) name() string {
-	return hashName("page", k.before, strconv.Itoa(k.limit), workGroupShape([]archiveReadOptions{k.opts}, false), strconv.FormatBool(k.opts.workGroups)) + ".whp"
+	return hashName("page", k.before, strconv.Itoa(k.limit), workGroupShape([]archiveReadOptions{k.opts}, false), strconv.FormatBool(k.opts.workGroups), strconv.FormatBool(k.opts.longRows)) + ".whp"
 }
 
 type pageMemoEntry struct {
@@ -317,7 +317,11 @@ func (s *workGroupPackStore) rememberPage(key pageMemoKey, revision uint64, kept
 
 // keepPage compresses and keeps a page read at revision (after its reply).
 func (s *workGroupPackStore) keepPage(key pageMemoKey, revision uint64, raw []byte) {
-	kept := keepReply(raw)
+	s.keepPageKept(key, revision, keepReply(raw))
+}
+
+// keepPageKept keeps an already compressed reply.
+func (s *workGroupPackStore) keepPageKept(key pageMemoKey, revision uint64, kept keptReply) {
 	if kept.deflated == nil {
 		return
 	}

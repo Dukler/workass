@@ -200,3 +200,40 @@ func (e *Engine) Revision() uint64 {
 	defer e.mu.Unlock()
 	return e.state.Revision
 }
+
+// NextMessageID is the id of the row after the newest row with messageID,
+// "" when it is the newest.
+func (a *SQLActors) NextMessageID(chatID, messageID string) (string, bool, error) {
+	chatID, messageID = strings.TrimSpace(chatID), strings.TrimSpace(messageID)
+	var next sql.NullString
+	found := false
+	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
+		seq, err := sqlMessageSequence(tx, chatID, messageID)
+		if err != nil || seq == 0 {
+			return err
+		}
+		found = true
+		err = tx.QueryRow(`SELECT message_id FROM messages WHERE chat_id = ? AND seq = ?`, chatID, seq+1).Scan(&next)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	return next.String, found, err
+}
+
+// NextMessageID is SQLActors.NextMessageID of an open actor.
+func (e *Engine) NextMessageID(messageID string) (string, bool) {
+	messageID = strings.TrimSpace(messageID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for index := len(e.state.Ledger) - 1; index >= 0; index-- {
+		if e.state.Ledger[index].MessageID == messageID {
+			if index+1 < len(e.state.Ledger) {
+				return e.state.Ledger[index+1].MessageID, true
+			}
+			return "", true
+		}
+	}
+	return "", false
+}

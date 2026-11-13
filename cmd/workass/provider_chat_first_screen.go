@@ -58,12 +58,12 @@ const (
 	lastExchangeWholeTailBytes = 2 << 20
 )
 
-var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, workGroups: true}
+var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, workGroups: true, longRows: true}
 
 // firstScreenWarmSummaryOptions is the first screen itself: the renderer asks
 // for it with toolSummaries (FIRST_SCREEN_READ_OPTIONS), and pages the rest of
 // the slice with firstScreenWarmOptions.
-var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true, workGroups: true}
+var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true, workGroups: true, longRows: true}
 
 // A renderer that predates work groups opens a chat with the same reads
 // without them; its first slices are warmed after the current renderer's.

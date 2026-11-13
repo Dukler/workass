@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -396,6 +397,10 @@ type archiveReadOptions struct {
 	// workGroups (provider_chat_work_groups.go) sends a settled row's folded
 	// calls as a summary, read with {workGroup} when its Worked row opens.
 	workGroups bool
+	// longRows (provider_chat_long_rows.go) sends a settled reply of
+	// hundreds of kilobytes as its last part, the rest read with
+	// {contentHead} as the reader scrolls up to it. With workGroups only.
+	longRows bool
 	// page (session:get {shell, page}) lists only the chats a first screen
 	// can show; see session_page.go. Only session:get sets it: archive reads
 	// compare their options as cache keys.
@@ -433,6 +438,7 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 		sessionShell:       options["shell"] == true,
 		toolSummaries:      options["toolSummaries"] == true,
 		workGroups:         options["workGroups"] == true,
+		longRows:           options["longRows"] == true,
 		runningStub:        options["runningTail"] == "stub",
 	}
 }
@@ -550,7 +556,8 @@ func (r *providerChatRuntime) ArchivePageBeforeReply(tabID, beforeMessageID stri
 	if err != nil || !found {
 		return raw, found, err
 	}
-	if known && len(raw) >= pageMemoMinBytes {
+	// A page with a long row's last part is small, but read from a large row.
+	if known && (len(raw) >= pageMemoMinBytes || bytes.Contains(raw, []byte(`"contentFrom":`))) {
 		go store.keepPage(key, revision, append([]byte(nil), raw...))
 	}
 	return raw, true, nil
@@ -570,6 +577,15 @@ func (r *providerChatRuntime) archivePageBeforeByTab(tabID, beforeMessageID stri
 // archivePageBeforeByChat is archivePageBeforeByTab of the chat the tab was
 // found to own.
 func (r *providerChatRuntime) archivePageBeforeByChat(chatID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {
+	revision, known := r.chatRevision(chatID)
+	page, found, err := r.archivePageBeforeByChatWhole(chatID, beforeMessageID, limit, opts...)
+	if err != nil || !found {
+		return page, found, err
+	}
+	return r.splitLongRows(chatID, revision, known, page, opts), true, nil
+}
+
+func (r *providerChatRuntime) archivePageBeforeByChatWhole(chatID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {
 	page, finished, err := r.ledgerPageBefore(chatID, beforeMessageID, limit, opts)
 	if err != nil {
 		return archivePage{}, false, err
@@ -617,6 +633,15 @@ func (r *providerChatRuntime) archivePageByTab(tabID string, history actorHistor
 
 // archivePageByChat is archivePageByTab of the chat the tab was found to own.
 func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHistoryProjection, tailLimit int, lastExchange bool, opts ...archiveReadOptions) (archivePage, bool, error) {
+	revision, known := r.chatRevision(chatID)
+	page, found, err := r.archivePageByChatWhole(chatID, history, tailLimit, lastExchange, opts...)
+	if err != nil || !found || history == actorHistoryFull {
+		return page, found, err
+	}
+	return r.splitLongRows(chatID, revision, known, page, opts), true, nil
+}
+
+func (r *providerChatRuntime) archivePageByChatWhole(chatID string, history actorHistoryProjection, tailLimit int, lastExchange bool, opts ...archiveReadOptions) (archivePage, bool, error) {
 	if lastExchange && history == actorHistoryTail {
 		// A tail small enough to read and paint at once is the first screen
 		// whole (ProjectLastExchangeByTab). A closed chat's rows do not change
@@ -624,7 +649,7 @@ func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHist
 		// one is never read again just to learn it is large.
 		summary, closed := r.closedSummary(chatID)
 		if !closed || !r.tailKnownLarge(summary, tailLimit, opts) {
-			whole, found, err := r.archivePageByChat(chatID, history, tailLimit, false, opts...)
+			whole, found, err := r.archivePageByChatWhole(chatID, history, tailLimit, false, opts...)
 			if err != nil || !found {
 				return whole, found, err
 			}

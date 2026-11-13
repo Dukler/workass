@@ -80,6 +80,22 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				}
 				return group, nil
 			}
+			// Additive {contentHead}: the earlier parts of a long row
+			// (provider_chat_long_rows.go). Paired with tail:1 like toolDetail.
+			if rawHead, requested := options["contentHead"]; requested {
+				request, err := parseContentHeadRequest(rawHead)
+				if err != nil {
+					return nil, err
+				}
+				head, found, err := providerChats.ContentHeadByTab(stringArg(args, 0), request, []archiveReadOptions{read})
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return nil, os.ErrNotExist
+				}
+				return head, nil
+			}
 			if _, requested := options["imageRef"]; requested {
 				// Additive {width}: a rendition at most that wide, for a
 				// thumbnail (ProjectToolImageRenditionByTab). Without it, or

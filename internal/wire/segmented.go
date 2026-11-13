@@ -83,11 +83,22 @@ const rawReplySpareBytes = 64
 const SegmentLevel = flate.DefaultCompression
 
 var segmentWriterPool = newDeflateWriterPool(SegmentLevel)
+var segmentBestWriterPool = newDeflateWriterPool(flate.BestCompression)
 
 // DeflateSegment compresses plain into a segment: non-final DEFLATE blocks
 // with a fresh window, ending in a sync flush.
 func DeflateSegment(plain []byte) []byte {
-	w, _ := segmentWriterPool.Get().(*deflateWriter)
+	return deflateSegment(plain, segmentWriterPool)
+}
+
+// DeflateSegmentBest is DeflateSegment at the best compression, for a segment
+// compressed ahead of any reader.
+func DeflateSegmentBest(plain []byte) []byte {
+	return deflateSegment(plain, segmentBestWriterPool)
+}
+
+func deflateSegment(plain []byte, pool *sync.Pool) []byte {
+	w, _ := pool.Get().(*deflateWriter)
 	if w == nil {
 		return nil
 	}
@@ -100,7 +111,7 @@ func DeflateSegment(plain []byte) []byte {
 		err = w.fw.Flush()
 	}
 	w.sink.buf = nil
-	segmentWriterPool.Put(w)
+	pool.Put(w)
 	if err != nil || !bytes.HasSuffix(buf.Bytes(), []byte(deflateFlushTail)) {
 		return nil
 	}
