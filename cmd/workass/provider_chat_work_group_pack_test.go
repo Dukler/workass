@@ -186,3 +186,60 @@ func TestWorkGroupPacksPageFromDiskByWindowAndRebuildWhenStale(t *testing.T) {
 		t.Fatalf("pack left behind: %v", err)
 	}
 }
+
+// A large history page is kept per chat revision and read back, in this
+// process or a later one, as exactly the bytes a read makes; a commit makes
+// it read again.
+func TestLargeHistoryPagesAreKeptPerRevision(t *testing.T) {
+	stateDir := t.TempDir()
+	backend, err := openChatActorBackend(stateDir, true, "test", t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.close()
+	workGroupTestChat(t, stateDir, backend, "wg")
+	defer func(min int) { pageMemoMinBytes = min }(pageMemoMinBytes)
+	pageMemoMinBytes = 1
+	runtime := startLazyTestRuntime(t, stateDir, backend, "tab-none")
+	defer runtime.Close(context.Background())
+	defer workGroupPackStores.Delete(stateDir)
+	options := archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true}
+	want, found, err := runtime.ProjectArchivePageBeforeByTabRaw("tab-wg", "wg-message-9", 4, options)
+	if err != nil || !found {
+		t.Fatal(found, err)
+	}
+	want = append([]byte(nil), want...)
+	reply := func() []byte {
+		got, found, err := runtime.ArchivePageBeforeReply("tab-wg", "wg-message-9", 4, options)
+		if err != nil || !found {
+			t.Fatal(found, err)
+		}
+		return mustJSONBytes(t, got)
+	}
+	if got := reply(); !bytes.Equal(got, want) {
+		t.Fatal("first read differs")
+	}
+	key := pageMemoKey{chatID: "wg", before: "wg-message-9", limit: 4, opts: options}
+	revision, _ := runtime.chatRevision("wg")
+	var kept bool
+	for wait := 0; wait < 200 && !kept; wait++ {
+		_, kept = runtime.workGroupPacks().keptPage(key, revision)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !kept {
+		t.Fatal("the page was not kept")
+	}
+	if got := reply(); !bytes.Equal(got, want) {
+		t.Fatal("kept page differs")
+	}
+	workGroupPackStores.Delete(stateDir)
+	if _, ok := runtime.workGroupPacks().keptPage(key, revision); !ok {
+		t.Fatal("the page was not kept on disk")
+	}
+	if got := reply(); !bytes.Equal(got, want) {
+		t.Fatal("page from disk differs")
+	}
+	if _, ok := runtime.workGroupPacks().keptPage(key, revision+1); ok {
+		t.Fatal("a page was kept across a revision")
+	}
+}

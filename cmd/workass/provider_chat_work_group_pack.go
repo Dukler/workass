@@ -133,6 +133,10 @@ type workGroupPackStore struct {
 	clock  atomic.Int64
 	// building bounds concurrent builds.
 	building chan struct{}
+	// pages are large history pages kept per chat revision
+	// (provider_chat_reply_memo.go).
+	pages     map[pageMemoKey]*pageMemoEntry
+	pageBytes int
 }
 
 var workGroupPackStores sync.Map // state dir -> *workGroupPackStore
@@ -173,6 +177,12 @@ func (s *workGroupPackStore) forgetChat(chatID string) {
 		if key.chatID == chatID {
 			s.memory -= pack.memoryBytes()
 			delete(s.packs, key)
+		}
+	}
+	for key, entry := range s.pages {
+		if key.chatID == chatID {
+			s.pageBytes -= len(entry.kept.deflated)
+			delete(s.pages, key)
 		}
 	}
 	s.mu.Unlock()

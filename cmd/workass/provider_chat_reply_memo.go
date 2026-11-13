@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -197,4 +202,118 @@ func (r *providerChatRuntime) FirstScreenReply(tabID string, limit int, opts arc
 		return conditionalRowsReply(raw, ifNoneMatch), true, nil
 	}
 	return raw, true, nil
+}
+
+// History page memo: a large page (an older renderer's page holding one row
+// of thousands of calls is 13.9 MB, read, decoded, finished, encoded and
+// compressed in 0.3 s, every time) is kept compressed per chat revision, in
+// memory and on disk with the chat's work group packs, so a later read, in
+// this process or the next, frames the kept segment. A chat's revision
+// moves with every commit, so a kept page is only ever the page it was.
+
+// pageMemoMinBytes: smaller pages are read faster than kept.
+var pageMemoMinBytes = 512 << 10
+
+const (
+	// pageMemoMemoryBytes bounds the kept pages held in memory.
+	pageMemoMemoryBytes = 32 << 20
+	pageMemoMagic       = "WHP1"
+)
+
+type pageMemoKey struct {
+	chatID, before string
+	limit          int
+	opts           archiveReadOptions
+}
+
+func (k pageMemoKey) name() string {
+	return hashName("page", k.before, strconv.Itoa(k.limit), workGroupShape([]archiveReadOptions{k.opts}, false), strconv.FormatBool(k.opts.workGroups)) + ".whp"
+}
+
+type pageMemoEntry struct {
+	revision uint64
+	kept     keptReply
+	used     uint64
+}
+
+func (s *workGroupPackStore) pagePath(key pageMemoKey) string {
+	return filepath.Join(s.chatDir(key.chatID), key.name())
+}
+
+// keptPage is the page kept at revision, from memory or disk.
+func (s *workGroupPackStore) keptPage(key pageMemoKey, revision uint64) (keptReply, bool) {
+	s.mu.Lock()
+	if entry, ok := s.pages[key]; ok {
+		if entry.revision == revision {
+			s.clock.Add(1)
+			entry.used = uint64(s.clock.Load())
+			s.mu.Unlock()
+			return entry.kept, true
+		}
+	}
+	s.mu.Unlock()
+	data, err := os.ReadFile(s.pagePath(key))
+	if err != nil || len(data) < 20 || string(data[:4]) != pageMemoMagic {
+		return keptReply{}, false
+	}
+	stored := binary.LittleEndian.Uint64(data[4:12])
+	size := int(binary.LittleEndian.Uint32(data[12:16]))
+	etagLen := int(binary.LittleEndian.Uint32(data[16:20]))
+	if stored != revision || len(data) < 20+etagLen {
+		return keptReply{}, false
+	}
+	kept := keptReply{etag: string(data[20 : 20+etagLen]), size: size, deflated: data[20+etagLen:]}
+	s.rememberPage(key, revision, kept)
+	return kept, true
+}
+
+func (s *workGroupPackStore) rememberPage(key pageMemoKey, revision uint64, kept keptReply) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pages == nil {
+		s.pages = make(map[pageMemoKey]*pageMemoEntry)
+	}
+	if previous, ok := s.pages[key]; ok {
+		s.pageBytes -= len(previous.kept.deflated)
+	}
+	s.pages[key] = &pageMemoEntry{revision: revision, kept: kept, used: uint64(s.clock.Add(1))}
+	s.pageBytes += len(kept.deflated)
+	for s.pageBytes > pageMemoMemoryBytes {
+		var oldest pageMemoKey
+		var oldestUse uint64
+		found := false
+		for candidate, entry := range s.pages {
+			if !found || entry.used < oldestUse {
+				oldest, oldestUse, found = candidate, entry.used, true
+			}
+		}
+		if !found {
+			break
+		}
+		s.pageBytes -= len(s.pages[oldest].kept.deflated)
+		delete(s.pages, oldest)
+	}
+}
+
+// keepPage compresses and keeps a page read at revision (after its reply).
+func (s *workGroupPackStore) keepPage(key pageMemoKey, revision uint64, raw []byte) {
+	kept := keepReply(raw)
+	if kept.deflated == nil {
+		return
+	}
+	s.rememberPage(key, revision, kept)
+	var out bytes.Buffer
+	out.WriteString(pageMemoMagic)
+	_ = binary.Write(&out, binary.LittleEndian, revision)
+	_ = binary.Write(&out, binary.LittleEndian, uint32(kept.size))
+	_ = binary.Write(&out, binary.LittleEndian, uint32(len(kept.etag)))
+	out.WriteString(kept.etag)
+	out.Write(kept.deflated)
+	path := s.pagePath(key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if writeFileAtomic(path, out.Bytes(), 0o600) == nil {
+		s.trimDisk(path)
+	}
 }

@@ -536,7 +536,24 @@ func (r *providerChatRuntime) ArchivePageBeforeReply(tabID, beforeMessageID stri
 	if kept, ok := r.cachedSlicePage(chatID, beforeMessageID, limit, opts...); ok {
 		return kept.result(), true, nil
 	}
-	return r.ProjectArchivePageBeforeByTabRaw(tabID, beforeMessageID, limit, opts...)
+	// A large page is kept per chat revision (provider_chat_reply_memo.go).
+	revision, known := r.chatRevision(chatID)
+	known = known && len(opts) <= 1
+	key := pageMemoKey{chatID: chatID, before: strings.TrimSpace(beforeMessageID), limit: limit, opts: singleReadOption(opts)}
+	store := r.workGroupPacks()
+	if known {
+		if kept, ok := store.keptPage(key, revision); ok {
+			return kept.result(), true, nil
+		}
+	}
+	raw, found, err := r.ProjectArchivePageBeforeByTabRaw(tabID, beforeMessageID, limit, opts...)
+	if err != nil || !found {
+		return raw, found, err
+	}
+	if known && len(raw) >= pageMemoMinBytes {
+		go store.keepPage(key, revision, append([]byte(nil), raw...))
+	}
+	return raw, true, nil
 }
 
 func (r *providerChatRuntime) archivePageBeforeByTab(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {
