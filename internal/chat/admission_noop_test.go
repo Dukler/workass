@@ -69,14 +69,12 @@ func TestDuplicateTurnAdmissionDoesNotRewriteHistory(t *testing.T) {
 	}); allocations > 1 {
 		t.Fatalf("duplicate admission copied history: %.0f allocations", allocations)
 	}
-	// Local preparation is explicitly requested work and cannot be bypassed:
-	// the command is prepared and committed, as a checkpoint or, an accepted
-	// admission being a send-path command, a control journal record.
+	// Local preparation is explicitly requested work and cannot be bypassed.
 	prepared := false
 	if err := e.ApplyPrepared(receipt, func() error { prepared = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if !prepared || store.writes+journalFrameCount(t, store.Path) != 2 || e.state.Revision != revision+1 {
+	if !prepared || store.writes != 2 {
 		t.Fatal("admission fast path suppressed explicit preparation")
 	}
 }

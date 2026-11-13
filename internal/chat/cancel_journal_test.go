@@ -26,13 +26,7 @@ func TestCancelJournalPreservesEveryDurableBoundaryWithoutHistoryRewrite(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Fill the journal to just under its checkpoint threshold; the
-			// send-path records (claim, admission) may already be in it.
-			used := int64(len(providerEventJournalMagic))
-			if info, err := os.Stat(providerEventJournalPath(path)); err == nil && info.Size() > 0 {
-				used = info.Size()
-			}
-			chunk.Event.Assistant.Text = strings.Repeat("x", providerEventJournalCheckpointBytes-int(used)-len(frame)-64)
+			chunk.Event.Assistant.Text = strings.Repeat("x", providerEventJournalCheckpointBytes-len(providerEventJournalMagic)-len(frame)-64)
 			if err := engine.Apply(chunk); err != nil {
 				t.Fatal(err)
 			}
