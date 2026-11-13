@@ -2826,8 +2826,16 @@ export class Store {
       // A ping stuck behind a large frame in transit is a slow link, not a
       // daemon that left.
       () => wireBusy(),
+      () => documentHidden(),
     );
     this.monitor.start();
+    // A hidden window pings less often (wire/connection.ts); showing it checks
+    // the daemon and the state digest right away.
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', () => {
+        if (!documentHidden()) this.monitor?.probeNow();
+      });
+    }
   }
 
   private async pingConnection(): Promise<unknown> {

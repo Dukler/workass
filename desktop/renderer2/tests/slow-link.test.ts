@@ -84,3 +84,33 @@ describe('slow link', () => {
     }
   });
 });
+
+// Energy lane 2026-11-13: a hidden window pings every 30 s instead of 5 s, and
+// probeNow (the store calls it when the window shows) pings at once.
+test('a hidden window pings less often and pings at once when shown', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flushAll = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  let hidden = false;
+  let pings = 0;
+  const monitor = new ConnectionMonitor(() => { pings++; return Promise.resolve(); }, () => {}, () => {}, () => false, () => hidden);
+  try {
+    monitor.start();
+    for (let i = 0; i < 20; i++) { t.mock.timers.tick(1000); await flushAll(); }
+    assert.equal(pings, 4, 'visible: every 5 s');
+    hidden = true;
+    pings = 0;
+    t.mock.timers.tick(5000); await flushAll();   // the sleep that began while visible
+    pings = 0;
+    for (let i = 0; i < 60; i++) { t.mock.timers.tick(1000); await flushAll(); }
+    assert.equal(pings, 2, 'hidden: every 30 s');
+    hidden = false;
+    pings = 0;
+    monitor.probeNow(); await flushAll();
+    assert.equal(pings, 1, 'shown: at once');
+    const status = monitor.connected();
+    assert.equal(status, true);
+  } finally {
+    monitor.stop();
+    t.mock.timers.reset();
+  }
+});
