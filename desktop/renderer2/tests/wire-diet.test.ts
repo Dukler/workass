@@ -555,6 +555,27 @@ describe('long chats: brief spawned work and work groups', () => {
     assert.deepEqual(calls[1], { messageId: 'm-long', before: 6, all: true });
   });
 
+  test('a long reply reads every earlier part in one background read and uses it when scrolled to', async () => {
+    const history = await vite.ssrLoadModule('/src/chat/history.ts');
+    const [tail] = history.actorMessages([{ id: 'm-pre', role: 'assistant', status: 'done', content: 'c', contentFrom: 2, contentLength: 3, events: [] }], 'tab-9');
+    const local = chat('tab-9');
+    local.messages = [tail];
+    const calls: any[] = [];
+    const store = subject([local], { archiveLoad: async (_tab: string, options: any) => { calls.push(options); return { messageId: 'm-pre', parts: [
+      { messageId: 'm-pre', from: 0, to: 1, content: 'a', events: [] },
+      { messageId: 'm-pre', from: 1, to: 2, content: 'b', events: [{ kind: 'tool', key: 'k', at: 1, workStub: true }] },
+    ] }; } });
+    store.prefetchLongRow('tab-9', tail);
+    store.prefetchLongRow('tab-9', tail);
+    assert.equal(calls.length, 1);
+    assert.deepEqual([calls[0].contentHead, calls[0].background], [{ messageId: 'm-pre', before: 2, parts: true }, true]);
+    assert.equal(await store.loadContentHead('tab-9', tail), true);
+    assert.equal(calls.length, 1, 'the scroll used the parts read ahead');
+    assert.equal(tail.content, 'abc');
+    assert.equal(tail.contentFrom, undefined);
+    assert.deepEqual(tail.events.map((event: any) => event.at), [1]);
+  });
+
   test('copying a long reply read in parts copies the whole reply', async () => {
     const history = await vite.ssrLoadModule('/src/chat/history.ts');
     const { copyWholeReply } = await vite.ssrLoadModule('/src/components/AssistantMessage.tsx');

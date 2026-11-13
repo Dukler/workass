@@ -945,7 +945,7 @@ export interface WorkassApi {
     // its last part; contentHead reads the part ending at `before` (all: the
     // whole head) as {messageId, from, to, content, events}.
     longRows?: boolean;
-    contentHead?: { messageId: string; before: number; all?: boolean };
+    contentHead?: { messageId: string; before: number; all?: boolean; parts?: boolean };
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
     // client holds. An older daemon ignores it and answers the plain array.

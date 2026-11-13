@@ -28,7 +28,7 @@ import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
 import { loadWorkGroupEvents, prefetchWorkGroup } from '../chat/work-group';
-import { loadContentHead } from '../chat/long-row';
+import { loadContentHead, prefetchLongRow } from '../chat/long-row';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
@@ -7432,6 +7432,10 @@ export class Store {
     if (ok && current && current !== msg && current.contentFrom) await loadContentHead(tabId, current, true);
     this.bump('msg:' + msg.id);
     return ok;
+  }
+  /** A long reply's last part is on screen: read the rest in the background. */
+  prefetchLongRow(tabId: string, msg: Msg): void {
+    prefetchLongRow(tabId, msg);
   }
   /** Every long reply of the chat whole (find, copy). */
   async completeLongRows(tabId: string): Promise<void> {

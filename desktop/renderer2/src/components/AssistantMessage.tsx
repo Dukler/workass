@@ -302,6 +302,17 @@ const LONG_ROW_CHARS_PER_PX = 1.5;
 function LongRowHead({ tabId, msg }: { tabId: string; msg: Msg }) {
   const box = useRef<HTMLDivElement>(null);
   const from = msg.contentFrom ?? 0;
+  // The rest is read in the background once the view is idle.
+  useEffect(() => {
+    if (!from) return;
+    const idle = (globalThis as { requestIdleCallback?: (fn: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+    const run = () => store.prefetchLongRow(tabId, msg);
+    const handle = idle ? idle(run, { timeout: 1000 }) : setTimeout(run, 200);
+    return () => {
+      const cancel = (globalThis as { cancelIdleCallback?: (handle: number) => void }).cancelIdleCallback;
+      if (idle && cancel) cancel(handle as number); else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
+  }, [tabId, msg, from]);
   useEffect(() => {
     const element = box.current;
     if (!element || !from || typeof IntersectionObserver === 'undefined') return;
