@@ -1002,7 +1002,7 @@ export interface WorkassApi {
   onConnectorsChanged?: (cb: (e: { connectors: Connector[] }) => void) => void;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
-  spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string; brief?: boolean }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string; brief?: boolean; settled?: Array<[string, string]>; omitted?: number } | { unchanged: true; etag: string; items?: undefined }>;
+  spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string; brief?: boolean; keep?: string[] }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string; brief?: boolean; settled?: Array<[string, string]>; omitted?: number } | { unchanged: true; etag: string; items?: undefined }>;
   /** Every chat's running rows, counts and obligation in one read (local
    *  daemon). Additive: an older bridge lacks it and the store falls back to
    *  one spawnedWorkList per chat. */

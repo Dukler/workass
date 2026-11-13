@@ -259,18 +259,18 @@ func TestBriefSpawnedWorkKeepsWhatTheFirstPaintDraws(t *testing.T) {
 		{"id": "old-bash", "kind": "bash", "status": "exited", "finishedAt": "2026-10-01T08:00:00Z"},
 		{"id": "kept-agent", "kind": "agent", "toolCallId": "call-kept", "status": "exited", "finishedAt": "2026-10-01T08:00:00Z", "summary": "shown"},
 	}
-	reply := briefSpawnedWorkReply(items, now)
+	reply := briefSpawnedWorkReply(items, map[string]struct{}{"call-kept": {}}, now)
 	var ids []string
 	for _, item := range reply["items"].([]map[string]any) {
 		ids = append(ids, fieldString(item, "id"))
 	}
-	if strings.Join(ids, ",") != "run-1,new-1" {
+	if strings.Join(ids, ",") != "run-1,new-1,kept-agent" {
 		t.Fatalf("kept %v", ids)
 	}
-	if got := mustJSONBytes(t, reply["settled"]); string(got) != `[["call-old","exited"],["old-sub","failed"],["call-kept","exited"]]` {
+	if got := mustJSONBytes(t, reply["settled"]); string(got) != `[["call-old","exited"],["old-sub","failed"]]` {
 		t.Fatalf("settled %s", got)
 	}
-	if reply["omitted"] != 4 || reply["brief"] != true {
+	if reply["omitted"] != 3 || reply["brief"] != true {
 		t.Fatalf("reply %v", reply)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// spawned-work:list {brief: true} is the list a chat's first
+// spawned-work:list {brief: true, keep?: [workId]} is the list a chat's first
 // paint needs. A long chat's list held every agent it ever ran, finished
 // weeks ago: 341-905 rows and 0.5-1.2 MB (most of it their result
 // summaries), read whenever the chat opened, while the screen draws the
@@ -14,8 +14,9 @@ import (
 //
 //	{brief: true, items, settled: [[workId, status], ...], omitted, obligation?}
 //
-// items: every row, whole, that runs or waits or that finished within
-// briefSpawnedWorkRecent. settled: for each other agent row, its work
+// items: every row, whole, that runs or waits, that finished within
+// briefSpawnedWorkRecent, or whose work id is in keep (the finished agents
+// the client's rail is drawing). settled: for each other agent row, its work
 // id (what a subagent card is matched by: the row id of a "subagent" row,
 // else its tool call id, else its row id) and status, so a card in loaded
 // history still takes its child's end. omitted: how many rows items leaves
@@ -26,19 +27,21 @@ import (
 // briefSpawnedWorkRecent covers "finished today" in any time zone.
 const briefSpawnedWorkRecent = 48 * time.Hour
 
-func briefSpawnedWorkReply(items []map[string]any, now time.Time) map[string]any {
+func briefSpawnedWorkReply(items []map[string]any, keep map[string]struct{}, now time.Time) map[string]any {
 	kept := make([]map[string]any, 0, 8)
 	settled := make([]any, 0, len(items))
 	omitted := 0
 	for _, item := range items {
-		if fieldString(item, "status") == "running" || finishedWithin(item, now, briefSpawnedWorkRecent) {
+		workID := spawnedWorkCardID(item)
+		_, named := keep[workID]
+		if named || fieldString(item, "status") == "running" || finishedWithin(item, now, briefSpawnedWorkRecent) {
 			kept = append(kept, item)
 			continue
 		}
 		omitted++
 		switch fieldString(item, "kind") {
 		case "agent", "subagent":
-			settled = append(settled, []any{spawnedWorkCardID(item), fieldString(item, "status")})
+			settled = append(settled, []any{workID, fieldString(item, "status")})
 		}
 	}
 	return map[string]any{"brief": true, "items": kept, "settled": settled, "omitted": omitted}
@@ -67,4 +70,14 @@ func finishedWithin(item map[string]any, now time.Time, window time.Duration) bo
 		return true
 	}
 	return now.Sub(at) < window
+}
+
+func stringSet(raw any) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, value := range anySlice(raw) {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			out[strings.TrimSpace(text)] = struct{}{}
+		}
+	}
+	return out
 }

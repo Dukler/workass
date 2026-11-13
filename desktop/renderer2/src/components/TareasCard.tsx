@@ -60,9 +60,9 @@ export function TareasCard() {
     if (chat) for (const message of summarized) void store.loadWorkGroup(chat.id, message);
   }, [chat, summarized.map((message) => message.id).join()]); // eslint-disable-line react-hooks/exhaustive-deps
   // A finished subagent listed here from a brief spawned-work list shows its
-  // whole record (its result): read the whole list.
-  const briefDone = doneNodes.some((node) => node.work?.brief);
-  useEffect(() => { if (briefDone) store.wantFullSpawnedWork(chat); }, [briefDone, chat]);
+  // whole record (duration, model, result): read those rows whole.
+  const briefDone = doneNodes.filter((node) => node.work?.brief).map((node) => node.id);
+  useEffect(() => { store.wantSpawnedWorkRows(chat, briefDone); }, [chat, briefDone.join()]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!live) return;

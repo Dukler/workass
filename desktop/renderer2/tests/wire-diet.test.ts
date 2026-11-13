@@ -391,3 +391,69 @@ describe('session shell by etag', () => {
     assert.equal(wireCache.isUnchangedReply({ unchanged: true, etag: 'a' }, ''), false);
   });
 });
+
+describe('long chats: brief spawned work and work groups', () => {
+  afterEach(restoreGlobals);
+
+  test('a brief list keeps settled agents as card statuses and reads rows whole when shown', async () => {
+    const local = chat('tab-1');
+    const sent: any[] = [];
+    const replies: unknown[] = [
+      { brief: true, items: [row('w-run', 'running')], settled: [['call-old', 'failed']], omitted: 3 },
+      { brief: true, items: [row('w-run', 'running'), row('old', 'failed', { toolCallId: 'call-old', summary: 'whole' })], settled: [], omitted: 2 },
+      { items: [row('w-run', 'running'), row('old', 'failed', { toolCallId: 'call-old' }), row('older', 'done')] },
+    ];
+    const store = subject([local], { spawnedWorkList: async (...args: unknown[]) => { sent.push(args[2]); return replies.shift(); } });
+    await store.refreshSpawnedWork(local);
+    assert.deepEqual(sent[0], { ifNoneMatch: '', brief: true });
+    const items = store.spawnedWork(local);
+    assert.deepEqual(items.map((item: any) => [item.id, item.status, item.brief === true]), [['w-run', 'running', false], ['call-old', 'failed', true]]);
+    // The rail draws the settled agent: its row comes whole.
+    store.wantSpawnedWorkRows(local, ['call-old']);
+    await settle(); await settle();
+    assert.deepEqual(sent[1], { ifNoneMatch: '', brief: true, keep: ['call-old'] });
+    assert.equal(store.spawnedWork(local).find((item: any) => item.id === 'old')?.summary, 'whole');
+    // Older finished work on screen: the whole list.
+    store.wantFullSpawnedWork(local);
+    await settle(); await settle();
+    assert.deepEqual(sent[2], { ifNoneMatch: '' });
+    assert.equal(store.spawnedWork(local).length, 3);
+  });
+
+  test('a folded row reads its calls page by page when shown, and keeps them', async () => {
+    const local = chat('tab-1');
+    const folded = message('m-big');
+    folded.workSummary = { tools: 3, subagentCalls: 0, failed: 0, events: 3 };
+    folded.events = [{ kind: 'tool', key: 'k0', at: 0, id: null, title: '', status: '', workStub: true } as any];
+    local.messages = [folded];
+    const calls: any[] = [];
+    const tool = (index: number) => ({ kind: 'tool', key: `k${index}`, at: 0, id: `c${index}`, title: `call ${index}`, status: 'completed', toolKind: 'read', command: null, terminalId: null, input: '', inputDeferred: true, output: 'o', location: null });
+    const pages: unknown[] = [
+      { messageId: 'm-big', offset: 0, next: 2, total: 3, events: [tool(0), tool(1)] },
+      { messageId: 'm-big', offset: 2, next: 3, total: 3, events: [tool(2)] },
+    ];
+    const store = subject([local], { archiveLoad: async (_tab: string, options: any) => { calls.push(options); return pages.shift(); } });
+    assert.equal(await store.loadWorkGroup('tab-1', folded), true);
+    assert.deepEqual(calls.map((options) => [options.tail, options.workGroup, options.toolSummaries, options.workGroups]), [[1, { messageId: 'm-big', offset: 0 }, true, undefined], [1, { messageId: 'm-big', offset: 2 }, true, undefined]]);
+    assert.equal(folded.workSummary, undefined);
+    assert.deepEqual(folded.events.map((event: any) => event.key), ['k0', 'k1', 'k2']);
+    assert.deepEqual((folded.events[0] as any).detail, { tabId: 'tab-1', messageId: 'm-big' });
+    // A refresh brings the summary back: the kept calls apply without a read.
+    const again = message('m-big');
+    again.workSummary = folded.workSummary ?? { tools: 3, subagentCalls: 0, failed: 0, events: 3 };
+    local.messages = [again];
+    assert.equal(await store.loadWorkGroup('tab-1', again), true);
+    assert.equal(calls.length, 2);
+    assert.equal(again.events.length, 3);
+  });
+
+  test('a daemon that predates work groups answers a row, which is not a group', async () => {
+    const local = chat('tab-2');
+    const folded = message('m-old');
+    folded.workSummary = { tools: 9, subagentCalls: 0, failed: 0, events: 9 };
+    local.messages = [folded];
+    const store = subject([local], { archiveLoad: async () => [{ id: 'm-old', role: 'assistant', status: 'done', events: [] }] });
+    assert.equal(await store.loadWorkGroup('tab-2', folded), false);
+    assert.ok(folded.workSummary, 'the summary stays until the calls are read');
+  });
+});

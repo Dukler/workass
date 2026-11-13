@@ -7372,6 +7372,19 @@ export class Store {
   // older finished work and so reads the whole list.
   private briefSpawnedWork = new Set<string>();
   private fullSpawnedWork = new Set<string>();
+  // Finished agents the rail draws, which a brief list then sends whole.
+  private keptSpawnedWork = new Map<string, Set<string>>();
+  /** The rail draws these finished agents (card ids): read their rows whole. */
+  wantSpawnedWorkRows(chat: Chat | null, ids: readonly string[]) {
+    if (!chat?.chatId || !ids.length) return;
+    const key = spawnedWorkChatKey(chat.id, chat.chatId);
+    if (this.fullSpawnedWork.has(key)) return;
+    const kept = this.keptSpawnedWork.get(key) ?? new Set<string>();
+    const before = kept.size;
+    for (const id of ids) kept.add(id);
+    this.keptSpawnedWork.set(key, kept);
+    if (kept.size !== before && this.briefSpawnedWork.has(key)) void this.refreshSpawnedWork(chat);
+  }
   /** Something on screen shows the chat's older finished work: read it whole. */
   wantFullSpawnedWork(chat: Chat | null) {
     if (!chat?.chatId) return;
@@ -7438,7 +7451,8 @@ export class Store {
     // Brief (additive): what the chat's first paint draws, unless something
     // on screen shows older finished work (wantFullSpawnedWork). An older
     // daemon sends the whole list.
-    const brief = local && !this.fullSpawnedWork.has(key) ? { brief: true } : {};
+    const keep = [...(this.keptSpawnedWork.get(key) ?? [])].sort();
+    const brief = local && !this.fullSpawnedWork.has(key) ? { brief: true, ...(keep.length ? { keep } : {}) } : {};
     let result = local
       ? await call('spawnedWorkList', chat.id, chat.chatId, { ifNoneMatch: cached?.etag ?? '', ...brief })
       : await call('spawnedWorkList', chat.id, chat.chatId);

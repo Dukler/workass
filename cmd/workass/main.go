@@ -1749,9 +1749,9 @@ func registerAcpHandlers(hub *wire.Hub, manager *acp.Manager, stateDir string, s
 		}
 		reply := map[string]any{"items": items}
 		if arg["brief"] == true {
-			// Additive {brief}: what a chat's first paint draws
+			// Additive {brief, keep}: what a chat's first paint draws
 			// (spawned_work_brief.go). Without it, the whole list as before.
-			reply = briefSpawnedWorkReply(items, time.Now())
+			reply = briefSpawnedWorkReply(items, stringSet(arg["keep"]), time.Now())
 		}
 		obligation, err := providerChats.Obligation(tabID, chatID)
 		if err != nil {
