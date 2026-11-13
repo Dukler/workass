@@ -26,6 +26,11 @@ import {
 } from '../transcript-window';
 
 const HISTORY_PAGE = 40;
+// The next older page is read ahead once the mounted window starts within
+// this many units of the oldest loaded one, within this many pixels of the
+// top (three times the distance at which it is read for real).
+const OLDER_PREFETCH_UNITS = 6;
+const OLDER_PREFETCH_PX = 3 * TRANSCRIPT_LOAD_AHEAD_PX;
 const OLDER_RETRY_MIN_MS = 1000;
 const OLDER_RETRY_MAX_MS = 15000;
 // A window that keeps re-cutting itself inside one commit is an estimate that
@@ -730,6 +735,24 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     void revealOlder().then((outcome) => { if (outcome === 'empty') olderStalledAt.current = before; });
   };
 
+  // A reader scrolled up near the top of what is loaded: once the view is
+  // idle, the next older page is read ahead (store.prefetchOlderHistory), so
+  // the read loadOlderAhead makes when the top is reached finds it there.
+  const olderPrefetchIdle = useRef<number | null>(null);
+  const prefetchOlderAhead = () => {
+    const el = scrollRef.current;
+    if (!el || !chat || !virtual || stick.current || restoring.current || hidden <= 0 || chat.historyComplete) return;
+    if (mountedWindow.current.from > OLDER_PREFETCH_UNITS || el.scrollTop > OLDER_PREFETCH_PX || sliceArriving()) return;
+    if (olderPrefetchIdle.current !== null) return;
+    const chatID = chat.id;
+    const run = () => {
+      olderPrefetchIdle.current = null;
+      if (viewChat.current === chatID && !historyLoadingNow.current) store.prefetchOlderHistory(chatID, HISTORY_PAGE);
+    };
+    const idle = (globalThis as { requestIdleCallback?: (fn: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+    olderPrefetchIdle.current = idle ? idle(run, { timeout: 1000 }) : window.setTimeout(run, 200);
+  };
+
   // Clamp writes to the real maximum. Programmatic scroll events are ignored by
   // onScroll unless a wheel/touch/scrollbar intent preceded them.
   const setScrollTop = (el: HTMLDivElement, top: number) => {
@@ -1071,6 +1094,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     if (syncRewindows.current++ === 0) requestAnimationFrame(() => { syncRewindows.current = 0; });
     if (syncRewindows.current <= MAX_SYNC_REWINDOWS) rewindowIfStale();
     loadOlderAhead();
+    prefetchOlderAhead();
   };
 
   // A window shorter than the screen left a band of nothing under the newest

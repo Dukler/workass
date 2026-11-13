@@ -503,6 +503,30 @@ describe('long chats: brief spawned work and work groups', () => {
     assert.equal((again.events[0] as any).key, 'timeline:tool:c0');
   });
 
+  test('the next older page read ahead is the one the top then loads, and goes with a chat switch', async () => {
+    const local = chat('tab-5');
+    local.messages = [message('m-10')];
+    local.messageCount = 30;
+    const other = chat('tab-6');
+    const calls: any[] = [];
+    const pages = [[message('m-8'), message('m-9')], [message('m-6'), message('m-7')], [message('m-6'), message('m-7')]];
+    const store = subject([local, other], { archiveLoad: async (_tab: string, options: any) => { calls.push(options); return pages.shift(); } });
+    store.prefetchOlderHistory('tab-5', 40);
+    store.prefetchOlderHistory('tab-5', 40);
+    assert.equal(calls.length, 1, 'one page is read ahead once');
+    assert.equal(calls[0].background, true);
+    assert.equal(calls[0].beforeMessageId, 'm-10');
+    assert.equal(await store.loadOlderHistoryPage('tab-5', 40), 'loaded');
+    assert.equal(calls.length, 1, 'the top used the page read ahead');
+    assert.deepEqual(local.messages.map((m: any) => m.id), ['m-8', 'm-9', 'm-10']);
+    // Read ahead, then left: the page is not used for the chat later.
+    store.prefetchOlderHistory('tab-5', 40);
+    store.switchChat('tab-6');
+    assert.equal(await store.loadOlderHistoryPage('tab-5', 40), 'loaded');
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].background, undefined);
+  });
+
   test('a daemon that predates work groups answers a row, which is not a group', async () => {
     const local = chat('tab-2');
     const folded = message('m-old');

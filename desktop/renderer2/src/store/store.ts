@@ -600,6 +600,9 @@ export class Store {
   private recentFirstRows = new Map<string, Promise<void>>();
   private firstScreens = new Set<string>();
   private olderHistoryLoads = new Map<string, Promise<OlderHistoryOutcome>>();
+  // The next older page read ahead while a reader nears the top of what is
+  // loaded (prefetchOlderHistory): one page, of the chat on screen only.
+  private olderPrefetch = new Map<string, { beforeMessageId: string; limit: number; reply: Promise<unknown> }>();
   // Keep a selected resident tail on screen while a metadata-only refresh with
   // a newer actor revision is reconciled. This is renderer residency state,
   // never transcript authority.
@@ -1776,6 +1779,24 @@ export class Store {
   // or raced another change; reading again may succeed). A caller that stops
   // reading on 'failed' stops for good: that is how a slow history lane turned
   // the automatic load into the "Ver anteriores" button.
+  /** A reader nears the top of what is loaded: read the next older page
+   *  ahead, behind anything a reader waits for (background), and keep it
+   *  for loadOlderHistoryPage. One page, for one chat. */
+  prefetchOlderHistory(chatId: string, requestedLimit: number): void {
+    if (!has('archiveLoad') || !chatId || this.olderHistoryLoads.has(chatId)) return;
+    if (this.recentHistoryLoads.has(chatId) || this.fullHistoryLoads.has(chatId)) return;
+    const resident = this.chat(chatId);
+    if (!resident || resident.historyComplete) return;
+    const beforeMessageId = resident.messages[0]?.id;
+    if (!beforeMessageId) return;
+    const limit = Math.max(1, Math.min(CHAT_MESSAGE_TAIL, Math.floor(requestedLimit)));
+    const kept = this.olderPrefetch.get(chatId);
+    if (kept && kept.beforeMessageId === beforeMessageId && kept.limit === limit) return;
+    this.olderPrefetch.clear();
+    const reply = call('archiveLoad', chatId, { beforeMessageId, limit, ...HISTORY_READ_OPTIONS, background: true }).catch(() => undefined);
+    this.olderPrefetch.set(chatId, { beforeMessageId, limit, reply });
+  }
+
   async loadOlderHistoryPage(chatId: string, requestedLimit: number): Promise<OlderHistoryOutcome> {
     if (!has('archiveLoad') || !chatId) return 'empty';
     const recent = this.recentHistoryLoads.get(chatId);
@@ -1793,7 +1814,13 @@ export class Store {
     const residentBefore = resident.messages.length;
     const load = (async (): Promise<OlderHistoryOutcome> => {
       let projected: unknown;
-      try {
+      // The page read ahead for exactly this boundary, when there is one.
+      const ahead = this.olderPrefetch.get(chatId);
+      if (ahead && ahead.beforeMessageId === beforeMessageId && ahead.limit === limit) {
+        this.olderPrefetch.delete(chatId);
+        projected = await ahead.reply;
+      }
+      if (projected === undefined) try {
         const step = await this.guardedStep(
           `older actor history (${chatId})`,
           () => call('archiveLoad', chatId, { beforeMessageId, limit, ...HISTORY_READ_OPTIONS }),
@@ -5441,6 +5468,8 @@ export class Store {
       this.refreshVisibleRecentHistory(this.chat(id));
       return;
     }
+    // A page read ahead for the chat being left is not kept.
+    this.olderPrefetch.clear();
     const target = this.chat(id);
     if (!target) {
       // A chat the paged shell left out (a notification, a link to a filed

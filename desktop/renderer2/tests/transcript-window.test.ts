@@ -52,11 +52,12 @@ test('a failed older read is retried with a growing pause; only an empty one sto
 // A chat opened with nothing on screen paints its last exchange while the rest
 // of its recent slice arrives. Reading older history before that slice would
 // load a page the slice may already fill the screen without, so every
-// automatic older read (screen fill, read-ahead, position restore) waits for
-// it; the store update that completes the slice renders the transcript again.
+// automatic older read (screen fill, read-ahead, position restore, the next
+// page read ahead in the background) waits for it; the store update that
+// completes the slice renders the transcript again.
 test('automatic older reads wait for an opened chat\'s recent slice', () => {
   assert.match(transcript, /const sliceArriving = \(\): boolean => !!chat && store\.showsFirstScreenOnly\(chat\.id\);/);
-  assert.equal(transcript.match(/sliceArriving\(\)/g)?.length, 3);
+  assert.equal(transcript.match(/sliceArriving\(\)/g)?.length, 4);
   assert.match(transcript, /if \(step !== 'load' \|\| olderRetryPending\(\) \|\| sliceArriving\(\)\) return;/);
 });
 
