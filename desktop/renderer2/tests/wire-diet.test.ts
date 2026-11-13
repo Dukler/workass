@@ -434,7 +434,12 @@ describe('long chats: brief spawned work and work groups', () => {
     ];
     const store = subject([local], { archiveLoad: async (_tab: string, options: any) => { calls.push(options); return pages.shift(); } });
     assert.equal(await store.loadWorkGroup('tab-1', folded), true);
-    assert.deepEqual(calls.map((options) => [options.tail, options.workGroup, options.toolSummaries, options.workGroups]), [[1, { messageId: 'm-big', offset: 0 }, true, undefined], [1, { messageId: 'm-big', offset: 2 }, true, undefined]]);
+    // The first page is the list's first screen; the rest is read behind
+    // anything a reader waits for.
+    assert.deepEqual(calls.map((options) => [options.tail, options.workGroup, options.toolSummaries, options.workGroups, options.background]), [
+      [1, { messageId: 'm-big', offset: 0, limit: 80, compact: true, ifNoneMatch: '' }, true, undefined, undefined],
+      [1, { messageId: 'm-big', offset: 2, compact: true }, true, undefined, true],
+    ]);
     assert.equal(folded.workSummary, undefined);
     assert.deepEqual(folded.events.map((event: any) => event.key), ['k0', 'k1', 'k2']);
     assert.deepEqual((folded.events[0] as any).detail, { tabId: 'tab-1', messageId: 'm-big' });
@@ -445,6 +450,57 @@ describe('long chats: brief spawned work and work groups', () => {
     assert.equal(await store.loadWorkGroup('tab-1', again), true);
     assert.equal(calls.length, 2);
     assert.equal(again.events.length, 3);
+  });
+
+  test('compact pages restore every call exactly; each page is drawn as it arrives', async () => {
+    const local = chat('tab-3');
+    const folded = message('m-c');
+    folded.workSummary = { tools: 3, subagentCalls: 0, failed: 0, events: 3 };
+    local.messages = [folded];
+    const full = (index: number) => ({ at: 0, command: index === 1 ? 'ls -la' : null, id: `c${index}`, input: '', inputDeferred: true, key: `timeline:tool:c${index}`, kind: 'tool', location: null, output: 'o', status: 'completed', terminalId: null, title: index === 1 ? 'ls -la' : `call ${index}`, toolKind: 'read' });
+    const compact = (index: number) => {
+      const event: any = { ...full(index) };
+      for (const field of ['command', 'location', 'terminalId']) if (event[field] === null) delete event[field];
+      delete event.key;
+      if (event.title === event.command) { delete event.title; event.titleIs = 'command'; }
+      return event;
+    };
+    const pages: unknown[] = [
+      { etag: 'e0', messageId: 'm-c', offset: 0, next: 2, total: 3, events: [compact(0), compact(1)] },
+      { etag: 'e2', messageId: 'm-c', offset: 2, next: 3, total: 3, events: [compact(2)] },
+    ];
+    let partialSeen: number[] = [];
+    const store = subject([local], { archiveLoad: async () => { partialSeen.push(folded.workPartial?.events.length ?? 0); return pages.shift(); } });
+    assert.equal(await store.loadWorkGroup('tab-3', folded), true);
+    assert.deepEqual(partialSeen, [0, 2], 'the first page is on screen while the second is read');
+    assert.equal(folded.workPartial, undefined);
+    for (let index = 0; index < 3; index++) {
+      const { detail, ...event } = folded.events[index] as any;
+      assert.deepEqual(event, full(index));
+    }
+  });
+
+  test('a first page read ahead of an open, or kept from before a reload, is not read again', async () => {
+    (globalThis as any).sessionStorage = memoryStorage();
+    const local = chat('tab-4');
+    const folded = message('m-p');
+    folded.workSummary = { tools: 1, subagentCalls: 0, failed: 0, events: 1 };
+    local.messages = [folded];
+    const page = { etag: 'p0', messageId: 'm-p', offset: 0, next: 1, total: 1, events: [{ at: 0, id: 'c0', kind: 'tool', status: 'completed', title: 't', toolKind: 'read', input: '', output: 'o' }] };
+    const calls: any[] = [];
+    const store = subject([local], { archiveLoad: async (_tab: string, options: any) => { calls.push(options); return calls.length === 1 ? JSON.parse(JSON.stringify(page)) : { unchanged: true, etag: 'p0' }; } });
+    await store.prefetchWorkGroup('tab-4', folded);
+    assert.equal(calls[0].background, true, 'a read ahead waits behind interactive reads');
+    assert.equal(await store.loadWorkGroup('tab-4', folded), true);
+    assert.equal(calls.length, 1, 'the open used the page read ahead');
+    // A reload: the kept page is asked for by its etag and answered by a receipt.
+    const again = message('m-p');
+    again.workSummary = { tools: 1, subagentCalls: 0, failed: 0, events: 1 };
+    local.messages = [again];
+    (await vite.ssrLoadModule('/src/chat/work-group.ts')).forgetWorkGroups();
+    assert.equal(await store.loadWorkGroup('tab-4', again), true);
+    assert.equal(calls[1].workGroup.ifNoneMatch, 'p0');
+    assert.equal((again.events[0] as any).key, 'timeline:tool:c0');
   });
 
   test('a daemon that predates work groups answers a row, which is not a group', async () => {

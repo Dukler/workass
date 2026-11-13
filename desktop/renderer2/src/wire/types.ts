@@ -934,7 +934,13 @@ export interface WorkassApi {
     // row's calls ({messageId, offset, next, total, events}). An older daemon
     // ignores both.
     workGroups?: boolean;
-    workGroup?: { messageId: string; offset: number };
+    // limit, compact and ifNoneMatch (additive): at least limit calls, sent
+    // compact (chat/work-group.ts expandWorkEvent), or {etag, unchanged}
+    // while the page is still the one held.
+    workGroup?: { messageId: string; offset: number; limit?: number; compact?: boolean; ifNoneMatch?: string };
+    // background (additive): a read nobody waits on (a prefetch); the daemon
+    // runs it on a lane of its own, behind nothing a reader waits for.
+    background?: boolean;
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
     // client holds. An older daemon ignores it and answers the plain array.

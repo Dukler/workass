@@ -147,6 +147,9 @@ export interface Msg {
   events: TimelineEvent[];
   // Set while the row's folded calls are only summarized (see WorkSummary).
   workSummary?: WorkSummary;
+  // The folded calls read so far while the rest loads (store.loadWorkGroup);
+  // total is the row's timeline length. Never persisted.
+  workPartial?: { events: TimelineEvent[]; total: number };
   // Delivery lifecycle for an explicit live steer. It is independent of the
   // assistant turn status: sending waits for the RPC acknowledgement, accepted
   // is the official turn/steer boundary, applied is the canonical client-id

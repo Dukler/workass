@@ -27,7 +27,7 @@ import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } fr
 import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
-import { loadWorkGroupEvents } from '../chat/work-group';
+import { loadWorkGroupEvents, prefetchWorkGroup } from '../chat/work-group';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
@@ -7393,17 +7393,32 @@ export class Store {
     this.fullSpawnedWork.add(key);
     if (this.briefSpawnedWork.has(key)) void this.refreshSpawnedWork(chat);
   }
+  /** A folded row is on screen: read its first page ahead of an open. */
+  prefetchWorkGroup(tabId: string, msg: Msg): Promise<void> {
+    return msg.workSummary ? prefetchWorkGroup(tabId, msg.id) : Promise.resolve();
+  }
   /** A settled row's folded calls, read when something shows them. */
   async loadWorkGroup(tabId: string, msg: Msg): Promise<boolean> {
     if (!msg.workSummary) return true;
-    const events = await loadWorkGroupEvents(tabId, msg.id);
-    if (!events) return false;
     // A refresh may have replaced the row object while the calls loaded.
-    const current = this.chat(tabId)?.messages.find((message) => message.id === msg.id);
-    for (const target of new Set([msg, current])) {
+    const targets = () => new Set([msg, this.chat(tabId)?.messages.find((message) => message.id === msg.id)]);
+    // Each page is drawn as it arrives: the Worked list shows the calls read
+    // so far (Msg.workPartial) and keeps the rest's room.
+    const events = await loadWorkGroupEvents(tabId, msg.id, (loaded, total) => {
+      for (const target of targets()) {
+        if (target?.workSummary) target.workPartial = { events: loaded.slice(), total };
+      }
+      this.bump('msg:' + msg.id);
+    });
+    if (!events) {
+      for (const target of targets()) if (target) delete target.workPartial;
+      return false;
+    }
+    for (const target of targets()) {
       if (!target?.workSummary) continue;
       target.events = events.slice();
       delete target.workSummary;
+      delete target.workPartial;
     }
     this.bump('msg:' + msg.id);
     this.bump(SPAWNED);

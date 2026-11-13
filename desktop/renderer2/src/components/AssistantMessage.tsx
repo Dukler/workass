@@ -593,7 +593,7 @@ function sameSpan(a: { from: number; to: number }, b: { from: number; to: number
   return a.from === b.from && a.to === b.to;
 }
 
-function WindowedWorkList({ items }: { items: WorkItem[] }) {
+function WindowedWorkList({ items, pending = 0 }: { items: WorkItem[]; pending?: number }) {
   const list = useRef<HTMLDivElement>(null);
   const head = useRef<HTMLDivElement>(null);
   const heights = useRef(new Map<string, number>());
@@ -648,6 +648,9 @@ function WindowedWorkList({ items }: { items: WorkItem[] }) {
   for (let index = 0; index < span.from; index++) before += sizeOf(items[index].key);
   let after = 0;
   for (let index = span.to; index < items.length; index++) after += sizeOf(items[index].key);
+  // Rows still on their way keep their room, so the list does not grow
+  // under the reader as they arrive.
+  after += pending * (estimate.current || WORKED_ROW_ESTIMATE);
   return (
     <div className="worklist" ref={list}>
       <div className="worklist-pad" ref={head} style={{ height: before }} aria-hidden="true" />
@@ -671,18 +674,37 @@ function WorkedRow({ items, tabId, msg }: { items: WorkItem[]; tabId: string; ms
   const meta: string[] = [];
   if (span != null) meta.push(fmtWorkElapsed(span));
   if (calls) meta.push(toolCount(calls));
-  // Calls that came as a summary are read when the row opens (or is about
-  // to: pointing at it starts the read).
+  // Calls that came as a summary are read when the row opens, or is about
+  // to: pointed at, focused, or scrolled into view (the first page only;
+  // the rest when it opens).
   const load = () => { if (summary) void store.loadWorkGroup(tabId, msg).then((ok) => { if (!ok) setUnreadable(true); }); };
   useEffect(() => { if (open && summary) load(); }, [open, summary]); // eslint-disable-line react-hooks/exhaustive-deps
+  const head = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const element = head.current;
+    if (!summary || !element || typeof IntersectionObserver === 'undefined') return;
+    const seen = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      seen.disconnect();
+      void store.prefetchWorkGroup(tabId, msg);
+    }, { rootMargin: '400px 0px' });
+    seen.observe(element);
+    return () => seen.disconnect();
+  }, [summary, tabId, msg]);
+  // While the rest loads, the calls read so far, and room for the others.
+  const partial = summary ? msg.workPartial : undefined;
+  const partialItems = partial ? partial.events.filter(isWorkItem) : [];
+  const pendingRows = partial ? Math.max(0, (summary?.tools ?? 0) - workTools(partialItems).length) : 0;
   return (
     <div className={`workfold${open ? ' open' : ''}`}>
-      <button type="button" className="workhead" aria-expanded={open} onPointerEnter={load} onClick={() => setOpen((value) => !value)}>
+      <button type="button" ref={head} className="workhead" aria-expanded={open} onPointerEnter={load} onFocus={load} onClick={() => setOpen((value) => !value)}>
         <span className="worklabel">Worked</span>
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
         <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
       </button>
-      {open && (summary
+      {open && (summary && partialItems.length > 0 && !unreadable && typeof document !== 'undefined'
+        ? <WindowedWorkList items={partialItems} pending={pendingRows} />
+        : summary
         ? <div className="worklist"><div className="thoughtrow"><span className="thoughtline">{unreadable ? 'No se pudieron leer los pasos' : 'Cargando…'}</span></div></div>
         : items.length > WORKED_WINDOW_MIN_ROWS && typeof document !== 'undefined'
           ? <WindowedWorkList items={items} />
