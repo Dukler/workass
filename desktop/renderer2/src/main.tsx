@@ -1,11 +1,12 @@
 import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
 import './styles/tokens.css';
 import './styles/app.css';
 import { App } from './components/App';
 import { BrowserSurfaceHost } from './components/BrowserSurfaceHost';
 import { browserApi, browserHostedInRenderer } from './browser';
 import { store } from './store/store';
+import { installFrameGrid } from './frame-grid';
+import { createAppRoot } from './react-root';
 
 // The preload exposes the host platform synchronously. Apply shell classes
 // before React mounts so the first painted titlebar already has the right OS
@@ -17,6 +18,9 @@ document.documentElement.classList.toggle(
   electron && window.workassWindow?.platform === 'win32',
 );
 
+// Stepped status loops share one 1/30 s frame grid (frame-grid.ts).
+installFrameGrid();
+
 // Kick off boot (wire events, hydrate from server, load archives). The local
 // mirror already seeded the store synchronously in the constructor, so the
 // first paint is instant.
@@ -24,7 +28,7 @@ void store.init();
 
 const root = document.getElementById('root');
 if (root) {
-  createRoot(root).render(
+  createAppRoot(root).render(
     <StrictMode>
       <App />
     </StrictMode>,
@@ -39,5 +43,5 @@ if (root && browser && browserHostedInRenderer(browser)) {
   const layer = document.createElement('div');
   layer.id = 'browser-surfaces';
   document.body.insertBefore(layer, root);
-  createRoot(layer).render(<BrowserSurfaceHost api={browser} />);
+  createAppRoot(layer).render(<BrowserSurfaceHost api={browser} />);
 }

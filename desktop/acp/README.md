@@ -329,6 +329,7 @@ Special prompt markers:
   visible context-limit path can be tested without mutating or replacing the
   provider lane.
 - `[mock:burst]` emits 4,096 deterministic 128-byte answer chunks with a zero-delay event-loop yield between them. It stress-tests ACP ingestion, 16 ms daemon coalescing, WebSocket delivery, and renderer streaming without using model quality as an oracle. Override the volume with `WORKASS_MOCK_ACP_BURST_CHUNKS` and `WORKASS_MOCK_ACP_BURST_CHUNK_BYTES`.
+- `[mock:stream-steady]` streams at a model's pace for energy measurements: a reasoning thought for the first third, then a markdown answer (paragraphs, a list, a code fence), 4-22 characters every 30 ms. It lasts 20 s; `[mock:stream-steady:60]` lasts 60 s (1-600).
 - `[mock:phases]` emits one `commentary` assistant chunk followed by one
   `final_answer` chunk through the provider-neutral
   `_meta.workassAssistantPhase`. It proves that Workass preserves a provider's

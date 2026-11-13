@@ -17,6 +17,12 @@
 export type ConnStatus = 'connected' | 'disconnected' | 'reconnecting';
 
 const HEALTH_INTERVAL = 5000; // gap between pings while healthy
+// While the window is hidden nobody reads the connection banner or the state
+// the digest refreshes, and each ping wakes the renderer and the daemon, so
+// the gap stretches; the store probes at once when the window shows again
+// (probeNow), so what the user sees is as fresh as before (energy lane,
+// 2026-11-13). Turn events, notifications and sends do not wait on pings.
+const HIDDEN_HEALTH_INTERVAL = 30000;
 const HEALTH_TIMEOUT = 5000;  // a healthy daemon must answer a ping within this
 const HEALTH_CONFIRM_TIMEOUT = 2000; // one slow actor/render cycle is not a disconnect
 const PROBE_TIMEOUT = 9000;   // during an outage, long enough for the shim's 1.5s reconnect to flush a queued ping
@@ -42,6 +48,8 @@ export class ConnectionMonitor {
     // other invokes is a slow link, not a lost daemon (see wireBusy). Absent:
     // every timeout counts, exactly as before.
     private readonly busy: () => boolean = () => false,
+    // True while the window is hidden. Absent: always the healthy gap.
+    private readonly hidden: () => boolean = () => false,
   ) {}
 
   start(): void {
@@ -100,7 +108,7 @@ export class ConnectionMonitor {
   private async loop(): Promise<void> {
     while (this.running) {
       if (this.status === 'connected') {
-        await this.sleep(HEALTH_INTERVAL);
+        await this.sleep(this.hidden() ? HIDDEN_HEALTH_INTERVAL : HEALTH_INTERVAL);
         if (!this.running) break;
         const ok = await this.pingWithTimeout(HEALTH_TIMEOUT) || this.busy();
         if (!this.running) break;

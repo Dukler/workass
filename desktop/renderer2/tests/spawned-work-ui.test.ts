@@ -11,6 +11,13 @@ import { createServer } from 'vite';
 // spawned work = ONE «Terminados hoy» fold of flat lines — no fold nested
 // inside a fold for today's work.
 test('running spawned work is inline; finished work is a single flat fold', async (t) => {
+  // One clock for the fixture and the components: whatever Date.now another
+  // test file left behind (tests share one process in the suite), the rows'
+  // times and the fold's "today" are read from the same instant.
+  const fixedNow = new Date().setHours(12, 0, 0, 0);
+  const realNow = Date.now;
+  Date.now = () => fixedNow;
+  t.after(() => { Date.now = realNow; });
   const root = fileURLToPath(new URL('..', import.meta.url));
   const server = await createServer({ root, server: { middlewareMode: true, ws: false }, appType: 'custom', logLevel: 'silent' });
   let store: { state: Record<string, unknown>; clearToastTimers(): void } | undefined;
@@ -31,17 +38,17 @@ test('running spawned work is inline; finished work is a single flat fold', asyn
       {
         id: 'bash-1', taskId: 'bash-1', tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'bash', status: 'running',
         label: 'Serve the complete interactive comparison gallery without truncating this title',
-        startedAt: new Date(Date.now() - 5000).toISOString(), updatedAt: new Date().toISOString(), pid: 321,
+        startedAt: new Date(Date.now() - 5000).toISOString(), updatedAt: new Date(Date.now()).toISOString(), pid: 321,
         outputFile: '/private/tmp/claude-501/project/session/tasks/bash-1.output',
         summary: 'Reempaquetando la app y esperando el gate.',
       },
       {
         id: 'agent-1', taskId: 'agent-1', tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'agent', status: 'exited',
-        label: 'Review the UI', startedAt: new Date(Date.now() - 9000).toISOString(), updatedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+        label: 'Review the UI', startedAt: new Date(Date.now() - 9000).toISOString(), updatedAt: new Date(Date.now()).toISOString(), finishedAt: new Date(Date.now()).toISOString(),
       },
       {
         id: 'bash-2', taskId: 'bash-2', tabId: 'tab-1', chatId: 'chat-1', providerId: 'claude', kind: 'bash', status: 'failed',
-        label: 'notarize.sh', startedAt: new Date(Date.now() - 8000).toISOString(), updatedAt: new Date().toISOString(), finishedAt: new Date(Date.now() - 2000).toISOString(),
+        label: 'notarize.sh', startedAt: new Date(Date.now() - 8000).toISOString(), updatedAt: new Date(Date.now()).toISOString(), finishedAt: new Date(Date.now() - 2000).toISOString(),
         exitCode: 1,
       },
     ],

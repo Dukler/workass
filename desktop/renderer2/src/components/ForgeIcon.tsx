@@ -45,7 +45,9 @@ function SparkLayer({ spark, uid }: { spark: Spark; uid: string }) {
   const style = {
     '--dx': `${((spark.distance * Math.cos(a)) / 24) * 100}%`,
     '--dy': `${((spark.distance * Math.sin(a)) / 24) * 100}%`,
-    animationDelay: `${spark.delay}ms`,
+    // The stagger lives in the keyframes (app.css, tools/stepped-keyframes.mjs),
+    // so all fourteen layers change on the same 30 fps frames.
+    animationName: `fg-fly-${spark.set}-${spark.delay}`,
   } as CSSProperties;
   return (
     <span className={`fg-spark ${spark.set}`} style={style}>
