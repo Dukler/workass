@@ -1153,7 +1153,13 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	if token != "" {
 		if device, ok := h.lease.AuthenticateToken(token, c.ip); ok {
 			c.setDevice(device, "")
-			c.bootReads = bootReadsFromQuery(r.URL.Query().Get("boot"))
+			// The JSON form wins when both are named; b1 is its compact
+			// spelling (boot_compact.go).
+			if named := r.URL.Query().Get("boot"); named != "" {
+				c.bootReads = bootReadsFromQuery(named)
+			} else {
+				c.bootReads = bootReadsFromCompact(r.URL.Query().Get("b1"))
+			}
 			c.bootCount = len(c.bootReads)
 			return c
 		}
