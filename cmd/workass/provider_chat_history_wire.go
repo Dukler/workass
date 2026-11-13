@@ -134,6 +134,29 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				// holds (a reload repainting a chat from its window cache).
 				// Without it the reply is the plain array, as before.
 				ifNoneMatch, conditional := options["ifNoneMatch"].(string)
+				if options["lastExchange"] == true && conditional {
+					// Additive {exchangeFirst} / {rest}: the first screen in
+					// two parts (provider_chat_first_screen_parts.go).
+					part := ""
+					if options["exchangeFirst"] == true {
+						part = firstScreenExchange
+					} else if options["rest"] == true {
+						part = firstScreenRest
+					}
+					if part != "" {
+						reply, found, err := providerChats.FirstScreenPartReply(stringArg(args, 0), limit, read, part, ifNoneMatch)
+						if err != nil {
+							return nil, err
+						}
+						if found {
+							if part == firstScreenExchange {
+								go providerChats.PrewarmChatByTab(stringArg(args, 0))
+							}
+							return reply, nil
+						}
+						return conditionalRowsReply(wire.EncodedResult("[]"), ifNoneMatch), nil
+					}
+				}
 				if options["lastExchange"] == true {
 					// A chat's first screen, kept as its reply per chat
 					// revision (provider_chat_reply_memo.go).

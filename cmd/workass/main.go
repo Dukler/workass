@@ -2408,6 +2408,9 @@ func appMeta(cwd string) map[string]any {
 		// session:save folds a {chatOrderPartial} order into the stored one
 		// (session_page.go), which a paged shell's renderer relies on.
 		"chatOrderMode": "partial-v1",
+		// archive-load first screens answer {exchangeFirst} and {rest}
+		// (provider_chat_first_screen_parts.go).
+		"firstScreenMode": "parts-v1",
 	}
 }
 

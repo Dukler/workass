@@ -423,11 +423,25 @@ func (r *providerChatRuntime) warmChatShape(summary chat.ActorSummary, shape fir
 	if err != nil || stored > warmTailStoredBytes {
 		return false
 	}
-	first, found, err := r.lastExchangeRawByChat(summary.ChatID, firstScreenWarmLimit, shape.summary)
-	if err != nil || !found {
-		return false
-	}
+	var first []byte
 	reply, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, shape.summary)
+	if kept {
+		raw, err := reply.plain()
+		if err != nil {
+			return false
+		}
+		first = raw
+	} else {
+		page, found, err := r.archivePageByChat(summary.ChatID, actorHistoryTail, firstScreenWarmLimit, true, shape.summary)
+		if err != nil || !found {
+			return false
+		}
+		first = page.raw()
+		r.storeFirstScreen(summary, firstScreenWarmLimit, shape.summary, first)
+		// Its parts on disk too (provider_chat_first_screen_parts.go).
+		r.keepFirstScreenParts(summary.ChatID, summary.Revision, firstScreenWarmLimit, shape.summary, page, false)
+		reply, kept = r.cachedFirstScreen(summary, firstScreenWarmLimit, shape.summary)
+	}
 	if kept {
 		// On disk too (provider_chat_reply_memo.go): a later process opens
 		// the chat at this revision before its own warm reaches it.
@@ -585,5 +599,6 @@ func (r *providerChatRuntime) writeFirstScreens(chatID string) {
 		kept := keepReply(page.raw())
 		r.replies.put(replyMemoKey{chatID: chatID, limit: firstScreenWarmLimit, opts: shape.summary}, revision, kept)
 		r.workGroupPacks().keepPageKept(firstScreenDiskKey(chatID, firstScreenWarmLimit, shape.summary), revision, kept)
+		r.keepFirstScreenParts(chatID, revision, firstScreenWarmLimit, shape.summary, page, false)
 	}
 }

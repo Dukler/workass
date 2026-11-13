@@ -242,8 +242,9 @@ func (r *providerChatRuntime) FirstScreenReply(tabID string, limit int, opts arc
 		return raw, true, nil
 	}
 	// On disk as it is sent (a small write, done before the reply so nothing
-	// writes into the state directory after a read returns).
+	// writes into the state directory after a read returns), with its parts.
 	r.workGroupPacks().keepPageKept(diskKey, revision, fast)
+	r.keepFirstScreenParts(chatID, revision, limit, opts, page, true)
 	if conditional {
 		return fast.conditional(ifNoneMatch), true, nil
 	}

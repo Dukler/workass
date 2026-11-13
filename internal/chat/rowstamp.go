@@ -291,3 +291,10 @@ func (e *Engine) LiveRowSeqsAt() ([]int, uint64, bool) {
 	}
 	return live, e.state.Revision, true
 }
+
+// LedgerLen is how many committed rows the actor has.
+func (e *Engine) LedgerLen() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.state.Ledger)
+}
