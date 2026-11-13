@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { subscribeSecond } from '../second-tick';
 import type { Chat } from '../store/types';
 import type { SpawnedWorkItem } from '../wire/types';
 import { store, useSpawnedWork } from '../store/store';
@@ -260,8 +261,7 @@ export function ServiceJobs({ chat, services, context }: { chat: Chat; services:
   useEffect(() => {
     if (!open) return;
     setNowMs(Date.now());
-    const iv = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(iv);
+    return subscribeSecond(() => setNowMs(Date.now()));
   }, [open]);
   if (services.length === 0) return null;
   return (

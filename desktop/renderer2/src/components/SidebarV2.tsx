@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { subscribeSecond } from '../second-tick';
 import type { Chat, Msg } from '../store/types';
 import { store, useApp, useSpawnedWork } from '../store/store';
 import { IcSearch, IcPlus, IcFolder, IcChevron, IcClose, ModelIcon } from '../icons';
@@ -219,8 +220,7 @@ function shortAgo(ms: number): string {
 function WorkingDuration({ since }: { since: number }) {
   const [, force] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => force((n) => n + 1), 1000);
-    return () => window.clearInterval(id);
+    return subscribeSecond(() => force((n) => n + 1));
   }, []);
   if (!since) return null;
   const s = Math.max(0, Math.floor((Date.now() - since) / 1000));

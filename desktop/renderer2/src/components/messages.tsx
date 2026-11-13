@@ -1,4 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { subscribeSecond } from '../second-tick';
 import { flushSync } from 'react-dom';
 import type { ThinkingEvent, PlanEvent, ToolEvent, PermissionState, RestoredEvent, MessageImage, SteerState } from '../store/types';
 import { renderInline } from '../markdown/inline';
@@ -453,8 +454,7 @@ function ToolGroupView({ tools, tabId }: ToolGroupProps) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!running) return;
-    const iv = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(iv);
+    return subscribeSecond(() => setNow(Date.now()));
   }, [running]);
   const dur = groupDuration(tools, now, running);
 

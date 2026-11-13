@@ -61,7 +61,10 @@ test('the forge only ever animates transform and opacity, so the GPU runs it', a
   // only move and fade, 0.4 ms. Anything else in these keyframes undoes that.
   const { readFileSync } = await import('node:fs');
   const css = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
-  for (const name of ['fg-swing', 'fg-fly-a', 'fg-fly-b', 'fg-flash']) {
+  // Each spark's set and stagger has its own keyframes (fg-fly-a-40), sampled at 30 fps.
+  const sparks = [...css.matchAll(/@keyframes (fg-fly-[ab]-\d+) \{/g)].map((m) => m[1]);
+  assert.equal(sparks.length, 12);
+  for (const name of ['fg-swing', 'fg-flash', ...sparks]) {
     const start = css.indexOf(`@keyframes ${name} {`);
     assert.ok(start >= 0, name);
     let depth = 0, end = start;

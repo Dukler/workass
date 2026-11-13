@@ -1,7 +1,9 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
-import { store, useApp, useMsgVersion, useClock, useSpawnedWork } from '../store/store';
+import { store, useApp, useMsgVersion, useSpawnedWork } from '../store/store';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
+import { thoughtPreview } from '../thought-preview';
+import { subscribeSecond, subscribeUntil } from '../second-tick';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolHtmlPages } from '../markdown/HtmlToolPages';
 import { ToolGroup, ToolDetail, ToolImageGallery, PermCard, CompactionRow, RestoredRow, toolState, fmtDur, toolLiveLine } from './messages';
@@ -13,7 +15,7 @@ import { isSubagentHeader, subagentCardsWithWork } from '../subagent-layout';
 import { buildCoalescedTurnBlockTimelineSegments, buildTranscriptTimelineSegments, detachTimelineEvent, stableMarkdownBlockKeys } from '../timeline-layout';
 import type { TranscriptTimelineSegment } from '../timeline-layout';
 import { fullAssistantText } from '../assistant-output';
-import { relTime } from '../rel-time';
+import { relTime, stampTurnsOver } from '../rel-time';
 import { MessageImageButton, loadImageSrc } from './MessageImage';
 import { connectedArtifactURL } from '../connected-artifacts';
 import { configuredModelUnavailable } from '../model-selection';
@@ -98,10 +100,20 @@ function EventView({ ev }: { ev: TimelineEvent }) {
 // The stamp's own leaf so the shared clock tick re-renders only this span, not the
 // memoized message body. Without a tick, relTime freezes at first render and a
 // settled turn reads "hace unos segundos" forever (user report 2026-07-17).
+// It wakes when its label can next change: every second while it reads
+// "hace N s", then at the minute, hour or day it turns over, so an idle window
+// is not woken every second for a label that says "hace 2 h" (energy lane,
+// 2026-11-12).
 function RelStamp({ at }: { at: string | null }) {
-  useClock();
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const then = at ? new Date(at).getTime() : NaN;
+    if (Number.isNaN(then)) return undefined;
+    return subscribeUntil(() => tick((n) => n + 1), (now) => stampTurnsOver(then, now));
+  }, [at]);
   return <span>{relTime(at)}</span>;
 }
+
 
 // Subagent cards subscribe here, not in the message: a child ending must repaint
 // its card without re-rendering the transcript around it.
@@ -416,28 +428,6 @@ function workTools(items: WorkItem[]): ToolEvent[] {
   return items.filter((e): e is ToolEvent => e.kind === 'tool');
 }
 
-// A thought as plain text: links keep their label; headings, list marks,
-// emphasis and code ticks go.
-function thoughtPlain(markdown: string): string {
-  return markdown
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, '')
-    .replace(/`+|\*\*|~~/g, '')
-    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, '$1$2')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// One line for a thought in the list (t3code's rule): a bold-only opening
-// line (the Codex summary heading) wins, else its first sentence.
-function thoughtPreview(markdown: string): string {
-  const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1];
-  const text = thoughtPlain(heading ?? markdown);
-  if (heading !== undefined) return text;
-  const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
-  return end ? text.slice(0, end.index + end[0].length) : text;
-}
-
 // The thought a running reply shows as its last line: the newest one, as long
 // as no text has followed it yet (then it steps aside, as in t3code).
 export function liveThoughtFor(msg: Msg): ThinkingEvent | null {
@@ -476,7 +466,7 @@ function LiveThought({ msg }: { msg: Msg }) {
       <span className="thoughtic" aria-hidden="true"><IcThought /></span>
       {open
         ? <div className="ltfull">{parseBlocks(thought.text).map((block, index) => <MarkdownBlock key={`${index}-${block.sig}`} sb={block} />)}</div>
-        : <span className="ltline">{thoughtPreview(thought.text)}</span>}
+        : <span className="ltline">{thoughtPreview(thought.text, thought.key)}</span>}
       <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
     </div>
   );
@@ -498,8 +488,7 @@ function fmtWorkElapsed(ms: number): string {
 function useSecondTicker(): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    return subscribeSecond(() => setNow(Date.now()));
   }, []);
   return now;
 }
@@ -527,7 +516,7 @@ function ThoughtRow({ ev }: { ev: ThinkingEvent }) {
     <div className={`thoughtrow${open ? ' open' : ''}`}>
       <button type="button" className="thoughthead" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         <span className="thoughtic" aria-hidden="true"><IcThought /></span>
-        <span className="thoughtline">{open ? 'Thought' : thoughtPreview(ev.text)}</span>
+        <span className="thoughtline">{open ? 'Thought' : thoughtPreview(ev.text, ev.key)}</span>
         {open && <span className="workchev open" aria-hidden="true">›</span>}
       </button>
       {open && (
@@ -726,7 +715,7 @@ function TurnPulse({ msg }: { msg: Msg }) {
         onClick={() => setOpen((value) => !value)}
       >
         <span className="workorbit" aria-hidden="true" />
-        <span className="worklabel" role="status" aria-live="polite">Working<span className="workdots" aria-hidden="true" /></span>
+        <span className="worklabel" role="status" aria-live="polite">Working<span className="workdots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span>
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
         {items.length > 0 && <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>}
         {pulse?.retry && (

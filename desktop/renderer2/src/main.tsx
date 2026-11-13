@@ -6,6 +6,7 @@ import { App } from './components/App';
 import { BrowserSurfaceHost } from './components/BrowserSurfaceHost';
 import { browserApi, browserHostedInRenderer } from './browser';
 import { store } from './store/store';
+import { installFrameGrid } from './frame-grid';
 
 // The preload exposes the host platform synchronously. Apply shell classes
 // before React mounts so the first painted titlebar already has the right OS
@@ -16,6 +17,9 @@ document.documentElement.classList.toggle(
   'electron-windows',
   electron && window.workassWindow?.platform === 'win32',
 );
+
+// Stepped status loops share one 1/30 s frame grid (frame-grid.ts).
+installFrameGrid();
 
 // Kick off boot (wire events, hydrate from server, load archives). The local
 // mirror already seeded the store synchronously in the constructor, so the

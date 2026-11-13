@@ -15,3 +15,13 @@ export function relTime(at: string | null, now: number = Date.now()): string {
   const days = Math.floor(hrs / 24);
   return `hace ${days} d`;
 }
+
+// When relTime for a stamp at `then` next changes after `now`: the next second
+// under a minute, then the next whole minute, hour or day of its age. Lets the
+// stamp sleep until then instead of waking every second (AssistantMessage.RelStamp).
+export function stampTurnsOver(then: number, now: number): number {
+  const age = now - then;
+  if (age < 60_000) return now - (now % 1000) + 1000;
+  const unit = age < 3_600_000 ? 60_000 : age < 86_400_000 ? 3_600_000 : 86_400_000;
+  return then + (Math.floor(age / unit) + 1) * unit;
+}

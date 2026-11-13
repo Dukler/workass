@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { subscribeSecond } from '../second-tick';
 import type { Chat, ToolEvent } from '../store/types';
 import { store, useApp, useActivity, useSpawnedWork } from '../store/store';
 import { extractSubagents, nodeState } from './messages';
@@ -56,8 +57,7 @@ export function TareasCard() {
 
   useEffect(() => {
     if (!live) return;
-    const iv = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(iv);
+    return subscribeSecond(() => setNowMs(Date.now()));
   }, [live]);
   useEffect(() => {
     if (app.flashTareas) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
