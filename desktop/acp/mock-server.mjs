@@ -282,6 +282,47 @@ async function runPrompt(id, params) {
     notify(session.id, { sessionUpdate: 'tool_call_update', toolCallId: liveId, title: 'Bash', kind: 'execute', status: 'completed', content: { type: 'text', text: 'rendered' } });
   }
 
+  const steady = /\[mock:stream-steady(?::(\d+))?\]/.exec(text);
+  if (steady) {
+    // A long turn at a model's pace, for energy measurements: about a third of
+    // the time a reasoning thought, then a markdown answer, 4-22 characters
+    // every 30 ms (roughly 50 tokens a second). [mock:stream-steady:60] runs 60 s.
+    const seconds = Math.max(1, Math.min(600, Number(steady[1] || 20)));
+    const thoughtUntil = Date.now() + seconds * 1000 / 3;
+    const endAt = Date.now() + seconds * 1000;
+    const thoughtWords = 'The floor seam between the legs is the only region where the two masks disagree, so I will compare the raw production pass, check the corrected labels, and confirm nothing else moved before touching the other frames'.split(' ');
+    const answerParts = [
+      '## Frame review\n\n',
+      'The two labels agree everywhere except the floor seam between the legs, where the corrected mask clears the fill that the original pass kept. ',
+      'That matches the spec for this frame type, so the fix belongs on the other side.\n\n',
+      '- the raw floor pixels from the original production pass\n',
+      '- the corrected mask after the review\n',
+      '- the untouched import, for reference\n\n',
+      '```python\ndiff = np.logical_xor(gold_mask, silver_mask)\nprint(diff.sum())\n```\n\n',
+    ];
+    let seed = 11;
+    const next = () => { seed = (seed * 9301 + 49297) % 233280; return seed; };
+    let w = 0;
+    while (!session.cancelled && Date.now() < thoughtUntil) {
+      let chunk = '';
+      while (chunk.length < 4 + (next() % 18)) { chunk += `${thoughtWords[w % thoughtWords.length]}${w % 37 === 36 ? '.\n\n' : (w % 9 === 8 ? ', ' : ' ')}`; w += 1; }
+      notify(session.id, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: chunk } });
+      await sleep(30);
+    }
+    const answer = answerParts.join('');
+    let at = 0;
+    while (!session.cancelled && Date.now() < endAt) {
+      const size = 4 + (next() % 18);
+      const piece = answer.slice(at % answer.length, (at % answer.length) + size);
+      notify(session.id, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: piece } });
+      at += piece.length;
+      await sleep(30);
+    }
+    session.turnStatus = session.cancelled ? 'interrupted' : 'completed';
+    respond(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' });
+    return;
+  }
+
   if (text.includes('[mock:stream-md]')) {
     // A realistic markdown answer streamed the way fast models emit it: a few
     // characters at a time, a few milliseconds apart. Headings, a list, a code
