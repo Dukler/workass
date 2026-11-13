@@ -370,6 +370,13 @@ type client struct {
 	// lean is set when the client connected with lean=1: events it never
 	// reads are not sent to it (lean_events.go).
 	lean bool
+	// chunkWindow is the window a lean client asked its stdout data frames
+	// to be merged over (?ck=, chunk_coalesce.go); 0 is off. The held
+	// text, its timer and when a chunk last left are guarded by outMu.
+	chunkWindow time.Duration
+	heldChunk   *heldChunk
+	chunkTimer  *time.Timer
+	chunkSentAt time.Time
 	// bootReads are the reads named on the URL (?boot=, boot_reads.go), run by
 	// readLoop before the first frame is read; bootCount is how many were
 	// accepted, announced on the approval. Set once in newClient.
@@ -907,6 +914,13 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 	h.recordChannel(&h.eventStats, channel, 0, len(encoded))
 	leanPayload, leanSend, leanChanged := leanForm(channel, payload)
 	var leanEncoded []byte
+	var chunkEvent map[string]any
+	var chunkText string
+	var chunkOffset int64
+	chunkable := false
+	if channel == "job:event" {
+		chunkEvent, chunkText, chunkOffset, chunkable = streamedChunk(payload)
+	}
 
 	h.mu.RLock()
 	clients := make([]*client, 0, len(h.clients))
@@ -924,6 +938,15 @@ func (h *Hub) broadcastWhere(channel string, payload any, include func(*client) 
 			continue
 		}
 		frameBytes := encoded
+		if c.lean && chunkable && c.chunkWindow > 0 {
+			// Merged with its neighbours (chunk_coalesce.go).
+			if err := c.admitChunk(chunkEvent, chunkText, chunkOffset); err != nil {
+				h.drop(c)
+				continue
+			}
+			delivered++
+			continue
+		}
 		if c.lean {
 			if !leanSend {
 				continue
@@ -1138,6 +1161,7 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 		announceBytes:   h.announceBytes,
 		replayKnown:     replayKnownFromQuery(r.URL.Query()["replayKnown"]),
 		lean:            r.URL.Query().Get("lean") == "1",
+		chunkWindow:     chunkWindowFromQuery(r.URL.Query()),
 	}
 	// The handshake is the peer's first word; idleness counts from it.
 	c.live.noteInbound()

@@ -53,6 +53,9 @@ func (c *client) admitEvent(frame outboundFrame) error {
 	if limit <= 0 {
 		limit = defaultOutboundMemoryLimit
 	}
+	// Streamed text a chunk window holds goes first (chunk_coalesce.go).
+	c.flushHeldLocked()
+	queued = c.eventBytes
 	if queued > 0 && queued+len(frame.payload) > limit {
 		frames, bytes := len(c.outbound)+len(c.backlog), c.outboundBytes+c.backlogBytes
 		c.outMu.Unlock()
@@ -75,6 +78,7 @@ func (c *client) admitReply(frame outboundFrame) error {
 	if err := c.admissibleLocked(frame); err != nil {
 		return err
 	}
+	c.flushHeldLocked()
 	c.admitLocked(frame)
 	return nil
 }
