@@ -24,7 +24,7 @@ const deferred = (key: string): ToolEvent => ({
 });
 
 test('every history read asks for image references and lean tool payloads', () => {
-  assert.deepEqual(HISTORY_READ_OPTIONS, { deferImages: true, leanTools: true, leanTitles: true });
+  assert.deepEqual(HISTORY_READ_OPTIONS, { deferImages: true, leanTools: true, leanTitles: true, workGroups: true });
 });
 
 test('hydration stamps each deferred payload with the row that owns it', () => {

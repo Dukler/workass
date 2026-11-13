@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"workass/internal/imagesize"
 )
@@ -83,6 +85,11 @@ func sessionImageRefSize(ref, stateDir string) (int, int) {
 		if size, ok := sessionImageSizes.lookup(name); ok {
 			return size.width, size.height
 		}
+		// A size read by an earlier process (session_image_size_index.go).
+		if size, ok := sessionImageSizesOnDisk.lookup(stateDir, name); ok {
+			sessionImageSizes.store(name, size)
+			return size.width, size.height
+		}
 	}
 	stored, err := locateSessionImage(ref, stateDir)
 	if err != nil {
@@ -117,6 +124,7 @@ func sessionImageRefSize(ref, stateDir string) (int, int) {
 		size = readSessionImageSize(file)
 	}
 	sessionImageSizes.store(stored.name, size)
+	sessionImageSizesOnDisk.remember(stateDir, stored.name, size)
 	return size.width, size.height
 }
 
@@ -144,6 +152,57 @@ func readSessionImageSize(text io.Reader) sessionImageSize {
 	}
 	return sessionImageSize{width: width, height: height}
 }
+
+// prefetchSessionImageSizes reads, several at a time, the sizes
+// annotateSessionImageSizes is about to read one by one: a fresh process has
+// none cached, and a row of a screenshot-heavy turn names hundreds of images
+// stored before attachments recorded their size (1,007 in one first screen,
+// 26 ms read in a row). It only fills the process cache.
+func prefetchSessionImageSizes(value any, stateDir string) {
+	var refs []string
+	var visit func(any)
+	visit = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			if ref := fieldString(item, sessionImageDataRefField); ref != "" && !wireImageHasSize(item) &&
+				strings.HasPrefix(strings.ToLower(fieldString(item, "mimeType")), "image/") {
+				if name, ok := validSessionImageRef(ref); ok {
+					if _, cached := sessionImageSizes.lookup(name); !cached {
+						if _, kept := sessionImageSizesOnDisk.lookup(stateDir, name); !kept {
+							refs = append(refs, ref)
+						}
+					}
+				}
+			}
+			for _, child := range item {
+				visit(child)
+			}
+		case []any:
+			for _, child := range item {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	if len(refs) < sessionImagePrefetchMin {
+		return
+	}
+	var next atomic.Int64
+	var group sync.WaitGroup
+	for worker := 0; worker < min(16, runtime.GOMAXPROCS(0), (len(refs)+31)/32); worker++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := int(next.Add(1)) - 1; index < len(refs); index = int(next.Add(1)) - 1 {
+				sessionImageRefSize(refs[index], stateDir)
+			}
+		}()
+	}
+	group.Wait()
+}
+
+// sessionImagePrefetchMin: fewer missing sizes are read in line.
+const sessionImagePrefetchMin = 16
 
 func setWireImageSize(image map[string]any, width, height int) {
 	if width > 0 && height > 0 {

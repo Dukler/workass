@@ -300,13 +300,13 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 	var kept []chat.LedgerEvent
 	keptMessages, keptEncoded := []any{}, [][]byte{}
 	decodedFrom, live := window.End+1, false
-	err = r.ledgers.WalkLedgerBackward(summary.ChatID, view, window, func(event chat.LedgerEvent) (bool, error) {
+	err = r.ledgers.WalkLedgerBackwardDecoding(summary.ChatID, view, window, decodeLedgerRowFor(opts), func(event chat.LedgerEvent) (bool, error) {
 		decodedFrom--
 		if event.Status == "pending" || event.Status == "running" {
 			live = true
 			return false, nil
 		}
-		message, err := projectLedgerMessage(event)
+		message, err := projectLedgerMessageFor(event, opts)
 		if err != nil {
 			return false, err
 		}
@@ -319,7 +319,7 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 			return false, err
 		}
 		size := int64(len(data))
-		if len(kept) > 0 && used+size+1 > actorHistoryPageBytes {
+		if len(kept) > 0 && used+size+1 > historyPageBytes(opts) {
 			return false, nil
 		}
 		used += size + 1

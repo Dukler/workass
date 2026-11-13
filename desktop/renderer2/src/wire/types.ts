@@ -503,6 +503,9 @@ export interface SpawnedWorkItem {
   queuedAt?: string;
   execStartedAt?: string;
   runMs?: number;
+  // A row from a brief list's `settled` pairs: only its card id and status
+  // (spawned-work:list {brief}); the whole row loads with the whole list.
+  brief?: boolean;
   // The named resource a supervised job holds or waits for, and its place in
   // that resource's queue (1 is the holder). Older daemons omit both.
   resource?: string;
@@ -926,6 +929,12 @@ export interface WorkassApi {
     // in full through toolDetail when a row opens; an older daemon ignores it.
     toolSummaries?: boolean;
     toolDetail?: { messageId: string; key: string; field?: 'output' | 'input' | 'title'; offset: number };
+    // workGroups (additive): a settled row's folded calls arrive as a
+    // workSummary and stubs; workGroup (with tail: 1) reads one page of a
+    // row's calls ({messageId, offset, next, total, events}). An older daemon
+    // ignores both.
+    workGroups?: boolean;
+    workGroup?: { messageId: string; offset: number };
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
     // client holds. An older daemon ignores it and answers the plain array.
@@ -993,7 +1002,7 @@ export interface WorkassApi {
   onConnectorsChanged?: (cb: (e: { connectors: Connector[] }) => void) => void;
   // {ifNoneMatch} is additive: the reply then names its etag, or is a tiny
   // {unchanged, etag} receipt. An older bridge or daemon drops it.
-  spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string } | { unchanged: true; etag: string; items?: undefined }>;
+  spawnedWorkList?: (tabId: string, chatId: string, options?: { ifNoneMatch: string; brief?: boolean }) => Promise<{ items: SpawnedWorkItem[]; obligation?: ChatObligation; etag?: string; brief?: boolean; settled?: Array<[string, string]>; omitted?: number } | { unchanged: true; etag: string; items?: undefined }>;
   /** Every chat's running rows, counts and obligation in one read (local
    *  daemon). Additive: an older bridge lacks it and the store falls back to
    *  one spawnedWorkList per chat. */

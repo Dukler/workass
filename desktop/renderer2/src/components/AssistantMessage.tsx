@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent } from '../store/types';
+import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent, WorkSummary } from '../store/types';
 import { store, useApp, useMsgVersion, useClock, useSpawnedWork } from '../store/store';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
@@ -188,11 +188,13 @@ function AssistantSliceBody({
   // order) fold into one "Worked" row at its head instead of interleaving
   // with the answer (user 2026-10-12). While running, the Working line owns them.
   const workItems = running ? [] : msg.events.filter(isWorkItem);
+  // A row whose calls came as a summary still has its Worked row.
+  const worked = !running && (workItems.length > 0 || !!msg.workSummary);
 
   return (
     <div className={`amsg${running ? ' streaming' : ''}`} ref={root}>
       {running && <ControlsSkippedRow tabId={tabId} />}
-      {workItems.length > 0 && <WorkedRow items={workItems} />}
+      {worked && <WorkedRow items={workItems} tabId={tabId} msg={msg} />}
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) {
           // Tool calls live in the Working line / Worked row, never inline.
@@ -409,7 +411,8 @@ function isWorkingTool(t: ToolEvent): boolean {
 type WorkItem = ThinkingEvent | ToolEvent;
 
 function isWorkItem(e: TimelineEvent): e is WorkItem {
-  return e.kind === 'thinking' || (e.kind === 'tool' && isWorkingTool(e));
+  // A work-group stub stands in for folded calls; it is never one.
+  return e.kind === 'thinking' || (e.kind === 'tool' && !e.workStub && isWorkingTool(e));
 }
 
 function workTools(items: WorkItem[]): ToolEvent[] {
@@ -567,9 +570,12 @@ function WorkList({ items, now, live }: { items: WorkItem[]; now: number; live: 
 
 // Observed span of the work: first call started → last call ended. Old
 // history without timestamps, or a sub-second span, shows no duration.
-function workSpanMs(tools: ToolEvent[]): number | null {
+function workSpanMs(tools: ToolEvent[], summary?: WorkSummary): number | null {
   const starts = tools.map((t) => t.startedAt).filter((x): x is number => typeof x === 'number');
   const ends = tools.map((t) => t.endedAt).filter((x): x is number => typeof x === 'number');
+  // Calls that came as a summary count by their bounds.
+  if (typeof summary?.startedAt === 'number') starts.push(summary.startedAt);
+  if (typeof summary?.endedAt === 'number') ends.push(summary.endedAt);
   if (!starts.length || !ends.length) return null;
   const span = Math.max(...ends) - Math.min(...starts);
   return span >= 1000 ? span : null;
@@ -655,23 +661,32 @@ function WindowedWorkList({ items }: { items: WorkItem[] }) {
 
 // A settled turn's Working line: the same head without the animation, closed
 // by default, opening the same list.
-function WorkedRow({ items }: { items: WorkItem[] }) {
+function WorkedRow({ items, tabId, msg }: { items: WorkItem[]; tabId: string; msg: Msg }) {
   const [open, setOpen] = useState(false);
+  const [unreadable, setUnreadable] = useState(false);
+  const summary = msg.workSummary;
   const tools = workTools(items);
-  const span = workSpanMs(tools);
+  const span = workSpanMs(tools, summary);
+  const calls = tools.length + (summary?.tools ?? 0);
   const meta: string[] = [];
   if (span != null) meta.push(fmtWorkElapsed(span));
-  if (tools.length) meta.push(toolCount(tools.length));
+  if (calls) meta.push(toolCount(calls));
+  // Calls that came as a summary are read when the row opens (or is about
+  // to: pointing at it starts the read).
+  const load = () => { if (summary) void store.loadWorkGroup(tabId, msg).then((ok) => { if (!ok) setUnreadable(true); }); };
+  useEffect(() => { if (open && summary) load(); }, [open, summary]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className={`workfold${open ? ' open' : ''}`}>
-      <button type="button" className="workhead" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <button type="button" className="workhead" aria-expanded={open} onPointerEnter={load} onClick={() => setOpen((value) => !value)}>
         <span className="worklabel">Worked</span>
         {meta.length > 0 && <span className="workmeta">{meta.join(' · ')}</span>}
         <span className={`workchev${open ? ' open' : ''}`} aria-hidden="true">›</span>
       </button>
-      {open && (items.length > WORKED_WINDOW_MIN_ROWS && typeof document !== 'undefined'
-        ? <WindowedWorkList items={items} />
-        : <WorkList items={items} now={Date.now()} live={false} />)}
+      {open && (summary
+        ? <div className="worklist"><div className="thoughtrow"><span className="thoughtline">{unreadable ? 'No se pudieron leer los pasos' : 'Cargando…'}</span></div></div>
+        : items.length > WORKED_WINDOW_MIN_ROWS && typeof document !== 'undefined'
+          ? <WindowedWorkList items={items} />
+          : <WorkList items={items} now={Date.now()} live={false} />)}
     </div>
   );
 }

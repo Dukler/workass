@@ -393,6 +393,9 @@ type archiveReadOptions struct {
 	// input (which no row draws) and the head of the output, the rest read
 	// through toolDetail when a row opens. A chat's first screen asks for it.
 	toolSummaries bool
+	// workGroups (provider_chat_work_groups.go) sends a settled row's folded
+	// calls as a summary, read with {workGroup} when its Worked row opens.
+	workGroups bool
 	// page (session:get {shell, page}) lists only the chats a first screen
 	// can show; see session_page.go. Only session:get sets it: archive reads
 	// compare their options as cache keys.
@@ -429,6 +432,7 @@ func archiveReadOptionsFrom(options map[string]any) archiveReadOptions {
 		leanTitles:         options["leanTitles"] == true,
 		sessionShell:       options["shell"] == true,
 		toolSummaries:      options["toolSummaries"] == true,
+		workGroups:         options["workGroups"] == true,
 		runningStub:        options["runningTail"] == "stub",
 	}
 }
@@ -544,7 +548,7 @@ func (r *providerChatRuntime) archivePageBeforeByChat(chatID, beforeMessageID st
 	}
 	messages := make([]any, 0, len(page.Events))
 	for _, event := range page.Events {
-		message, err := projectLedgerMessage(event)
+		message, err := projectLedgerMessageFor(event, opts)
 		if err != nil {
 			return archivePage{}, false, err
 		}
@@ -553,7 +557,7 @@ func (r *providerChatRuntime) archivePageBeforeByChat(chatID, beforeMessageID st
 	for _, opt := range opts {
 		opt.beforeBudget(messages)
 	}
-	built, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, actorHistoryPageBytes)
+	built, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, historyPageBytes(opts))
 	if err != nil {
 		return archivePage{}, false, err
 	}
@@ -660,6 +664,11 @@ func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHist
 		return archivePage{}, false, err
 	}
 	messages := anySlice(projected["messages"])
+	if workGroupsRead(opts) {
+		if err := applyWorkGroups(messages, state.Ledger); err != nil {
+			return archivePage{}, false, err
+		}
+	}
 	if lastExchange && history == actorHistoryTail {
 		messages = messages[lastExchangeStart(messages):]
 	}
@@ -667,7 +676,7 @@ func (r *providerChatRuntime) archivePageByChat(chatID string, history actorHist
 		opt.beforeBudget(messages)
 	}
 	if history != actorHistoryFull {
-		finished, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, actorHistoryPageBytes)
+		finished, err := finishArchivePage(messages, filepath.Dir(r.sessions.path), opts, historyPageBytes(opts))
 		if err != nil {
 			return archivePage{}, false, err
 		}

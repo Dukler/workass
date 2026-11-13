@@ -58,12 +58,12 @@ const (
 	lastExchangeWholeTailBytes = 2 << 20
 )
 
-var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true}
+var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, workGroups: true}
 
 // firstScreenWarmSummaryOptions is the first screen itself: the renderer asks
 // for it with toolSummaries (FIRST_SCREEN_READ_OPTIONS), and pages the rest of
 // the slice with firstScreenWarmOptions.
-var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true}
+var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true, workGroups: true}
 
 type firstScreenEntry struct {
 	revision uint64

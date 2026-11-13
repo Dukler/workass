@@ -402,6 +402,13 @@ export function FinishedWork({ chat }: { chat: Chat }) {
     .filter((event): event is ToolEvent => event.kind === 'tool')).nodes : []).map((node) => [node.id, node]));
 
   useEffect(() => { void store.refreshSpawnedWork(chat); }, [chat]);
+  // The history shows older finished work whole, with the calls of the
+  // subagents of loaded turns whose calls came as a summary.
+  useEffect(() => {
+    if (!historyOpen) return;
+    store.wantFullSpawnedWork(chat);
+    for (const message of chat.messages) if ((message.workSummary?.subagentCalls ?? 0) > 0) void store.loadWorkGroup(chat.id, message);
+  }, [historyOpen, chat]);
 
   if (finished.length === 0) return null;
   const nowMs = Date.now();

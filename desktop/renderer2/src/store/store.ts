@@ -27,6 +27,7 @@ import { WorkspaceMoveGate, workspaceMoveAccepted, workspaceRebindSupported } fr
 import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
+import { loadWorkGroupEvents } from '../chat/work-group';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
@@ -505,6 +506,18 @@ function readBrowserPresentation(): Record<string, BrowserPresentation> {
 
 function writeBrowserPresentation(value: Record<string, BrowserPresentation> | undefined) {
   try { globalThis.sessionStorage?.setItem(BROWSER_PRESENTATION_KEY, JSON.stringify(value ?? {})); } catch { /* storage unavailable */ }
+}
+
+// A brief list's settled agents as rows that carry only what a card reads of
+// them: its id and status.
+function withSettledRows(items: SpawnedWorkItem[], settled: unknown): SpawnedWorkItem[] {
+  if (!Array.isArray(settled) || settled.length === 0) return items;
+  const out = items.slice();
+  for (const pair of settled) {
+    if (!Array.isArray(pair) || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') continue;
+    out.push({ id: pair[0], taskId: '', toolCallId: pair[0], tabId: '', chatId: '', providerId: '', kind: 'agent', label: '', status: pair[1], startedAt: '', updatedAt: '', brief: true });
+  }
+  return out;
 }
 
 export class Store {
@@ -7355,6 +7368,34 @@ export class Store {
   // newest thing known (a fresh sequence number); a list reply is as new as
   // the moment its read was issued.
   private settledSubagentCards = new Set<string>();
+  // Chats whose spawned-work list arrived brief, and chats whose screen shows
+  // older finished work and so reads the whole list.
+  private briefSpawnedWork = new Set<string>();
+  private fullSpawnedWork = new Set<string>();
+  /** Something on screen shows the chat's older finished work: read it whole. */
+  wantFullSpawnedWork(chat: Chat | null) {
+    if (!chat?.chatId) return;
+    const key = spawnedWorkChatKey(chat.id, chat.chatId);
+    if (this.fullSpawnedWork.has(key)) return;
+    this.fullSpawnedWork.add(key);
+    if (this.briefSpawnedWork.has(key)) void this.refreshSpawnedWork(chat);
+  }
+  /** A settled row's folded calls, read when something shows them. */
+  async loadWorkGroup(tabId: string, msg: Msg): Promise<boolean> {
+    if (!msg.workSummary) return true;
+    const events = await loadWorkGroupEvents(tabId, msg.id);
+    if (!events) return false;
+    // A refresh may have replaced the row object while the calls loaded.
+    const current = this.chat(tabId)?.messages.find((message) => message.id === msg.id);
+    for (const target of new Set([msg, current])) {
+      if (!target?.workSummary) continue;
+      target.events = events.slice();
+      delete target.workSummary;
+    }
+    this.bump('msg:' + msg.id);
+    this.bump(SPAWNED);
+    return true;
+  }
   // Ajustes · General "Cuando termina o falla un trabajo en segundo plano":
   // only a live change announces, against the rows this window last saw for
   // that chat, so a reload or a list read never replays old endings.
@@ -7394,8 +7435,12 @@ export class Store {
     // are read as before (the router does not forward the option).
     const local = !ownerMachineId(chat);
     const cached = local ? this.spawnedWorkListCache.get(key) : undefined;
+    // Brief (additive): what the chat's first paint draws, unless something
+    // on screen shows older finished work (wantFullSpawnedWork). An older
+    // daemon sends the whole list.
+    const brief = local && !this.fullSpawnedWork.has(key) ? { brief: true } : {};
     let result = local
-      ? await call('spawnedWorkList', chat.id, chat.chatId, { ifNoneMatch: cached?.etag ?? '' })
+      ? await call('spawnedWorkList', chat.id, chat.chatId, { ifNoneMatch: cached?.etag ?? '', ...brief })
       : await call('spawnedWorkList', chat.id, chat.chatId);
     if (result && typeof result === 'object' && (result as { unchanged?: unknown }).unchanged === true) {
       const kept = cached && isUnchangedReply(result, cached.etag) ? parseWireCache<typeof result>(cached) : null;
@@ -7405,7 +7450,10 @@ export class Store {
       this.rememberSpawnedWorkList(key, result);
     }
     if (Array.isArray(result?.items)) {
-      const update: SpawnedWorkChanged = { tabId: chat.id, chatId: chat.chatId, items: result.items };
+      const items = result.brief === true ? withSettledRows(result.items, result.settled) : result.items;
+      if (result.brief === true) this.briefSpawnedWork.add(key);
+      else this.briefSpawnedWork.delete(key);
+      const update: SpawnedWorkChanged = { tabId: chat.id, chatId: chat.chatId, items };
       if (result && Object.prototype.hasOwnProperty.call(result, 'obligation')) {
         update.obligation = result.obligation;
       }

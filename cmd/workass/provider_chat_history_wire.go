@@ -62,6 +62,24 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				}
 				return detail, nil
 			}
+			// Additive {workGroup: {messageId, offset}}: one page of a folded
+			// row's calls (provider_chat_work_groups.go). Paired with tail:1
+			// like toolDetail.
+			if rawGroup, requested := options["workGroup"]; requested {
+				request, err := parseWorkGroupRequest(rawGroup)
+				if err != nil {
+					return nil, err
+				}
+				read.workGroups = false
+				group, found, err := providerChats.ProjectWorkGroupByTab(stringArg(args, 0), request, read)
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return nil, os.ErrNotExist
+				}
+				return group, nil
+			}
 			if _, requested := options["imageRef"]; requested {
 				// Additive {width}: a rendition at most that wide, for a
 				// thumbnail (ProjectToolImageRenditionByTab). Without it, or

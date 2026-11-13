@@ -108,7 +108,9 @@ func finishArchivePage(messages []any, stateDir string, opts []archiveReadOption
 // closed actor's row selection (closedHistoryRows) sizes rows with it too, so
 // both paths keep exactly the same rows.
 func finishArchiveRow(row []any, stateDir string, opts []archiveReadOptions, resolved map[string]string) ([]byte, error) {
+	prefetchSessionImageSizes(row, stateDir)
 	annotateSessionImageSizes(row, stateDir)
+	sessionImageSizesOnDisk.flush(stateDir)
 	deferArchiveToolImages(row)
 	for _, opt := range opts {
 		opt.apply(row)

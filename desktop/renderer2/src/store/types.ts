@@ -50,6 +50,17 @@ export interface ToolEvent {
   // row shows one line of it, and the whole title loads when the row opens.
   titleDeferred?: boolean; titleBytes?: number;
   detail?: { tabId: string; messageId: string };
+  // Work groups (additive): this event stands in for folded calls of a settled
+  // row that came as a summary (Msg.workSummary): an anchor at their text
+  // offset, or the images they returned. Never a call to draw or count.
+  workStub?: boolean;
+}
+// What a settled row's folded calls came to when a history read sent them as
+// a summary (archive-load {workGroups}); the calls load when its Worked row
+// opens (store.loadWorkGroup).
+export interface WorkSummary {
+  tools: number; subagentCalls: number; failed: number; events: number;
+  startedAt?: number; endedAt?: number; kinds?: Record<string, number>;
 }
 // Quiet in-transcript marker that the daemon auto-compacted the context (D1).
 export interface CompactionEvent { key: string; at: number; kind: 'compaction'; }
@@ -134,6 +145,8 @@ export interface Msg {
   status: MsgStatus;
   at: string | null;
   events: TimelineEvent[];
+  // Set while the row's folded calls are only summarized (see WorkSummary).
+  workSummary?: WorkSummary;
   // Delivery lifecycle for an explicit live steer. It is independent of the
   // assistant turn status: sending waits for the RPC acknowledgement, accepted
   // is the official turn/steer boundary, applied is the canonical client-id

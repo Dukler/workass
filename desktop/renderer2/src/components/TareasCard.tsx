@@ -53,6 +53,16 @@ export function TareasCard() {
   const totals = workTotals(runningNodes.length, running.length, queued.length);
   const loads = machineLoads(running, queued, context);
   const empty = runningNodes.length + doneNodes.length + running.length + queued.length + services.length + scheduled === 0;
+  // A subagent's calls in a turn whose calls came as a summary are read for
+  // its rows here (work groups).
+  const summarized = currentTurnMessages(chat).filter((message) => (message.workSummary?.subagentCalls ?? 0) > 0);
+  useEffect(() => {
+    if (chat) for (const message of summarized) void store.loadWorkGroup(chat.id, message);
+  }, [chat, summarized.map((message) => message.id).join()]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A finished subagent listed here from a brief spawned-work list shows its
+  // whole record (its result): read the whole list.
+  const briefDone = doneNodes.some((node) => node.work?.brief);
+  useEffect(() => { if (briefDone) store.wantFullSpawnedWork(chat); }, [briefDone, chat]);
 
   useEffect(() => {
     if (!live) return;

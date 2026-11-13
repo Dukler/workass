@@ -241,8 +241,8 @@ describe('spawned work at connect', () => {
     await store.refreshSpawnedWork(local);
     store.state.spawnedWorkByChat = {};
     await store.refreshSpawnedWork(local);
-    assert.deepEqual(sent[0], ['tab-1', 'chat-tab-1', { ifNoneMatch: '' }]);
-    assert.deepEqual(sent[1], ['tab-1', 'chat-tab-1', { ifNoneMatch: 'list-1' }]);
+    assert.deepEqual(sent[0], ['tab-1', 'chat-tab-1', { ifNoneMatch: '', brief: true }]);
+    assert.deepEqual(sent[1], ['tab-1', 'chat-tab-1', { ifNoneMatch: 'list-1', brief: true }]);
     assert.deepEqual(store.spawnedWork(local).map((item: any) => item.id), ['w-run', 'w-done'], 'the receipt re-applies the kept list');
     assert.deepEqual(store.obligation(local), { state: 'needs_input' });
     await store.refreshSpawnedWork(remote);

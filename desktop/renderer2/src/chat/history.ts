@@ -4,8 +4,13 @@ import type { Msg, TimelineEvent } from '../store/types';
 const STATUSES = new Set<Msg['status']>(['pending', 'running', 'done', 'failed', 'cancelled']);
 
 // Every history read asks for references instead of payloads: images load when
-// seen, large tool payloads when their row opens. Older daemons ignore both.
-export const HISTORY_READ_OPTIONS = { deferImages: true, leanTools: true, leanTitles: true } as const;
+// seen, large tool payloads when their row opens, and a settled turn's folded
+// calls (workGroups) when its Worked row opens. Older daemons ignore all three.
+export const HISTORY_READ_OPTIONS = { deferImages: true, leanTools: true, leanTitles: true, workGroups: true } as const;
+
+// A folded row's calls are read as its Worked row draws them: no input, the
+// head of each output (the rest loads when a call opens), images by reference.
+export const WORK_GROUP_READ_OPTIONS = { deferImages: true, leanTools: true, leanTitles: true, toolSummaries: true } as const;
 
 // Actor projections already carry canonical chronology and stable message ids.
 // Hydration is therefore a validation + shape conversion, never a merge,
@@ -44,6 +49,7 @@ export function actorMessages(records: readonly MirrorMsg[], tabId?: string): Ms
       inherited: record.inherited === true ? true : undefined,
       notice: record.notice && typeof record.notice.kind === 'string' ? record.notice : undefined,
       images: record.images,
+      workSummary: record.workSummary && typeof record.workSummary === 'object' ? record.workSummary : undefined,
       events: stampToolDetail((Array.isArray(record.events) ? record.events : []) as TimelineEvent[], tabId, id),
     };
   });
@@ -51,7 +57,7 @@ export function actorMessages(records: readonly MirrorMsg[], tabId?: string): Ms
 
 // A deferred payload is read back by its exact owner: the tab the row was read
 // from (a tagged remote id routes to its machine) and the row's message id.
-function stampToolDetail(events: TimelineEvent[], tabId: string | undefined, messageId: string): TimelineEvent[] {
+export function stampToolDetail(events: TimelineEvent[], tabId: string | undefined, messageId: string): TimelineEvent[] {
   if (!tabId) return events;
   for (const event of events) {
     if (event.kind === 'tool' && (event.outputDeferred || event.inputDeferred || event.titleDeferred)) event.detail = { tabId, messageId };

@@ -2,7 +2,7 @@
 // change so a reload paints instantly (before state:get / session:get resolves),
 // then reconciles with the authoritative server snapshot. Same shape both sides.
 
-import type { Panes, RightPane, ThemePref, Density, Workspace, QueuedMsg, MessageImage, PlanEntry, PermissionState } from './types';
+import type { Panes, RightPane, ThemePref, Density, Workspace, QueuedMsg, MessageImage, PlanEntry, PermissionState, WorkSummary } from './types';
 import type { AcpSessionInfo } from '../wire/types';
 import type { ModelControlMemory } from '../model-controls';
 import type { ContextUsageByProvider } from '../context-usage';
@@ -27,6 +27,7 @@ export interface MirrorMsg {
   notice?: { kind: string; title?: string; status?: string; body?: string };
   images?: MessageImage[];
   events: unknown[];
+  workSummary?: WorkSummary;
 }
 export interface MirrorChat {
   id: string; chatId?: string; actorRevision?: number; title: string; titleLocked: boolean; group: string | null; cwd: string | null;

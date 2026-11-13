@@ -422,6 +422,12 @@ func (a *SQLActors) readSQLLedgerChunkDesc(chatID string, view LedgerView, lo, h
 // the rows it keeps plus one, not the whole window. A commit to the actor
 // ends the walk with ErrLedgerChanged.
 func (a *SQLActors) WalkLedgerBackward(chatID string, view LedgerView, window LedgerWindow, visit func(LedgerEvent) (bool, error)) error {
+	return a.WalkLedgerBackwardDecoding(chatID, view, window, nil, visit)
+}
+
+// WalkLedgerBackwardDecoding is WalkLedgerBackward with its own row decoder
+// (nil: json.Unmarshal), such as DecodeLedgerEventForWorkGroup.
+func (a *SQLActors) WalkLedgerBackwardDecoding(chatID string, view LedgerView, window LedgerWindow, decode func([]byte) (LedgerEvent, error), visit func(LedgerEvent) (bool, error)) error {
 	chatID = strings.TrimSpace(chatID)
 	for hi := window.End; hi > window.Start; hi -= sqlLedgerChunkRows {
 		lo := max(window.Start, hi-sqlLedgerChunkRows)
@@ -431,7 +437,13 @@ func (a *SQLActors) WalkLedgerBackward(chatID string, view LedgerView, window Le
 		}
 		for index := range raws {
 			var event LedgerEvent
-			if err := json.Unmarshal(raws[index].eventJSON, &event); err != nil {
+			var err error
+			if decode != nil {
+				event, err = decode(raws[index].eventJSON)
+			} else {
+				err = json.Unmarshal(raws[index].eventJSON, &event)
+			}
+			if err != nil {
 				return fmt.Errorf("decode chat ledger row %d: %w", raws[index].seq, err)
 			}
 			raws[index].eventJSON = nil
@@ -539,9 +551,23 @@ func (a *SQLActors) LedgerBytes(chatID string, view LedgerView, from int) (int64
 
 // ReadLedgerMessage is Engine.ReadMessage for a chat that is not resident.
 func (a *SQLActors) ReadLedgerMessage(chatID string, view LedgerView, messageID string) (LedgerEvent, bool, error) {
+	raw, found, err := a.ReadLedgerMessageRaw(chatID, view, messageID)
+	if err != nil || !found {
+		return LedgerEvent{}, false, err
+	}
+	var event LedgerEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return LedgerEvent{}, false, fmt.Errorf("decode chat ledger row: %w", err)
+	}
+	return cloneLedgerEvents([]LedgerEvent{event})[0], true, nil
+}
+
+// ReadLedgerMessageRaw is a row of a chat that is not resident, as stored (its
+// actor JSON encoding), for a reader that decodes only part of it.
+func (a *SQLActors) ReadLedgerMessageRaw(chatID string, view LedgerView, messageID string) ([]byte, bool, error) {
 	chatID, messageID = strings.TrimSpace(chatID), strings.TrimSpace(messageID)
 	if messageID == "" {
-		return LedgerEvent{}, false, nil
+		return nil, false, nil
 	}
 	var raw []byte
 	err := a.db.Read(context.Background(), func(tx *store.Tx) error {
@@ -556,13 +582,9 @@ func (a *SQLActors) ReadLedgerMessage(chatID string, view LedgerView, messageID 
 		return tx.QueryRow(`SELECT event_json FROM messages WHERE chat_id = ? AND seq = ?`, chatID, seq).Scan(&raw)
 	})
 	if err != nil || raw == nil {
-		return LedgerEvent{}, false, err
+		return nil, false, err
 	}
-	var event LedgerEvent
-	if err := json.Unmarshal(raw, &event); err != nil {
-		return LedgerEvent{}, false, fmt.Errorf("decode chat ledger row: %w", err)
-	}
-	return cloneLedgerEvents([]LedgerEvent{event})[0], true, nil
+	return raw, true, nil
 }
 
 // ReadLedgerStamps returns the identity and timestamp of a chat's trailing
