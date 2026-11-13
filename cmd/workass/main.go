@@ -1305,6 +1305,16 @@ func registerStateDigestHandler(hub *wire.Hub, providerChats *providerChatRuntim
 		// {unchanged, etag} reply while nothing changed, so an idle heartbeat
 		// no longer re-sends the whole per-chat table every few seconds. A
 		// client that sends no argument gets the full digest, as before.
+		// {omit} (read_omit.go): the projected digest names its own hash.
+		if len(args) > 0 {
+			if omit := readOmitFrom(mapFromAnyMain(args[0])); omit != nil {
+				raw, err := json.Marshal(digest)
+				if err != nil {
+					return nil, err
+				}
+				return etagReply(omit.apply(raw), fieldString(mapFromAnyMain(args[0]), "ifNoneMatch")), nil
+			}
+		}
 		etag := stateDigestHash(digest)
 		if len(args) > 0 && fieldString(mapFromAnyMain(args[0]), "ifNoneMatch") == etag {
 			return map[string]any{"unchanged": true, "etag": etag}, nil
@@ -1342,6 +1352,11 @@ func registerSessionHandlersWithActor(hub *wire.Hub, store *sessionStore, manage
 		raw, err := providerChats.ProjectSessionRaw(read)
 		if err != nil {
 			return nil, err
+		}
+		// {omit} (read_omit.go) is additive and shell-only: it is applied
+		// before the etag and the delta memory, so both cover the projection.
+		if read.sessionShell {
+			raw = readOmitFrom(options).apply(raw)
 		}
 		if read.sessionShell && options["delta"] == true {
 			return sessionShellDeltaReply(raw, fieldString(options, "ifNoneMatch")), nil
