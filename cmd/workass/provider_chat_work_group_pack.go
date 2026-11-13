@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"workass/internal/chat"
 	"workass/internal/wire"
@@ -137,6 +138,7 @@ type workGroupPackStore struct {
 	// (provider_chat_reply_memo.go).
 	pages     map[pageMemoKey]*pageMemoEntry
 	pageBytes int
+	trimmedAt atomic.Int64
 }
 
 var workGroupPackStores sync.Map // state dir -> *workGroupPackStore
@@ -832,9 +834,21 @@ func (s *workGroupPackStore) load(key workGroupPackKey) (*workGroupPack, error) 
 	return pack, nil
 }
 
-// trimDisk removes the least recently written packs past the disk budget,
-// never the one just written.
+// trimDisk keeps state/work-groups within its budget: at most once a
+// minute, off the caller (a write on a reader's path must not walk the
+// directory).
 func (s *workGroupPackStore) trimDisk(keep string) {
+	now := time.Now().UnixNano()
+	last := s.trimmedAt.Load()
+	if now-last < int64(time.Minute) || !s.trimmedAt.CompareAndSwap(last, now) {
+		return
+	}
+	go s.trimDiskNow(keep)
+}
+
+// trimDiskNow removes the least recently written packs past the disk budget,
+// never the one just written.
+func (s *workGroupPackStore) trimDiskNow(keep string) {
 	type file struct {
 		path string
 		size int64

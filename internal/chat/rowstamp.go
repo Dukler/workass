@@ -3,7 +3,9 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"strings"
 	"sync"
@@ -236,4 +238,39 @@ func (e *Engine) NextMessageID(messageID string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// DecodeLedgerWindowDesc reads the window's rows in one read and decodes them
+// in parallel (decode nil: json.Unmarshal), newest first. For a first screen
+// a few rows of megabytes each are most of its time; read and decoded one
+// after another they took 9 of its 16 ms.
+func (a *SQLActors) DecodeLedgerWindowDesc(chatID string, view LedgerView, window LedgerWindow, decode func([]byte) (LedgerEvent, error)) ([]LedgerEvent, error) {
+	raws, err := a.readSQLLedgerChunkDesc(strings.TrimSpace(chatID), view, window.Start, window.End)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]LedgerEvent, len(raws))
+	errs := make([]error, len(raws))
+	var wg sync.WaitGroup
+	for index := range raws {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			if decode != nil {
+				events[index], errs[index] = decode(raws[index].eventJSON)
+			} else {
+				errs[index] = json.Unmarshal(raws[index].eventJSON, &events[index])
+			}
+			if errs[index] != nil {
+				errs[index] = fmt.Errorf("decode chat ledger row %d: %w", raws[index].seq, errs[index])
+			}
+		}(index)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return events, nil
 }

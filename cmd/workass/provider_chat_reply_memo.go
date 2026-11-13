@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -162,6 +163,11 @@ func (r *providerChatRuntime) chatRevision(chatID string) (uint64, bool) {
 	return actor.engine.Revision(), true
 }
 
+// firstScreenDiskKey names a chat's first screen in the page memo.
+func firstScreenDiskKey(chatID string, limit int, opts archiveReadOptions) pageMemoKey {
+	return pageMemoKey{chatID: chatID, before: "first:" + strconv.Itoa(limit), opts: opts}
+}
+
 // FirstScreenReply is the archive-load reply of a chat's first screen
 // ({tail, lastExchange}), conditional with ifNoneMatch: from the memo when
 // the chat has not changed since it was encoded, else read, and kept for
@@ -182,46 +188,66 @@ func (r *providerChatRuntime) FirstScreenReply(tabID string, limit int, opts arc
 	}
 	revision, known := r.chatRevision(chatID)
 	key := replyMemoKey{chatID: chatID, limit: limit, opts: opts}
+	// Kept on disk too, per chat revision, so a later process opens a chat
+	// it has not read yet as fast as this one reopens it.
+	diskKey := firstScreenDiskKey(chatID, limit, opts)
 	if known {
-		if kept, ok := r.replies.get(key, revision); ok {
+		kept, ok := r.replies.get(key, revision)
+		if !ok {
+			if kept, ok = r.workGroupPacks().keptPage(diskKey, revision); ok {
+				r.replies.put(key, revision, kept)
+			}
+		}
+		if ok {
 			if conditional {
 				return kept.conditional(ifNoneMatch), true, nil
 			}
 			return kept.result(), true, nil
 		}
 	}
-	raw, found, err := r.ProjectLastExchangeByTabRaw(tabID, limit, opts)
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("recent archive limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	summary, closed := r.closedSummary(chatID)
+	page, found, err := r.archivePageByChat(chatID, actorHistoryTail, limit, true, opts)
 	if err != nil || !found {
 		return nil, found, err
 	}
+	raw := page.raw()
 	if !known {
 		if conditional {
 			return conditionalRowsReply(raw, ifNoneMatch), true, nil
 		}
 		return raw, true, nil
 	}
-	// Compressed and hashed once, here: the reply goes out as the kept
-	// segment (no second compression on the socket, no second hash), and the
-	// next reader of this revision gets it as it is.
-	// A closed chat's read was just kept, compressed, by the warm cache.
-	kept, cached := keptReply{}, false
-	if summary, closed := r.closedSummary(chatID); closed {
-		kept, cached = r.cachedFirstScreen(summary, limit, opts)
-	}
-	if !cached {
-		kept = keepReply(raw)
-	}
-	if kept.deflated == nil {
+	// This reply goes out compressed fast, hashed once; what is kept (in the
+	// warm cache, the memo and on disk) is compressed at the default level
+	// after it, off the reader's wait.
+	fast := keptReply{deflated: wire.DeflateSegmentFast(raw), size: len(raw), etag: rowsEtag(raw)}
+	plain := append([]byte(nil), raw...)
+	go func() {
+		kept := keepReply(plain)
+		if kept.deflated == nil {
+			return
+		}
+		if closed {
+			r.storeFirstScreenKept(summary, limit, opts, kept)
+		}
+		r.replies.put(key, revision, kept)
+	}()
+	if fast.deflated == nil {
 		if conditional {
 			return conditionalRowsReply(raw, ifNoneMatch), true, nil
 		}
 		return raw, true, nil
 	}
-	r.replies.put(key, revision, kept)
+	// On disk as it is sent (a small write, done before the reply so nothing
+	// writes into the state directory after a read returns).
+	r.workGroupPacks().keepPageKept(diskKey, revision, fast)
 	if conditional {
-		return kept.conditional(ifNoneMatch), true, nil
+		return fast.conditional(ifNoneMatch), true, nil
 	}
-	return kept.result(), true, nil
+	return fast.result(), true, nil
 }
 
 // History page memo: a large page (an older renderer's page holding one row

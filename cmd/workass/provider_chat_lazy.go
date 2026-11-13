@@ -300,21 +300,28 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 	var kept []chat.LedgerEvent
 	keptMessages, keptEncoded := []any{}, [][]byte{}
 	decodedFrom, live := window.End+1, false
-	err = r.ledgers.WalkLedgerBackwardDecoding(summary.ChatID, view, window, decodeLedgerRowFor(opts), func(event chat.LedgerEvent) (bool, error) {
-		decodedFrom--
-		if event.Status == "pending" || event.Status == "running" {
-			live = true
-			return false, nil
-		}
+	// prepare is a row as a reply sends it, and its encoding.
+	prepare := func(event chat.LedgerEvent, resolved map[string]string) ([]any, []byte, error) {
 		message, err := projectLedgerMessageFor(event, opts)
 		if err != nil {
-			return false, err
+			return nil, nil, err
 		}
 		messages := []any{message}
 		for _, opt := range opts {
 			opt.beforeBudget(messages)
 		}
 		data, err := finishArchiveRow(messages, stateDir, opts, resolved)
+		return messages, data, err
+	}
+	visit := func(event chat.LedgerEvent, messages []any, data []byte, err error) (bool, error) {
+		decodedFrom--
+		if event.Status == "pending" || event.Status == "running" {
+			live = true
+			return false, nil
+		}
+		if messages == nil && err == nil {
+			messages, data, err = prepare(event, resolved)
+		}
 		if err != nil {
 			return false, err
 		}
@@ -327,7 +334,14 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 		keptMessages = append(keptMessages, messages[0])
 		keptEncoded = append(keptEncoded, data)
 		return true, nil
-	})
+	}
+	if rows := window.End - window.Start; rows > 0 && rows <= closedParallelRows {
+		err = r.closedHistoryRowsParallel(summary, view, window, opts, prepare, visit)
+	} else {
+		err = r.ledgers.WalkLedgerBackwardDecoding(summary.ChatID, view, window, decodeLedgerRowFor(opts), func(event chat.LedgerEvent) (bool, error) {
+			return visit(event, nil, nil, nil)
+		})
+	}
 	if err != nil {
 		return nil, nil, r.closedReadError(summary, err)
 	}
@@ -350,6 +364,49 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 		keptEncoded[left], keptEncoded[right] = keptEncoded[right], keptEncoded[left]
 	}
 	return kept, &archivePage{messages: keptMessages, encoded: keptEncoded}, nil
+}
+
+// closedParallelRows: a window this small (a first screen's tail) is read in
+// one read and its rows decoded, projected and finished in parallel, then
+// selected exactly as the walk selects them; a larger one (an older page)
+// is walked, so rows past the page budget are never decoded.
+const closedParallelRows = 12
+
+// closedHistoryRowsParallel runs visit over the window's rows newest first,
+// as WalkLedgerBackwardDecoding does, with each row's decoding, projection
+// and finishing (finishArchiveRow is a pure function of the row) done ahead,
+// in parallel.
+func (r *providerChatRuntime) closedHistoryRowsParallel(summary chat.ActorSummary, view chat.LedgerView, window chat.LedgerWindow, opts []archiveReadOptions,
+	prepare func(chat.LedgerEvent, map[string]string) ([]any, []byte, error), visit func(chat.LedgerEvent, []any, []byte, error) (bool, error)) error {
+	events, err := r.ledgers.DecodeLedgerWindowDesc(summary.ChatID, view, window, decodeLedgerRowFor(opts))
+	if err != nil {
+		return err
+	}
+	type prepared struct {
+		messages []any
+		data     []byte
+		err      error
+	}
+	rows := make([]prepared, len(events))
+	var wg sync.WaitGroup
+	for index := range events {
+		if events[index].Status == "pending" || events[index].Status == "running" {
+			continue
+		}
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			rows[index].messages, rows[index].data, rows[index].err = prepare(events[index], make(map[string]string))
+		}(index)
+	}
+	wg.Wait()
+	for index, event := range events {
+		more, err := visit(event, rows[index].messages, rows[index].data, rows[index].err)
+		if err != nil || !more {
+			return err
+		}
+	}
+	return nil
 }
 
 // closedLiveScan is what history reads have learned about a closed actor's

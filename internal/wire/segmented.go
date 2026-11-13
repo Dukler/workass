@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strconv"
 	"sync"
 )
@@ -84,6 +85,13 @@ const SegmentLevel = flate.DefaultCompression
 
 var segmentWriterPool = newDeflateWriterPool(SegmentLevel)
 var segmentBestWriterPool = newDeflateWriterPool(flate.BestCompression)
+var segmentFastWriterPool = newDeflateWriterPool(flate.BestSpeed)
+
+// DeflateSegmentFast is DeflateSegment at the fastest level, for a segment a
+// reader is waiting on.
+func DeflateSegmentFast(plain []byte) []byte {
+	return deflateSegment(plain, segmentFastWriterPool)
+}
 
 // DeflateSegment compresses plain into a segment: non-final DEFLATE blocks
 // with a fresh window, ending in a sync flush.
@@ -212,4 +220,38 @@ func encodeSegmentedReplyFrame(id any, result SegmentedResult) ([]byte, int, err
 		return nil, 0, errors.New("wire segmented frame length mismatch: " + strconv.Itoa(len(frame)) + " != " + strconv.Itoa(headerLen+compressed))
 	}
 	return frame, replyBytes, nil
+}
+
+// parallelDeflateMinBytes: a reply this large is compressed in parallel.
+const parallelDeflateMinBytes = 2 << 20
+
+// parallelDeflateChunkBytes is each compressor's share.
+const parallelDeflateChunkBytes = 1 << 20
+
+// deflateParallel compresses plain as segments of parallelDeflateChunkBytes,
+// on every core, at the level one compressor would have used for it all.
+func deflateParallel(plain []byte) SegmentedResult {
+	pool := segmentFastWriterPool
+	if deflateLevelFor(len(plain)) == deflateRatioLevel {
+		pool = segmentWriterPool
+	}
+	count := (len(plain) + parallelDeflateChunkBytes - 1) / parallelDeflateChunkBytes
+	parts := make([]SegmentedPart, count)
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, max(2, min(8, runtime.GOMAXPROCS(0))))
+	for index := range parts {
+		chunk := plain[index*parallelDeflateChunkBytes : min(len(plain), (index+1)*parallelDeflateChunkBytes)]
+		wg.Add(1)
+		limit <- struct{}{}
+		go func(index int, chunk []byte) {
+			defer func() { <-limit; wg.Done() }()
+			if deflated := deflateSegment(chunk, pool); deflated != nil {
+				parts[index] = SegmentedPart{Deflated: deflated, Size: len(chunk)}
+			} else {
+				parts[index] = SegmentedPart{Literal: chunk}
+			}
+		}(index, chunk)
+	}
+	wg.Wait()
+	return SegmentedResult{Parts: parts}
 }

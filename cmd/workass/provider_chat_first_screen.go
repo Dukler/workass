@@ -423,7 +423,12 @@ func (r *providerChatRuntime) warmChatShape(summary chat.ActorSummary, shape fir
 	if err != nil || !found {
 		return false
 	}
-	_, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, shape.summary)
+	reply, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, shape.summary)
+	if kept {
+		// On disk too (provider_chat_reply_memo.go): a later process opens
+		// the chat at this revision before its own warm reaches it.
+		r.workGroupPacks().keepPageKept(firstScreenDiskKey(summary.ChatID, firstScreenWarmLimit, shape.summary), summary.Revision, reply)
+	}
 	r.warmSlice(summary, first, shape.page)
 	return kept
 }
