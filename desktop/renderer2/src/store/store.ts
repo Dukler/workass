@@ -7431,6 +7431,10 @@ export class Store {
     const current = this.chat(tabId)?.messages.find((message) => message.id === msg.id);
     if (ok && current && current !== msg && current.contentFrom) await loadContentHead(tabId, current, true);
     this.bump('msg:' + msg.id);
+    // The transcript holds the reader in the same commit the reply grows in
+    // (it consumes the growth the reply notes); bumping the reply alone left
+    // that to its next commit, a frame late.
+    this.bumpApp(false);
     return ok;
   }
   /** A long reply's last part is on screen: read the rest in the background. */
