@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -273,9 +275,7 @@ type sqlLoadedActor struct {
 	tools map[string]ToolState
 }
 
-// sqlActorHeadRow is a chats row as stored. Its checkpoint fields identify
-// one committed checkpoint: every checkpoint bumps ledger_gen, so a reader
-// that sees the same values again knows no checkpoint happened in between.
+// sqlActorHeadRow is a chats row as stored.
 type sqlActorHeadRow struct {
 	version   int
 	revision  uint64
@@ -283,11 +283,6 @@ type sqlActorHeadRow struct {
 	ledgerLen int
 	ledgerGen int64
 	updatedAt string
-}
-
-func (h sqlActorHeadRow) sameCheckpoint(other sqlActorHeadRow) bool {
-	return h.version == other.version && h.revision == other.revision && h.ledgerLen == other.ledgerLen &&
-		h.ledgerGen == other.ledgerGen && h.updatedAt == other.updatedAt
 }
 
 // sqlRawRow is one messages row as stored.
@@ -319,15 +314,16 @@ var sqlLoadBetweenChunks func(chatID string, decoded int)
 // loadSQLActorInChunks returns what loadSQLActorRows returns in one
 // transaction, without holding the connection for the whole read or for any
 // decoding. The head and the first rows are copied out in one short read
-// transaction; each later one re-reads the head's checkpoint fields and
-// copies the next sqlLoadChunkBytes of rows, and the one that reaches the
-// last row also copies the journal. Decoding, validation and journal replay
-// run between and after those transactions.
+// transaction; each later one re-reads the head's revision
+// (sqlActorStillAt) and copies the next sqlLoadChunkBytes of rows, and the
+// one that reaches the last row also copies the journal. Decoding,
+// validation and journal replay run between and after those transactions.
 //
 // The result is one committed checkpoint: rows change only through a
-// checkpoint, which bumps ledger_gen, so an unchanged head proves the rows
-// already copied still belong to it, and the journal copied with the last
-// rows is that checkpoint's journal at that moment. A checkpoint in between
+// checkpoint, and a checkpoint that changes them moves the revision, so an
+// unchanged revision proves the rows already copied still belong to it, and
+// the journal copied with the last rows is that checkpoint's journal at that
+// moment. A checkpoint in between
 // restarts the load.
 func loadSQLActorInChunks(db *store.DB, chatID string) (sqlLoadedActor, bool, error) {
 	for attempt := 1; ; attempt++ {
@@ -352,16 +348,24 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 		tools    map[string]ToolState
 	)
 	defer func() { rows.stop() }()
+	// The head and the tool owners decode on their own goroutine while the
+	// ledger chunks are read: nothing in the loop needs them, and on a long
+	// chat they are a fifth of the open (a 5 MB head, 60k owners).
+	var (
+		headWork sync.WaitGroup
+		headErr  error
+	)
+	defer headWork.Wait()
 	for first, done := true, false; !done; first = false {
 		found := false
 		err := db.Read(context.Background(), func(tx *store.Tx) error {
 			chunk, journal, done = chunk[:0], nil, false
-			current, ok, err := readSQLActorHead(tx, chatID)
-			if err != nil {
-				return err
-			}
-			found = ok
 			if first {
+				current, ok, err := readSQLActorHead(tx, chatID)
+				if err != nil {
+					return err
+				}
+				found = ok
 				head = current
 				if !ok {
 					return nil
@@ -369,9 +373,17 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 				if toolRows, err = readSQLTools(tx, chatID); err != nil {
 					return err
 				}
-			} else if !ok || !current.sameCheckpoint(head) {
-				return errSQLActorCheckpointedDuringLoad
+			} else {
+				ok, err := sqlActorStillAt(tx, chatID, head)
+				if err != nil {
+					return err
+				}
+				found = true
+				if !ok {
+					return errSQLActorCheckpointedDuringLoad
+				}
 			}
+			var err error
 			done = true
 			if head.ledgerLen > 0 {
 				read := 0
@@ -392,14 +404,23 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			return sqlLoadedActor{}, false, err
 		}
 		if first {
-			if state, err = decodeSQLHead(head, chatID); err != nil {
-				return sqlLoadedActor{}, false, err
-			}
-			head.stateJSON = nil
-			if tools, err = withSQLTools(&state, toolRows); err != nil {
-				return sqlLoadedActor{}, false, err
-			}
-			toolRows = nil
+			stored, owners := head, toolRows
+			head.stateJSON, toolRows = nil, nil
+			headWork.Add(1)
+			go func() {
+				defer headWork.Done()
+				decoded, err := decodeSQLHead(stored, chatID)
+				if err != nil {
+					headErr = err
+					return
+				}
+				stored.stateJSON = nil
+				if tools, err = withSQLTools(&decoded, owners); err != nil {
+					headErr = err
+					return
+				}
+				state = decoded
+			}()
 			if head.ledgerLen > 0 {
 				rows = newSQLRowDecoder(head.ledgerLen)
 			}
@@ -419,9 +440,36 @@ func loadSQLActorChunkedOnce(db *store.DB, chatID string) (sqlLoadedActor, bool,
 			return sqlLoadedActor{}, false, err
 		}
 	}
+	headWork.Wait()
+	if headErr != nil {
+		return sqlLoadedActor{}, false, headErr
+	}
 	loaded, found, err := finishSQLActor(state, head.ledgerLen, ledger, journal, head.ledgerGen, true)
 	loaded.tools = tools
 	return loaded, found, err
+}
+
+// sqlActorStillAt reports whether the chats row still holds the checkpoint
+// head was read from, reading only the columns stored before state_json.
+// Re-reading the whole head (or any column after state_json) between chunks
+// walked the head's overflow pages once per chunk: on a chat whose head is
+// 5 MB, a 112 MB ledger in 1 MB chunks walked about 560 MB, five times the
+// rows themselves, and that was most of opening the chat. The revision is the
+// fence, as for every read of a closed actor (checkSQLRevision): each
+// revision is one committed state, so a checkpoint that leaves it unchanged
+// writes the same head and rows again, and one that changes anything moves
+// it.
+func sqlActorStillAt(tx *store.Tx, chatID string, head sqlActorHeadRow) (bool, error) {
+	var version int
+	var revision int64
+	err := tx.QueryRow(`SELECT envelope_version, revision FROM chats WHERE chat_id = ?`, chatID).Scan(&version, &revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return version == head.version && revision >= 0 && uint64(revision) == head.revision, nil
 }
 
 // readSQLActorHead reads one chats row as stored.
@@ -529,15 +577,26 @@ func finishSQLActor(state State, ledgerLen int, ledger []LedgerEvent, journal []
 		state.Ledger = ledger
 	}
 	normalizeStateMaps(&state)
-	if err := state.Validate(); err != nil {
+	// The store's private copy of the rows is taken while the state
+	// validates: both only read the decoded ledger.
+	var (
+		rows   []LedgerEvent
+		copied sync.WaitGroup
+	)
+	if keepRows && ledgerLen > 0 {
+		copied.Add(1)
+		go func() {
+			defer copied.Done()
+			rows = exactLedgerCopy(ledger)
+		}()
+	}
+	err := state.Validate()
+	copied.Wait()
+	if err != nil {
 		return sqlLoadedActor{}, false, fmt.Errorf("validate chat state: %w", err)
 	}
-	var rows []LedgerEvent
-	if keepRows && ledgerLen > 0 {
-		rows = exactLedgerCopy(ledger)
-	}
 	next := 0
-	state, err := replayProviderEventRecords(state, func() ([]byte, error) {
+	state, err = replayProviderEventRecords(state, func() ([]byte, error) {
 		if next == len(journal) {
 			return nil, nil
 		}
@@ -837,11 +896,31 @@ func exactLedgerCopy(events []LedgerEvent) []LedgerEvent {
 		return nil
 	}
 	out := make([]LedgerEvent, len(events))
-	for index := range events {
-		exactCopyInto(reflect.ValueOf(&out[index]).Elem(), reflect.ValueOf(events[index]))
+	if len(events) < 2*exactLedgerCopyWorkers {
+		for index := range events {
+			exactCopyInto(reflect.ValueOf(&out[index]).Elem(), reflect.ValueOf(events[index]))
+		}
+		return out
 	}
+	// Rows copy independently into their own positions; a long chat's rows
+	// are hundreds of megabytes, and copying them is on the open's path.
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for worker := 0; worker < min(runtime.GOMAXPROCS(0), exactLedgerCopyWorkers); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := int(next.Add(1)) - 1; index < len(events); index = int(next.Add(1)) - 1 {
+				exactCopyInto(reflect.ValueOf(&out[index]).Elem(), reflect.ValueOf(events[index]))
+			}
+		}()
+	}
+	wg.Wait()
 	return out
 }
+
+// exactLedgerCopyWorkers bounds the goroutines one exactLedgerCopy uses.
+const exactLedgerCopyWorkers = 8
 
 func exactCopyInto(dst, src reflect.Value) {
 	switch src.Kind() {
