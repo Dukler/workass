@@ -1561,11 +1561,8 @@ export class Store {
     // asked for the last exchange, to paint, and in the same flight for the
     // tail's rows before it, laid out right behind (no second round trip).
     const parts = conditional && this.state.meta?.firstScreenMode === 'parts-v1';
-    const restRead = parts
-      ? this.guardedStep(`recent actor history rest (${chatId})`, () => call('archiveLoad', chatId, {
-        tail: limit, lastExchange: true, toolSummaries: true, ...HISTORY_READ_OPTIONS, rest: true, ifNoneMatch: '',
-      })).catch(() => undefined)
-      : undefined;
+    // Asked right after the exchange (below): replies come in the order asked.
+    let restRead: Promise<{ ok: boolean; value?: unknown } | undefined> | undefined;
     let firstRowsReady = () => {};
     this.recentFirstRows.set(chatId, new Promise<void>((resolve) => { firstRowsReady = resolve; }));
     const load = (async () => {
@@ -1688,6 +1685,11 @@ export class Store {
       this.firstScreens.delete(chatId);
       this.commitRecentHistory(chat, messages, messageCount, historyComplete, liveEventFence);
     })();
+    if (parts) {
+      restRead = this.guardedStep(`recent actor history rest (${chatId})`, () => call('archiveLoad', chatId, {
+        tail: limit, lastExchange: true, toolSummaries: true, ...HISTORY_READ_OPTIONS, rest: true, ifNoneMatch: '',
+      })).catch(() => undefined);
+    }
     this.recentHistoryLoads.set(chatId, load);
     try {
       await load;

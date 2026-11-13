@@ -594,7 +594,8 @@ describe('long chats: brief spawned work and work groups', () => {
     const load = store.ensureRecentHistory('tab-10', 10);
     await settle();
     assert.equal(calls.length, 2, 'both parts are asked for before either arrives');
-    assert.equal(calls.find((options) => options.exchangeFirst)?.lastExchange, true);
+    assert.equal(calls[0].exchangeFirst, true, 'the exchange is asked for first');
+    assert.equal(calls[1].rest, true);
     release();
     await load;
     assert.deepEqual(store.chat('tab-10').messages.map((m: any) => m.id), ['u1', 'a2', 'u3', 'a4']);
