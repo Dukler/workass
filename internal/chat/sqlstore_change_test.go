@@ -435,3 +435,44 @@ func bigStreamingSQLEngine(b *testing.B, actors *SQLActors) (*Engine, provider.L
 	engine.mu.Unlock()
 	return engine, lane
 }
+
+// A transition that shares the committed rows skips comparing them only
+// while no journal commit (whose reducer may edit a shared row in place) has
+// happened since the last checkpoint.
+func TestSQLSharedRowsCheckpointStillWritesARowAJournalEditedInPlace(t *testing.T) {
+	const chatID = "shared-rows-chat"
+	actors := openTestActors(t)
+	if err := actors.Store(chatID).Save(richLedgerState(t, chatID, 40, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	handle := actors.Store(chatID)
+	state, found, err := handle.Load(chatID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	// The first checkpoint after a load compares every row and records them.
+	state.Revision++
+	if err := handle.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	next := state
+	next.Revision++
+	if err := handle.saveSharedRows(next); err != nil {
+		t.Fatal(err)
+	}
+	assertRowsMatch(t, actors, chatID, next.Ledger)
+	state = next
+
+	handle.markJournaled()
+	state.Ledger[2].Text = "edited in place by a journaled reducer"
+	next = state
+	next.Revision++
+	if err := handle.saveSharedRows(next); err != nil {
+		t.Fatal(err)
+	}
+	assertRowsMatch(t, actors, chatID, next.Ledger)
+	reloaded, found, err := actors.Store(chatID).Load(chatID)
+	if err != nil || !found || reloaded.Ledger[2].Text != "edited in place by a journaled reducer" {
+		t.Fatalf("the reload lost the in-place edit: found=%v err=%v", found, err)
+	}
+}

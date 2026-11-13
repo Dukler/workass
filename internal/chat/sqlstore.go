@@ -204,6 +204,17 @@ type SQLStore struct {
 	// journal is this handle's account of the chat's journal records after
 	// its checkpoint (see appendJournalRecord); nil when unknown.
 	journal *sqlJournalAccount
+	// headSize is the length of the head this handle last wrote, the buffer
+	// size for the next one.
+	headSize int
+	// toolsAt is the tool-owner map the last checkpoint wrote (its rows and
+	// cache.tools equal it), and journaled records that a journal commit was
+	// attempted since. A journaled tool update edits the committed map in
+	// place; no other transition does (TestMain's checkToolsSharing). So with
+	// no journal commit since, a checkpoint of that very map has nothing in it
+	// to compare (checkpointLocked).
+	toolsAt   unsafe.Pointer
+	journaled bool
 }
 
 // sqlJournalAccount is the size the journal budget charges for the journal
@@ -252,6 +263,7 @@ func (s *SQLStore) Load(chatID string) (State, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.journal = nil
+	s.toolsAt = nil
 	loaded, found, err := loadSQLActorInChunks(s.actors.db, s.chatID)
 	if err != nil || !found {
 		s.cache = nil
@@ -681,11 +693,30 @@ func (s *SQLStore) saveValidated(state State) error {
 	return s.checkpointLocked(state)
 }
 
+// saveSharedRows is saveValidated for an engine transition that shared the
+// committed ledger rows and so left them as they were (commandLeavesLedger,
+// held by TestMain's checkLedgerSharing).
+func (s *SQLStore) saveSharedRows(state State) error {
+	if strings.TrimSpace(state.ChatID) != s.chatID || s.chatID == "" {
+		return errors.New("chat state store belongs to another chat")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitCheckpoint(state, true)
+}
+
 func (s *SQLStore) checkpointLocked(state State) error {
-	head, err := encodeSQLHead(state)
+	return s.commitCheckpoint(state, false)
+}
+
+// commitCheckpoint is checkpointLocked. rowsShared says state's rows are, row for
+// row, the rows of the state committed before it.
+func (s *SQLStore) commitCheckpoint(state State, rowsShared bool) error {
+	head, err := encodeSQLHeadSized(state, s.headSize)
 	if err != nil {
 		return err
 	}
+	s.headSize = len(head)
 	cache := s.cache
 	// The plan, the row diff and every changed row's JSON are worked out
 	// before the write transaction. On a large ledger they cost far more than
@@ -697,9 +728,17 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	// checkpoints are incremental. The diff compares every row, whatever slice
 	// the ledger arrives in.
 	plan := sqlLedgerPlan{full: cache == nil || cache.gen == 0}
-	if !plan.full {
+	// Rows the last checkpoint wrote, handed back unchanged by the
+	// transition, with no journal commit in between (whose reducer may edit
+	// them in place), have nothing to compare.
+	sameRows := rowsShared && !plan.full && !s.journaled && cache.head != nil &&
+		cache.head == unsafe.Pointer(unsafe.SliceData(state.Ledger)) && cache.length == len(state.Ledger)
+	if !plan.full && !sameRows {
 		plan.diff(cache.rows, state.Ledger)
 	}
+	// A command that shares the committed tool map (commandLeavesTools) hands
+	// it back unchanged: comparing its 60k owners again would find nothing.
+	sameTools := !plan.full && !s.journaled && s.toolsAt != nil && s.toolsAt == mapIdentity(state.Tools)
 	if err := plan.encode(state.Ledger); err != nil {
 		return err
 	}
@@ -707,9 +746,14 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	if !plan.full {
 		storedTools = cache.tools
 	}
-	tools, err := planSQLTools(storedTools, state.Tools, plan.full)
-	if err != nil {
-		return err
+	var tools sqlToolsPlan
+	if !sameTools {
+		if sqlToolsDiffed != nil {
+			sqlToolsDiffed()
+		}
+		if tools, err = planSQLTools(storedTools, state.Tools, plan.full); err != nil {
+			return err
+		}
 	}
 	for {
 		err = s.actors.db.Write(context.Background(), func(tx *store.Tx) error {
@@ -753,8 +797,11 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		// forget the cache so the next checkpoint rewrites every row.
 		s.cache = nil
 		s.journal = nil
+		s.toolsAt = nil
 		return err
 	}
+	s.toolsAt = mapIdentity(state.Tools)
+	s.journaled = false
 	var previousTools map[string]ToolState
 	if cache != nil {
 		previousTools = cache.tools
@@ -973,18 +1020,6 @@ func exactCopyInto(dst, src reflect.Value) {
 	}
 }
 
-// encodeSQLHead encodes the State without a non-empty Ledger (the rows hold
-// it). An empty ledger stays in the head so nil and [] round-trip exactly.
-func encodeSQLHead(state State) ([]byte, error) {
-	head := state
-	if len(state.Ledger) > 0 {
-		head.Ledger = nil
-	}
-	// Tool owners are chat_tools rows (sqltools.go).
-	head.Tools = nil
-	return json.Marshal(head)
-}
-
 // writeSQLFullCheckpoint replaces one chat's head, every ledger row and its
 // journal; used where no handle cache exists (import, which owns the
 // connection at boot).
@@ -1025,6 +1060,7 @@ func upsertSQLChatHead(tx *store.Tx, chatID string, revision uint64, head []byte
 }
 
 func (s *SQLStore) commitProviderEvent(baseRevision uint64, next State, command ProviderEventReceived) error {
+	s.markJournaled()
 	if s.ledgerChanged(next) {
 		// Terminal receipts and settled-subagent updates edit the ledger. A
 		// checkpoint here writes only the changed rows, and keeps the message
@@ -1035,6 +1071,7 @@ func (s *SQLStore) commitProviderEvent(baseRevision uint64, next State, command 
 }
 
 func (s *SQLStore) commitCancelCommand(baseRevision uint64, next State, command Command) error {
+	s.markJournaled()
 	if s.ledgerChanged(next) {
 		return s.journalCheckpoint(next)
 	}
@@ -1052,6 +1089,7 @@ func (s *SQLStore) journalCheckpoint(next State) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.journaled = true
 	return s.checkpointLocked(next)
 }
 
@@ -1169,6 +1207,27 @@ func sqlText(raw []byte) string {
 	return unsafe.String(unsafe.SliceData(raw), len(raw))
 }
 
+// sqlNow is an RFC 3339 UTC time with a fixed nine-digit fraction: a chats
+// row keeps its size when only its time changes (sqlhead.go).
 func sqlNow() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
+
+// sqlToolsDiffed, tests only, runs whenever a checkpoint compares the tool
+// owners.
+var sqlToolsDiffed func()
+
+// markJournaled records, before a journal commit is attempted, that its
+// reducer may have edited the committed rows or tool map in place.
+func (s *SQLStore) markJournaled() {
+	s.mu.Lock()
+	s.journaled = true
+	s.mu.Unlock()
+}
+
+func mapIdentity[M ~map[K]V, K comparable, V any](m M) unsafe.Pointer {
+	if m == nil {
+		return nil
+	}
+	return reflect.ValueOf(m).UnsafePointer()
 }
