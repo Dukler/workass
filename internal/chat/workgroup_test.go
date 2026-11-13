@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -134,4 +135,31 @@ func mustMarshal(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// A large row decoded in parallel is the row json.Unmarshal decodes.
+func TestDecodeLedgerEventParallelIsUnmarshal(t *testing.T) {
+	event := LedgerEvent{MessageID: "m", Role: "assistant", Status: "done", Text: "text"}
+	for index := 0; index < 12000; index++ {
+		event.Timeline = append(event.Timeline, TimelineEntry{Key: fmt.Sprintf("timeline:tool:%d", index), At: index % 50, Kind: provider.EventToolUpdate,
+			Tool: &provider.ToolEvent{ToolCallID: fmt.Sprintf("%d", index), Title: strings.Repeat("t", 200), Status: "completed", Output: strings.Repeat("o", 300)}})
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) < decodeParallelMinBytes {
+		t.Fatalf("row is %d bytes", len(raw))
+	}
+	var want LedgerEvent
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeLedgerEventParallel(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("parallel decode differs")
+	}
 }

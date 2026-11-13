@@ -70,7 +70,8 @@ func decodeLedgerRowFor(opts []archiveReadOptions) func([]byte) (chat.LedgerEven
 	if workGroupsRead(opts) {
 		return chat.DecodeLedgerEventForWorkGroup
 	}
-	return nil
+	// Every call whole: a large row's entries are decoded in parallel.
+	return chat.DecodeLedgerEventParallel
 }
 
 // projectLedgerMessageFor is projectLedgerMessage under the read's options.

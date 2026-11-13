@@ -136,3 +136,23 @@ func TestLongRowsComeInPartsThatMakeTheWholeReply(t *testing.T) {
 		t.Fatal("a read without longRows was split")
 	}
 }
+
+// A large row encoded in parallel is json.Marshal's encoding, byte for byte.
+func TestMarshalArchiveRowIsMarshal(t *testing.T) {
+	events := make([]any, 0, 5000)
+	for index := 0; index < 5000; index++ {
+		events = append(events, map[string]any{"kind": "tool", "key": fmt.Sprintf("k%d", index), "title": "<b>&é😀", "at": index})
+	}
+	row := map[string]any{"id": "m", "role": "assistant", "content": "x<y", "events": events, "zeta": 1}
+	want, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := marshalArchiveRow(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("parallel encoding differs")
+	}
+}

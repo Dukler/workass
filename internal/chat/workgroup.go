@@ -888,3 +888,70 @@ func (s *skimmer) smallString(start, end int) string {
 	}
 	return out
 }
+
+// decodeParallelMinBytes: a smaller row is decoded whole.
+const decodeParallelMinBytes = 4 << 20
+
+// DecodeLedgerEventParallel decodes a stored row exactly as json.Unmarshal
+// does, with a large row's timeline entries decoded in parallel: the
+// 17 MB row behind an older renderer's 13.9 MB page took 66 ms to decode on
+// one core. A row the skim cannot follow is decoded whole.
+func DecodeLedgerEventParallel(raw []byte) (LedgerEvent, error) {
+	var event LedgerEvent
+	if len(raw) < decodeParallelMinBytes {
+		err := json.Unmarshal(raw, &event)
+		return event, err
+	}
+	s := skimmer{data: raw, row: true}
+	timelineStart, timelineEnd := -1, -1
+	err := s.object(func(key []byte, start, end int) error {
+		if string(key) == "Timeline" {
+			timelineStart, timelineEnd = start, end
+		}
+		return nil
+	})
+	if err == nil {
+		err = s.err
+	}
+	var spans [][2]int
+	if err == nil && timelineStart >= 0 && raw[timelineStart] == '[' {
+		var parallel bool
+		spans, parallel = timelineElementSpans(raw, timelineStart, timelineEnd)
+		if !parallel {
+			spans = spans[:0]
+			walk := skimmer{data: raw, pos: timelineStart}
+			if walkErr := walk.array(func(start, end int) error {
+				spans = append(spans, [2]int{start, end})
+				return nil
+			}); walkErr != nil || walk.pos != timelineEnd {
+				spans = nil
+			}
+		}
+	}
+	if spans == nil {
+		err := json.Unmarshal(raw, &event)
+		return event, err
+	}
+	head := make([]byte, 0, timelineStart+len("null")+len(raw)-timelineEnd)
+	head = append(head, raw[:timelineStart]...)
+	head = append(head, "null"...)
+	head = append(head, raw[timelineEnd:]...)
+	if err := json.Unmarshal(head, &event); err != nil {
+		return LedgerEvent{}, err
+	}
+	event.Timeline = make([]TimelineEntry, len(spans))
+	if err := runSkimRanges(spans, true, func(from, to int) error {
+		for index := from; index < to; index++ {
+			if err := json.Unmarshal(raw[spans[index][0]:spans[index][1]], &event.Timeline[index]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return LedgerEvent{}, err
+	}
+	if len(spans) == 0 {
+		event.Timeline = []TimelineEntry{}
+	}
+	return event, nil
+}

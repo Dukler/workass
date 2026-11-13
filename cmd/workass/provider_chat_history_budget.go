@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"runtime"
+	"sync"
 
 	"workass/internal/wire"
 )
@@ -111,7 +116,86 @@ func finishArchiveRow(row []any, stateDir string, opts []archiveReadOptions, res
 	if err := finishArchiveRowValue(row, stateDir, opts, resolved); err != nil {
 		return nil, err
 	}
-	return json.Marshal(row[0])
+	return marshalArchiveRow(row[0])
+}
+
+// marshalParallelEvents: a row with more events than this has them encoded
+// in parallel.
+const marshalParallelEvents = 2048
+
+// marshalArchiveRow is json.Marshal(row), byte for byte, with a large row's
+// events encoded on every core: encoding the 13.9 MB row of an older
+// renderer's page took 40 ms on one.
+func marshalArchiveRow(row any) ([]byte, error) {
+	message, ok := row.(map[string]any)
+	events, isSlice := message["events"].([]any)
+	if !ok || !isSlice || len(events) < marshalParallelEvents {
+		return json.Marshal(row)
+	}
+	workers := max(2, min(8, runtime.GOMAXPROCS(0)))
+	chunks := make([][]byte, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	per := (len(events) + workers - 1) / workers
+	for worker := 0; worker < workers; worker++ {
+		from, to := worker*per, min(len(events), (worker+1)*per)
+		if from >= to {
+			continue
+		}
+		wg.Add(1)
+		go func(worker, from, to int) {
+			defer wg.Done()
+			chunks[worker], errs[worker] = json.Marshal(events[from:to])
+		}(worker, from, to)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	// The row with a placeholder where its events go, then the events,
+	// joined as one array encodes them.
+	var sentinel [16]byte
+	_, _ = rand.Read(sentinel[:])
+	placeholder := "\x00workass-events-" + hex.EncodeToString(sentinel[:])
+	shell := make(map[string]any, len(message))
+	for key, value := range message {
+		shell[key] = value
+	}
+	shell["events"] = placeholder
+	head, err := json.Marshal(shell)
+	if err != nil {
+		return nil, err
+	}
+	quoted, err := json.Marshal(placeholder)
+	if err != nil {
+		return nil, err
+	}
+	at := bytes.Index(head, quoted)
+	if at < 0 || bytes.Count(head, quoted) != 1 {
+		return json.Marshal(row)
+	}
+	size := len(head) - len(quoted) + 2
+	for _, chunk := range chunks {
+		size += len(chunk)
+	}
+	out := make([]byte, 0, size+rawReplySpare)
+	out = append(out, head[:at]...)
+	out = append(out, '[')
+	first := true
+	for _, chunk := range chunks {
+		if len(chunk) <= 2 {
+			continue
+		}
+		if !first {
+			out = append(out, ',')
+		}
+		out = append(out, chunk[1:len(chunk)-1]...)
+		first = false
+	}
+	out = append(out, ']')
+	return append(out, head[at+len(quoted):]...), nil
 }
 
 // finishArchiveRowValue is finishArchiveRow without the encoding.

@@ -1611,6 +1611,15 @@ func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 		result = RawResult(encoded)
 		validateRaw = false
 	}
+	if frame == nil && errText == nil && c.deflate && !validateRaw {
+		// A large reply is compressed on every core (segmented.go): one
+		// 13.9 MB page took 50 ms in one compressor.
+		if raw, ok := result.(RawResult); ok && len(raw) >= parallelDeflateMinBytes {
+			if built, size, err := encodeSegmentedReplyFrame(msg.ID, deflateParallel(raw)); err == nil {
+				frame, replyBytes = built, size
+			}
+		}
+	}
 	if frame != nil {
 		// Already framed, compressed.
 	} else if rawResult, ok := result.(RawResult); ok && errText == nil {

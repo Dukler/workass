@@ -62,3 +62,36 @@ func TestSegmentedReplyFrameInflatesToThePlainReply(t *testing.T) {
 		t.Fatalf("MarshalJSON differs: %v", err)
 	}
 }
+
+// A large reply compressed in parallel inflates to the same reply.
+func TestParallelDeflateInflatesToThePlainReply(t *testing.T) {
+	var plain bytes.Buffer
+	plain.WriteString(`[`)
+	for index := 0; plain.Len() < 5<<20; index++ {
+		if index > 0 {
+			plain.WriteByte(',')
+		}
+		plain.WriteString(`{"kind":"tool","title":"Read file ` + strings.Repeat("é", index%7) + `","n":` + string(rune('0'+index%10)) + `}`)
+	}
+	plain.WriteString(`]`)
+	result := deflateParallel(plain.Bytes())
+	if len(result.Parts) < 5 {
+		t.Fatalf("%d parts", len(result.Parts))
+	}
+	frame, _, err := encodeSegmentedReplyFrame(7, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := serverTextFramePayload(append([]byte{0x81}, frame[1:]...))
+	if !ok {
+		t.Fatal("not one frame")
+	}
+	got, err := io.ReadAll(flate.NewReader(io.MultiReader(bytes.NewReader(payload), strings.NewReader(inflateMessageTail))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"t":"reply","id":7,"result":` + plain.String() + `,"error":null}`
+	if string(got) != want {
+		t.Fatal("inflated reply differs")
+	}
+}
