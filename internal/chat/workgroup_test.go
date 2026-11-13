@@ -44,6 +44,7 @@ func TestDecodeLedgerEventForWorkGroupReducesLikeAWholeDecode(t *testing.T) {
 	}{
 		{"few calls", 5, 10},
 		{"small", 40, 10},
+		{"sequential skim", 60, 400},
 		{"parallel", 400, 4000},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
@@ -51,6 +52,9 @@ func TestDecodeLedgerEventForWorkGroupReducesLikeAWholeDecode(t *testing.T) {
 			raw, err := json.Marshal(row)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if shape.name == "sequential skim" && (len(raw) < workGroupSkimMinBytes || len(raw) >= skimParallelBytes) {
+				t.Fatalf("row is %d bytes, not a sequential skim", len(raw))
 			}
 			if shape.name == "parallel" && len(raw) < skimParallelBytes {
 				t.Fatalf("row is %d bytes, under the parallel threshold", len(raw))

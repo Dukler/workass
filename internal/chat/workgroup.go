@@ -262,6 +262,10 @@ func ReduceLedgerEventForWorkGroup(event LedgerEvent) (WorkGroupRow, bool) {
 	return row, true
 }
 
+// workGroupSkimMinBytes: a smaller row is decoded whole, which costs less
+// than skimming it first.
+const workGroupSkimMinBytes = 32 << 10
+
 // DecodeLedgerEventForWorkGroup decodes a stored ledger row for a work group
 // read: exactly as json.Unmarshal does, except that the calls a work group
 // leaves out with nothing of them (WorkGroupChild, WorkGroupFolded) are
@@ -272,7 +276,11 @@ func ReduceLedgerEventForWorkGroup(event LedgerEvent) (WorkGroupRow, bool) {
 // ReduceLedgerEventForWorkGroup may read the event.
 func DecodeLedgerEventForWorkGroup(raw []byte) (LedgerEvent, error) {
 	var event LedgerEvent
-	shells, err := skimLedgerEvent(raw)
+	var shells *skimmedRow
+	var err error
+	if len(raw) >= workGroupSkimMinBytes {
+		shells, err = skimLedgerEvent(raw)
+	}
 	if err != nil || shells == nil {
 		// Not a row whose work folds, or a shape the skim does not follow:
 		// the ordinary decode, which also reports any real error.
