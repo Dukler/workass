@@ -194,14 +194,34 @@ func (r *providerChatRuntime) FirstScreenReply(tabID string, limit int, opts arc
 	if err != nil || !found {
 		return nil, found, err
 	}
-	if known {
-		plain := append([]byte(nil), raw...)
-		go r.replies.put(key, revision, keepReply(plain))
+	if !known {
+		if conditional {
+			return conditionalRowsReply(raw, ifNoneMatch), true, nil
+		}
+		return raw, true, nil
 	}
+	// Compressed and hashed once, here: the reply goes out as the kept
+	// segment (no second compression on the socket, no second hash), and the
+	// next reader of this revision gets it as it is.
+	// A closed chat's read was just kept, compressed, by the warm cache.
+	kept, cached := keptReply{}, false
+	if summary, closed := r.closedSummary(chatID); closed {
+		kept, cached = r.cachedFirstScreen(summary, limit, opts)
+	}
+	if !cached {
+		kept = keepReply(raw)
+	}
+	if kept.deflated == nil {
+		if conditional {
+			return conditionalRowsReply(raw, ifNoneMatch), true, nil
+		}
+		return raw, true, nil
+	}
+	r.replies.put(key, revision, kept)
 	if conditional {
-		return conditionalRowsReply(raw, ifNoneMatch), true, nil
+		return kept.conditional(ifNoneMatch), true, nil
 	}
-	return raw, true, nil
+	return kept.result(), true, nil
 }
 
 // History page memo: a large page (an older renderer's page holding one row
