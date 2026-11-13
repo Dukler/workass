@@ -529,7 +529,11 @@ table.mdtable tbody tr:last-child td { border-bottom: 0; }
 .amsg.streaming .chatfind-text > *,
 .amsg.streaming .doclist > li,
 .amsg.streaming .mdtable tbody tr,
-.amsg.streaming .mdfresh { animation: mdfresh 280ms steps(1, end) both; }
+.amsg.streaming .mdfresh { animation: mdfresh 280ms steps(1, end) backwards; }
+/* backwards, not both: the fade ends at opacity 1, the element's own value,
+   so a finished fade can let go. Held with fill "both", every faded block of
+   the reply stayed an active animation that each later frame restyled and
+   frame-grid.ts walked (energy lane, 2026-11-13). */
 
 /* Settled: the same head at rest, heading the turn it summarizes. */
 .workfold { margin: 2px 0 12px; display: flex; flex-direction: column; }

@@ -27,7 +27,11 @@ type Started = { animationName: string; target: EventTarget | null; pseudoElemen
 export function alignStartedAnimation(doc: Pick<Document, 'getAnimations'>, event: Started): number {
   if (!isSteppedAnimation(event.animationName)) return 0;
   let moved = 0;
-  for (const animation of doc.getAnimations()) {
+  // Only the element that started it (and its pseudo-elements) can hold the
+  // animation; the whole document's list grows with every faded block.
+  const target = event.target as (Element & { getAnimations?: (o?: { subtree?: boolean }) => Animation[] }) | null;
+  const candidates = target && typeof target.getAnimations === 'function' ? target.getAnimations({ subtree: true }) : doc.getAnimations();
+  for (const animation of candidates) {
     if ((animation as CSSAnimation).animationName !== event.animationName) continue;
     const effect = animation.effect as KeyframeEffect | null;
     if (!effect || effect.target !== event.target) continue;
