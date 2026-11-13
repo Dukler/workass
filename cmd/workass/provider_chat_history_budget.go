@@ -108,6 +108,14 @@ func finishArchivePage(messages []any, stateDir string, opts []archiveReadOption
 // closed actor's row selection (closedHistoryRows) sizes rows with it too, so
 // both paths keep exactly the same rows.
 func finishArchiveRow(row []any, stateDir string, opts []archiveReadOptions, resolved map[string]string) ([]byte, error) {
+	if err := finishArchiveRowValue(row, stateDir, opts, resolved); err != nil {
+		return nil, err
+	}
+	return json.Marshal(row[0])
+}
+
+// finishArchiveRowValue is finishArchiveRow without the encoding.
+func finishArchiveRowValue(row []any, stateDir string, opts []archiveReadOptions, resolved map[string]string) error {
 	prefetchSessionImageSizes(row, stateDir)
 	annotateSessionImageSizes(row, stateDir)
 	sessionImageSizesOnDisk.flush(stateDir)
@@ -115,10 +123,7 @@ func finishArchiveRow(row []any, stateDir string, opts []archiveReadOptions, res
 	for _, opt := range opts {
 		opt.apply(row)
 	}
-	if err := rehydrateExternalSessionImagesShared(row, stateDir, resolved); err != nil {
-		return nil, err
-	}
-	return json.Marshal(row[0])
+	return rehydrateExternalSessionImagesShared(row, stateDir, resolved)
 }
 
 func actorHistorySuffixWithinBytes(messages []any, stateDir string, budget int64) ([]any, error) {

@@ -1200,6 +1200,10 @@ func (r *providerChatRuntime) DeleteChat(ctx context.Context, tabID, chatID stri
 	if r.scheduled != nil {
 		r.scheduled.CancelChat(strings.TrimSpace(tabID), strings.TrimSpace(chatID), "chat deleted")
 	}
+	// What was kept of its rows goes with it (provider_chat_work_group_pack.go).
+	if r.sessions != nil {
+		r.workGroupPacks().forgetChat(strings.TrimSpace(chatID))
+	}
 	drainErr := actor.coordinator.Drain(ctx)
 	closeErr := actor.coordinator.Close(ctx)
 	actor.mu.Unlock()

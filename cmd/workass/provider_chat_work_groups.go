@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
-	"path/filepath"
 	"strings"
 
 	"workass/internal/chat"
@@ -190,18 +188,28 @@ func applyWorkGroups(messages []any, ledger []chat.LedgerEvent) error {
 type workGroupRequest struct {
 	messageID string
 	offset    int
+	// limit (additive): at least this many entries, in whole chunks.
+	limit int
+	// compact (additive): calls as compactWorkGroupEvent sends them.
+	compact bool
+	// ifNoneMatch (additive): a page's etag the reader holds; the reply is
+	// then {etag, unchanged: true} while the page is still those bytes.
+	ifNoneMatch string
 }
 
 func parseWorkGroupRequest(raw any) (workGroupRequest, error) {
 	options := mapFromAnyMain(raw)
 	request := workGroupRequest{
-		messageID: strings.TrimSpace(fieldString(options, "messageId")),
-		offset:    intValue(options["offset"]),
+		messageID:   strings.TrimSpace(fieldString(options, "messageId")),
+		offset:      intValue(options["offset"]),
+		limit:       intValue(options["limit"]),
+		compact:     options["compact"] == true,
+		ifNoneMatch: fieldString(options, "ifNoneMatch"),
 	}
 	if request.messageID == "" {
 		return workGroupRequest{}, errors.New("work group requires a message id")
 	}
-	if request.offset < 0 {
+	if request.offset < 0 || request.limit < 0 {
 		return workGroupRequest{}, errors.New("work group offset must not be negative")
 	}
 	return request, nil
@@ -209,53 +217,31 @@ func parseWorkGroupRequest(raw any) (workGroupRequest, error) {
 
 // ProjectWorkGroupByTab is one page of a row's whole timeline (see the top of
 // this file): its entries from request.offset on, each projected and
-// finished under opts as a history page sends it, until workGroupPageBytes.
-func (r *providerChatRuntime) ProjectWorkGroupByTab(tabID string, request workGroupRequest, opts ...archiveReadOptions) (map[string]any, bool, error) {
+// finished under opts as a history page sends it, read from the row's pack
+// (provider_chat_work_group_pack.go). A page holds at least request.limit
+// entries when that is set, else up to workGroupPageBytes, of what the pack
+// has built so far.
+func (r *providerChatRuntime) ProjectWorkGroupByTab(tabID string, request workGroupRequest, opts ...archiveReadOptions) (any, bool, error) {
 	chatID, found, err := r.chatByTab(tabID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	timeline, found, err := r.ledgerTimeline(chatID, request.messageID)
-	if err != nil || !found {
-		return nil, found, err
-	}
-	total := timeline.length()
-	if request.offset > total {
-		return nil, false, fmt.Errorf("work group offset %d is past the row's %d entries", request.offset, total)
-	}
-	stateDir := filepath.Dir(r.sessions.path)
-	resolved := make(map[string]string)
-	events := make([]any, 0, min(total-request.offset, 1024))
-	used := 0
-	next := request.offset
-	for ; next < total; next++ {
-		entry, err := timeline.entry(next)
-		if err != nil {
+	store := r.workGroupPacks()
+	for attempt := 0; ; attempt++ {
+		pack, found, err := r.workGroupPack(chatID, request.messageID, request.compact, opts)
+		if err != nil || !found {
+			return nil, found, err
+		}
+		page, err := store.page(pack, request.offset, request.limit, workGroupPageBytes, request.ifNoneMatch)
+		if err == nil {
+			return page, true, nil
+		}
+		// A pack whose file went away (or whose build failed) is built again.
+		store.drop(pack)
+		if attempt > 0 {
 			return nil, false, err
 		}
-		projected, err := projectTimeline([]chat.TimelineEntry{entry})
-		if err != nil {
-			return nil, false, err
-		}
-		// Each entry is finished as the row it belongs to would be: lean
-		// payloads, summaries, deferred images.
-		holder := []any{map[string]any{"id": request.messageID, "role": "assistant", "status": "done", "events": projected}}
-		for _, opt := range opts {
-			opt.beforeBudget(holder)
-		}
-		encoded, err := finishArchiveRow(holder, stateDir, opts, resolved)
-		if err != nil {
-			return nil, false, err
-		}
-		if len(events) > 0 && used+len(encoded) > workGroupPageBytes {
-			break
-		}
-		used += len(encoded)
-		events = append(events, anySlice(mapFromAnyMain(holder[0])["events"])...)
 	}
-	return map[string]any{
-		"messageId": request.messageID, "offset": request.offset, "next": next, "total": total, "events": events,
-	}, true, nil
 }
 
 // rowTimeline is a committed row's timeline; a closed chat's is decoded from
@@ -278,32 +264,4 @@ func (t rowTimeline) entry(index int) (chat.TimelineEntry, error) {
 		return t.stored.Entry(index)
 	}
 	return t.entries[index], nil
-}
-
-func (r *providerChatRuntime) ledgerTimeline(chatID, messageID string) (rowTimeline, bool, error) {
-	if summary, closed := r.closedSummary(chatID); closed {
-		if summary.Deleted {
-			return rowTimeline{}, false, nil
-		}
-		raw, found, err := r.ledgers.ReadLedgerMessageRaw(chatID, closedView(summary), messageID)
-		if err = r.closedReadError(summary, err); err == nil {
-			if !found {
-				return rowTimeline{}, false, nil
-			}
-			stored, err := chat.ParseStoredTimeline(raw)
-			return rowTimeline{stored: stored, closed: true}, err == nil, err
-		}
-		if !errors.Is(err, errClosedActorChanged) {
-			return rowTimeline{}, false, err
-		}
-	}
-	actor, err := r.actor(chatID)
-	if err != nil {
-		return rowTimeline{}, false, err
-	}
-	event, found := actor.engine.ReadMessage(messageID)
-	if !found {
-		return rowTimeline{}, false, nil
-	}
-	return rowTimeline{entries: event.Timeline}, true, nil
 }

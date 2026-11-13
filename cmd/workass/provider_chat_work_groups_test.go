@@ -111,8 +111,8 @@ func TestWorkGroupsFoldSettledCallsAndReadThemBack(t *testing.T) {
 	want := read(eager)
 	// The rows a work group read leaves out, read back page by page, are
 	// exactly the row's events as a read without work groups sends them.
-	workGroupPageBytes = 2 << 10
-	defer func() { workGroupPageBytes = 1 << 20 }()
+	workGroupPageBytes, workGroupChunkBytes = 2<<10, 700
+	defer func() { workGroupPageBytes, workGroupChunkBytes = 1<<20, 48<<10 }()
 	wantGroup := readWorkGroup(t, eager, "wg-message-7")
 	if err := eager.Close(context.Background()); err != nil {
 		t.Fatal(err)
@@ -192,9 +192,13 @@ func readWorkGroup(t *testing.T, runtime *providerChatRuntime, messageID string)
 	var events []any
 	offset, pages := 0, 0
 	for {
-		page, found, err := runtime.ProjectWorkGroupByTab("tab-wg", workGroupRequest{messageID: messageID, offset: offset}, options)
+		reply, found, err := runtime.ProjectWorkGroupByTab("tab-wg", workGroupRequest{messageID: messageID, offset: offset}, options)
 		if err != nil || !found {
 			t.Fatalf("work group page at %d: %v %v", offset, found, err)
+		}
+		var page map[string]any
+		if err := json.Unmarshal(mustJSONBytes(t, reply), &page); err != nil {
+			t.Fatal(err)
 		}
 		pages++
 		events = append(events, anySlice(page["events"])...)

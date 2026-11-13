@@ -34,6 +34,8 @@ import (
 // not a rewrite of the transcript.
 type SQLActors struct {
 	db *store.DB
+	// stamps: the rows this process wrote (rowstamp.go).
+	stamps rowStamps
 }
 
 // NewSQLActors binds the chat actor tables of an open state database.
@@ -700,6 +702,7 @@ func (s *SQLStore) checkpointLocked(state State) error {
 	if cache != nil {
 		previousTools = cache.tools
 	}
+	s.actors.stamps.note(s.chatID, &plan, len(state.Ledger))
 	s.cache = plan.nextCache(cache, state.Ledger)
 	s.cache.tools = tools.nextToolsCache(previousTools, state.Tools)
 	s.journalRecords = 0

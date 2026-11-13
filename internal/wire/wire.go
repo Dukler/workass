@@ -510,6 +510,17 @@ func (h *Hub) RegisterHistoryRead(channel string, fn Handler) {
 	h.register(channel, fn, invokeHistoryRead)
 }
 
+// backgroundRead reports whether a history read's options mark it
+// {background: true}.
+func backgroundRead(args []any) bool {
+	for _, arg := range args {
+		if options, ok := arg.(map[string]any); ok && options["background"] == true {
+			return true
+		}
+	}
+	return false
+}
+
 // RegisterConcurrentRead installs a read-only handler that runs on its own
 // goroutine and replies whenever it finishes, waiting behind nothing and
 // holding nothing up. It is for a read that may legitimately take seconds
@@ -1434,9 +1445,14 @@ func (h *Hub) readLoop(c *client) {
 	// out-of-order replies part of the frozen protocol.
 	ordered := make(chan invokeMessage, outboundQueueFrameLimit)
 	history := make(chan invokeMessage, outboundQueueFrameLimit)
+	// A history read marked {background: true} (a prefetch nobody waits
+	// on) runs on a lane of its own, so it never delays one a reader waits
+	// for. An older daemon ignores the mark and reads it in order.
+	background := make(chan invokeMessage, outboundQueueFrameLimit)
 	readerDone := make(chan struct{})
 	orderedDone := make(chan struct{})
 	historyDone := make(chan struct{})
+	backgroundDone := make(chan struct{})
 	lane := func(queue <-chan invokeMessage, done chan<- struct{}) {
 		defer close(done)
 		for {
@@ -1455,15 +1471,18 @@ func (h *Hub) readLoop(c *client) {
 	}
 	go lane(ordered, orderedDone)
 	go lane(history, historyDone)
+	go lane(background, backgroundDone)
 	defer func() {
 		close(readerDone)
 		close(ordered)
 		close(history)
+		close(background)
 		// A handler that already began may have taken the controller lease. Let
 		// it leave the ordered boundary before drop releases that lease; otherwise
 		// it can finish after removal and resurrect a disconnected controller.
 		<-orderedDone
 		<-historyDone
+		<-backgroundDone
 	}()
 
 	// The decoder rejects a frame whose declared length passes the limit before
@@ -1499,6 +1518,9 @@ func (h *Hub) readLoop(c *client) {
 					continue
 				case invokeHistoryRead:
 					queue = history
+					if backgroundRead(msg.Args) {
+						queue = background
+					}
 				case invokeConcurrentRead:
 					go h.handleInvoke(c, msg)
 					continue
@@ -1566,11 +1588,32 @@ func (h *Hub) handleInvoke(c *client, msg invokeMessage) {
 	var frame []byte
 	replyBytes := 0
 	validateRaw := true
+	if segmented, ok := result.(SegmentedResult); ok && errText == nil {
+		// Kept compressed (segmented.go): a deflate socket gets the kept
+		// segments as they are; any other the plain bytes.
+		if c.deflate {
+			if built, size, err := encodeSegmentedReplyFrame(msg.ID, segmented); err == nil {
+				frame, replyBytes = built, size
+			}
+		}
+		if frame == nil {
+			plain, err := segmented.PlainBytes()
+			if err != nil {
+				s := err.Error()
+				errText = &s
+				result = nil
+			} else {
+				result = EncodedResult(plain)
+			}
+		}
+	}
 	if encoded, ok := result.(EncodedResult); ok {
 		result = RawResult(encoded)
 		validateRaw = false
 	}
-	if rawResult, ok := result.(RawResult); ok && errText == nil {
+	if frame != nil {
+		// Already framed, compressed.
+	} else if rawResult, ok := result.(RawResult); ok && errText == nil {
 		var rawErr error
 		frame, replyBytes, rawErr = encodeRawReplyFrame(msg.ID, rawResult, validateRaw)
 		if rawErr != nil {
