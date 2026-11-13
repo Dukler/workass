@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { after, before, beforeEach, test } from 'node:test';
+import { after, afterEach, before, beforeEach, test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer, type ViteDevServer } from 'vite';
@@ -38,6 +38,10 @@ before(async () => {
   ({ store: appStore } = await server.ssrLoadModule('/src/store/store.ts') as { store: typeof appStore });
   ({ setMachineRouter } = await server.ssrLoadModule('/src/wire/api.ts') as { setMachineRouter: typeof setMachineRouter });
 });
+
+// Each test pins the clock; give it back after each one, so a file run after
+// this one in the same process sees the real time.
+afterEach(() => { Date.now = realNow; });
 
 after(async () => { Date.now = realNow; setMachineRouter(undefined); appStore.clearToastTimers(); await server.close(); });
 
