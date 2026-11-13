@@ -70,7 +70,8 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 		if err != nil || !found || !bytes.Equal(raw, want[chatID]) {
 			t.Fatalf("%s: first screen differs from an open actor's (%v %v)", chatID, found, err)
 		}
-		if ok && !bytes.Equal(cached, want[chatID]) {
+		cachedRaw, _ := cached.plain()
+		if ok && !bytes.Equal(cachedRaw, want[chatID]) {
 			t.Fatalf("%s: kept first screen differs from an open actor's", chatID)
 		}
 		// A reply is framed inside its own buffer: the kept bytes are a copy.
@@ -149,7 +150,7 @@ func TestClosedFirstScreensAreKeptExactlyAndDroppedOnOpen(t *testing.T) {
 	total := lazy.firstScreens.bytes
 	counted := 0
 	for _, entry := range lazy.firstScreens.entries {
-		counted += len(entry.raw)
+		counted += len(entry.kept.deflated)
 	}
 	lazy.mu.Unlock()
 	if total != counted || total > firstScreenCacheBytes {

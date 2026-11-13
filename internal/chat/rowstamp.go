@@ -193,3 +193,10 @@ func (a *SQLActors) ReadLedgerMessageForPack(chatID, messageID string) (raw []by
 	}
 	return raw, seq, revision, true, nil
 }
+
+// Revision is the actor's committed revision.
+func (e *Engine) Revision() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state.Revision
+}

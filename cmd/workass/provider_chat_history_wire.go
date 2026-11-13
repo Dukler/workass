@@ -94,7 +94,7 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				return []any{}, nil
 			}
 			if _, requested := options["beforeMessageId"]; requested {
-				if messages, found, err := providerChats.ProjectArchivePageBeforeByTabRaw(
+				if messages, found, err := providerChats.ArchivePageBeforeReply(
 					stringArg(args, 0), fieldString(options, "beforeMessageId"), intValue(options["limit"]), read,
 				); err != nil {
 					return nil, err
@@ -118,6 +118,22 @@ func registerArchiveHandlers(hub *wire.Hub, _ *daemonState, runtimes ...*provide
 				// holds (a reload repainting a chat from its window cache).
 				// Without it the reply is the plain array, as before.
 				ifNoneMatch, conditional := options["ifNoneMatch"].(string)
+				if options["lastExchange"] == true {
+					// A chat's first screen, kept as its reply per chat
+					// revision (provider_chat_reply_memo.go).
+					reply, found, err := providerChats.FirstScreenReply(stringArg(args, 0), limit, read, conditional, ifNoneMatch)
+					if err != nil {
+						return nil, err
+					}
+					if found {
+						go providerChats.PrewarmChatByTab(stringArg(args, 0))
+						return reply, nil
+					}
+					if conditional {
+						return conditionalRowsReply(wire.EncodedResult("[]"), ifNoneMatch), nil
+					}
+					return []any{}, nil
+				}
 				if messages, found, err := recent(stringArg(args, 0), limit, read); err != nil {
 					return nil, err
 				} else if found {

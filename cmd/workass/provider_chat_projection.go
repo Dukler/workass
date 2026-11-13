@@ -511,14 +511,32 @@ func (r *providerChatRuntime) ProjectArchivePageBeforeByTabRaw(tabID, beforeMess
 	}
 	// The pages that complete a closed chat's first slice may already be in
 	// memory (provider_chat_first_screen.go).
-	if raw, ok := r.cachedSlicePage(chatID, beforeMessageID, limit, opts...); ok {
-		return raw, true, nil
+	if kept, ok := r.cachedSlicePage(chatID, beforeMessageID, limit, opts...); ok {
+		if raw, err := kept.plain(); err == nil {
+			return raw, true, nil
+		}
 	}
 	page, found, err := r.archivePageBeforeByChat(chatID, beforeMessageID, limit, opts...)
 	if err != nil || !found {
 		return nil, found, err
 	}
 	return page.raw(), true, nil
+}
+
+// ArchivePageBeforeReply is ProjectArchivePageBeforeByTabRaw as the reply a
+// socket sends: a kept page goes out as it was compressed.
+func (r *providerChatRuntime) ArchivePageBeforeReply(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (any, bool, error) {
+	if limit < 1 || limit > sessionProjectionMessageTail {
+		return nil, false, fmt.Errorf("archive page limit must be between 1 and %d", sessionProjectionMessageTail)
+	}
+	chatID, found, err := r.chatByTab(tabID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	if kept, ok := r.cachedSlicePage(chatID, beforeMessageID, limit, opts...); ok {
+		return kept.result(), true, nil
+	}
+	return r.ProjectArchivePageBeforeByTabRaw(tabID, beforeMessageID, limit, opts...)
 }
 
 func (r *providerChatRuntime) archivePageBeforeByTab(tabID, beforeMessageID string, limit int, opts ...archiveReadOptions) (archivePage, bool, error) {

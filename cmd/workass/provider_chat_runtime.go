@@ -68,8 +68,14 @@ type providerChatRuntime struct {
 	// firstScreens keeps closed chats' first screens
 	// (provider_chat_first_screen.go).
 	firstScreens firstScreenCache
-	bootErr      error
-	closed       bool
+	// firstScreensPlain is the same for a renderer that predates work
+	// groups.
+	firstScreensPlain firstScreenCache
+	// replies keeps chats' first screens as their replies, per revision
+	// (provider_chat_reply_memo.go).
+	replies replyMemo
+	bootErr error
+	closed  bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is

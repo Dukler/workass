@@ -65,11 +65,28 @@ var firstScreenWarmOptions = archiveReadOptions{deferMessageImages: true, leanTo
 // the slice with firstScreenWarmOptions.
 var firstScreenWarmSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true, workGroups: true}
 
+// A renderer that predates work groups opens a chat with the same reads
+// without them; its first slices are warmed after the current renderer's.
+var (
+	firstScreenWarmPlainOptions        = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true}
+	firstScreenWarmPlainSummaryOptions = archiveReadOptions{deferMessageImages: true, leanTools: true, leanTitles: true, toolSummaries: true}
+)
+
+// firstScreenShape is one renderer's first screen and slice reads.
+type firstScreenShape struct {
+	summary, page archiveReadOptions
+}
+
+var firstScreenShapes = []firstScreenShape{
+	{summary: firstScreenWarmSummaryOptions, page: firstScreenWarmOptions},
+	{summary: firstScreenWarmPlainSummaryOptions, page: firstScreenWarmPlainOptions},
+}
+
 type firstScreenEntry struct {
 	revision uint64
 	limit    int
 	opts     archiveReadOptions
-	raw      []byte
+	kept     keptReply
 }
 
 // tailSize is what a closed chat's tail came to under one read.
@@ -90,7 +107,7 @@ type sliceEntry struct {
 	revision uint64
 	opts     archiveReadOptions
 	activity int64
-	pages    map[slicePageKey][]byte
+	pages    map[slicePageKey]keptReply
 	bytes    int
 }
 
@@ -117,8 +134,10 @@ func (r *providerChatRuntime) lastExchangeRawByChat(chatID string, limit int, op
 	cacheable := closed && len(opts) <= 1
 	opt := singleReadOption(opts)
 	if cacheable {
-		if raw, ok := r.cachedFirstScreen(summary, limit, opt); ok {
-			return raw, true, nil
+		if kept, ok := r.cachedFirstScreen(summary, limit, opt); ok {
+			if raw, err := kept.plain(); err == nil {
+				return raw, true, nil
+			}
 		}
 	}
 	page, found, err := r.archivePageByChat(chatID, actorHistoryTail, limit, true, opts...)
@@ -153,16 +172,26 @@ func copyReply(raw []byte) wire.EncodedResult {
 	return out
 }
 
-// cachedFirstScreen returns a copy of the kept reply (the hub frames a reply
-// inside its buffer) when it is this read of the chat as it is now.
-func (r *providerChatRuntime) cachedFirstScreen(summary chat.ActorSummary, limit int, opts archiveReadOptions) (wire.EncodedResult, bool) {
+// screenCache is the cache of one read shape: the current renderer's (work
+// groups) or an older one's, each kept compressed (keptReply), so keeping
+// both costs less memory than one did kept plain.
+func (r *providerChatRuntime) screenCache(opts archiveReadOptions) *firstScreenCache {
+	if opts.workGroups {
+		return &r.firstScreens
+	}
+	return &r.firstScreensPlain
+}
+
+// cachedFirstScreen returns the kept reply when it is this read of the chat
+// as it is now.
+func (r *providerChatRuntime) cachedFirstScreen(summary chat.ActorSummary, limit int, opts archiveReadOptions) (keptReply, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.firstScreens.entries[summary.ChatID]
+	entry, ok := r.screenCache(opts).entries[summary.ChatID]
 	if !ok || !r.closedCurrentLocked(summary) || entry.revision != summary.Revision || entry.limit != limit || entry.opts != opts {
-		return nil, false
+		return keptReply{}, false
 	}
-	return copyReply(entry.raw), true
+	return entry.kept, true
 }
 
 // storeFirstScreen keeps raw as the chat's first screen, if the chat is still
@@ -171,22 +200,28 @@ func (r *providerChatRuntime) storeFirstScreen(summary chat.ActorSummary, limit 
 	if len(raw) > firstScreenEntryBytes {
 		return
 	}
+	r.storeFirstScreenKept(summary, limit, opts, keepReply(raw))
+}
+
+func (r *providerChatRuntime) storeFirstScreenKept(summary chat.ActorSummary, limit int, opts archiveReadOptions, kept keptReply) {
+	if kept.deflated == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed || !r.closedCurrentLocked(summary) {
 		return
 	}
-	previous := len(r.firstScreens.entries[summary.ChatID].raw)
-	if r.firstScreens.bytes-previous+len(raw) > firstScreenCacheBytes {
+	cache := r.screenCache(opts)
+	previous := len(cache.entries[summary.ChatID].kept.deflated)
+	if cache.bytes-previous+len(kept.deflated) > firstScreenCacheBytes {
 		return
 	}
-	if r.firstScreens.entries == nil {
-		r.firstScreens.entries = make(map[string]firstScreenEntry)
+	if cache.entries == nil {
+		cache.entries = make(map[string]firstScreenEntry)
 	}
-	r.firstScreens.entries[summary.ChatID] = firstScreenEntry{
-		revision: summary.Revision, limit: limit, opts: opts, raw: append([]byte(nil), raw...),
-	}
-	r.firstScreens.bytes += len(raw) - previous
+	cache.entries[summary.ChatID] = firstScreenEntry{revision: summary.Revision, limit: limit, opts: opts, kept: kept}
+	cache.bytes += len(kept.deflated) - previous
 }
 
 // tailKnownLarge reports whether this read of the closed chat's tail is known
@@ -198,7 +233,7 @@ func (r *providerChatRuntime) tailKnownLarge(summary chat.ActorSummary, limit in
 	opt := singleReadOption(opts)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	known, ok := r.firstScreens.tails[summary.ChatID]
+	known, ok := r.screenCache(opt).tails[summary.ChatID]
 	return ok && r.closedCurrentLocked(summary) && known.revision == summary.Revision && known.limit == limit && known.opts == opt && !known.small
 }
 
@@ -212,42 +247,46 @@ func (r *providerChatRuntime) recordTailSize(summary chat.ActorSummary, limit in
 	if r.closed || !r.closedCurrentLocked(summary) {
 		return
 	}
-	if r.firstScreens.tails == nil {
-		r.firstScreens.tails = make(map[string]tailSize)
+	cache := r.screenCache(singleReadOption(opts))
+	if cache.tails == nil {
+		cache.tails = make(map[string]tailSize)
 	}
-	r.firstScreens.tails[summary.ChatID] = tailSize{revision: summary.Revision, limit: limit, opts: singleReadOption(opts), small: small}
+	cache.tails[summary.ChatID] = tailSize{revision: summary.Revision, limit: limit, opts: singleReadOption(opts), small: small}
 }
 
 // cachedSlicePage returns a copy of a kept page of a closed chat's first
 // slice when it is this read of the chat as it is now.
-func (r *providerChatRuntime) cachedSlicePage(chatID, beforeMessageID string, limit int, opts ...archiveReadOptions) (wire.EncodedResult, bool) {
+func (r *providerChatRuntime) cachedSlicePage(chatID, beforeMessageID string, limit int, opts ...archiveReadOptions) (keptReply, bool) {
 	if len(opts) > 1 {
-		return nil, false
+		return keptReply{}, false
 	}
 	opt := singleReadOption(opts)
 	chatID = strings.TrimSpace(chatID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.firstScreens.slices[chatID]
+	entry, ok := r.screenCache(opt).slices[chatID]
 	current, closed := r.summaries[chatID]
 	if !ok || !closed || current.Revision != entry.revision || entry.opts != opt {
-		return nil, false
+		return keptReply{}, false
 	}
-	raw, ok := entry.pages[slicePageKey{before: strings.TrimSpace(beforeMessageID), limit: limit}]
-	if !ok {
-		return nil, false
-	}
-	return copyReply(raw), true
+	kept, ok := entry.pages[slicePageKey{before: strings.TrimSpace(beforeMessageID), limit: limit}]
+	return kept, ok
 }
 
 // storeSlice keeps the pages of a closed chat's first slice if the chat is
 // still closed at the revision they were read at, evicting less recently
 // active chats' slices to make room; a chat less recent than all of them is
 // not kept.
-func (r *providerChatRuntime) storeSlice(summary chat.ActorSummary, opts archiveReadOptions, pages map[slicePageKey][]byte) bool {
+func (r *providerChatRuntime) storeSlice(summary chat.ActorSummary, opts archiveReadOptions, plain map[slicePageKey][]byte) bool {
 	size := 0
-	for _, raw := range pages {
-		size += len(raw)
+	pages := make(map[slicePageKey]keptReply, len(plain))
+	for key, raw := range plain {
+		kept := keepReply(raw)
+		if kept.deflated == nil {
+			return false
+		}
+		pages[key] = kept
+		size += len(kept.deflated)
 	}
 	if size == 0 || size > slicePageCacheBytes {
 		return false
@@ -257,7 +296,7 @@ func (r *providerChatRuntime) storeSlice(summary chat.ActorSummary, opts archive
 	if r.closed || !r.closedCurrentLocked(summary) {
 		return false
 	}
-	cache := &r.firstScreens
+	cache := r.screenCache(opts)
 	cache.dropSliceLocked(summary.ChatID)
 	for cache.sliceBytes+size > slicePageCacheBytes {
 		oldest, found := "", false
@@ -275,11 +314,7 @@ func (r *providerChatRuntime) storeSlice(summary chat.ActorSummary, opts archive
 	if cache.slices == nil {
 		cache.slices = make(map[string]sliceEntry)
 	}
-	kept := make(map[slicePageKey][]byte, len(pages))
-	for key, raw := range pages {
-		kept[key] = append([]byte(nil), raw...)
-	}
-	cache.slices[summary.ChatID] = sliceEntry{revision: summary.Revision, opts: opts, activity: summary.LastActivityAt, pages: kept, bytes: size}
+	cache.slices[summary.ChatID] = sliceEntry{revision: summary.Revision, opts: opts, activity: summary.LastActivityAt, pages: pages, bytes: size}
 	cache.sliceBytes += size
 	return true
 }
@@ -294,12 +329,14 @@ func (c *firstScreenCache) dropSliceLocked(chatID string) {
 // dropFirstScreenLocked forgets everything kept for the chat; the caller holds
 // r.mu.
 func (r *providerChatRuntime) dropFirstScreenLocked(chatID string) {
-	if entry, ok := r.firstScreens.entries[chatID]; ok {
-		r.firstScreens.bytes -= len(entry.raw)
-		delete(r.firstScreens.entries, chatID)
+	for _, cache := range []*firstScreenCache{&r.firstScreens, &r.firstScreensPlain} {
+		if entry, ok := cache.entries[chatID]; ok {
+			cache.bytes -= len(entry.kept.deflated)
+			delete(cache.entries, chatID)
+		}
+		delete(cache.tails, chatID)
+		cache.dropSliceLocked(chatID)
 	}
-	delete(r.firstScreens.tails, chatID)
-	r.firstScreens.dropSliceLocked(chatID)
 }
 
 // runFirstScreenWarm reads the first slices of closed chats once, after
@@ -342,14 +379,16 @@ func (r *providerChatRuntime) warmFirstScreens(ctx context.Context) int {
 		return summaries[i].ChatID < summaries[j].ChatID
 	})
 	kept := 0
-	for _, summary := range summaries {
-		if ctx.Err() != nil {
-			break
+	for index, shape := range firstScreenShapes {
+		for _, summary := range summaries {
+			if ctx.Err() != nil {
+				return kept
+			}
+			if r.warmChatShape(summary, shape) && index == 0 {
+				kept++
+			}
+			time.Sleep(time.Millisecond)
 		}
-		if r.warmChat(summary) {
-			kept++
-		}
-		time.Sleep(time.Millisecond)
 	}
 	return kept
 }
@@ -357,7 +396,20 @@ func (r *providerChatRuntime) warmFirstScreens(ctx context.Context) int {
 // warmChat reads a closed chat's first screen and, when that is not the whole
 // first slice, the pages a renderer reads after it. It reports whether the
 // first screen is kept.
+// It reads both renderers' shapes; the current one's decides.
 func (r *providerChatRuntime) warmChat(summary chat.ActorSummary) bool {
+	kept := r.warmChatShape(summary, firstScreenShapes[0])
+	for _, shape := range firstScreenShapes[1:] {
+		r.warmChatShape(summary, shape)
+	}
+	return kept
+}
+
+func (r *providerChatRuntime) warmChatShape(summary chat.ActorSummary, shape firstScreenShape) bool {
+	// The chat may have opened, or changed, since the list was taken.
+	if current, closed := r.closedSummary(summary.ChatID); !closed || current.Revision != summary.Revision {
+		return false
+	}
 	if summary.Deleted || summary.LedgerCount == 0 {
 		return false
 	}
@@ -367,12 +419,12 @@ func (r *providerChatRuntime) warmChat(summary chat.ActorSummary) bool {
 	if err != nil || stored > warmTailStoredBytes {
 		return false
 	}
-	first, found, err := r.lastExchangeRawByChat(summary.ChatID, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
+	first, found, err := r.lastExchangeRawByChat(summary.ChatID, firstScreenWarmLimit, shape.summary)
 	if err != nil || !found {
 		return false
 	}
-	_, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, firstScreenWarmSummaryOptions)
-	r.warmSlice(summary, first)
+	_, kept := r.cachedFirstScreen(summary, firstScreenWarmLimit, shape.summary)
+	r.warmSlice(summary, first, shape.page)
 	return kept
 }
 
@@ -380,7 +432,7 @@ func (r *providerChatRuntime) warmChat(summary chat.ActorSummary) bool {
 // it pages (desktop/renderer2 store ensureRecentHistory): before the oldest
 // row it has, for the rows its slice still lacks, until it has them all or a
 // page brings nothing new.
-func (r *providerChatRuntime) warmSlice(summary chat.ActorSummary, first []byte) {
+func (r *providerChatRuntime) warmSlice(summary chat.ActorSummary, first []byte, opts archiveReadOptions) {
 	ids, ok := replyMessageIDs(first)
 	want := min(firstScreenWarmLimit, summary.LedgerCount)
 	if !ok || len(ids) >= want {
@@ -389,7 +441,7 @@ func (r *providerChatRuntime) warmSlice(summary chat.ActorSummary, first []byte)
 	pages := make(map[slicePageKey][]byte)
 	for len(ids) < want && len(ids) > 0 {
 		boundary, limit := ids[0], want-len(ids)
-		page, found, err := r.archivePageBeforeByChat(summary.ChatID, boundary, limit, firstScreenWarmOptions)
+		page, found, err := r.archivePageBeforeByChat(summary.ChatID, boundary, limit, opts)
 		if err != nil || !found {
 			return
 		}
@@ -422,7 +474,7 @@ func (r *providerChatRuntime) warmSlice(summary chat.ActorSummary, first []byte)
 		take := prefix[max(0, len(prefix)-(want-len(ids))):]
 		ids = append(append([]string(nil), take...), ids...)
 	}
-	r.storeSlice(summary, firstScreenWarmOptions, pages)
+	r.storeSlice(summary, opts, pages)
 }
 
 // replyMessageIDs are the stable ids of a history reply's rows, in order.
