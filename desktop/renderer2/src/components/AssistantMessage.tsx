@@ -104,14 +104,49 @@ function EventView({ ev }: { ev: TimelineEvent }) {
 // "hace N s", then at the minute, hour or day it turns over, so an idle window
 // is not woken every second for a label that says "hace 2 h" (energy lane,
 // 2026-11-12).
+// And only while it can be seen: the time shows on hover or keyboard focus
+// (app.css .stamp-time, opacity 0 otherwise). A hidden label that changed
+// every second still repainted the page each second, and on macOS every
+// repaint keeps the display link running for about a second: ~9 ms/s and 35
+// GPU wakeups a second for the minute after each reply (energy lane,
+// 2026-11-13). It reads the time afresh the moment it is shown.
+function stampShownBy(span: Element | null): { reply: Element | null; stamp: Element | null } {
+  return { reply: span?.closest('.amsg') ?? null, stamp: span?.closest('.stamp') ?? null };
+}
+
 function RelStamp({ at }: { at: string | null }) {
   const [, tick] = useState(0);
+  const [shown, setShown] = useState(false);
+  const ref = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
+    const { reply, stamp } = stampShownBy(ref.current);
+    if (!reply) { setShown(true); return undefined; }   // not in a reply row: always shown
+    let hover = reply.matches(':hover');
+    let focus = !!stamp?.matches(':focus-within');
+    const update = () => setShown(hover || focus);
+    const enter = () => { hover = true; update(); };
+    const leave = () => { hover = false; update(); };
+    const focusIn = () => { focus = true; update(); };
+    const focusOut = () => { focus = !!stamp?.matches(':focus-within'); update(); };
+    update();
+    reply.addEventListener('mouseenter', enter);
+    reply.addEventListener('mouseleave', leave);
+    stamp?.addEventListener('focusin', focusIn);
+    stamp?.addEventListener('focusout', focusOut);
+    return () => {
+      reply.removeEventListener('mouseenter', enter);
+      reply.removeEventListener('mouseleave', leave);
+      stamp?.removeEventListener('focusin', focusIn);
+      stamp?.removeEventListener('focusout', focusOut);
+    };
+  }, []);
+  useEffect(() => {
+    if (!shown) return undefined;
     const then = at ? new Date(at).getTime() : NaN;
     if (Number.isNaN(then)) return undefined;
     return subscribeUntil(() => tick((n) => n + 1), (now) => stampTurnsOver(then, now));
-  }, [at]);
-  return <span>{relTime(at)}</span>;
+  }, [at, shown]);
+  return <span ref={ref}>{relTime(at)}</span>;
 }
 
 
