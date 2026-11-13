@@ -103,6 +103,46 @@ describe('cache-first reload', () => {
     assert.equal(store.provisionalFirstScreens.size, 0, 'the rows count as read once confirmed');
   });
 
+  test('cached rows count as a first screen only until boot revalidates them', async () => {
+    // The kept first screen is often just the last exchange, shorter than the
+    // screen. Reading an older page from it raced the revalidation and, when
+    // its taller rows were drawn first, the transcript held their height for
+    // 700 ms with the newest message out of view (e2e reload 2026-11-13).
+    prime();
+    const before: boolean[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const store = boot({
+      getSession: async () => ({ unchanged: true, etag: 'shell-1' }),
+      archiveLoad: async (_tabId: string, o: any) => {
+        before.push(store.showsFirstScreenOnly('tab-a'));
+        await gate;
+        return o.ifNoneMatch === 'rows-1' ? { unchanged: true, etag: 'rows-1' } : [];
+      },
+    });
+    assert.equal(store.showsFirstScreenOnly('tab-a'), true, 'painted from the cache, nothing older is read yet');
+    assert.equal(store.showsFirstScreenOnly('tab-b'), false);
+    const booted = store.init();
+    await flush();
+    assert.deepEqual(before, [true], 'still held while the revalidation is in flight');
+    release();
+    await booted;
+    await flush();
+    assert.equal(store.showsFirstScreenOnly('tab-a'), false, 'released once the slice settles');
+  });
+
+  test('cached rows boot never revalidates load older history as any chat does', async () => {
+    prime();
+    const store = boot({
+      getSession: async () => ({ ...shell([shellChat('tab-a'), shellChat('tab-b')], 'shell-4'), activeId: 'tab-b' }),
+      archiveLoad: async () => [],
+    });
+    assert.equal(store.showsFirstScreenOnly('tab-a'), true);
+    await store.init();
+    await flush();
+    assert.equal(store.showsFirstScreenOnly('tab-a'), false);
+  });
+
   test('changed rows replace the painted ones in place', async () => {
     prime();
     const fresh = [row('m-5', 'user', 'new question'), row('m-6', 'assistant', 'new answer')];

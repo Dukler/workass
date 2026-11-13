@@ -602,6 +602,14 @@ export class Store {
   // (or the load ends), and firstScreens holds the chats still showing only it.
   private recentFirstRows = new Map<string, Promise<void>>();
   private firstScreens = new Set<string>();
+  // A chat a reload painted from the window cache shows only the rows kept
+  // there (since first screens come in parts, often just its last exchange)
+  // until boot revalidates them and brings the rest of the slice. Until then
+  // it counts as showing its first screen only: an older page read from the
+  // cached rows raced that revalidation, and when its taller rows reached the
+  // screen first, the followed transcript held their height for
+  // HELD_HEIGHT_RELEASE_MS with the newest message above the view.
+  private cachedFirstScreens = new Set<string>();
   private olderHistoryLoads = new Map<string, Promise<OlderHistoryOutcome>>();
   // The next older page read ahead while a reader nears the top of what is
   // loaded (prefetchOlderHistory): one page, of the chat on screen only.
@@ -832,6 +840,7 @@ export class Store {
           const entry = { etag: firstEntry.etag, text: first.text, chatId: String(active.chatId) };
           this.provisionalFirstScreens.set(active.id, entry);
           this.firstScreenCache.set(active.id, entry);
+          this.cachedFirstScreens.add(active.id);
         }
       } catch { /* an unreadable entry paints nothing; boot reads the chat */ }
     }
@@ -880,6 +889,7 @@ export class Store {
     writeWireCache(SESSION_SHELL_CACHE, '', '');
     this.firstScreenCache.delete(tabId);
     this.provisionalFirstScreens.delete(tabId);
+    this.cachedFirstScreens.delete(tabId);
     const kept = parseWireCache<{ tabId?: unknown }>(readWireCache(FIRST_SCREEN_CACHE));
     if (kept?.tabId === tabId) writeWireCache(FIRST_SCREEN_CACHE, '', '');
   }
@@ -1722,7 +1732,8 @@ export class Store {
       this.recentFirstRows.delete(chatId);
       // A slice that ended early (a failed page, a replaced chat) still lets
       // the transcript load older history on its own.
-      if (this.firstScreens.delete(chatId)) this.bumpApp(false);
+      const cached = this.cachedFirstScreens.delete(chatId);
+      if (this.firstScreens.delete(chatId) || cached) this.bumpApp(false);
     }
   }
 
@@ -1802,7 +1813,7 @@ export class Store {
   // its recent slice is still arriving. Loading older history then would read
   // a page the slice may already fill the screen without.
   showsFirstScreenOnly(chatId: string): boolean {
-    return this.firstScreens.has(chatId);
+    return this.firstScreens.has(chatId) || this.cachedFirstScreens.has(chatId);
   }
 
   // Settles once a recent-history load of the chat has something to paint:
@@ -4520,6 +4531,9 @@ export class Store {
       // reconciliation path continues pulling any step that failed above.
       this.state.hydrated = true;
       this.booting = false;
+      // A cached first screen boot did not start revalidating (another chat
+      // is active now, a failed read) loads older history as any chat does.
+      for (const tabId of [...this.cachedFirstScreens]) if (!this.recentHistoryLoads.has(tabId)) this.cachedFirstScreens.delete(tabId);
       this.bumpApp(false);
       this.recoverIdleQueues();
       this.refreshAllSpawnedWork();
