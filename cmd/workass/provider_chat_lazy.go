@@ -339,9 +339,31 @@ func (r *providerChatRuntime) closedHistoryRows(summary chat.ActorSummary, befor
 	if rows := window.End - window.Start; rows > 0 && rows <= closedParallelRows {
 		err = r.closedHistoryRowsParallel(summary, view, window, opts, prepare, visit)
 	} else {
-		err = r.ledgers.WalkLedgerBackwardDecoding(summary.ChatID, view, window, decodeLedgerRowFor(opts), func(event chat.LedgerEvent) (bool, error) {
+		// When which older rows are live is not known yet, it is read while
+		// the newest row decodes (the database has one connection: after
+		// the walk's first read, before the row's decoding, the CPU work of
+		// which the scan then overlaps).
+		// Only when the newest row is large enough to be the page alone.
+		var ahead chan liveScanResult
+		first := true
+		decode := decodeLedgerRowFor(opts)
+		err = r.ledgers.WalkLedgerBackwardDecoding(summary.ChatID, view, window, func(raw []byte) (chat.LedgerEvent, error) {
+			if first {
+				first = false
+				if int64(len(raw)) >= historyPageBytes(opts) {
+					ahead = r.scanLiveRowsAhead(summary, window)
+				}
+			}
+			return decode(raw)
+		}, func(event chat.LedgerEvent) (bool, error) {
 			return visit(event, nil, nil, nil)
 		})
+		if ahead != nil && err == nil && !live && decodedFrom-1 > window.Start {
+			if scanned := <-ahead; scanned.err == nil {
+				live = liveRowInWindow(scanned.live, chat.LedgerWindow{Start: window.Start, End: decodedFrom - 1, Count: window.Count})
+				decodedFrom = window.Start + 1 // known: no scan below
+			}
+		}
 	}
 	if err != nil {
 		return nil, nil, r.closedReadError(summary, err)
@@ -887,4 +909,36 @@ func (r *providerChatRuntime) backfillLiveRows(ctx context.Context) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+type liveScanResult struct {
+	live []int
+	err  error
+}
+
+// scanLiveRowsAhead starts reading which of the window's older rows are live
+// when nothing kept already says, and returns nil when something does.
+func (r *providerChatRuntime) scanLiveRowsAhead(summary chat.ActorSummary, window chat.LedgerWindow) chan liveScanResult {
+	if window.End-1 <= window.Start {
+		return nil
+	}
+	if _, ok := summary.LiveRows(); ok {
+		return nil
+	}
+	if _, ok := r.keptLiveRows(summary.ChatID, summary.Revision); ok {
+		return nil
+	}
+	r.mu.Lock()
+	scan := r.liveScans[summary.ChatID]
+	covered := scan != nil && scan.revision == summary.Revision && scan.scannedFrom <= window.Start+1
+	r.mu.Unlock()
+	if covered {
+		return nil
+	}
+	out := make(chan liveScanResult, 1)
+	go func() {
+		live, err := r.ledgers.ScanLedgerLiveRows(summary.ChatID, closedView(summary), window.Start, window.End-1)
+		out <- liveScanResult{live: live, err: err}
+	}()
+	return out
 }
