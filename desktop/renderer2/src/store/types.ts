@@ -453,7 +453,7 @@ export interface AppState {
   // Drives the "sin conexión" banner and blocks sends while offline. Transient —
   // never persisted; a fresh load starts optimistically 'connected'.
   connection: ConnStatus;
-  meta?: { rootDir?: string; workspaceDir?: string; profile?: WorkassRuntimeProfile; daemon?: boolean; sessionSaveMode?: 'lean-payload-v2'; workspaceRebindMode?: 'transactional-v1'; chatOrderMode?: 'partial-v1' };
+  meta?: { rootDir?: string; workspaceDir?: string; profile?: WorkassRuntimeProfile; daemon?: boolean; sessionSaveMode?: 'lean-payload-v2'; workspaceRebindMode?: 'transactional-v1'; chatOrderMode?: 'partial-v1'; firstScreenMode?: 'parts-v1' };
   hasBrowserChannels: boolean;
   processes: ProcessSummary[];
   hasProcChannels: boolean;

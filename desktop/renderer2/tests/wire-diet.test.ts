@@ -576,6 +576,31 @@ describe('long chats: brief spawned work and work groups', () => {
     assert.deepEqual(tail.events.map((event: any) => event.at), [1]);
   });
 
+  test('a first screen comes as its last exchange and, in the same flight, the rows before it', async () => {
+    const local = chat('tab-10');
+    local.messages = [];
+    (local as any).messageCount = 4;
+    const row = (id: string, role: string) => ({ id, role, status: 'done', content: id, events: [] });
+    const calls: any[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const store = subject([local], { archiveLoad: async (_tab: string, options: any) => {
+      calls.push(options);
+      if (options.rest) return { etag: 'r', part: 'rest', complete: true, messages: [row('u1', 'user'), row('a2', 'assistant')] };
+      await gate;
+      return { etag: 'x', part: 'exchange', messages: [row('u3', 'user'), row('a4', 'assistant')] };
+    } });
+    store.state.meta = { firstScreenMode: 'parts-v1' };
+    const load = store.ensureRecentHistory('tab-10', 10);
+    await settle();
+    assert.equal(calls.length, 2, 'both parts are asked for before either arrives');
+    assert.equal(calls.find((options) => options.exchangeFirst)?.lastExchange, true);
+    release();
+    await load;
+    assert.deepEqual(store.chat('tab-10').messages.map((m: any) => m.id), ['u1', 'a2', 'u3', 'a4']);
+    assert.equal(calls.length, 2, 'no page was read after them');
+  });
+
   test('copying a long reply read in parts copies the whole reply', async () => {
     const history = await vite.ssrLoadModule('/src/chat/history.ts');
     const { copyWholeReply } = await vite.ssrLoadModule('/src/components/AssistantMessage.tsx');

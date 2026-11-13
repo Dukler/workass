@@ -1557,6 +1557,15 @@ export class Store {
     // revalidate them; another machine's are read exactly as before.
     const conditional = firstScreen && !ownerMachineId(resident);
     let firstScreenPainted: Promise<void> = Promise.resolve();
+    // A daemon that keeps first screens in parts (meta firstScreenMode) is
+    // asked for the last exchange, to paint, and in the same flight for the
+    // tail's rows before it, laid out right behind (no second round trip).
+    const parts = conditional && this.state.meta?.firstScreenMode === 'parts-v1';
+    const restRead = parts
+      ? this.guardedStep(`recent actor history rest (${chatId})`, () => call('archiveLoad', chatId, {
+        tail: limit, lastExchange: true, toolSummaries: true, ...HISTORY_READ_OPTIONS, rest: true, ifNoneMatch: '',
+      })).catch(() => undefined)
+      : undefined;
     let firstRowsReady = () => {};
     this.recentFirstRows.set(chatId, new Promise<void>((resolve) => { firstRowsReady = resolve; }));
     const load = (async () => {
@@ -1570,6 +1579,7 @@ export class Store {
             // its folded Worked row shows; a row reads the rest when it opens.
             tail: limit, ...(firstScreen ? { lastExchange: true, toolSummaries: true } : {}), ...HISTORY_READ_OPTIONS,
             ...(conditional ? { ifNoneMatch: repaint ? provisional!.etag : '' } : {}),
+            ...(parts ? { exchangeFirst: true } : {}),
           }),
         );
         projected = step.ok ? step.value : undefined;
@@ -1619,6 +1629,21 @@ export class Store {
       // A first screen is painted before the rest is asked for: reading those
       // rows can keep the daemon's cores busy while the frame is being made.
       await firstScreenPainted;
+      // The rest read in the same flight: the tail's rows before the
+      // exchange, when the daemon had them all.
+      if (restRead && messages.length < Math.min(limit, messageCount)) {
+        const step = await restRead;
+        const value = step && step.ok ? step.value as { part?: unknown; complete?: unknown; messages?: unknown } : undefined;
+        if (value && value.part === 'rest' && value.complete === true && Array.isArray(value.messages)) {
+          try {
+            const rest = actorMessages(value.messages as MirrorMsg[], chatId);
+            const seen = new Set(messages.map((message) => message.id));
+            if (!rest.some((message) => seen.has(message.id))) {
+              messages = [...rest.slice(-(Math.min(limit, messageCount) - messages.length)), ...messages];
+            }
+          } catch { /* paged in below */ }
+        }
+      }
       while (messages.length < Math.min(limit, messageCount) && messages[0]?.id) {
         const boundary = messages[0].id;
         const step = await this.guardedStep(
@@ -4570,6 +4595,7 @@ export class Store {
       sessionSaveMode: meta.sessionSaveMode === LEAN_SESSION_SAVE_MODE ? LEAN_SESSION_SAVE_MODE : undefined,
       workspaceRebindMode: meta.workspaceRebindMode === 'transactional-v1' ? 'transactional-v1' : undefined,
       chatOrderMode: meta.chatOrderMode === 'partial-v1' ? 'partial-v1' : undefined,
+      firstScreenMode: (meta as { firstScreenMode?: unknown }).firstScreenMode === 'parts-v1' ? 'parts-v1' : undefined,
     };
     if (this.state.groups.length) {
       reportShellCatalog(this.state.groups);

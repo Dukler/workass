@@ -946,6 +946,12 @@ export interface WorkassApi {
     // whole head) as {messageId, from, to, content, events}.
     longRows?: boolean;
     contentHead?: { messageId: string; before: number; all?: boolean; parts?: boolean };
+    // exchangeFirst and rest (additive, with lastExchange and ifNoneMatch):
+    // the first screen's last exchange, or the tail's rows before it
+    // ({etag, messages, part, complete?}); meta firstScreenMode says the
+    // daemon answers them.
+    exchangeFirst?: boolean;
+    rest?: boolean;
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
     // client holds. An older daemon ignores it and answers the plain array.
