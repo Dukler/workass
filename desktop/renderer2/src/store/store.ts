@@ -34,6 +34,7 @@ import { resolveModelSelection } from '../model-selection';
 import { adoptsTerminalJobResult, appendAssistantChunk, ensureAssistantResultAnchor, normalizeAssistantMessagePhase } from '../assistant-output.ts';
 import { chunkCanReveal } from '../stream-reveal';
 import { subscribeSecond } from '../second-tick';
+import { createBeat, type Beat } from '../frame-beat';
 import {
   contextUsageIdentityMatches,
   normalizeContextUsage,
@@ -935,6 +936,27 @@ export class Store {
       const set = this.listeners.get('clock');
       if ((!set || set.size === 0) && this.clockTimer) { this.clockTimer(); this.clockTimer = null; }
     };
+  }
+  // Streaming updates (reply chunks, thoughts, tool steps, heartbeats) render
+  // on the indicators' 30 fps beat (frame-beat.ts). Only in a real page: the
+  // tests and SSR bump at once, as before.
+  private streamBeat: Beat | null | undefined;
+  private bumpStreaming(topic: string): void {
+    if (this.streamBeat === undefined) {
+      this.streamBeat = typeof requestAnimationFrame === 'function' && typeof performance !== 'undefined'
+        ? createBeat((topics) => { for (const t of topics) this.bump(t); }, {
+          now: () => performance.now(),
+          hidden: documentHidden,
+          setTimeout: (fn, ms) => setTimeout(fn, ms),
+          clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+        })
+        : null;
+      if (this.streamBeat && typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', () => { if (!documentHidden()) this.streamBeat?.shown(); });
+      }
+    }
+    if (this.streamBeat) this.streamBeat.request(topic);
+    else this.bump(topic);
   }
   version(topic: string): number { return this.versions.get(topic) ?? 0; }
   bump(topic: string): void {
@@ -6905,7 +6927,7 @@ export class Store {
         // whole message, so nothing is ever left unshown. final_answer chunks
         // restructure the message and always render.
         const commentary = normalizeAssistantMessagePhase(e.phase) !== 'final_answer';
-        if (!wasRunning || !commentary || chunkCanReveal(before, e.chunk)) this.bump('msg:' + msg.id);   // isolated streaming re-render
+        if (!wasRunning || !commentary || chunkCanReveal(before, e.chunk)) this.bumpStreaming('msg:' + msg.id);   // isolated streaming re-render
         break;
       }
       case 'assistant-media': {
@@ -6951,7 +6973,7 @@ export class Store {
             at: Date.now(),
           });
           const pulseMsg = this.resolveMsg(e.id);
-          if (pulseMsg) this.bump('msg:' + pulseMsg.id);   // isolated re-render, like streaming
+          if (pulseMsg) this.bumpStreaming('msg:' + pulseMsg.id);   // isolated re-render, like streaming
           return;
         }
         let msg = this.resolveMsg(e.id);
@@ -6982,8 +7004,8 @@ export class Store {
         }
         this.applyAcp(msg, e.event);
         if (liveChat) this.markLiveTurnEvent(liveChat, e.id, e.event.kind === 'plan' ? 'plan' : 'acp');
-        this.bump('msg:' + msg.id);
-        this.bump(ACT);   // Tareas rail: live plan/tool activity
+        this.bumpStreaming('msg:' + msg.id);
+        this.bumpStreaming(ACT);   // Tareas rail: live plan/tool activity
         break;
       }
       case 'usage': {
