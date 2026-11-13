@@ -28,6 +28,7 @@ import { chatPane, nextPane, type RightPane } from './right-pane';
 import { catalogHashKey, stateDigestHash } from './digest-hash';
 import { actorMessages, HISTORY_READ_OPTIONS } from '../chat/history';
 import { loadWorkGroupEvents, prefetchWorkGroup } from '../chat/work-group';
+import { loadContentHead } from '../chat/long-row';
 import { CHAT_INITIAL_HISTORY, CHAT_MESSAGE_TAIL, CHAT_RETAINED_HISTORIES, preserveUnchangedFullHistories, releaseInactiveHistories } from '../chat/residency';
 import { afterNextPaint } from '../after-paint';
 import { redactSensitiveText } from '../redact';
@@ -7422,6 +7423,22 @@ export class Store {
     this.fullSpawnedWork.add(key);
     if (this.briefSpawnedWork.has(key)) void this.refreshSpawnedWork(chat);
   }
+  /** A long reply's part before what it holds (all: the whole reply). */
+  async loadContentHead(tabId: string, msg: Msg, all = false): Promise<boolean> {
+    if (!msg.contentFrom) return true;
+    const ok = await loadContentHead(tabId, msg, all);
+    // A refresh may have replaced the row object while the part loaded.
+    const current = this.chat(tabId)?.messages.find((message) => message.id === msg.id);
+    if (ok && current && current !== msg && current.contentFrom) await loadContentHead(tabId, current, true);
+    this.bump('msg:' + msg.id);
+    return ok;
+  }
+  /** Every long reply of the chat whole (find, copy). */
+  async completeLongRows(tabId: string): Promise<void> {
+    const partial = this.chat(tabId)?.messages.filter((message) => message.contentFrom) ?? [];
+    await Promise.all(partial.map((message) => this.loadContentHead(tabId, message, true)));
+    if (partial.length) this.bumpApp(false);
+  }
   /** A folded row is on screen: read its first page ahead of an open. */
   prefetchWorkGroup(tabId: string, msg: Msg): Promise<void> {
     return msg.workSummary ? prefetchWorkGroup(tabId, msg.id) : Promise.resolve();
@@ -7429,6 +7446,8 @@ export class Store {
   /** A settled row's folded calls, read when something shows them. */
   async loadWorkGroup(tabId: string, msg: Msg): Promise<boolean> {
     if (!msg.workSummary) return true;
+    // The calls come placed in the whole reply.
+    if (msg.contentFrom && !(await this.loadContentHead(tabId, msg, true))) return false;
     // A refresh may have replaced the row object while the calls loaded.
     const targets = () => new Set([msg, this.chat(tabId)?.messages.find((message) => message.id === msg.id)]);
     // Each page is drawn as it arrives: the Worked list shows the calls read

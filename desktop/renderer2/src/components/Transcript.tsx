@@ -13,6 +13,7 @@ import { syncFlowBlocks } from '../flow-window';
 import { blockFlipFrames, flipBlocks, registerColumnSlideView, type BlockBox } from '../transcript-flip';
 import { projectSteeringPresentation } from '../chat/steering-presentation';
 import { assistantTurnBlockRanges } from '../timeline-layout';
+import { takeGrowthAbove, clearGrowth } from '../chat/long-row';
 import { findChatMessageMatches, findMatchOffsets, isChatFindShortcut, nextFindIndex } from '../chat-find';
 import { ChatFindQueryContext } from '../markdown/find-context';
 import { localBrowserOwnsChat } from '../browser';
@@ -679,7 +680,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const el = scrollRef.current;
     const doc = docRef.current;
     const held = anchor.current;
-    if (!el || !doc || stick.current || !held || restoring.current) return;
+    if (!el || !doc || stick.current || !held || restoring.current) { clearGrowth(); return; }
     const viewportTop = el.getBoundingClientRect().top;
     let delta: number | null = null;
     const exact = anchorNode.current;
@@ -692,7 +693,15 @@ export function Transcript({ chat }: { chat: Chat | null }) {
         .find((candidate) => candidate.dataset.chatFindMessage === held.key);
       const box = node && (node.getClientRects().length > 0 ? node : firstBox(node));
       if (box) delta = box.getBoundingClientRect().top - glideShift(box) - viewportTop + el.scrollTop - anchorContentTop.current;
+      // A long reply grew above what it held (chat/long-row.ts): the reader's
+      // line moved down by that much inside it.
+      const grew = takeGrowthAbove(held.key);
+      if (grew && delta !== null) {
+        delta += grew;
+        anchorContentTop.current += grew;
+      }
     }
+    clearGrowth();
     if (delta !== null && Math.abs(delta) >= 0.5) setScrollTop(el, el.scrollTop + delta);
   };
 
@@ -841,7 +850,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     // Searching is a new place to read; a position still on its way back yields.
     restoring.current = null;
     setFindOpen(true);
-    void loadCompleteHistory();
+    // Find reads every reply whole, a long one too.
+    void loadCompleteHistory().then(() => (chat ? store.completeLongRows(chat.id) : undefined));
     requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); });
   }, [findOpen, loadCompleteHistory]);
 

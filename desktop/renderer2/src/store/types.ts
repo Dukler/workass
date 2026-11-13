@@ -150,6 +150,12 @@ export interface Msg {
   // The folded calls read so far while the rest loads (store.loadWorkGroup);
   // total is the row's timeline length. Never persisted.
   workPartial?: { events: TimelineEvent[]; total: number };
+  // A long reply read in parts (history longRows): content and events are
+  // the reply from contentFrom on (events' at counted from there), of a
+  // whole contentLength long; the rest loads as the reader scrolls up to it
+  // (store.loadContentHead), and whole for find and copy.
+  contentFrom?: number;
+  contentLength?: number;
   // Delivery lifecycle for an explicit live steer. It is independent of the
   // assistant turn status: sending waits for the RPC acknowledgement, accepted
   // is the official turn/steer boundary, applied is the canonical client-id

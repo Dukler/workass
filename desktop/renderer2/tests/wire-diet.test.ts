@@ -527,6 +527,53 @@ describe('long chats: brief spawned work and work groups', () => {
     assert.equal(calls[2].background, undefined);
   });
 
+  test('a long reply arrives as its last part and puts itself back together part by part', async () => {
+    const history = await vite.ssrLoadModule('/src/chat/history.ts');
+    const whole = 'aaaa\n\nbbbb\n\ncccc';
+    const image = { deferredImageRef: 'images/x', width: 10, height: 20, name: 'n' };
+    const [tail] = history.actorMessages([{ id: 'm-long', role: 'assistant', status: 'done', content: 'cccc', contentFrom: 12, contentLength: 16,
+      events: [{ kind: 'tool', key: 'k2', at: 12, workStub: true, images: [{ ...image }] }] }], 'tab-7');
+    assert.equal(tail.contentFrom, 12);
+    assert.equal(tail.events[0].at, 0, 'events count from the part');
+    assert.deepEqual(tail.events[0].images[0], { ...image, data: '', mimeType: 'image/png' }, 'by-reference images are whole again');
+    const local = chat('tab-7');
+    local.messages = [tail];
+    const parts = [
+      { messageId: 'm-long', from: 6, to: 12, content: 'bbbb\n\n', events: [{ kind: 'tool', key: 'k1', at: 6, workStub: true, images: [{ ...image }] }] },
+      { messageId: 'm-long', from: 0, to: 6, content: 'aaaa\n\n', events: [] },
+    ];
+    const calls: any[] = [];
+    const store = subject([local], { archiveLoad: async (_tab: string, options: any) => { calls.push(options.contentHead); return parts.shift(); } });
+    assert.equal(await store.loadContentHead('tab-7', tail), true);
+    assert.deepEqual(calls[0], { messageId: 'm-long', before: 12 });
+    assert.equal(tail.contentFrom, 6);
+    assert.deepEqual(tail.events.map((event: any) => [event.key, event.at]), [['k1', 0], ['k2', 6]]);
+    await store.completeLongRows('tab-7');
+    assert.equal(tail.content, whole);
+    assert.equal(tail.contentFrom, undefined);
+    assert.deepEqual(tail.events.map((event: any) => [event.key, event.at]), [['k1', 6], ['k2', 12]]);
+    assert.deepEqual(calls[1], { messageId: 'm-long', before: 6, all: true });
+  });
+
+  test('copying a long reply read in parts copies the whole reply', async () => {
+    const history = await vite.ssrLoadModule('/src/chat/history.ts');
+    const { copyWholeReply } = await vite.ssrLoadModule('/src/components/AssistantMessage.tsx');
+    const [tail] = history.actorMessages([{ id: 'm-copy', role: 'assistant', status: 'done', content: 'end', contentFrom: 6, contentLength: 9, events: [] }], 'tab-8');
+    const local = chat('tab-8');
+    local.messages = [tail];
+    subject([local], { archiveLoad: async () => ({ messageId: 'm-copy', from: 0, to: 6, content: 'start ', events: [] }) });
+    let copied: string | null = null;
+    const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async (text: string) => { copied = text; } } } });
+    try {
+      await copyWholeReply('tab-8', tail);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, 'navigator', previous);
+      else delete (globalThis as any).navigator;
+    }
+    assert.equal(copied, 'start end');
+  });
+
   test('a daemon that predates work groups answers a row, which is not a group', async () => {
     const local = chat('tab-2');
     const folded = message('m-old');

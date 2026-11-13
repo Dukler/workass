@@ -941,6 +941,11 @@ export interface WorkassApi {
     // background (additive): a read nobody waits on (a prefetch); the daemon
     // runs it on a lane of its own, behind nothing a reader waits for.
     background?: boolean;
+    // longRows and contentHead (additive): a long settled reply comes as
+    // its last part; contentHead reads the part ending at `before` (all: the
+    // whole head) as {messageId, from, to, content, events}.
+    longRows?: boolean;
+    contentHead?: { messageId: string; before: number; all?: boolean };
     // ifNoneMatch (additive, with tail): the rows come back as {etag,
     // messages}, or as {unchanged, etag} while they are exactly the rows the
     // client holds. An older daemon ignores it and answers the plain array.

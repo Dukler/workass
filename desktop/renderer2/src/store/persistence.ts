@@ -28,6 +28,8 @@ export interface MirrorMsg {
   images?: MessageImage[];
   events: unknown[];
   workSummary?: WorkSummary;
+  contentFrom?: number;
+  contentLength?: number;
 }
 export interface MirrorChat {
   id: string; chatId?: string; actorRevision?: number; title: string; titleLocked: boolean; group: string | null; cwd: string | null;

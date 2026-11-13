@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { MessageImage, Msg, ThinkingEvent, TimelineEvent, ToolEvent, WorkSummary } from '../store/types';
 import { store, useApp, useMsgVersion, useClock, useSpawnedWork } from '../store/store';
+import { noteGrowthAbove } from '../chat/long-row';
 import { parseBlocks, parseBlocksGrowing, type SignedBlock, listTexts } from '../markdown/blocks';
 import { MarkdownBlock } from '../markdown/MarkdownBlock';
 import { ToolHtmlPages } from '../markdown/HtmlToolPages';
@@ -190,11 +191,23 @@ function AssistantSliceBody({
   const workItems = running ? [] : msg.events.filter(isWorkItem);
   // A row whose calls came as a summary still has its Worked row.
   const worked = !running && (workItems.length > 0 || !!msg.workSummary);
+  // A long reply read in parts (chat/long-row.ts): when a part arrives above,
+  // note how much the reply grew, for the transcript to hold the reader.
+  const longFrom = msg.contentFrom ?? 0;
+  const seen = useRef<{ from: number; height: number }>({ from: longFrom, height: 0 });
+  useLayoutEffect(() => {
+    const element = root.current;
+    if (!element || (!longFrom && !seen.current.from)) return;
+    const height = element.getBoundingClientRect().height;
+    if (longFrom < seen.current.from && seen.current.height > 0) noteGrowthAbove(msg.id, height - seen.current.height);
+    seen.current = { from: longFrom, height };
+  });
 
   return (
     <div className={`amsg${running ? ' streaming' : ''}`} ref={root}>
       {running && <ControlsSkippedRow tabId={tabId} />}
       {worked && <WorkedRow items={workItems} tabId={tabId} msg={msg} />}
+      {longFrom > 0 && <LongRowHead tabId={tabId} msg={msg} />}
       {segs.map((s, segmentIndex) => {
         if ('tools' in s) {
           // Tool calls live in the Working line / Worked row, never inline.
@@ -211,7 +224,7 @@ function AssistantSliceBody({
         }
         if ('event' in s) return <EventView key={s.event.key} ev={s.event} />;
         return (
-          <div className="chatfind-text" data-chat-find-text key={`prose-${segmentIndex}`}>
+          <div className="chatfind-text" data-chat-find-text key={`prose-${'start' in s ? longFrom + s.start : segmentIndex}`}>
             {parsedSegments[segmentIndex]!.map((sb) => <MarkdownBlock key={blockKeys[blockIndex++]} sb={sb} media={media} visualizeTabId={tabId} visualizeChatId={visualizeChatId} artifactOrigin={artifactOrigin} streaming={running} />)}
           </div>
         );
@@ -244,7 +257,7 @@ function AssistantSliceBody({
           {!midRun && (
             <>
               <button type="button" className="stamp-btn" title="Copiar respuesta" aria-label="Copiar respuesta"
-                onClick={() => { void navigator.clipboard?.writeText(fullAssistantText(owner)); }}>
+                onClick={() => { void copyWholeReply(tabId, owner); }}>
                 <IcStampCopy />
               </button>
               {/* Fork from this point (user 2026-10-16): a forked subsession
@@ -272,6 +285,33 @@ function AssistantSliceBody({
       )}
     </div>
   );
+}
+
+// Copy is always the whole reply: a long one read in parts is read whole
+// first.
+export async function copyWholeReply(tabId: string, owner: Msg): Promise<void> {
+  if (owner.contentFrom) await store.loadContentHead(tabId, owner, true);
+  if (owner.contentFrom) return;
+  await navigator.clipboard?.writeText(fullAssistantText(owner));
+}
+
+// What a long reply has not read yet: room for it (from its length; a part
+// replaces it as it arrives, the transcript holding the reader), read when
+// it comes within two screens.
+const LONG_ROW_CHARS_PER_PX = 1.5;
+function LongRowHead({ tabId, msg }: { tabId: string; msg: Msg }) {
+  const box = useRef<HTMLDivElement>(null);
+  const from = msg.contentFrom ?? 0;
+  useEffect(() => {
+    const element = box.current;
+    if (!element || !from || typeof IntersectionObserver === 'undefined') return;
+    const near = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void store.loadContentHead(tabId, msg);
+    }, { rootMargin: '2000px 0px' });
+    near.observe(element);
+    return () => near.disconnect();
+  }, [tabId, msg, from]);
+  return <div ref={box} className="longrow-head" aria-busy="true" style={{ height: Math.round(from / LONG_ROW_CHARS_PER_PX) }} />;
 }
 
 interface AssistantBodyProps {
