@@ -2053,6 +2053,7 @@ func (m *Manager) buildEnvironmentBrief(forSubagent bool) string {
 // off in Ajustes > Herramientas, so the brief never names a tool the agent
 // cannot call.
 func (m *Manager) environmentBriefWith(forSubagent bool, off ToolGroups) string {
+	off = guideGroupsOff(off, forSubagent)
 	stateDir := strings.TrimSpace(m.opts.StateDir)
 	if abs, err := filepath.Abs(stateDir); err == nil {
 		stateDir = abs

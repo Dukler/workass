@@ -326,15 +326,19 @@ func workassToolMutates(kind toolKind, name string) bool {
 
 // agentToolsForChild is the delegated agent's catalog: every chat-control
 // tool, acting for its parent chat. Like Claude Code subagents it cannot
-// delegate further (no subagent orchestration), and questions and pages go to
-// the parent that owns the conversation with the user: a page renders only
-// from the chat's own reply, so a delegated agent reports instead.
+// spawn subagents of its own, and questions and pages go to the parent that
+// owns the conversation with the user: a page renders only from the chat's
+// own reply, so a delegated agent reports instead. The fork tools stay: fork
+// children run once with no Workass tools, so they cannot nest, and a fan-out
+// from the parent's fork point is the cheap path the guide recommends. They
+// run for the parent, capped at the child's own level like every other call.
+// The guide a child reads (acp.Manager.WorkassGuideFor) names exactly these.
 func agentToolsForChild() []map[string]any {
 	tools := agentMCPTools()
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == "workass_ask_user_question" || name == "workass_render_html" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
+		if name == "workass_ask_user_question" || name == "workass_render_html" || strings.Contains(name, "subagent") {
 			continue
 		}
 		filtered = append(filtered, tool)

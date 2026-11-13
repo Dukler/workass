@@ -113,3 +113,53 @@ func TestNativeGuideFollowsSwitchesOnTheNextTurn(t *testing.T) {
 		}
 	}
 }
+
+// bug-20261113-0bf46145: a delegated child's engine was given the chat's guide,
+// which offered workass_spawn_subagent, a page and the browser, none of which
+// its catalog has. Its guide.md now names the fork tools it keeps and nothing
+// it lacks; a chat's engine keeps the full guide.
+func TestADelegatedChildsGuideNamesOnlyItsTools(t *testing.T) {
+	root := t.TempDir()
+	opts := Options{StateDir: root, Provider: ProviderConfig{ID: "opencode"}, WorkassToolsOrigin: "https://tools.localhost:8788", WorkassToolsCommand: filepath.Join(root, "workass"), WorkassToolsCAFile: filepath.Join(root, "ca.pem")}
+	m := NewManager(opts)
+	t.Cleanup(func() { m.Reset() })
+	guideOf := func(key string) string {
+		t.Helper()
+		b := newBridge(key, opts, m)
+		prepared, err := b.prepareNativeInstructions(ProviderConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(b.nativeInstructionsDir) })
+		data, err := os.ReadFile(prepared.Env["WORKASS_TOOLS_GUIDE"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	child := guideOf("opencode:" + subagentChatIDPrefix + "wa-subagent-1")
+	for _, gone := range []string{"workass_spawn_subagent", "orchestrate tracked subagents", "workass_render_html", "Browser tools:", "workass_browser_"} {
+		if strings.Contains(child, gone) {
+			t.Errorf("a child's guide offers %q, which its catalog lacks:\n%s", gone, child)
+		}
+	}
+	for _, kept := range []string{"workass_fork_run", "timeout_ms=-1", "workass_create_subsession", "Workass CLI reference"} {
+		if !strings.Contains(child, kept) {
+			t.Errorf("a child's guide lost %q:\n%s", kept, child)
+		}
+	}
+	chat := guideOf("opencode:chat-1")
+	if _, full := m.WorkassGuide(m.ToolGroupsOff()); chat != full {
+		t.Fatalf("a chat's guide is not the full guide:\n%s", chat)
+	}
+	for _, kept := range []string{"workass_spawn_subagent", "workass_fork_run", "orchestrate tracked subagents"} {
+		if !strings.Contains(chat, kept) {
+			t.Errorf("a chat's guide lost %q", kept)
+		}
+	}
+	// With subagents switched off the fork sentence leaves too, child or not.
+	m.SetToolGroupsSource(func() ToolGroups { return ToolGroups{ToolGroupSubagents: true} })
+	if _, guide := m.WorkassGuideFor(m.ToolGroupsOff(), true); strings.Contains(guide, "workass_fork_run") {
+		t.Fatalf("subagents off: a child's guide still offers forks:\n%s", guide)
+	}
+}

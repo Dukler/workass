@@ -247,16 +247,20 @@ func TestToolFrictionChildListingIsShortToo(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("empty child listing")
 	}
-	applyListed := false
+	applyListed, forkListed := false, false
 	for _, raw := range rows {
 		name := fieldString(mapFromAnyMain(raw), "name")
-		if name == "workass_register_process_child" || strings.Contains(name, "subagent") || strings.Contains(name, "fork") {
+		if name == "workass_register_process_child" || strings.Contains(name, "subagent") {
 			t.Fatalf("%s is not for a child's listing", name)
 		}
 		applyListed = applyListed || name == "workass_apply_update"
+		forkListed = forkListed || name == "workass_fork_run"
 	}
 	if !applyListed {
 		t.Fatal("a delegated agent lost workass_apply_update")
+	}
+	if !forkListed {
+		t.Fatal("a delegated agent lost workass_fork_run")
 	}
 }
 

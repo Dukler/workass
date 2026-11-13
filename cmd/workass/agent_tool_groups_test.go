@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -267,5 +268,33 @@ func TestToolEndpointRefusesASwitchedOffGroup(t *testing.T) {
 	})
 	if status != http.StatusOK || response["error"] != nil && strings.Contains(toString(response["error"]), "switched off") {
 		t.Fatalf("a tool that is on was refused: %d %#v", status, response)
+	}
+}
+
+// bug-20261113-0bf46145: every Workass tool a delegated child's guide names is
+// one its catalog has, with any group switched off, so the guide never sends a
+// child to "unknown Workass tool".
+func TestADelegatedChildsGuideNamesOnlyToolsItCanCall(t *testing.T) {
+	manager := acp.NewManager(acp.Options{WorkassToolsOrigin: "https://localhost:8788", StateDir: filepath.Join(t.TempDir(), "state")})
+	t.Cleanup(func() { manager.Reset() })
+	named := regexp.MustCompile(`workass_[a-z_]+`)
+	for _, id := range append([]string{""}, acp.ToolGroupOrder...) {
+		off := acp.ToolGroups{}
+		if id != "" {
+			off[id] = true
+		}
+		callable := map[string]bool{}
+		for _, tool := range withoutToolGroups(agentToolsForChild(), off) {
+			callable[toString(tool["name"])] = true
+		}
+		instructions, guide := manager.WorkassGuideFor(off, true)
+		for _, name := range named.FindAllString(instructions+guide, -1) {
+			if !callable[name] {
+				t.Errorf("groups off %v: a child's guide names %s, which it cannot call", off, name)
+			}
+		}
+		if id == "" && !strings.Contains(guide, "workass_fork_run") {
+			t.Errorf("a child's guide does not offer the fork run it can call:\n%s", guide)
+		}
 	}
 }

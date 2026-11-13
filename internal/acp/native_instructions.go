@@ -54,7 +54,7 @@ func (b *Bridge) prepareNativeInstructions(provider ProviderConfig) (ProviderCon
 			os.RemoveAll(dir)
 			return provider, err
 		}
-		_, guide := b.manager.WorkassGuide(b.manager.ToolGroupsOff())
+		_, guide := b.manager.WorkassGuideFor(b.manager.ToolGroupsOff(), b.servesSubagent())
 		for name, body := range map[string]string{"instructions.md": workassNativeInstructions, "guide.md": guide, "context.json": "{}\n"} {
 			if err := os.WriteFile(filepath.Join(absolute, name), []byte(body), 0600); err != nil {
 				os.RemoveAll(dir)
@@ -182,7 +182,7 @@ func (b *Bridge) bindNativeToolContext(owner, chatID, tabID string) error {
 // `tools list` without restarting the engine. A failed write keeps the old
 // guide; the tool endpoint still refuses a group that is off.
 func (b *Bridge) refreshNativeGuide(dir string) {
-	_, guide := b.manager.WorkassGuide(b.manager.ToolGroupsOff())
+	_, guide := b.manager.WorkassGuideFor(b.manager.ToolGroupsOff(), b.servesSubagent())
 	b.mu.Lock()
 	same := b.nativeGuide == guide
 	b.mu.Unlock()
@@ -253,4 +253,13 @@ func (b *Bridge) removeNativeInstructions() {
 	if !chatToolBootstrapDirIsLive(filepath.Join(dir, "context.json"), tokens) {
 		_ = os.RemoveAll(dir)
 	}
+}
+
+// servesSubagent reports whether this engine runs a delegated child. Its key
+// is "provider:" + the child's chat id (runSubagent, normalizeBridgeKeyLocked),
+// and nothing else is keyed with the subagent prefix. The guide it writes then
+// names only the tools the child's catalog has.
+func (b *Bridge) servesSubagent() bool {
+	_, scope, found := strings.Cut(b.key, ":")
+	return found && strings.HasPrefix(scope, subagentChatIDPrefix)
 }

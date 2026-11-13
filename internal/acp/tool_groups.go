@@ -22,6 +22,12 @@ const (
 	ToolGroupMachines  = "machines"
 )
 
+// toolGroupSpawn is not a switch. It marks the sentences about spawning and
+// orchestrating subagents, which leave with the subagents group and are never
+// in a delegated child's guide: a child cannot spawn subagents of its own
+// (agentToolsForChild in cmd/workass), though it keeps the fork tools.
+const toolGroupSpawn = "subagents.spawn"
+
 // ToolGroupOrder is every group, in the order Settings lists them.
 var ToolGroupOrder = []string{
 	ToolGroupBrowser, ToolGroupPages, ToolGroupSubagents, ToolGroupJobs,
@@ -73,20 +79,50 @@ func (m *Manager) ToolGroupsOff() ToolGroups {
 // groups off: the instructions appended to its system prompt, and the guide
 // `tools guide` prints. Settings counts its cost from exactly this text.
 func (m *Manager) WorkassGuide(off ToolGroups) (instructions, guide string) {
+	return m.WorkassGuideFor(off, false)
+}
+
+// WorkassGuideFor is WorkassGuide for a chat's own engine or, forSubagent, for
+// a delegated child's. A child's catalog has no browser, page, question or
+// subagent tools, so its guide names none of them: a guide that offers a tool
+// `tools call` then answers "unknown" sends the child down a dead end.
+func (m *Manager) WorkassGuideFor(off ToolGroups, forSubagent bool) (instructions, guide string) {
+	off = guideGroupsOff(off, forSubagent)
 	if m == nil {
 		return workassNativeInstructions, nativeToolGuide(off)
 	}
-	return workassNativeInstructions, m.environmentBriefWith(false, off) + nativeToolGuide(off)
+	return workassNativeInstructions, m.environmentBriefWith(forSubagent, off) + nativeToolGuide(off)
+}
+
+// guideGroupsOff is off widened to the sentences the reader cannot act on: the
+// spawn sentences whenever subagents are off, and for a delegated child every
+// group its catalog lacks. It is idempotent, so text built from an already
+// widened set is unchanged.
+func guideGroupsOff(off ToolGroups, forSubagent bool) ToolGroups {
+	widened := ToolGroups{}
+	for group, isOff := range off {
+		widened[group] = isOff
+	}
+	if widened[ToolGroupSubagents] {
+		widened[toolGroupSpawn] = true
+	}
+	if forSubagent {
+		widened[ToolGroupBrowser] = true
+		widened[ToolGroupPages] = true
+		widened[toolGroupSpawn] = true
+	}
+	return widened
 }
 
 // environmentControls is the brief's paragraph on control tools, one clause
 // per group.
 func environmentControls(off ToolGroups) string {
+	off = guideGroupsOff(off, false)
 	return joinToolText(off,
 		toolText{"", agenttext.Get("environment.controls")},
 		toolText{ToolGroupChats, agenttext.Get("environment.controls.chats")},
 		toolText{ToolGroupMachines, agenttext.Get("environment.controls.machines")},
-		toolText{ToolGroupSubagents, agenttext.Get("environment.controls.subagents")},
+		toolText{toolGroupSpawn, agenttext.Get("environment.controls.subagents")},
 		toolText{ToolGroupPages, agenttext.Get("environment.controls.pages")},
 		toolText{"", "."},
 		toolText{ToolGroupChats, agenttext.Get("environment.controls.chats.pairs")},
@@ -96,12 +132,14 @@ func environmentControls(off ToolGroups) string {
 
 // nativeToolGuide is the reference `tools guide` prints after the brief.
 func nativeToolGuide(off ToolGroups) string {
+	off = guideGroupsOff(off, false)
 	return joinToolText(off,
 		toolText{"", agenttext.Get("native.guide")},
 		toolText{ToolGroupMachines, agenttext.Get("native.guide.machines")},
 		toolText{ToolGroupSubagents, agenttext.Get("native.guide.subagents")},
 		toolText{"", agenttext.Get("native.guide.background")},
-		toolText{ToolGroupSubagents, agenttext.Get("native.guide.background.subagents")},
+		toolText{toolGroupSpawn, agenttext.Get("native.guide.background.subagents")},
+		toolText{ToolGroupSubagents, agenttext.Get("native.guide.background.forks")},
 		toolText{ToolGroupChats, agenttext.Get("native.guide.background.chats")},
 		toolText{ToolGroupJobs, agenttext.Get("native.guide.background.jobs")},
 		toolText{"", ".\n"},
