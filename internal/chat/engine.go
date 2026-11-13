@@ -243,7 +243,7 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		} else if prepare == nil {
 			persistErr = e.persistCommand(next, command)
 		} else {
-			persistErr = e.saveReduced(next)
+			persistErr = e.saveTransition(next, command)
 		}
 		if persistErr != nil {
 			undo()
@@ -253,6 +253,17 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 	e.installCommittedState(next)
 	e.validated = !useProviderEventJournal
 	return nil
+}
+
+// saveTransition is saveReduced for next, command's transition of the
+// committed state. A command that shares the committed ledger rows
+// (commandLeavesLedger) left them as they were, so the SQL checkpoint need not
+// compare them again (SQLStore.saveSharedRows).
+func (e *Engine) saveTransition(next State, command Command) error {
+	if store, ok := e.store.(*SQLStore); ok && commandLeavesLedger(command) {
+		return store.saveSharedRows(next)
+	}
+	return e.saveReduced(next)
 }
 
 // saveReduced checkpoints a state reduce has just validated. Both stores

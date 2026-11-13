@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"runtime"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"workass/internal/store"
 )
@@ -134,17 +137,45 @@ func decodeSQLTools(rows []sqlToolRow) (map[string]ToolState, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
+	// Each owner decodes independently; a long chat has tens of thousands,
+	// so they decode on several goroutines into their row positions and are
+	// then inserted in row order.
+	owners := make([]ToolState, len(rows))
+	errs := make([]error, len(rows))
+	workers := min(runtime.GOMAXPROCS(0), 8, (len(rows)+sqlToolDecodeBatch-1)/sqlToolDecodeBatch)
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				end := int(next.Add(sqlToolDecodeBatch))
+				start := end - sqlToolDecodeBatch
+				if start >= len(rows) {
+					return
+				}
+				for index := start; index < min(end, len(rows)); index++ {
+					errs[index] = json.Unmarshal(rows[index].owner, &owners[index])
+					rows[index].owner = nil
+				}
+			}
+		}()
+	}
+	wg.Wait()
 	tools := make(map[string]ToolState, len(rows))
 	for index := range rows {
-		var owner ToolState
-		if err := json.Unmarshal(rows[index].owner, &owner); err != nil {
-			return nil, fmt.Errorf("decode chat tool owner %q: %w", rows[index].id, err)
+		if errs[index] != nil {
+			return nil, fmt.Errorf("decode chat tool owner %q: %w", rows[index].id, errs[index])
 		}
-		tools[rows[index].id] = owner
-		rows[index].owner = nil
+		tools[rows[index].id] = owners[index]
 	}
 	return tools, nil
 }
+
+// sqlToolDecodeBatch is how many owner rows one decoding goroutine takes at a
+// time.
+const sqlToolDecodeBatch = 1024
 
 // withSQLTools puts the stored owners into a decoded head, keeping a copy of
 // them as stored (journal replay may change the head's map afterwards).

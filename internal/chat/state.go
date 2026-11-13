@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -997,7 +998,13 @@ func (s State) Clone() State {
 // SQLite store does not rely on this: its checkpoint compares every row with
 // its own private copy, so even an in-place edit would be saved.
 func (s State) cloneLedgerRows() State {
-	out := s.cloneSharingLedger()
+	return s.cloneLedgerRowsSharing(false)
+}
+
+// cloneLedgerRowsSharing is cloneLedgerRows, sharing the tool-owner map as
+// cloneSharing does.
+func (s State) cloneLedgerRowsSharing(shareTools bool) State {
+	out := s.cloneSharing(shareTools)
 	out.Ledger = append(make([]LedgerEvent, 0, len(s.Ledger)), s.Ledger...)
 	return out
 }
@@ -1018,6 +1025,13 @@ func cloneValueMap[M ~map[K]V, K comparable, V any](m M) M {
 // ledger is the bulk of a long chat, so deep-copying it on every command
 // dominated the command. Like Clone's copy, a nil ledger becomes an empty one.
 func (s State) cloneSharingLedger() State {
+	return s.cloneSharing(false)
+}
+
+// cloneSharing is cloneSharingLedger; with shareTools the result also shares
+// the tool-owner map, the largest map of a long chat (60k entries), for a
+// transition that never writes it (commandLeavesTools).
+func (s State) cloneSharing(shareTools bool) State {
 	out := s
 	if out.Ledger == nil {
 		out.Ledger = make([]LedgerEvent, 0)
@@ -1062,7 +1076,9 @@ func (s State) cloneSharingLedger() State {
 		out.Lanes[id] = lane
 	}
 	out.Operations = cloneValueMap(s.Operations)
-	out.Tools = cloneValueMap(s.Tools)
+	if !shareTools || s.Tools == nil {
+		out.Tools = cloneValueMap(s.Tools)
+	}
 	out.Plans = make(map[provider.OperationID]PlanState, len(s.Plans))
 	for id, value := range s.Plans {
 		value.Event.Entries = append([]provider.PlanEntry(nil), value.Event.Entries...)
@@ -1299,6 +1315,36 @@ func validateTurnPresentation(presentation provider.TurnPresentation) error {
 }
 
 func (s State) Validate() error {
+	return s.validate(toolOwnerCheck{all: true})
+}
+
+// toolOwnerCheck selects which tool owners validate checks: all of them, or
+// only those whose turn key is one of keys (see validateTransition). With
+// skipRows the ledger rows are not checked again either.
+type toolOwnerCheck struct {
+	all      bool
+	keys     []foregroundOwnerKey
+	skipRows bool
+}
+
+func (c toolOwnerCheck) includes(owner ProviderActivityOwner) bool {
+	if c.all {
+		return true
+	}
+	if len(c.keys) == 0 {
+		return false
+	}
+	laneID := provider.LaneID(strings.TrimSpace(string(owner.LaneID)))
+	operationID := provider.NormalizeOperationID(string(owner.OperationID))
+	for _, key := range c.keys {
+		if key.laneID == laneID && key.operationID == operationID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s State) validate(tools toolOwnerCheck) error {
 	if strings.TrimSpace(s.ChatID) == "" {
 		return errors.New("chat state requires chat id")
 	}
@@ -1395,7 +1441,11 @@ func (s State) Validate() error {
 		return errors.New("chat context floor is ahead of the semantic ledger")
 	}
 	var sequence uint64
-	for _, event := range s.Ledger {
+	rows := s.Ledger
+	if tools.skipRows {
+		rows = nil
+	}
+	for _, event := range rows {
 		sequence++
 		if event.Sequence != sequence {
 			return fmt.Errorf("ledger sequence %d is not contiguous at %d", event.Sequence, sequence)
@@ -1535,6 +1585,9 @@ func (s State) Validate() error {
 	owners := newProviderActivityOwnerIndex(s)
 	validateOwner := owners.validate
 	for id, value := range s.Tools {
+		if !tools.all && !tools.includes(value.Owner) {
+			continue
+		}
 		if strings.TrimSpace(id) == "" {
 			return errors.New("tool activity is missing its provider id")
 		}
@@ -1871,4 +1924,103 @@ func validateTimeline(entries []TimelineEntry) error {
 		}
 	}
 	return nil
+}
+
+// foregroundOwnerKey is the (lane, operation) a foreground turn answers for
+// in providerActivityOwnerMatches.
+type foregroundOwnerKey struct {
+	laneID      provider.LaneID
+	operationID provider.OperationID
+}
+
+// validateTransition is next.Validate() for next, a transition of current.
+//
+// On a long chat Validate spends most of its time on the tool owners (60k on
+// a 62k-item chat, ~5 ms per command). When current was validated, next
+// shares current's tool-owner map (the command never writes it,
+// commandLeavesTools) and nothing a tool owner's check reads changed in a way
+// that could fail it, every owner still passes and only the rest is checked.
+// A tool owner's check (validateProviderActivityOwnerWith with
+// providerActivityOwnerMatches) reads: its lane's existence and connection
+// generation, the ledger rows' lane, operation, native turn and
+// exclusion/inheritance, and the foreground's lane, operation and native
+// turn. So:
+//   - no lane may disappear or lower its connection generation (a lane that
+//     appears or a higher generation cannot fail an owner that passed);
+//   - those ledger fields must be equal row for row (cheap: shared rows
+//     compare equal at once);
+//   - when the foreground's key changed, the owners whose (lane, operation)
+//     is the old or the new foreground's are checked again: for every other
+//     owner the foreground never applied, before or after.
+func validateTransition(current, next State, currentValidated, toolsShared bool) error {
+	if !currentValidated || !toolsShared || !sameMapIdentity(current.Tools, next.Tools) ||
+		!lanesKeepGenerations(current.Lanes, next.Lanes) || !sameLedgerOwnership(current.Ledger, next.Ledger) {
+		return next.Validate()
+	}
+	// Each row's check reads only the row, its position and whether its lane
+	// exists: rows shared with current (the same array, which a transition
+	// that shares it never edits, TestMain's checkLedgerSharing) pass again.
+	sharedRows := len(current.Ledger) == len(next.Ledger) &&
+		(len(next.Ledger) == 0 || &current.Ledger[0] == &next.Ledger[0])
+	return next.validate(toolOwnerCheck{keys: changedForegroundKeys(current.Foreground, next.Foreground), skipRows: sharedRows})
+}
+
+func sameMapIdentity[M ~map[K]V, K comparable, V any](left, right M) bool {
+	return left != nil && right != nil && reflect.ValueOf(left).UnsafePointer() == reflect.ValueOf(right).UnsafePointer()
+}
+
+func lanesKeepGenerations(current, next map[provider.LaneID]LaneState) bool {
+	for id, lane := range current {
+		after, ok := next[id]
+		if !ok || after.ConnectionGeneration < lane.ConnectionGeneration {
+			return false
+		}
+	}
+	return true
+}
+
+func sameLedgerOwnership(current, next []LedgerEvent) bool {
+	if len(current) != len(next) {
+		return false
+	}
+	if len(current) == 0 || &current[0] == &next[0] {
+		return true
+	}
+	for index := range current {
+		left, right := &current[index], &next[index]
+		if left.LaneID != right.LaneID || left.OperationID != right.OperationID || left.NativeTurnID != right.NativeTurnID ||
+			left.ContextExcluded != right.ContextExcluded || left.Inherited != right.Inherited {
+			return false
+		}
+	}
+	return true
+}
+
+func changedForegroundKeys(current, next *ForegroundTurn) []foregroundOwnerKey {
+	key := func(foreground *ForegroundTurn) (foregroundOwnerKey, string) {
+		return foregroundOwnerKey{laneID: foreground.LaneID, operationID: provider.NormalizeOperationID(string(foreground.OperationID))},
+			strings.TrimSpace(foreground.Turn.NativeID)
+	}
+	var keys []foregroundOwnerKey
+	if current != nil && next != nil {
+		before, beforeTurn := key(current)
+		after, afterTurn := key(next)
+		if before == after && beforeTurn == afterTurn {
+			return nil
+		}
+		keys = append(keys, before)
+		if after != before {
+			keys = append(keys, after)
+		}
+		return keys
+	}
+	if current != nil {
+		before, _ := key(current)
+		keys = append(keys, before)
+	}
+	if next != nil {
+		after, _ := key(next)
+		keys = append(keys, after)
+	}
+	return keys
 }

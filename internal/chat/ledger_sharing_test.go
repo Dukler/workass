@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,14 @@ func TestMain(m *testing.M) {
 		}
 		if commandLeavesLedger(command) && !sameLedgerRows(before, next.Ledger) {
 			panic(fmt.Sprintf("%T shares the ledger but changed it", command))
+		}
+	}
+	checkToolsSharing = func(command Command, before, current map[string]ToolState, next *State) {
+		if !maps.Equal(before, current) {
+			panic(fmt.Sprintf("%T changed the committed tool owners in place", command))
+		}
+		if commandLeavesTools(command) && next.Tools != nil && !maps.Equal(before, next.Tools) {
+			panic(fmt.Sprintf("%T shares the tool owners but changed them", command))
 		}
 	}
 	os.Exit(m.Run())
@@ -82,7 +91,8 @@ func TestLedgerLeavingCommandsLeaveTheLedger(t *testing.T) {
 		{ResolvePermission{}, "reduceResolvePermission"}, {PermissionDecided{}, "reducePermissionDecided"},
 		{RecordCancelReceipt{}, "reduceRecordCancelReceipt"}, {RecordAgentWaitObservation{}, "reduceRecordAgentWaitObservation"},
 		{RecordExternalMutation{}, "reduceRecordExternalMutation"}, {ExternalMutationReceipt{}, "reduceExternalMutationReceipt"},
-		{ClaimEffect{}, "reduceClaimEffect"},
+		{ClaimEffect{}, "reduceClaimEffect"}, {CommitLaneSelection{}, "reduceCommitLaneSelection"},
+		{TurnAdmitted{Accepted: true}, "reduceTurnAccepted"},
 	}
 	checked := map[string]bool{}
 	for _, root := range roots {
@@ -104,7 +114,7 @@ func TestLedgerLeavingCommandsLeaveTheLedger(t *testing.T) {
 			return true
 		})
 	}
-	for _, command := range []Command{InitializeChat{}, InitializeFork{}, TurnAdmitted{}, InputConsumed{}, TurnTerminated{}, ProviderEventReceived{}, RecoverOutbox{}, SelectLane{}, BindEstablishedLane{}, CheckpointRestored{}} {
+	for _, command := range []Command{InitializeChat{}, InitializeFork{}, TurnAdmitted{}, TurnAdmitted{Accepted: true, Ambiguous: true}, InputConsumed{}, TurnTerminated{}, ProviderEventReceived{}, RecoverOutbox{}, SelectLane{}, BindEstablishedLane{}, CheckpointRestored{}} {
 		if commandLeavesLedger(command) {
 			t.Errorf("%T writes the ledger but is shared by commandLeavesLedger", command)
 		}
@@ -152,7 +162,7 @@ func TestLedgerLeavingCommandsLeaveTheLedger(t *testing.T) {
 	}
 	// These build and return a new State; their only ledger writes set the
 	// copy's own field.
-	constructsState := map[string]bool{"Clone": true, "cloneSharingLedger": true, "cloneLedgerRows": true}
+	constructsState := map[string]bool{"Clone": true, "cloneSharingLedger": true, "cloneSharing": true, "cloneLedgerRows": true, "cloneLedgerRowsSharing": true}
 	for _, root := range roots {
 		command := root.command
 		if len(funcs[root.reducer]) == 0 {

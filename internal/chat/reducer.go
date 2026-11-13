@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strconv"
 	"strings"
@@ -587,10 +588,14 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 	if checkLedgerSharing != nil {
 		defer checkLedgerSharing(command, exactLedgerCopy(current.Ledger), current.Ledger, &next)
 	}
+	shareTools := commandLeavesTools(command)
+	if checkToolsSharing != nil {
+		defer checkToolsSharing(command, maps.Clone(current.Tools), current.Tools, &next)
+	}
 	if commandLeavesLedger(command) {
-		next = current.cloneSharingLedger()
+		next = current.cloneSharing(shareTools)
 	} else {
-		next = current.cloneLedgerRows()
+		next = current.cloneLedgerRowsSharing(shareTools)
 	}
 	var (
 		effects []Effect
@@ -723,10 +728,34 @@ func reduce(current State, command Command, currentValidated bool) (State, []Eff
 		return current, nil, err
 	}
 	next.Revision++
-	if err := next.Validate(); err != nil {
+	if err := validateTransition(current, next, currentValidated, shareTools); err != nil {
 		return current, nil, fmt.Errorf("chat transition produced invalid state: %w", err)
 	}
 	return next, effects, nil
+}
+
+// checkToolsSharing is a test hook like checkLedgerSharing: every transition
+// reports the committed tool owners as they were before it, the committed map
+// itself, and its result, so tests can prove a transition never edits the
+// committed map and that one sharing it (commandLeavesTools) left it as it was.
+var checkToolsSharing func(command Command, before, current map[string]ToolState, next *State)
+
+// commandLeavesTools reports whether command's reducer, and everything it
+// calls, never writes the tool-owner map, so the transition may share the
+// committed map instead of copying it (State.cloneSharing) and skip
+// re-checking the owners it did not affect (validateTransition). These are a
+// send's commands before its prompt reaches the provider. TurnAdmitted
+// qualifies only accepted and unambiguous: that path (reduceTurnAccepted)
+// sets the foreground, its lane and its outbox entry; the ambiguous one
+// terminalizes the turn. TestToolLeavingCommandsLeaveTheTools enforces it.
+func commandLeavesTools(command Command) bool {
+	switch command := command.(type) {
+	case CommitLaneSelection, Submit, ClaimEffect:
+		return true
+	case TurnAdmitted:
+		return command.Accepted && !command.Ambiguous
+	}
+	return false
 }
 
 // checkLedgerSharing is a test hook: when set, every transition reports the
@@ -742,13 +771,16 @@ var checkLedgerSharing func(command Command, before, current []LedgerEvent, next
 // commands a chat runs on open, switch, queueing, steering, settings and
 // external mutations. TestLedgerLeavingCommandsLeaveTheLedger enforces it.
 func commandLeavesLedger(command Command) bool {
-	switch command.(type) {
+	switch command := command.(type) {
 	case UpdatePresentation, SavePresentation, UpdateEnvironment, ChangeWorkspace,
 		ReplaceStagedQueue, PromoteStagedQueue, UpdateRuntimeControls, SaveRuntimeControls,
 		AttachTab, Submit, Steer, ResolvePermission, PermissionDecided,
 		RecordCancelReceipt, RecordAgentWaitObservation,
-		RecordExternalMutation, ExternalMutationReceipt, ClaimEffect:
+		RecordExternalMutation, ExternalMutationReceipt, ClaimEffect, CommitLaneSelection:
 		return true
+	case TurnAdmitted:
+		// Only the accepted path (reduceTurnAccepted); see commandLeavesTools.
+		return command.Accepted && !command.Ambiguous
 	}
 	return false
 }
@@ -2994,6 +3026,13 @@ func reduceTurnAdmitted(state *State, command TurnAdmitted) ([]Effect, error) {
 	if !command.Accepted {
 		return nil, errors.New("rejected turn admission requires an explicit failure transition")
 	}
+	return reduceTurnAccepted(state, command)
+}
+
+// reduceTurnAccepted is reduceTurnAdmitted for an accepted, unambiguous
+// admission of the current foreground.
+func reduceTurnAccepted(state *State, command TurnAdmitted) ([]Effect, error) {
+	lane := state.Lanes[state.Foreground.LaneID]
 	state.Foreground.Turn = command.Turn
 	state.Foreground.Status = ForegroundRunning
 	if lane.Provision != nil {
