@@ -563,30 +563,74 @@ func (r *providerChatRuntime) Rewind(ctx context.Context, tabID, chatID string, 
 	return nil, errors.New("checkpoint restore lost its durable actor receipt")
 }
 
+// readChatProjectsWhole makes ReadChat project every row, as it did before
+// it read only the rows it returns (tests compare the two).
+var readChatProjectsWhole bool
+
 func (r *providerChatRuntime) ReadChat(tabID, chatID string, limit int, includeEvents bool) (map[string]any, error) {
-	actor, state, err := r.exactActor(tabID, chatID)
-	if err != nil {
-		return nil, err
+	// A bounded read copies and projects only the rows it can return, as the
+	// renderer's tail read does: reading the last 20 rows of a 93,000-call
+	// chat copied and projected every row (130 ms), and a closed chat is read
+	// from its rows without opening it (decoding the whole chat, 0.7 s).
+	var state chat.State
+	var window actorLedgerWindow
+	read := false
+	if limit > 0 && !readChatProjectsWhole && r != nil && r.ledgers != nil {
+		if summary, closed := r.closedSummary(strings.TrimSpace(chatID)); closed {
+			switch {
+			case summary.Deleted:
+				return nil, errors.New("chat was deleted")
+			case strings.TrimSpace(tabID) == "" || strings.TrimSpace(chatID) == "":
+				return nil, errors.New("exact tab and chat ids are required")
+			case strings.TrimSpace(summary.TabID) != strings.TrimSpace(tabID):
+				return nil, errors.New("tab id does not own the requested chat")
+			}
+			page, err := r.closedLedgerPage(summary, 0, "", limit)
+			if err == nil && !page.Deleted {
+				snapshot := summary.ProjectionSnapshot(page.Events)
+				state, window, read = snapshot.State, actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}, true
+			} else if err != nil && !errors.Is(err, errClosedActorChanged) {
+				return nil, err
+			}
+		}
 	}
-	actor.mu.Lock()
-	state = actor.engine.ReadSnapshot()
-	actor.mu.Unlock()
+	if !read {
+		actor, _, err := r.exactActor(tabID, chatID)
+		if err != nil {
+			return nil, err
+		}
+		actor.mu.Lock()
+		if limit > 0 && !readChatProjectsWhole {
+			snapshot := actor.engine.ReadProjectionSnapshot(limit)
+			state, window = snapshot.State, actorLedgerWindow{offset: snapshot.LedgerOffset, count: snapshot.LedgerCount}
+		} else {
+			state = actor.engine.ReadSnapshot()
+			window = actorLedgerWindow{count: len(state.Ledger)}
+		}
+		actor.mu.Unlock()
+	}
 	projected := map[string]any{}
-	if err := projectActorChat(projected, state); err != nil {
+	if err := projectActorChatWithHistoryWindow(projected, state, actorHistoryFull, sessionProjectionMessageTail, window); err != nil {
 		return nil, err
 	}
 	messages := anySlice(projected["messages"])
-	messageCount := len(messages)
-	truncated := false
+	messageCount := window.offset + len(messages)
+	truncated := limit > 0 && messageCount > limit
 	if limit > 0 && len(messages) > limit {
 		messages = messages[len(messages)-limit:]
-		truncated = true
 	}
 	copyMessages := make([]any, 0, len(messages))
 	eventSources := make([][]any, 0, len(messages))
 	eventCount := 0
 	for _, raw := range messages {
-		message := mapFromAnyMain(cloneJSON(raw))
+		// The projection is this read's own: a shallow copy is enough to
+		// replace its top-level fields (a deep copy of every event cost as
+		// much as the projection).
+		source := mapFromAnyMain(raw)
+		message := make(map[string]any, len(source))
+		for key, value := range source {
+			message[key] = value
+		}
 		events := anySlice(message["events"])
 		if includeEvents {
 			eventCount += len(events)
