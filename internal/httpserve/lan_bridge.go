@@ -263,7 +263,7 @@ const LANBridgeJS = `(() => {
     // Ajustes > Herramientas: Workass tool groups and what each costs, one
     // switch per group, and the MCP servers each agent's CLI is configured with.
     agentToolsGet: () => invoke('agent-tools:get'), agentToolsSet: (group, on) => invoke('agent-tools:set', { group, on }), agentMcpList: () => invoke('agent-mcp:list'),
-    spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch } : { tabId, chatId }),
+    spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? (o.brief === true ? (Array.isArray(o.keep) ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch, brief: true, keep: o.keep } : { tabId, chatId, ifNoneMatch: o.ifNoneMatch, brief: true }) : { tabId, chatId, ifNoneMatch: o.ifNoneMatch }) : { tabId, chatId }),
     // Every chat's running background rows, counts and obligation in one read.
     // Additive: a renderer that finds it boots its sidebar from it instead of
     // one spawned-work:list per chat; an older bridge simply lacks it.

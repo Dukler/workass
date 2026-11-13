@@ -260,6 +260,10 @@ func TestLanBridgeServed(t *testing.T) {
 		!strings.Contains(string(body), "projectIcon: (chatId, cwd, o) => invoke('project:icon', o && o.ifNoneMatch !== undefined ? (o.byURL === true ? { chatId, cwd, ifNoneMatch: o.ifNoneMatch, byURL: true } : { chatId, cwd, ifNoneMatch: o.ifNoneMatch }) : { chatId, cwd })") {
 		t.Fatalf("bridge missing server-owned project filesystem methods")
 	}
+	// spawned-work:list {brief, keep} (cmd/workass spawned_work_brief.go) reaches the daemon.
+	if !strings.Contains(string(body), "spawnedWorkList: (tabId, chatId, o) => invoke('spawned-work:list', o && o.ifNoneMatch !== undefined ? (o.brief === true ? (Array.isArray(o.keep) ? { tabId, chatId, ifNoneMatch: o.ifNoneMatch, brief: true, keep: o.keep } : { tabId, chatId, ifNoneMatch: o.ifNoneMatch, brief: true }) : { tabId, chatId, ifNoneMatch: o.ifNoneMatch }) : { tabId, chatId })") {
+		t.Fatalf("bridge does not forward a brief spawned-work list")
+	}
 	if !strings.Contains(string(body), "machinesNickname: (machineId, nickname) => invoke('machines:nickname', { machineId, nickname })") {
 		t.Fatalf("bridge missing controller-local machine nickname method")
 	}
