@@ -755,3 +755,51 @@ func rewriteForkPointMode(t *testing.T, path, modeID string) {
 		t.Fatal(err)
 	}
 }
+
+// bug-20261113-0bf46145: a delegated child was refused every fork tool as
+// "unknown Workass tool" while its guide recommended workass_fork_run. It now
+// lists them, reads its parent's fork points, and a run answers to the
+// child's own level like every other call it makes for its parent.
+func TestASubagentRunsForksForItsParentAtItsOwnLevel(t *testing.T) {
+	h := newStatelessMCPTestHarness(t)
+	setChatModeAsHuman(t, h, "mcp-tab", "mcp-chat", "bypass", "human-parent-full-fork-child")
+	spawned := ceilingTool(t, h, "workass_spawn_subagent", map[string]any{
+		"operation_id": "fork-child", "task": "reply with the deterministic mock result", "label": "forker", "mode_id": "ask",
+	})
+	childID := fieldString(mapFromAnyMain(spawned.response["result"]), "id")
+	if spawned.errorText() != "" || childID == "" {
+		t.Fatalf("spawn = %#v", spawned.response)
+	}
+	h.handler.agentControl.forks = fleetSeedWideForkPoint(t, h, "mcp-tab", "mcp-chat", "bypass")
+	childChat := subagentTabPrefix + childID
+	asChild := func(name string, arguments map[string]any) ceilingCall {
+		t.Helper()
+		var call ceilingCall
+		if _, err := h.manager.WithActorOwner(childChat, childChat, func(owner string) (any, error) {
+			call = <-ceilingToolAsync(h, owner, childChat, childChat, name, arguments)
+			return nil, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return call
+	}
+
+	listed := asChild("workass_list_forks", map[string]any{"tab_id": "mcp-tab", "chat_id": "mcp-chat"})
+	points := anySlice(mapFromAnyMain(listed.response["result"])["forkPoints"])
+	if listed.errorText() != "" || len(points) != 1 || fieldString(mapFromAnyMain(points[0]), "forkPointId") != "fp-1793316037099-1" {
+		t.Fatalf("a child listing its parent's fork points = %d %#v", listed.status, listed.response)
+	}
+	ran := asChild("workass_fork_run", map[string]any{
+		"operation_id": "child-fork-run", "fork_point_id": "fp-1793316037099-1",
+		"children": []any{map[string]any{"label": "c", "message": "go"}},
+	})
+	if text := ran.errorText(); strings.Contains(text, "unknown Workass tool") || !strings.Contains(text, permissionCeilingCode) {
+		t.Fatalf("an ask-level child's run over a full-access fork point = %d %#v", ran.status, ran.response)
+	}
+	if cards := raiseCards(h); len(cards) != 0 {
+		t.Fatalf("a child opened a human card: %#v", cards)
+	}
+	if spawn := asChild("workass_spawn_subagent", map[string]any{"operation_id": "grandchild", "task": "x"}); !strings.Contains(spawn.errorText(), "unknown Workass tool") {
+		t.Fatalf("a child spawned a subagent of its own: %#v", spawn.response)
+	}
+}
