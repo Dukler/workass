@@ -279,17 +279,23 @@ func (r *providerChatRuntime) keepLongRowParts(chatID, messageID string, revisio
 	// Newest first: the part a reader scrolls to first is ready first. Off
 	// the reply that read the row.
 	go func() {
-		for at := len(parts) - 1; at >= 0; at-- {
-			encoded, err := encodeLongRowPart(messageID, parts[at])
-			if err != nil {
-				return
-			}
-			deflated := wire.DeflateSegmentBest(encoded)
-			if deflated == nil {
-				return
-			}
-			store.keepPageKept(longRowPartKey(key, at), revision, keptReply{deflated: deflated, size: len(encoded)})
+		// Every part at once, each on its own core: a reader may ask for
+		// them all as soon as the last part lands.
+		var wg sync.WaitGroup
+		for at := range parts {
+			wg.Add(1)
+			go func(at int) {
+				defer wg.Done()
+				encoded, err := encodeLongRowPart(messageID, parts[at])
+				if err != nil {
+					return
+				}
+				if deflated := wire.DeflateSegment(encoded); deflated != nil {
+					store.keepPageKept(longRowPartKey(key, at), revision, keptReply{deflated: deflated, size: len(encoded)})
+				}
+			}(at)
 		}
+		wg.Wait()
 		bounds, err := json.Marshal(index.bounds)
 		if err == nil {
 			store.keepPage(key, revision, bounds)
@@ -346,11 +352,14 @@ type contentHeadRequest struct {
 	messageID string
 	before    int
 	all       bool
+	// parts (additive): every part up to before, each as its own reply,
+	// in one reply {messageId, parts: [...]}, framed from the kept parts.
+	parts bool
 }
 
 func parseContentHeadRequest(raw any) (contentHeadRequest, error) {
 	options := mapFromAnyMain(raw)
-	request := contentHeadRequest{messageID: strings.TrimSpace(fieldString(options, "messageId")), before: intValue(options["before"]), all: options["all"] == true}
+	request := contentHeadRequest{messageID: strings.TrimSpace(fieldString(options, "messageId")), before: intValue(options["before"]), all: options["all"] == true, parts: options["parts"] == true}
 	if request.messageID == "" || request.before <= 0 {
 		return contentHeadRequest{}, errors.New("content head requires a message id and where it ends")
 	}
@@ -396,6 +405,23 @@ func (r *providerChatRuntime) ContentHeadByTab(tabID string, request contentHead
 	}
 	if end < 0 {
 		return nil, false, fmt.Errorf("no part of %s ends at %d", request.messageID, request.before)
+	}
+	if request.parts {
+		// Every part up to it, as kept: no part is decoded or encoded again.
+		id, _ := json.Marshal(request.messageID)
+		segments := []wire.SegmentedPart{{Literal: append(append([]byte(`{"messageId":`), id...), `,"parts":[`...)}}
+		for at := 0; at <= end; at++ {
+			kept, ok := r.longRowPartReply(chatID, request.messageID, revision, at, opts)
+			if !ok {
+				return nil, false, fmt.Errorf("part %d of %s is not kept", at, request.messageID)
+			}
+			if at > 0 {
+				segments = append(segments, wire.SegmentedPart{Literal: []byte{','}})
+			}
+			segments = append(segments, kept.result().Parts...)
+		}
+		segments = append(segments, wire.SegmentedPart{Literal: []byte(`]}`)})
+		return wire.SegmentedResult{Parts: segments}, true, nil
 	}
 	if !request.all {
 		kept, ok := r.longRowPartReply(chatID, request.messageID, revision, end, opts)

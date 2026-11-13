@@ -125,6 +125,33 @@ func TestLongRowsComeInPartsThatMakeTheWholeReply(t *testing.T) {
 	if intValue(head["from"]) != 0 || head["content"].(string)+tail["content"].(string) != full {
 		t.Fatal("the whole head is not the text before the last part")
 	}
+	// Every part in one read, framed from the kept parts.
+	var all struct {
+		MessageID string `json:"messageId"`
+		Parts     []struct {
+			From    int    `json:"from"`
+			To      int    `json:"to"`
+			Content string `json:"content"`
+		} `json:"parts"`
+	}
+	partsReply, _, err := runtime.ContentHeadByTab("tab-long", contentHeadRequest{messageID: fieldString(tail, "id"), before: from, parts: true}, []archiveReadOptions{parted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(mustJSONBytes(t, partsReply), &all); err != nil {
+		t.Fatal(err)
+	}
+	joined, at := "", 0
+	for _, part := range all.Parts {
+		if part.From != at {
+			t.Fatalf("parts not contiguous at %d", part.From)
+		}
+		joined += part.Content
+		at = part.To
+	}
+	if at != from || joined+tail["content"].(string) != full {
+		t.Fatal("the parts read at once are not the head")
+	}
 	// A cut never falls inside a code fence.
 	for _, cut := range longRowBounds(full) {
 		if strings.Count(full[:cut], "```")%2 != 0 {
