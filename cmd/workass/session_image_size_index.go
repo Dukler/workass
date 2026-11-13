@@ -56,6 +56,19 @@ func (x *sessionImageSizeIndex) lookup(stateDir, name string) (sessionImageSize,
 	return size, found
 }
 
+// preload reads the state directory's index if no lookup has yet.
+func (x *sessionImageSizeIndex) preload(stateDir string) {
+	if stateDir == "" {
+		return
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if !x.loaded[stateDir] {
+		x.loaded[stateDir] = true
+		x.readLocked(stateDir)
+	}
+}
+
 func (x *sessionImageSizeIndex) readLocked(stateDir string) {
 	data, err := os.ReadFile(filepath.Join(stateDir, sessionImageSizeIndexFile))
 	if err != nil {

@@ -183,6 +183,9 @@ func newProviderChatRuntimeWithBackend(manager *acp.Manager, sessions *sessionSt
 		if runtime.ledgers != nil {
 			runtime.wg.Add(1)
 			go runtime.runFirstScreenWarm(ctx, firstScreenWarmDelay)
+			// The image size index is read now, so a first history read in
+			// this process does not wait for it (session_image_size_index.go).
+			go sessionImageSizesOnDisk.preload(stateDir)
 		}
 	}
 	return runtime

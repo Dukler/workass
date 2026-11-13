@@ -44,6 +44,10 @@ func briefSpawnedWorkReply(items []map[string]any, keep map[string]struct{}, now
 			settled = append(settled, []any{workID, fieldString(item, "status")})
 		}
 	}
+	if omitted == 0 {
+		// Nothing left out: the whole list, exactly as without brief.
+		return map[string]any{"items": kept}
+	}
 	return map[string]any{"brief": true, "items": kept, "settled": settled, "omitted": omitted}
 }
 
