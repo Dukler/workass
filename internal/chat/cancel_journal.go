@@ -11,14 +11,20 @@ const cancelJournalVersion = 2
 func (r providerEventJournalRecord) validateCommand() error {
 	switch r.Version {
 	case providerEventJournalVersion:
-		if r.Cancel != nil || !providerEventJournalEligible(r.Command.Event.Kind) {
+		if r.Cancel != nil || r.Control != nil || !providerEventJournalEligible(r.Command.Event.Kind) {
 			return errors.New("provider event is not eligible for the durable stream journal")
 		}
 	case cancelJournalVersion:
-		if r.Cancel == nil || r.Command.Event.Kind != "" {
+		if r.Cancel == nil || r.Control != nil || r.Command.Event.Kind != "" {
 			return errors.New("cancel journal record contains another command")
 		}
 		_, err := r.Cancel.command()
+		return err
+	case controlJournalVersion:
+		if r.Control == nil || r.Cancel != nil || r.Command.Event.Kind != "" {
+			return errors.New("control journal record contains another command")
+		}
+		_, err := r.Control.command()
 		return err
 	default:
 		return fmt.Errorf("unsupported provider event journal version %d", r.Version)
@@ -124,6 +130,12 @@ func (e *Engine) persistCommand(next State, command Command) error {
 	}
 	if store, ok := e.store.(cancelCommandStateStore); ok && cancellationCommand(e.state, command) {
 		return store.commitCancelCommand(e.state.Revision, next, command)
+	}
+	if store, ok := e.store.(controlCommandStateStore); ok && controlCommandEligible(e.state, command) {
+		journaled, err := store.commitControlCommand(e.state, next, command)
+		if err != nil || journaled {
+			return err
+		}
 	}
 	return e.saveReduced(next)
 }

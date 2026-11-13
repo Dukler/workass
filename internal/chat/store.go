@@ -49,6 +49,8 @@ type providerEventJournalRecord struct {
 	Revision     uint64                `json:"revision"`
 	Command      ProviderEventReceived `json:"command"`
 	Cancel       *cancelJournalCommand `json:"cancel,omitempty"`
+	// Control is a send-path command (control_journal.go), version 3.
+	Control *controlJournalCommand `json:"control,omitempty"`
 }
 
 type stateEnvelope struct {
@@ -594,7 +596,12 @@ func replayProviderEventRecords(state State, next func() ([]byte, error)) (State
 		if record.BaseRevision != state.Revision {
 			return State{}, fmt.Errorf("provider event journal revision gap: got base %d, want %d", record.BaseRevision, state.Revision)
 		}
-		if record.Cancel != nil {
+		if record.Control != nil {
+			state, err = replayControlCommand(state, record.Control)
+			if err != nil {
+				return State{}, err
+			}
+		} else if record.Cancel != nil {
 			command, err := record.Cancel.command()
 			if err != nil {
 				return State{}, err

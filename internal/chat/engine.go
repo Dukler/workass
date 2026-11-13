@@ -240,10 +240,10 @@ func (e *Engine) ApplyPrepared(command Command, prepare func() error) error {
 		var persistErr error
 		if hasProviderStore && isProviderEvent {
 			persistErr = providerStore.commitProviderEvent(e.state.Revision, next, providerEvent)
-		} else if prepare == nil {
-			persistErr = e.persistCommand(next, command)
 		} else {
-			persistErr = e.saveReduced(next)
+			// A prepared command's local files are written above, before
+			// its commit, whichever way the commit is persisted.
+			persistErr = e.persistCommand(next, command)
 		}
 		if persistErr != nil {
 			undo()
