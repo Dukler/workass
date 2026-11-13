@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +137,33 @@ func TestChunkWindowKeepsJobsAndGapsApart(t *testing.T) {
 	want := "data:a data:bc data:x data:z data:! end:"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("frames %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+// Which connects ask for a window: lean with ck, or lean with compact boot
+// reads (the phone app's b1); an explicit ck wins; never without lean.
+func TestChunkWindowFromQuery(t *testing.T) {
+	cases := map[string]time.Duration{
+		"lean=1":              0,
+		"ck=1":                0,
+		"b1=0.a.b.d":          0,
+		"lean=1&ck=1":         defaultChunkWindow,
+		"lean=1&ck=250":       250 * time.Millisecond,
+		"lean=1&ck=5000":      time.Second,
+		"lean=1&ck=0":         0,
+		"lean=1&ck=x":         0,
+		"lean=1&b1=0.a.b.d":   defaultChunkWindow,
+		"lean=1&b1=":          0,
+		"lean=1&b1=0.a&ck=0":  0,
+		"lean=1&b1=0.a&ck=40": 40 * time.Millisecond,
+	}
+	for query, want := range cases {
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := chunkWindowFromQuery(values); got != want {
+			t.Errorf("%s: window %s, want %s", query, got, want)
+		}
 	}
 }

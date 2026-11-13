@@ -8,8 +8,9 @@ import (
 )
 
 // Streamed text, merged for a lean client that asks (?ck=1 for the default
-// window, ?ck=N for N milliseconds, with lean=1; the name is short because it
-// rides every connect's upgrade request): a model streams a reply in ~25 ms chunks, one job:event data frame
+// window, ?ck=N for N milliseconds, or ?b1= — see chunkWindowFromQuery — with
+// lean=1; the name is short because it rides every connect's upgrade
+// request): a model streams a reply in ~25 ms chunks, one job:event data frame
 // each (~36 a second from the mock, more from a fast model), and a phone
 // draws them at most ten times a second anyway (workass-mobile
 // state/liveText.ts). Every frame wakes its radio, crosses into its
@@ -36,9 +37,19 @@ const defaultChunkWindow = 100 * time.Millisecond
 
 // chunkWindowFromQuery is the window a lean client asked for: 0 (off) unless
 // lean=1 and ck is 1 (the default window) or a number of milliseconds from 10
-// up, capped at a second.
+// up, capped at a second. A lean client that names its boot reads in the
+// compact form (?b1=, boot_compact.go) asks for the default window too: only
+// the phone app sends b1, every build of it that does takes merged chunks
+// (it places a chunk by its offset), and its connects stay as short as they
+// were. An explicit ck wins.
 func chunkWindowFromQuery(query url.Values) time.Duration {
 	if query.Get("lean") != "1" {
+		return 0
+	}
+	if !query.Has("ck") {
+		if query.Get("b1") != "" {
+			return defaultChunkWindow
+		}
 		return 0
 	}
 	ms, err := strconv.Atoi(query.Get("ck"))
