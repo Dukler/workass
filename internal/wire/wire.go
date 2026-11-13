@@ -370,6 +370,11 @@ type client struct {
 	// lean is set when the client connected with lean=1: events it never
 	// reads are not sent to it (lean_events.go).
 	lean bool
+	// bootReads are the reads named on the URL (?boot=, boot_reads.go), run by
+	// readLoop before the first frame is read; bootCount is how many were
+	// accepted, announced on the approval. Set once in newClient.
+	bootReads []invokeMessage
+	bootCount int
 }
 
 type outboundFrame struct {
@@ -1159,6 +1164,14 @@ func (h *Hub) newClient(conn net.Conn, r *http.Request) *client {
 	if token != "" {
 		if device, ok := h.lease.AuthenticateToken(token, c.ip); ok {
 			c.setDevice(device, "")
+			// The JSON form wins when both are named; b1 is its compact
+			// spelling (boot_compact.go).
+			if named := r.URL.Query().Get("boot"); named != "" {
+				c.bootReads = bootReadsFromQuery(named)
+			} else {
+				c.bootReads = bootReadsFromCompact(r.URL.Query().Get("b1"))
+			}
+			c.bootCount = len(c.bootReads)
 			return c
 		}
 		c.setAccessState(accessState{State: "rejected", Reason: "invalid-token"})
@@ -1485,6 +1498,49 @@ func (h *Hub) readLoop(c *client) {
 		<-backgroundDone
 	}()
 
+	// dispatch schedules one invoke on its lane; false means the client is gone.
+	dispatch := func(msg invokeMessage) bool {
+		// While blocked below the reader cannot see the peer answer a
+		// ping, so the liveness monitor holds its verdict until it is
+		// back. Both waits are flow control, never a dead peer.
+		queue := ordered
+		switch h.schedulingFor(msg.Channel) {
+		case invokeOutOfBandRead:
+			c.live.blockReader()
+			h.handleInvoke(c, msg)
+			c.live.unblockReader()
+			return true
+		case invokeHistoryRead:
+			queue = history
+			if backgroundRead(msg.Args) {
+				queue = background
+			}
+		case invokeConcurrentRead:
+			go h.handleInvoke(c, msg)
+			return true
+		}
+		c.live.blockReader()
+		select {
+		case queue <- msg:
+		case <-c.done:
+			return false
+		}
+		c.live.unblockReader()
+		return true
+	}
+
+	// Reads named on the URL (boot_reads.go) go first, exactly as if they were
+	// the first frames on the socket. Only a token-approved client has any.
+	boot := c.bootReads
+	c.bootReads = nil
+	if _, paired := c.deviceSnapshot(); paired {
+		for _, msg := range boot {
+			if !dispatch(msg) {
+				return
+			}
+		}
+	}
+
 	// The decoder rejects a frame whose declared length passes the limit before
 	// its payload arrives, so buf never holds more than one bounded frame.
 	var buf []byte
@@ -1506,32 +1562,9 @@ func (h *Hub) readLoop(c *client) {
 				if !ok {
 					continue
 				}
-				// While blocked below the reader cannot see the peer answer a
-				// ping, so the liveness monitor holds its verdict until it is
-				// back. Both waits are flow control, never a dead peer.
-				queue := ordered
-				switch h.schedulingFor(msg.Channel) {
-				case invokeOutOfBandRead:
-					c.live.blockReader()
-					h.handleInvoke(c, msg)
-					c.live.unblockReader()
-					continue
-				case invokeHistoryRead:
-					queue = history
-					if backgroundRead(msg.Args) {
-						queue = background
-					}
-				case invokeConcurrentRead:
-					go h.handleInvoke(c, msg)
-					continue
-				}
-				c.live.blockReader()
-				select {
-				case queue <- msg:
-				case <-c.done:
+				if !dispatch(msg) {
 					return
 				}
-				c.live.unblockReader()
 			}
 			if protocolErr != nil {
 				h.logf("[wire] closing client after websocket protocol error: %v", protocolErr)
@@ -2263,6 +2296,11 @@ func (h *Hub) accessApprovedPayload(c *client, device lease.Device) map[string]a
 	// chat_image_key.go). An older client ignores it.
 	if key := chatImageKey(device); key != "" {
 		payload["imageKey"] = key
+	}
+	// Additive: how many ?boot= reads this daemon will answer unasked
+	// (boot_reads.go). Absent means none: the client sends them itself.
+	if c != nil && c.bootCount > 0 {
+		payload["boot"] = c.bootCount
 	}
 	return h.stampIdentity(payload)
 }

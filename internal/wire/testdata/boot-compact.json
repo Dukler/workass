@@ -1,0 +1,503 @@
+{
+ "template": 1,
+ "valid": [
+  {
+   "label": "first launch (no etags, settings last)",
+   "value": "15.mw6nfkw0..d.s.p.w.m.g",
+   "frames": [
+    {
+     "t": "invoke",
+     "id": 41,
+     "channel": "state:digest",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "omit": {
+        "root": [
+         "catalogHash",
+         "procHash"
+        ],
+        "chat": [
+         "actorRevision",
+         "currentModeId",
+         "currentModelId",
+         "messageCount",
+         "queueHeadId",
+         "queueLen"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 42,
+     "channel": "session:get",
+     "args": [
+      {
+       "shell": true,
+       "leanTools": true,
+       "leanTitles": true,
+       "toolSummaries": true,
+       "deferImages": true,
+       "runningTail": "stub",
+       "omit": {
+        "root": [
+         "deferredChats",
+         "removedWorkspaces"
+        ],
+        "chat": [
+         "contextUsageByProvider",
+         "planLatest",
+         "historyComplete",
+         "sessionProviderId",
+         "actorRevision",
+         "sessionId",
+         "titleLocked",
+         "draft",
+         "pane",
+         "pending",
+         "messageCount"
+        ]
+       },
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "delta": true
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 43,
+     "channel": "chat:permissions-pending",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 44,
+     "channel": "spawned-work:summary",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       }
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 45,
+     "channel": "machines:list",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 46,
+     "channel": "settings:get",
+     "args": []
+    }
+   ]
+  },
+  {
+   "label": "reconnect (three etags)",
+   "value": "15.mw6nfkw0..d0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE.sCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo.p.wt7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c.m",
+   "frames": [
+    {
+     "t": "invoke",
+     "id": 41,
+     "channel": "state:digest",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "omit": {
+        "root": [
+         "catalogHash",
+         "procHash"
+        ],
+        "chat": [
+         "actorRevision",
+         "currentModeId",
+         "currentModelId",
+         "messageCount",
+         "queueHeadId",
+         "queueLen"
+        ]
+       },
+       "ifNoneMatch": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 42,
+     "channel": "session:get",
+     "args": [
+      {
+       "shell": true,
+       "leanTools": true,
+       "leanTitles": true,
+       "toolSummaries": true,
+       "deferImages": true,
+       "runningTail": "stub",
+       "omit": {
+        "root": [
+         "deferredChats",
+         "removedWorkspaces"
+        ],
+        "chat": [
+         "contextUsageByProvider",
+         "planLatest",
+         "historyComplete",
+         "sessionProviderId",
+         "actorRevision",
+         "sessionId",
+         "titleLocked",
+         "draft",
+         "pane",
+         "pending",
+         "messageCount"
+        ]
+       },
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "ifNoneMatch": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+       "delta": true
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 43,
+     "channel": "chat:permissions-pending",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 44,
+     "channel": "spawned-work:summary",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "ifNoneMatch": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 45,
+     "channel": "machines:list",
+     "args": []
+    }
+   ]
+  },
+  {
+   "label": "no fleet key (no machines:list)",
+   "value": "7.mw6nfkw0..d0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE.sCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo.p.wt7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c",
+   "frames": [
+    {
+     "t": "invoke",
+     "id": 7,
+     "channel": "state:digest",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "omit": {
+        "root": [
+         "catalogHash",
+         "procHash"
+        ],
+        "chat": [
+         "actorRevision",
+         "currentModeId",
+         "currentModelId",
+         "messageCount",
+         "queueHeadId",
+         "queueLen"
+        ]
+       },
+       "ifNoneMatch": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 8,
+     "channel": "session:get",
+     "args": [
+      {
+       "shell": true,
+       "leanTools": true,
+       "leanTitles": true,
+       "toolSummaries": true,
+       "deferImages": true,
+       "runningTail": "stub",
+       "omit": {
+        "root": [
+         "deferredChats",
+         "removedWorkspaces"
+        ],
+        "chat": [
+         "contextUsageByProvider",
+         "planLatest",
+         "historyComplete",
+         "sessionProviderId",
+         "actorRevision",
+         "sessionId",
+         "titleLocked",
+         "draft",
+         "pane",
+         "pending",
+         "messageCount"
+        ]
+       },
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "ifNoneMatch": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+       "delta": true
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 9,
+     "channel": "chat:permissions-pending",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 10,
+     "channel": "spawned-work:summary",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794070800000,
+        "include": []
+       },
+       "ifNoneMatch": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "label": "settle off (no idleBefore)",
+   "value": "1.mw70ajk0..d0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE.sCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo.p.wt7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c",
+   "frames": [
+    {
+     "t": "invoke",
+     "id": 1,
+     "channel": "state:digest",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794092400000,
+        "include": []
+       },
+       "omit": {
+        "root": [
+         "catalogHash",
+         "procHash"
+        ],
+        "chat": [
+         "actorRevision",
+         "currentModeId",
+         "currentModelId",
+         "messageCount",
+         "queueHeadId",
+         "queueLen"
+        ]
+       },
+       "ifNoneMatch": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 2,
+     "channel": "session:get",
+     "args": [
+      {
+       "shell": true,
+       "leanTools": true,
+       "leanTitles": true,
+       "toolSummaries": true,
+       "deferImages": true,
+       "runningTail": "stub",
+       "omit": {
+        "root": [
+         "deferredChats",
+         "removedWorkspaces"
+        ],
+        "chat": [
+         "contextUsageByProvider",
+         "planLatest",
+         "historyComplete",
+         "sessionProviderId",
+         "actorRevision",
+         "sessionId",
+         "titleLocked",
+         "draft",
+         "pane",
+         "pending",
+         "messageCount"
+        ]
+       },
+       "page": {
+        "settledBefore": 1794092400000,
+        "include": []
+       },
+       "ifNoneMatch": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+       "delta": true
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 3,
+     "channel": "chat:permissions-pending",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 4,
+     "channel": "spawned-work:summary",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 1794092400000,
+        "include": []
+       },
+       "ifNoneMatch": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "label": "archive off (settledBefore 0)",
+   "value": "1.0..d0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE.sCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo.p.wt7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c",
+   "frames": [
+    {
+     "t": "invoke",
+     "id": 1,
+     "channel": "state:digest",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 0,
+        "include": []
+       },
+       "omit": {
+        "root": [
+         "catalogHash",
+         "procHash"
+        ],
+        "chat": [
+         "actorRevision",
+         "currentModeId",
+         "currentModelId",
+         "messageCount",
+         "queueHeadId",
+         "queueLen"
+        ]
+       },
+       "ifNoneMatch": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 2,
+     "channel": "session:get",
+     "args": [
+      {
+       "shell": true,
+       "leanTools": true,
+       "leanTitles": true,
+       "toolSummaries": true,
+       "deferImages": true,
+       "runningTail": "stub",
+       "omit": {
+        "root": [
+         "deferredChats",
+         "removedWorkspaces"
+        ],
+        "chat": [
+         "contextUsageByProvider",
+         "planLatest",
+         "historyComplete",
+         "sessionProviderId",
+         "actorRevision",
+         "sessionId",
+         "titleLocked",
+         "draft",
+         "pane",
+         "pending",
+         "messageCount"
+        ]
+       },
+       "page": {
+        "settledBefore": 0,
+        "include": []
+       },
+       "ifNoneMatch": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+       "delta": true
+      }
+     ]
+    },
+    {
+     "t": "invoke",
+     "id": 3,
+     "channel": "chat:permissions-pending",
+     "args": []
+    },
+    {
+     "t": "invoke",
+     "id": 4,
+     "channel": "spawned-work:summary",
+     "args": [
+      {
+       "page": {
+        "settledBefore": 0,
+        "include": []
+       },
+       "ifNoneMatch": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "invalid": [
+  "",
+  "1",
+  "1.2.3",
+  "Z.1..d",
+  "1.1..x",
+  "1.1..pAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "1.1..dAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "1.1..d!",
+  "1.1..p.p.p.p.p.p.p.p.p",
+  "1.1..d.",
+  "-1.1..d"
+ ]
+}
