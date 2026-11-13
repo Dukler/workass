@@ -136,8 +136,16 @@ func TestWorkGroupPacksPageFromDiskByWindowAndRebuildWhenStale(t *testing.T) {
 	// A later process reads the pack from disk.
 	store := runtime.workGroupPacks()
 	path := store.packPath(workGroupPackKey{chatID: "wg", messageID: "wg-message-7", shape: "d1l1t1s1c0"})
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("pack not on disk: %v", err)
+	// The pack is written after its last page is published.
+	var statErr error
+	for wait := 0; wait < 400; wait++ {
+		if _, statErr = os.Stat(path); statErr == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if statErr != nil {
+		t.Fatalf("pack not on disk: %v", statErr)
 	}
 	workGroupPackStores.Delete(stateDir)
 	if got := mustJSONBytes(t, readWorkGroupAll(t, runtime, false)); !bytes.Equal(got, want) {
