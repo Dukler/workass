@@ -22,8 +22,28 @@ const nextSecond = (now: number) => now - (now % 1000) + 1000;
 // The first second boundary at or after `t`, plus a little slack.
 const onBoundary = (t: number) => Math.ceil(t / 1000) * 1000 + SLACK_MS;
 
+// A hidden window shows none of these labels, so the clock does not run while
+// the document is hidden; when it shows again every label catches up at once
+// (energy lane, 2026-11-13). Every subscriber only formats a time for display.
+let isHidden: () => boolean = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
+let watching = false;
+
+function watchVisibility(): void {
+  if (watching || typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+  watching = true;
+  document.addEventListener('visibilitychange', () => { if (!isHidden()) shown(); });
+}
+
+// The window shows again: run every listener now, then resume on the boundary.
+function shown(): void {
+  const now = Date.now();
+  for (const entry of listeners.values()) entry.due = Math.min(entry.due, now);
+  if (timer !== null) { clearTimeout(timer); timer = null; }
+  fire();
+}
+
 function schedule(): void {
-  if (!listeners.size) {
+  if (!listeners.size || isHidden()) {
     if (timer !== null) { clearTimeout(timer); timer = null; }
     return;
   }
@@ -58,6 +78,7 @@ export function subscribeSecond(listener: Listener): () => void {
 export function subscribeUntil(listener: Listener, nextDue: NextDue): () => void {
   const now = Date.now();
   listeners.set(listener, { nextDue, due: onBoundary(Math.max(nextDue(now), now + 1)) });
+  watchVisibility();
   schedule();
   return () => {
     listeners.delete(listener);
@@ -65,4 +86,7 @@ export function subscribeUntil(listener: Listener, nextDue: NextDue): () => void
   };
 }
 
-export const secondTickInternals = { listenerCount: () => listeners.size, scheduled: () => timer !== null, timerAt: () => timerAt };
+export const secondTickInternals = {
+  listenerCount: () => listeners.size, scheduled: () => timer !== null, timerAt: () => timerAt,
+  setHidden: (hidden: () => boolean) => { isHidden = hidden; }, shown,
+};

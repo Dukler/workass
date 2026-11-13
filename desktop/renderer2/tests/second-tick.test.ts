@@ -66,3 +66,34 @@ test('stampTurnsOver names exactly the moment relTime changes', () => {
     assert.notEqual(relTime(at, next), relTime(at, now), `age ${age}: no change at ${next - then}`);
   }
 });
+
+// Energy lane 2026-11-13: nobody sees the labels of a hidden window, so the
+// clock stops while hidden and every label catches up the moment it shows.
+test('the clock sleeps while the window is hidden and catches up when it shows', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 20_500 });
+  const { subscribeSecond, secondTickInternals } = await import('../src/second-tick.ts');
+  let hidden = false;
+  secondTickInternals.setHidden(() => hidden);
+  try {
+    const seen: number[] = [];
+    const off = subscribeSecond(() => seen.push(Date.now()));
+    mock.timers.tick(502);   // 21_002
+    assert.deepEqual(seen, [21_002]);
+    hidden = true;
+    mock.timers.tick(1000);  // the tick already scheduled still runs once
+    assert.deepEqual(seen, [21_002, 22_002]);
+    assert.equal(secondTickInternals.scheduled(), false, 'nothing is scheduled while hidden');
+    mock.timers.tick(10_000);
+    assert.equal(seen.length, 2);
+    hidden = false;
+    mock.timers.tick(300);   // 32_302
+    secondTickInternals.shown();
+    assert.deepEqual(seen.slice(2), [32_302], 'shown: at once');
+    mock.timers.tick(700);   // 33_002: back on the boundary
+    assert.deepEqual(seen.slice(3), [33_002]);
+    off();
+  } finally {
+    secondTickInternals.setHidden(() => false);
+    mock.timers.reset();
+  }
+});
