@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -429,6 +430,9 @@ func (r *providerChatRuntime) closedRowsHaveLiveRow(summary chat.ActorSummary, w
 	if known, ok := summary.LiveRows(); ok {
 		return liveRowInWindow(known, unchecked), nil
 	}
+	if known, ok := r.keptLiveRows(summary.ChatID, summary.Revision); ok {
+		return liveRowInWindow(known, unchecked), nil
+	}
 	r.mu.Lock()
 	scan := r.liveScans[summary.ChatID]
 	if scan == nil || scan.revision != summary.Revision {
@@ -812,4 +816,75 @@ func (r *providerChatRuntime) lazyActorCounts() (open, closed int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.actors), len(r.summaries)
+}
+
+// Live rows on disk. Which of a closed chat's rows have their own pending or
+// running status was learned by reading every row older than a page (a
+// page of the c94k chat read 60 MB for it, most of its first-read time). It
+// is kept per chat revision with the chat's packs: written when the chat's
+// rows commit (from the rows in memory), after the warm for chats no
+// process wrote since (one scan each, in idle time), and read before any
+// scan.
+
+func liveRowsKey(chatID string) pageMemoKey {
+	return pageMemoKey{chatID: chatID, before: "live-rows"}
+}
+
+func (r *providerChatRuntime) keptLiveRows(chatID string, revision uint64) ([]int, bool) {
+	kept, ok := r.workGroupPacks().keptPage(liveRowsKey(chatID), revision)
+	if !ok {
+		return nil, false
+	}
+	raw, err := kept.plain()
+	if err != nil {
+		return nil, false
+	}
+	var live []int
+	if json.Unmarshal(raw, &live) != nil {
+		return nil, false
+	}
+	return live, true
+}
+
+func (r *providerChatRuntime) keepLiveRows(chatID string, revision uint64, live []int) {
+	if live == nil {
+		live = []int{}
+	}
+	raw, err := json.Marshal(live)
+	if err == nil {
+		r.workGroupPacks().keepPage(liveRowsKey(chatID), revision, raw)
+	}
+}
+
+// backfillLiveRows scans, in idle time, every closed chat whose live rows are
+// not kept at its revision.
+func (r *providerChatRuntime) backfillLiveRows(ctx context.Context) {
+	r.mu.Lock()
+	summaries := make([]chat.ActorSummary, 0, len(r.summaries))
+	for _, summary := range r.summaries {
+		if !summary.Deleted && summary.LedgerCount > 0 {
+			summaries = append(summaries, summary)
+		}
+	}
+	r.mu.Unlock()
+	for _, summary := range summaries {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, ok := r.keptLiveRows(summary.ChatID, summary.Revision); ok {
+			continue
+		}
+		if known, ok := summary.LiveRows(); ok {
+			r.keepLiveRows(summary.ChatID, summary.Revision, known)
+			continue
+		}
+		live, err := r.ledgers.ScanLedgerLiveRows(summary.ChatID, closedView(summary), 0, summary.LedgerCount)
+		if err != nil {
+			continue
+		}
+		if current, closed := r.closedSummary(summary.ChatID); closed && current.Revision == summary.Revision {
+			r.keepLiveRows(summary.ChatID, summary.Revision, live)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }

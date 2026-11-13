@@ -74,8 +74,14 @@ type providerChatRuntime struct {
 	// replies keeps chats' first screens as their replies, per revision
 	// (provider_chat_reply_memo.go).
 	replies replyMemo
-	bootErr error
-	closed  bool
+	// screenWrites: first screens kept on disk after commits
+	// (provider_chat_first_screen.go).
+	screenWrites firstScreenWrites
+	// liveRowsBackfill: the warm also keeps every closed chat's live rows
+	// on disk (the daemon; provider_chat_lazy.go).
+	liveRowsBackfill bool
+	bootErr          error
+	closed           bool
 	// actorsPaused is used only by the daemon's staged startup path. Durable
 	// actor construction may happen before the network listener,
 	// but no coordinator may resume a provider effect until that listener is

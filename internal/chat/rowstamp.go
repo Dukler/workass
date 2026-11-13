@@ -274,3 +274,20 @@ func (a *SQLActors) DecodeLedgerWindowDesc(chatID string, view LedgerView, windo
 	}
 	return events, nil
 }
+
+// LiveRowSeqsAt are the rows whose own status is pending or running, and the
+// revision they are of.
+func (e *Engine) LiveRowSeqsAt() ([]int, uint64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state.Deleted {
+		return nil, 0, false
+	}
+	live := []int{}
+	for index := range e.state.Ledger {
+		if status := e.state.Ledger[index].Status; status == "pending" || status == "running" {
+			live = append(live, index+1)
+		}
+	}
+	return live, e.state.Revision, true
+}

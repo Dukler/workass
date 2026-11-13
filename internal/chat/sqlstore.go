@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -36,6 +37,18 @@ type SQLActors struct {
 	db *store.DB
 	// stamps: the rows this process wrote (rowstamp.go).
 	stamps rowStamps
+	// commitHook runs after a chat's rows commit (SetCommitHook).
+	commitHook atomic.Pointer[func(chatID string)]
+}
+
+// SetCommitHook names a function run after each commit of a chat's rows, on
+// the committing goroutine: it must only schedule work.
+func (a *SQLActors) SetCommitHook(hook func(chatID string)) {
+	if hook == nil {
+		a.commitHook.Store(nil)
+		return
+	}
+	a.commitHook.Store(&hook)
 }
 
 // NewSQLActors binds the chat actor tables of an open state database.
@@ -703,6 +716,9 @@ func (s *SQLStore) checkpointLocked(state State) error {
 		previousTools = cache.tools
 	}
 	s.actors.stamps.note(s.chatID, &plan, len(state.Ledger))
+	if hook := s.actors.commitHook.Load(); hook != nil {
+		(*hook)(s.chatID)
+	}
 	s.cache = plan.nextCache(cache, state.Ledger)
 	s.cache.tools = tools.nextToolsCache(previousTools, state.Tools)
 	s.journalRecords = 0

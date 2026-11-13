@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"workass/internal/chat"
@@ -351,6 +352,9 @@ func (r *providerChatRuntime) runFirstScreenWarm(ctx context.Context, delay time
 	case <-timer.C:
 	}
 	r.warmFirstScreens(ctx)
+	if r.liveRowsBackfill {
+		r.backfillLiveRows(ctx)
+	}
 	// Decoding every chat's newest rows left garbage several times the size
 	// of what is kept; hand it back rather than when the scavenger gets to it.
 	debug.FreeOSMemory()
@@ -495,4 +499,91 @@ func replyMessageIDs(raw []byte) ([]string, bool) {
 		ids[index] = row.ID
 	}
 	return ids, true
+}
+
+// First screens at write time. A chat whose rows commit has its first
+// screens (both renderers' shapes) made again from the rows in memory a
+// moment after the commits stop, and kept on disk at that revision: a
+// later process opens it without reading or decoding its newest rows,
+// even if no process ever read it. Chats no process wrote since this
+// existed get theirs from the warm after boot (warmChatShape), which keeps
+// what it reads on disk too.
+
+const firstScreenWriteDelay = 1500 * time.Millisecond
+
+type firstScreenWrites struct {
+	mu      sync.Mutex
+	pending map[string]*time.Timer
+}
+
+// keepFirstScreensOnWrite turns the artifact on (the daemon does; tests that
+// do not ask for it never write after their reads).
+func (r *providerChatRuntime) keepFirstScreensOnWrite() {
+	if r == nil || r.ledgers == nil {
+		return
+	}
+	r.mu.Lock()
+	r.liveRowsBackfill = true
+	r.mu.Unlock()
+	r.ledgers.SetCommitHook(r.firstScreenSoon)
+}
+
+func (r *providerChatRuntime) firstScreenSoon(chatID string) {
+	r.screenWrites.mu.Lock()
+	defer r.screenWrites.mu.Unlock()
+	if r.screenWrites.pending == nil {
+		r.screenWrites.pending = make(map[string]*time.Timer)
+	}
+	if timer, ok := r.screenWrites.pending[chatID]; ok {
+		timer.Reset(firstScreenWriteDelay)
+		return
+	}
+	r.screenWrites.pending[chatID] = time.AfterFunc(firstScreenWriteDelay, func() {
+		r.screenWrites.mu.Lock()
+		delete(r.screenWrites.pending, chatID)
+		r.screenWrites.mu.Unlock()
+		r.writeFirstScreens(chatID)
+	})
+}
+
+// writeFirstScreens keeps the chat's first screens at its current revision
+// on disk, unless a turn is running in it (its rows are still changing).
+func (r *providerChatRuntime) writeFirstScreens(chatID string) {
+	r.mu.Lock()
+	closing := r.closed
+	r.mu.Unlock()
+	if closing {
+		return
+	}
+	revision, known := r.chatRevision(chatID)
+	if !known {
+		return
+	}
+	// Its live rows too, from the rows in memory.
+	r.mu.Lock()
+	actor := r.actors[chatID]
+	r.mu.Unlock()
+	if actor != nil {
+		if seq, now, ok := actor.engine.LiveRowSeqsAt(); ok && now == revision {
+			r.keepLiveRows(chatID, revision, seq)
+		}
+	}
+	for _, shape := range firstScreenShapes {
+		page, found, err := r.archivePageByChat(chatID, actorHistoryTail, firstScreenWarmLimit, true, shape.summary)
+		if err != nil || !found {
+			return
+		}
+		for _, raw := range page.messages {
+			switch fieldString(mapFromAnyMain(raw), "status") {
+			case "running", "pending":
+				return
+			}
+		}
+		if now, _ := r.chatRevision(chatID); now != revision {
+			return
+		}
+		kept := keepReply(page.raw())
+		r.replies.put(replyMemoKey{chatID: chatID, limit: firstScreenWarmLimit, opts: shape.summary}, revision, kept)
+		r.workGroupPacks().keepPageKept(firstScreenDiskKey(chatID, firstScreenWarmLimit, shape.summary), revision, kept)
+	}
 }

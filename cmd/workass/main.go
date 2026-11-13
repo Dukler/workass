@@ -385,6 +385,8 @@ func main() {
 		logger.Printf("[workass] update preflight: admission closed, no beacon, fleet links or schedules")
 	}
 	providerChats := newProviderChatRuntimeBeforeProviderStartupWithBackend(acpManager, sessionState, stateDir, chatActors, hub.Broadcast)
+	// A chat's first screen is kept on disk as its rows commit.
+	providerChats.keepFirstScreensOnWrite()
 	if err := providerChats.StartupError(); err != nil {
 		acpManager.Reset()
 		_ = chatActors.close()
