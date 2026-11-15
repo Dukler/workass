@@ -952,7 +952,7 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 			c.discardLane(lane)
 			return
 		}
-		acknowledgeProviderEvent(lane, event.Identity.Sequence, nil)
+		acknowledgeProviderEvent(lane, event.Identity.Sequence, providerTurnAnswer(c.engine, event))
 		c.wakeEffects()
 		if event.Kind == provider.EventLaneDetached {
 			// The adapter has already destroyed this disposable attachment. Remove
@@ -968,6 +968,27 @@ func (c *Coordinator) forwardEvents(lane provider.Lane, generation uint64) {
 			return
 		}
 	}
+}
+
+// providerTurnAnswer tells the adapter whether the chat took a turn the
+// provider started on its own. The chat declines one while its own turn is
+// running or already dispatched; adopting it anyway bound the session to a job
+// the chat never owned, so the chat's own input, folded into that turn by the
+// provider, was refused as a protocol violation (bug-20261115-e090223f).
+func providerTurnAnswer(engine *Engine, event provider.Event) error {
+	if event.Kind != provider.EventProviderTurnStarted || event.Admission == nil {
+		return nil
+	}
+	// Taking the turn reserves its operation; declining never does. This is the
+	// same ownership providerTurnEventDeclined reads for the turn's later output.
+	owned := false
+	engine.View(func(state State) {
+		_, owned = state.Operations[event.Admission.Turn.OperationID]
+	})
+	if owned {
+		return nil
+	}
+	return provider.ErrProviderTurnDeclined
 }
 
 func acknowledgeProviderEvent(lane provider.Lane, sequence uint64, err error) {

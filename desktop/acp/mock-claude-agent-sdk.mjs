@@ -831,6 +831,14 @@ class FixtureQuery {
       if (fixtureMarker(text, 'harness-open') !== null) await this.harnessTurn({ open: true });
       const harnessHold = fixtureMarker(text, 'harness-hold');
       if (harnessHold !== null) await this.harnessTurn({ holdMs: Number(harnessHold) });
+      // Two self-started turns back to back, as two Monitor events do: the
+      // second starts the instant the first one's result is out, and stays
+      // open so a prompt sent meanwhile is folded into it.
+      const harnessChain = fixtureMarker(text, 'harness-chain');
+      if (harnessChain !== null) {
+        await this.harnessTurn({ holdMs: Number(harnessChain) || 300 });
+        await this.harnessTurn({ open: true, immediate: true });
+      }
       if (text.includes('[fixture:transport-closes-after-result]')) {
         this.transportReady = false;
       }
@@ -899,10 +907,11 @@ class FixtureQuery {
 
   // A turn nobody asked for: the harness wakes the session when background work
   // settles. This is the shape that produced the 76-minute false park.
-  async harnessTurn({ dies = false, open = false, settles = null, holdMs = 0 } = {}) {
+  async harnessTurn({ dies = false, open = false, settles = null, holdMs = 0, immediate = false } = {}) {
     // A real wake arrives while the session is idle, after the host has
-    // settled the previous result.
-    if (dies || open || settles || holdMs) await new Promise((resolve) => setTimeout(resolve, 50));
+    // settled the previous result. `immediate` is a queued wake: Claude Code
+    // starts it right after the previous turn's result, with no idle gap.
+    if (!immediate && (dies || open || settles || holdMs)) await new Promise((resolve) => setTimeout(resolve, 50));
     // `settles` replays a real background task finishing while idle, in the
     // order the real CLI emits it (captured 2026-10-13): task_updated, then
     // task_notification with its status, output file and summary.

@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -414,7 +415,12 @@ func (m *Manager) adoptHarnessTurn(bridge *Bridge, tabID, chatID, sessionID, pro
 			Admission: &providercontract.TurnAdmission{
 				Turn: providercontract.TurnRef{OperationID: operationID, NativeID: jobID}, Accepted: true,
 			},
-		}); err != nil {
+		}); errors.Is(err, providercontract.ErrProviderTurnDeclined) {
+			// The chat's own turn is running or already dispatched, and its job
+			// owns the session. Claude folds that turn's input into this one, so
+			// this turn's output and end belong to the chat's job.
+			return
+		} else if err != nil {
 			// Adopt anyway: an acknowledgement that timed out after the chat
 			// committed would otherwise leave it owning a turn no job can end. If
 			// the chat never took it, the turn's terminal is simply declined.

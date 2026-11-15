@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -251,3 +252,43 @@ func phaseCACPIdentity(chatID string) providercontract.LaneIdentity {
 }
 
 var _ chat.StateStore = (*phaseCBlockingStateStore)(nil)
+
+// A chat declining a provider-started turn answers the adapter; it is not a
+// protocol failure. The lane keeps delivering, and the emitter learns the turn
+// is not the chat's (bug-20261115-e090223f).
+func TestDeclinedProviderTurnLeavesTheLaneHealthy(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(Options{RSSSampleInterval: time.Hour})
+	t.Cleanup(func() { manager.Reset() })
+	lane := newUnopenedManagerLaneForTest(t, manager, "declined-turn-chat", "declined-turn-session")
+	lane.RequireDurableEventCommits()
+	if attached := <-lane.Events(); attached.Kind != providercontract.EventLaneAttached {
+		t.Fatalf("first lane event = %q, want lane attached", attached.Kind)
+	}
+	go func() {
+		for event := range lane.Events() {
+			var answer error
+			if event.Kind == providercontract.EventProviderTurnStarted {
+				answer = providercontract.ErrProviderTurnDeclined
+			}
+			lane.AcknowledgeDurableEvent(event.Identity.Sequence, answer)
+		}
+	}()
+	operationID := providercontract.ProviderTurnOperationID("harness-turn-declined")
+	err := lane.emit(providercontract.Event{
+		Kind:     providercontract.EventProviderTurnStarted,
+		Identity: providercontract.EventIdentity{OperationID: operationID, TurnID: "harness-turn-declined"},
+		Admission: &providercontract.TurnAdmission{
+			Turn: providercontract.TurnRef{OperationID: operationID, NativeID: "harness-turn-declined"}, Accepted: true,
+		},
+	})
+	if !errors.Is(err, providercontract.ErrProviderTurnDeclined) {
+		t.Fatalf("emit = %v, want the decline", err)
+	}
+	if err := lane.emit(providercontract.Event{
+		Kind: providercontract.EventUsageUpdated, Usage: &providercontract.UsageEvent{Used: 1, Size: 10},
+	}); err != nil {
+		t.Fatalf("the lane stopped delivering after a declined turn: %v", err)
+	}
+	lane.attachmentClosed()
+}

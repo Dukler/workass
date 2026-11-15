@@ -440,6 +440,12 @@ func (e Event) Validate() error {
 	return nil
 }
 
+// ErrProviderTurnDeclined acknowledges a provider-started turn the chat did not
+// take: it is already running or dispatching its own turn. It is an answer, not
+// a protocol failure. The adapter must leave the turn unadopted, so whatever the
+// provider folds into it stays with the chat's own turn.
+var ErrProviderTurnDeclined = errors.New("the chat declined this provider-started turn")
+
 // providerTurnOperationPrefix namespaces operations Workass did not originate.
 // The chat reserves the derived id when it owns the turn and declines one that
 // is already reserved, so a provider-started turn never adopts a prompt's

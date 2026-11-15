@@ -857,7 +857,7 @@ func (l *managerLane) AcknowledgeDurableEvent(sequence uint64, commitErr error) 
 	if wait := l.commitWait[sequence]; wait != nil {
 		waiters = append(waiters, wait)
 	}
-	if commitErr != nil {
+	if commitErr != nil && !errors.Is(commitErr, providercontract.ErrProviderTurnDeclined) {
 		l.protocolFailed = true
 		// LaneAttached is queued before its actor consumer exists and therefore has
 		// no waiter. If the actor rejects that first event, a provider callback may
