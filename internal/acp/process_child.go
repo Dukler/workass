@@ -522,7 +522,19 @@ func (m *Manager) applySpoolEventLocked(rec *spawnedWorkRecord, event procchild.
 		if ms, present := spoolIntPresent(payload, "elapsedMs"); present && ms > 0 && rec.Item.Status == "running" {
 			rec.Item.RunMs = int64(ms)
 		}
-		return m.settleProcessChildLocked(rec, outcome, exitCode, summary)
+		event, ok := m.settleProcessChildLocked(rec, outcome, exitCode, summary)
+		if ok && !event.NoticeSuppressed && spoolBool(payload, procchild.SettledPayloadCallerReceived) &&
+			strings.TrimSpace(rec.Item.ChatID) != "" {
+			// The command that started this job was still waiting when it ended,
+			// so the outcome reached the chat as that command's own result. A
+			// notice now would be the same news again, arriving as a new turn
+			// behind whatever the chat did next (bug-20261116-7ab17943). A job
+			// hosted for another machine's chat has no caller here that is that
+			// chat, so it always notifies.
+			event.NoticeSuppressed = true
+			event.SuppressReason = "the command that started this job was still waiting and received its outcome"
+		}
+		return event, ok
 	}
 	return ProcessLifecycleEvent{}, false
 }
@@ -1058,6 +1070,22 @@ func spoolString(payload map[string]any, key string) string {
 	}
 	value, _ := payload[key].(string)
 	return value
+}
+
+// spoolBool reads a flag in any shape a payload can carry it in: a bool built in
+// process, or the string the wire may have turned it into.
+func spoolBool(payload map[string]any, key string) bool {
+	if payload == nil {
+		return false
+	}
+	switch value := payload[key].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		return err == nil && parsed
+	}
+	return false
 }
 
 // spoolInt is spoolIntPresent where absence and zero mean the same thing.

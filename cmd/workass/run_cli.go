@@ -126,6 +126,9 @@ no settled event means lost, not running.
 		}
 	}
 
+	// Captured after the cgroup escape, which keeps this pid and its parent.
+	callerWaiting := procchild.WatchCaller()
+
 	resolvedStateDir, reporter, err := resolveRunContext(*tokenFile, *stateDir, *unreported, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "workass run: %s\n", acp.RedactSensitiveText(err.Error()))
@@ -168,6 +171,9 @@ no settled event means lost, not running.
 		Inputs: splitInputList(*inputs), MinFreeDisk: floor, Owner: *owner,
 		Dir: strings.TrimSpace(*workDir), Command: command, OutputFile: strings.TrimSpace(*outputFile),
 		Diagnostics: diagnostics, Reporter: reporter, Outbox: outbox,
+		// A caller still waiting when the job ends gets the outcome as this
+		// receipt, so its chat is not told a second time (bug-20261116-7ab17943).
+		CallerWaiting: callerWaiting,
 	}
 	result, err := procchild.Run(spec)
 	if err != nil {

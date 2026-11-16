@@ -102,6 +102,10 @@ type Spec struct {
 	// so it does not have to wait out a real outage.
 	ReportRetry    time.Duration
 	ReportDeadline time.Duration
+	// CallerWaiting answers, when the outcome is recorded, whether the process
+	// that started this run is still there to read its receipt (WatchCaller).
+	// Nil means nobody is: a daemon-started or timer-started run.
+	CallerWaiting func() bool
 }
 
 // Exit codes the supervisor itself produces, distinct from the child's.
@@ -198,6 +202,16 @@ func Run(spec Spec) (Result, error) {
 		}
 	}
 	record := newJournal(childID, outbox, spec.Reporter, diagnostics, now, facts, spec.ReportRetry, spec.ReportDeadline)
+	// Every outcome goes through here, so each one says whether it reached the
+	// caller as the receipt (caller.go). Only for a job the calling chat owns:
+	// a job owed to another chat (--owner, a timer's credential) has a caller
+	// that is not the party the notice is for.
+	settle := func(payload map[string]any) {
+		if strings.TrimSpace(spec.Owner) == "" && spec.CallerWaiting != nil && spec.CallerWaiting() {
+			payload[SettledPayloadCallerReceived] = true
+		}
+		_, _ = record.record(KindSettled, payload)
+	}
 	// One timer for the whole run: it reports the heartbeat while the daemon is
 	// reachable and retries the backlog while it is not. The caller asked for
 	// supervision, and this is what supervision reports with.
@@ -245,7 +259,7 @@ func Run(spec Spec) (Result, error) {
 		// receipt. A job started from another machine has a chat waiting, and a
 		// refusal it never hears about is indistinguishable from a job that
 		// vanished. This is what the live test's refused case proved.
-		_, _ = record.record(KindSettled, map[string]any{
+		settle(map[string]any{
 			"outcome": OutcomeFailed, "summary": "preflight refused: " + strings.Join(lines, "; "),
 			"preflight": lines, "exitCode": ExitPreflightRefused,
 		})
@@ -281,7 +295,7 @@ func Run(spec Spec) (Result, error) {
 			},
 		})
 		if err != nil {
-			_, _ = record.record(KindSettled, map[string]any{
+			settle(map[string]any{
 				"outcome": OutcomeCancelled, "summary": err.Error(), "exitCode": ExitCancelled,
 			})
 			result.Outcome, result.ExitCode = OutcomeCancelled, ExitCancelled
@@ -306,7 +320,7 @@ func Run(spec Spec) (Result, error) {
 	group.prepare(cmd)
 	started := now()
 	if err := cmd.Start(); err != nil {
-		_, _ = record.record(KindSettled, map[string]any{
+		settle(map[string]any{
 			"outcome": OutcomeFailed, "summary": "the command could not be started: " + err.Error(),
 			"exitCode": ExitSupervisorFailed,
 		})
@@ -347,7 +361,7 @@ func Run(spec Spec) (Result, error) {
 		// A process group cannot be found again once a descendant leaves it.
 		settled["summary"] = summary + "; isolation is a process group only, so a descendant that left it (setsid) is not tracked or stopped"
 	}
-	_, _ = record.record(KindSettled, settled)
+	settle(settled)
 	// The done marker keeps the pre-P4 settle path working byte for byte: a
 	// child registered through the external-work adapter is settled from this
 	// file by the same reconcile branch it always was, whatever happened to the

@@ -1051,6 +1051,26 @@ and on a `Shared` database a pragma that answers busy is retried up to the busy 
 keeps failing fast, since a second daemon there is the error it reports. Refused jobs on a fresh
 outbox went from 58 of 43,200 on the Mac and 84 of 7,200 on Linux to none.
 
+## 14l. A caller that waited has its outcome (2026-11-16)
+
+bug-20261116-7ab17943. Every local `workass run` notified its chat when it settled, including the
+ordinary case where the agent's own shell call was still waiting and printed the receipt. The
+chat's turn was busy running that call, so the notice was queued as a new turn and arrived after the
+result had been used, sometimes an hour later and behind the owner's messages. Reproduced on the
+installed 0.1.297: a foreground run returned `reported: true` and its exit event was consumed by
+the chat's monitor.
+
+The supervisor now records with every outcome whether the process that started it is still there
+to read the receipt (`callerReceived` on the settled event; `procchild.WatchCaller`). On Unix that
+is the parent pid captured at start, unchanged: a parent that exits re-parents its child, so the
+`&` a shell returned from, or a shell a tool timeout killed, reads as gone. A receipt sent to the
+null device counts as unread. Windows never re-parents, so it waits on a handle to the parent
+opened at start. The flag is set only for a job the calling chat owns: `--owner`, a timer's
+credential and `process.start` (which always passes `--owner`) keep their notice. The daemon
+suppresses the notice on that flag, with the reason logged; the row, the receipt and the entity
+log are unchanged. A harness background shell is a waiting caller too, and its own notification
+reports the exit.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global

@@ -473,7 +473,9 @@ Nothing about that call polls, and nothing about it needs a watcher:
 - **The chat is told only what is actionable**: settled, failed, `timed_out`,
   `lost`, a declared stall once, and a decision. A queue position and a start
   are visible by reading, which is when they matter. A job you cancelled never
-  notifies you.
+  notifies you, and neither does one whose `workass run` you were still waiting
+  on when it ended: its receipt was the outcome. A run sent off with `&`, or
+  whose shell was killed, still notifies.
 - **`--owner <global id>`** sends the outcome to a chat on another machine, so a
   job on the box with the GPU reports into the chat that asked for it.
 
