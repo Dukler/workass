@@ -91,25 +91,25 @@ export function transcriptWindowStale(rendered: Pick<TranscriptWindow, 'from' | 
   return rendered.from < wide.from || rendered.to > wide.to;
 }
 
-export type MeasuredUnit = { key: string; top: number; bottom: number };
+/** `trail`: the unit's own bottom margin, in px. */
+export type MeasuredUnit = { key: string; top: number; bottom: number; trail?: number };
 
 /**
  * A unit's height is its pitch: top to the next unit's top, so collapsed
- * margins between messages count exactly once. The last mounted unit takes
- * its box plus the median gap seen between the others.
+ * margins between messages count exactly once. The last mounted unit has no
+ * next top and takes its box plus its own bottom margin. It used to borrow the
+ * median gap between the other mounted units, so mounting one more row changed
+ * the newest row's height, which changed how many rows the window needed: the
+ * window flipped between two cuts on every render (user 2026-11-15).
  */
 export function recordUnitHeights(heights: Map<string, number>, units: readonly MeasuredUnit[]): void {
   if (!units.length) return;
-  const gaps: number[] = [];
   for (let index = 0; index + 1 < units.length; index++) {
     const pitch = units[index + 1].top - units[index].top;
     if (pitch >= 0) heights.set(units[index].key, pitch);
-    gaps.push(Math.max(0, units[index + 1].top - units[index].bottom));
   }
-  gaps.sort((a, b) => a - b);
-  const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
   const last = units[units.length - 1];
-  heights.set(last.key, Math.max(0, last.bottom - last.top) + gap);
+  heights.set(last.key, Math.max(0, last.bottom - last.top) + Math.max(0, last.trail ?? 0));
 }
 
 /** The first unit still visible at the viewport's top edge. */

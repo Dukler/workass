@@ -308,6 +308,7 @@ const noShift: Shift = () => 0;
 
 function measureUnits(doc: Element, shift: Shift = noShift): MeasuredUnit[] {
   const units: MeasuredUnit[] = [];
+  let lastBoxSeen: Element | null = null;
   for (const node of doc.children) {
     const key = (node as HTMLElement).dataset?.vunit;
     if (!key) continue;
@@ -315,7 +316,10 @@ function measureUnits(doc: Element, shift: Shift = noShift): MeasuredUnit[] {
     const last = lastBox(node);
     if (!first || !last) continue;
     units.push({ key, top: first.getBoundingClientRect().top - shift(first), bottom: last.getBoundingClientRect().bottom - shift(last) });
+    lastBoxSeen = last;
   }
+  // Only the newest mounted unit has no next top to measure its pitch to.
+  if (lastBoxSeen) units[units.length - 1].trail = parseFloat(getComputedStyle(lastBoxSeen).marginBottom) || 0;
   return units;
 }
 
@@ -360,6 +364,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const heights = useRef<Map<string, number>>(new Map());
   const anchor = useRef<TranscriptAnchor | null>(null);
   const mountedWindow = useRef<TranscriptWindow>({ from: 0, to: 0, topPad: 0, bottomPad: 0 });
+  // The top spacer stands in for unmounted units by their pitches, and a pitch
+  // already holds the gap before the next unit. The first mounted unit's own
+  // top margin then counted that gap twice, by an amount that depends on which
+  // unit is first (12 px for a sent message, 2 for a reply), so every re-cut
+  // moved the page (user 2026-11-15). Measured per first unit, subtracted.
+  const leadGaps = useRef<Map<string, number>>(new Map());
+  const topPadRef = useRef<HTMLDivElement>(null);
   const syncRewindows = useRef(0);
   const viewChat = useRef<string | null>(null);
   // A remembered reading position on its way back (transcript-window.ts). Until
@@ -392,6 +403,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     stick.current = view.pinned || !view.anchor;
     anchor.current = stick.current ? null : view.anchor;
     heights.current = view.heights;
+    leadGaps.current = new Map();
     restoring.current = anchor.current ? { anchor: anchor.current, depth: view.depth, newestId: view.newestId } : null;
     restoreStalled.current = false;
     viewChat.current = chatKey;
@@ -479,6 +491,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const win: TranscriptWindow = virtual
     ? transcriptWindow(windowInput)
     : { from: 0, to: units.length, topPad: 0, bottomPad: 0 };
+  const firstUnitKey = units[win.from]?.key;
+  const topPadHeight = Math.max(0, win.topPad - (firstUnitKey ? leadGaps.current.get(firstUnitKey) ?? 0 : 0));
   // While the remembered row is still older than what is loaded, the newest
   // rows are laid out but not shown: revealing them first and then jumping to
   // the remembered row once its page arrives is exactly the jump to avoid.
@@ -1083,8 +1097,23 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     // content it moved before the frame paints, not one frame later.
     syncFlowBlocks(el, Math.abs(el.scrollTop - scrolledFrom) >= 1);
   });
+  // Before anything reads the layout: the first mounted unit starts exactly
+  // where the units the spacer stands in for would have put it.
+  const fitTopPad = () => {
+    const pad = topPadRef.current;
+    const first = pad?.nextElementSibling as HTMLElement | null | undefined;
+    const key = first?.dataset?.vunit;
+    const box = key ? firstBox(first!) : null;
+    if (!pad || !key || !box) return;
+    const gap = box.getBoundingClientRect().top - glideShift(box) - pad.getBoundingClientRect().bottom;
+    if (!Number.isFinite(gap) || gap < 0) return;
+    leadGaps.current.set(key, gap);
+    const height = Math.max(0, win.topPad - gap);
+    if (Math.abs(pad.getBoundingClientRect().height - height) >= 0.5) pad.style.height = `${height}px`;
+  };
   const commitLayout = (doc: HTMLDivElement) => {
     mountedWindow.current = win;
+    fitTopPad();
     recordUnitHeights(heights.current, measureUnits(doc, glideShift));
     if (!virtual) { recordAnchor(); return; }
     if (restoring.current) {
@@ -1325,7 +1354,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                       : `Ver ${Math.min(HISTORY_PAGE, hidden)} mensajes anteriores`}
                   </button>
                 )}
-                {win.topPad > 0 && <div className="vpad" style={{ height: win.topPad }} aria-hidden="true" />}
+                {win.topPad > 0 && <div ref={topPadRef} className="vpad" style={{ height: topPadHeight }} aria-hidden="true" />}
                 {units.slice(win.from, win.to).map((unit) => {
                   const index = unit.start;
                   const m = shown[index];

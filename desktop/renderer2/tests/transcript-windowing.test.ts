@@ -55,9 +55,34 @@ test('heights are pitches, so margins between rows are counted once', () => {
   recordUnitHeights(heights, [
     { key: 'a', top: 0, bottom: 80 },
     { key: 'b', top: 100, bottom: 150 },
-    { key: 'c', top: 170, bottom: 300 },
+    { key: 'c', top: 170, bottom: 300, trail: 12 },
   ]);
-  assert.deepEqual([...heights], [['a', 100], ['b', 70], ['c', 150]], 'the last row adds the median gap seen above it');
+  assert.deepEqual([...heights], [['a', 100], ['b', 70], ['c', 142]], 'the last row adds its own bottom margin');
+});
+
+test('the newest row keeps its height whichever rows are mounted above it, so the cut does not flip', () => {
+  // The logging chat (2026-11-15): the newest reply took the median gap of the
+  // mounted rows, 106.4 px without the sent message above the cut and 112.4 px
+  // with it. 2520 px of rows needed one more, 2526 did not: every render
+  // mounted the message, the next dropped it, and the page moved 10 px each time.
+  const rows = [
+    { key: 'u1', box: 37, gap: 20 }, { key: 'a1', box: 435, gap: 0 }, { key: 'u2', box: 37, gap: 20 },
+    { key: 'a2', box: 874, gap: 0 }, { key: 'u3', box: 99, gap: 20 }, { key: 'a3', box: 520, gap: 0 },
+    { key: 'a4', box: 351, gap: 0 }, { key: 'u4', box: 37, gap: 20 }, { key: 'a5', box: 100, gap: 0 },
+  ];
+  const layout = (from: number) => {
+    let top = 0;
+    return rows.slice(from).map((row) => { const unit = { key: row.key, top, bottom: top + row.box, trail: 0 }; top += row.box + row.gap; return unit; });
+  };
+  const heights = new Map<string, number>();
+  recordUnitHeights(heights, layout(0));
+  const cuts = new Set<number>();
+  for (let render = 0; render < 6; render++) {
+    const win = transcriptWindow({ keys: rows.map((row) => row.key), heights, viewport: 1030, overscan: 0, anchor: null });
+    if (render >= 2) cuts.add(win.from);
+    recordUnitHeights(heights, layout(win.from));
+  }
+  assert.equal(cuts.size, 1, 'one cut for one viewport, render after render');
 });
 
 test('the anchor is the first row still visible at the top edge', () => {
