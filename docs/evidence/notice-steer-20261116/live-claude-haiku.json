@@ -1,0 +1,66 @@
+[
+ {
+  "file": "read.json",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Do exactly these two steps, each as its own separate Bash tool call, and do not combine them:\nStep 1: run this command, which returns immediately: \"$WORKASS_TOOLS_COMMAND\" run --label detached-probe --operation-id live-7ab-probe-1 -- python3 -c 'import time;time.sleep(4)' >/dev/null 2>&1 &\nStep 2: run: python3 -c 'import time;time.sleep(25)'\nAfter step 2, reply with one line: DONE, then say whether any notification arrived while you worked and what it said."
+   },
+   {
+    "role": "assistant",
+    "content": "I'll read the Workass tools guide first, since the harness requires it before the first Workass call. Then I'll run the two steps in order."
+   },
+   {
+    "role": "user",
+    "steerState": "applied",
+    "notice": {
+     "body": "Finished with exit 0 after 4s",
+     "kind": "subagent",
+     "status": "done",
+     "title": "detached-probe"
+    },
+    "content": "<task-notification>\n<task-id>xwe0lE1W0vP5T8</task-id>\n<status>done</status>\n<summary>Job \"detached-probe\" finished</summary>\n<exit-code>0</exit-code>\n<run-time>4s</run-time>\n<output-file>/tmp/wa-live-7ab/state/external-work/xwe0lE1W0vP5T8.output</output-file>\n<result>Finished with exit 0 after 4s</result>\n</task-notification>"
+   },
+   {
+    "role": "assistant",
+    "content": "I'll read the Workass tools guide first, since the harness requires it before the first Workass call. Then I'll run the two steps in order.\n\nDONE. Yes, a notification arrived during the 25-second sleep: the `detached-probe` job (task `xwe0lE1W0vP5T8`) finished with exit 0 after 4s.\n\nI ran the Workass guide read first, as its own call, because the harness requires it before the first Workass call. Then I ran the two steps as requested."
+   }
+  ]
+ },
+ {
+  "file": "read2.json",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Do exactly these two steps, each as its own separate Bash tool call, and do not combine them:\nStep 1: run this command, which returns immediately: \"$WORKASS_TOOLS_COMMAND\" run --label detached-probe --operation-id live-7ab-probe-1 -- python3 -c 'import time;time.sleep(4)' >/dev/null 2>&1 &\nStep 2: run: python3 -c 'import time;time.sleep(25)'\nAfter step 2, reply with one line: DONE, then say whether any notification arrived while you worked and what it said."
+   },
+   {
+    "role": "assistant",
+    "content": "I'll read the Workass tools guide first, since the harness requires it before the first Workass call. Then I'll run the two steps in order."
+   },
+   {
+    "role": "user",
+    "steerState": "applied",
+    "notice": {
+     "body": "Finished with exit 0 after 4s",
+     "kind": "subagent",
+     "status": "done",
+     "title": "detached-probe"
+    },
+    "content": "<task-notification>\n<task-id>xwe0lE1W0vP5T8</task-id>\n<status>done</status>\n<summary>Job \"detached-probe\" finished</summary>\n<exit-code>0</exit-code>\n<run-time>4s</run-time>\n<output-file>/tmp/wa-live-7ab/state/external-work/xwe0lE1W0vP5T8.output</output-file>\n<result>Finished with exit 0 after 4s</result>\n</task-notification>"
+   },
+   {
+    "role": "assistant",
+    "content": "I'll read the Workass tools guide first, since the harness requires it before the first Workass call. Then I'll run the two steps in order.\n\nDONE. Yes, a notification arrived during the 25-second sleep: the `detached-probe` job (task `xwe0lE1W0vP5T8`) finished with exit 0 after 4s.\n\nI ran the Workass guide read first, as its own call, because the harness requires it before the first Workass call. Then I ran the two steps as requested."
+   },
+   {
+    "role": "user",
+    "content": "Run this in one Bash call and wait for it: \"$WORKASS_TOOLS_COMMAND\" run --label waited-probe --operation-id live-7ab-probe-2 -- python3 -c 'import time;time.sleep(3)'\nThen reply with one line: DONE and the outcome field from its JSON."
+   },
+   {
+    "role": "assistant",
+    "content": "DONE: outcome is \"settled\"."
+   }
+  ]
+ }
+]

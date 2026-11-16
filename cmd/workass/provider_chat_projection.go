@@ -1608,6 +1608,9 @@ func projectPendingSteer(pending *chat.PendingSteer, foreground *chat.Foreground
 	if queueID := strings.TrimSpace(pending.Presentation.QueueID); queueID != "" {
 		user[agentQueueMessageField] = queueID
 	}
+	if notice := providercontract.NoticeView(pending.Presentation.NoticeKind, pending.Presentation.NoticeTitle, pending.Presentation.NoticeStatus, pending.Text); notice != nil {
+		user["notice"] = notice
+	}
 	if len(images) > 0 {
 		user["images"] = images
 	}

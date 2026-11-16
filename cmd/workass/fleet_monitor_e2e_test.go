@@ -116,6 +116,17 @@ func chatNotices(t *testing.T, harness statelessMCPTestHarness, chatID string) [
 			})
 		}
 	}
+	// A notice for a chat whose turn is running joins that turn as a live input
+	// (notice_admission.go) and is held here until the provider consumes it.
+	for pending := state.PendingSteer; pending != nil; pending = pending.Next {
+		if pending.Presentation.NoticeKind != "" {
+			out = append(out, chat.LedgerEvent{
+				Role: "user", Text: pending.Text, OperationID: pending.OperationID, LaneID: pending.LaneID,
+				NoticeKind: pending.Presentation.NoticeKind, NoticeTitle: pending.Presentation.NoticeTitle,
+				NoticeStatus: pending.Presentation.NoticeStatus, SteerState: "pending",
+			})
+		}
+	}
 	if state.Foreground != nil && state.Foreground.Input.Presentation.NoticeKind != "" {
 		entry := state.Foreground.Input
 		out = append(out, chat.LedgerEvent{

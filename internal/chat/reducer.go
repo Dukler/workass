@@ -2554,6 +2554,13 @@ func reduceSteerFailed(state *State, command SteerFailed) ([]Effect, error) {
 		updateOutbox(state, steerEffectID(operationID), OutboxFailed, kind)
 		return nil, nil
 	}
+	if noticeOriginStopped(state, pending) {
+		// A notice folded into the very turn its work belongs to, refused while
+		// that turn is being stopped: it goes with the turn, exactly as the same
+		// notice waiting in the FIFO would have.
+		updateOutbox(state, steerEffectID(operationID), OutboxFailed, kind)
+		return nil, nil
+	}
 	if pending.Presentation.Origin == "agent" && strings.TrimSpace(pending.Presentation.QueueID) != "" {
 		// Headless chat.send(delivery=steer) already gave this exact input a
 		// durable FIFO identity. A definite native rejection transfers that same
@@ -3384,12 +3391,9 @@ func reduceTurnTerminated(state *State, command TurnTerminated) ([]Effect, error
 		}
 	}
 	for state.PendingSteer != nil && state.PendingSteer.Turn == state.Foreground.Turn {
-		pending := state.PendingSteer
-		if err := appendUnconsumedSteerAtTerminal(state, pending); err != nil {
+		if err := settlePendingSteerAtTerminal(state, state.PendingSteer); err != nil {
 			return nil, err
 		}
-		updateOutbox(state, steerEffectID(pending.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
-		state.removePendingSteer(pending.OperationID)
 	}
 	if state.PendingCancel != nil && state.PendingCancel.Turn == state.Foreground.Turn {
 		updateOutbox(state, cancelEffectID(state.PendingCancel.OperationID), OutboxCompleted, "")
@@ -3693,6 +3697,63 @@ func consumeTerminalSteerReceipt(state *State, operationID provider.OperationID)
 	return errors.New("terminal steer receipt does not match a pending or consumed steer")
 }
 
+// settlePendingSteerAtTerminal settles one steer the turn ended without
+// consuming. A provider that may have received it keeps it ambiguity-fenced and
+// never replayed. A Workass notice that never left the outbox reached nobody,
+// so it is still owed and takes the next turn instead.
+func settlePendingSteerAtTerminal(state *State, pending *PendingSteer) error {
+	if requeueUnsentNotice(state, pending) {
+		state.removePendingSteer(pending.OperationID)
+		return nil
+	}
+	if err := appendUnconsumedSteerAtTerminal(state, pending); err != nil {
+		return err
+	}
+	updateOutbox(state, steerEffectID(pending.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
+	state.removePendingSteer(pending.OperationID)
+	return nil
+}
+
+func requeueUnsentNotice(state *State, pending *PendingSteer) bool {
+	if pending == nil || strings.TrimSpace(pending.Presentation.NoticeKind) == "" ||
+		pending.Presentation.Origin != "agent" || strings.TrimSpace(pending.Presentation.QueueID) == "" ||
+		pending.QueuedEntry != nil || !outboxHas(state, steerEffectID(pending.OperationID), OutboxPending) ||
+		noticeOriginStopped(state, pending) {
+		return false
+	}
+	modelID, modeID, permission := "", "", ""
+	if state.Foreground != nil && state.Foreground.LaneID == pending.LaneID {
+		modelID, modeID, permission = state.Foreground.Input.ModelID, state.Foreground.Input.ModeID, state.Foreground.Input.Permission
+	}
+	state.Queue = append(state.Queue, QueueEntry{
+		OperationID: pending.OperationID, LaneID: pending.LaneID, Text: pending.Text,
+		Attachments: append([]provider.Attachment(nil), pending.Attachments...),
+		ModelID:     modelID, ModeID: modeID, Permission: permission,
+		Presentation: pending.Presentation, Revision: state.Revision + 1,
+	})
+	state.Presentation.AgentQueueRevision++
+	updateOutbox(state, steerEffectID(pending.OperationID), OutboxCompleted, "")
+	return true
+}
+
+// noticeOriginStopped reports a notice folded into the turn its own work
+// belongs to while somebody is stopping that turn.
+func noticeOriginStopped(state *State, pending *PendingSteer) bool {
+	origin := provider.NormalizeOperationID(pending.Presentation.NoticeOrigin)
+	if origin == "" || state.Foreground == nil || state.Foreground.OperationID != origin || pending.Turn != state.Foreground.Turn {
+		return false
+	}
+	if state.PendingCancel != nil && state.PendingCancel.Turn == pending.Turn {
+		return true
+	}
+	for _, entry := range state.Outbox {
+		if entry.Kind == EffectCancelTurn && entry.Turn.NativeID != "" && entry.Turn.NativeID == pending.Turn.NativeID {
+			return true
+		}
+	}
+	return false
+}
+
 func appendUnconsumedSteerAtTerminal(state *State, pending *PendingSteer) error {
 	if state == nil || state.Foreground == nil || pending == nil {
 		return errors.New("terminal steer settlement has no foreground owner")
@@ -3715,6 +3776,7 @@ func appendUnconsumedSteerAtTerminal(state *State, pending *PendingSteer) error 
 		NativeTurnID: pending.Turn.NativeID, TerminalState: "unconsumed",
 		SteerState: steerState, TurnRootID: state.Foreground.RootAssistantMessageID,
 	}
+	applyNotice(&event, pending.Presentation)
 	state.Ledger = append(state.Ledger, event)
 	// No consumption receipt means this exact input remains ambiguity-fenced and
 	// is never replayed. Mark it excluded for its own lane so the next ordinary
@@ -3875,12 +3937,9 @@ func terminalizeInterruptedForeground(
 	}
 
 	for state.PendingSteer != nil && state.PendingSteer.Turn == foreground.Turn {
-		pending := state.PendingSteer
-		if err := appendUnconsumedSteerAtTerminal(state, pending); err != nil {
+		if err := settlePendingSteerAtTerminal(state, state.PendingSteer); err != nil {
 			return err
 		}
-		updateOutbox(state, steerEffectID(pending.OperationID), OutboxAmbiguous, provider.ErrorAcceptanceAmbiguous)
-		state.removePendingSteer(pending.OperationID)
 	}
 	for index := range state.Outbox {
 		entry := &state.Outbox[index]
@@ -4866,6 +4925,9 @@ func appendConsumedSteer(state *State, pending *PendingSteer) (LedgerEvent, erro
 		NativeTurnID: pending.Turn.NativeID, TerminalState: "consumed",
 		SteerState: "applied", TurnRootID: state.Foreground.RootAssistantMessageID,
 	}
+	// A notice folded into a running turn is still a notice, never the user
+	// speaking.
+	applyNotice(&event, pending.Presentation)
 	state.Ledger = append(state.Ledger, event)
 	if err := markLedgerNativeSeen(state, event, pending.OperationID); err != nil {
 		return LedgerEvent{}, err

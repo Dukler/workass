@@ -141,6 +141,10 @@ type TurnPresentation struct {
 	NoticeKind   string `json:",omitempty"`
 	NoticeTitle  string `json:",omitempty"`
 	NoticeStatus string `json:",omitempty"`
+	// NoticeOrigin is the operation id of the turn the notice's work belongs
+	// to. A notice folded into that same turn while it is being stopped goes
+	// with it, as a queued one would; any other notice is still owed.
+	NoticeOrigin string `json:",omitempty"`
 }
 
 type TurnInput struct {

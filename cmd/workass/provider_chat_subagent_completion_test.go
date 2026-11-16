@@ -313,8 +313,13 @@ func TestExplicitParentStopDropsOnlyItsQueuedSubagentCompletion(t *testing.T) {
 	}
 	completionID := subagentCompletionOperationID(tabID, chatID, receipt.ReceiptID)
 	state = actor.engine.Snapshot()
-	if len(state.Queue) != 2 {
-		t.Fatalf("expected human work and child completion queued: %#v", state.Queue)
+	// The parent is running, so its child's completion joins it as a live input
+	// (notice_admission.go) instead of waiting behind the human's queued work.
+	if len(state.Queue) != 1 || state.Queue[0].OperationID != "human-waiting" {
+		t.Fatalf("expected only the human work queued: %#v", state.Queue)
+	}
+	if state.PendingSteerFor(completionID) == nil && !ledgerHasOperation(state, completionID) {
+		t.Fatalf("the child completion did not join its running parent: pending=%#v", state.PendingSteer)
 	}
 	jobID := state.Foreground.Turn.NativeID
 	result, handled, err := runtime.Cancel(context.Background(), jobID)
@@ -519,4 +524,13 @@ func TestARemoteChildOfAStoppedTurnEndsLikeALocalOne(t *testing.T) {
 			t.Fatalf("row = %#v", item)
 		}
 	}
+}
+
+func ledgerHasOperation(state chat.State, operationID providercontract.OperationID) bool {
+	for _, event := range state.Ledger {
+		if event.OperationID == operationID {
+			return true
+		}
+	}
+	return false
 }

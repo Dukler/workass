@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"workass/internal/acp"
-	"workass/internal/chat"
 	"workass/internal/fleetlog"
 	providercontract "workass/internal/provider"
 )
@@ -151,10 +150,7 @@ func (r *providerChatRuntime) admitFleetNotice(tabID, chatID string, notice flee
 		Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		NoticeKind: "subagent", NoticeTitle: notice.Label, NoticeStatus: status,
 	}
-	if err := actor.engine.Apply(chat.Submit{
-		OperationID: operationID, LaneID: laneID, Text: message, ModelID: lane.ModelID, ModeID: lane.ModeID,
-		Presentation: presentation,
-	}); err != nil {
+	if err := admitNoticeLocked(actor, state, operationID, laneID, lane.ModelID, lane.ModeID, notice.OriginOperationID, message, presentation); err != nil {
 		actor.mu.Unlock()
 		return err
 	}

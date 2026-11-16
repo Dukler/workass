@@ -69,10 +69,7 @@ func (r *providerChatRuntime) deliverSubagentCompletion(tabID, chatID string, re
 		Origin: "agent", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		NoticeKind: "subagent", NoticeTitle: receipt.Label, NoticeStatus: receipt.Status,
 	}
-	if err := actor.engine.Apply(chat.Submit{
-		OperationID: operationID, LaneID: laneID, Text: message, ModelID: lane.ModelID, ModeID: lane.ModeID,
-		Presentation: presentation,
-	}); err != nil {
+	if err := admitNoticeLocked(actor, state, operationID, laneID, lane.ModelID, lane.ModeID, receipt.OriginOperationID, message, presentation); err != nil {
 		actor.mu.Unlock()
 		return err
 	}
@@ -115,13 +112,19 @@ func actorHasSubagentCompletion(state chat.State, operationID providercontract.O
 	if state.Foreground != nil && match(state.Foreground.Input) {
 		return true
 	}
+	// Folded into a running turn and not yet consumed (notice_admission.go).
+	if pending := state.PendingSteerFor(operationID); pending != nil && pending.Text == message &&
+		pending.Presentation.Origin == "agent" {
+		return true
+	}
 	for _, input := range state.Queue {
 		if match(input) {
 			return true
 		}
 	}
 	for _, event := range state.Ledger {
-		laneMatches := laneID == "" || event.LaneID == laneID
+		// A steered notice is recorded on the lane of the turn it joined.
+		laneMatches := laneID == "" || event.LaneID == laneID || event.SteerState != ""
 		if event.OperationID == operationID && laneMatches && event.Role == "user" && event.Text == message {
 			return true
 		}

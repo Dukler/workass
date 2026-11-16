@@ -1071,6 +1071,15 @@ suppresses the notice on that flag, with the reason logged; the row, the receipt
 log are unchanged. A harness background shell is a waiting caller too, and its own notification
 reports the exit.
 
+A notice that is still owed no longer waits behind the turn that is running. While the chat's turn
+runs on a lane that takes live input, every Workass notice (a job's or subagent's end, a stall, a
+machine gone dark) is admitted as an agent steer of that turn (`admitNoticeLocked`), the way Claude
+Code folds its own background notifications in at the next tool boundary. The steer is durable
+before the provider call and runs from the coordinator's drain; a definite refusal moves the same
+input into the FIFO once, so the notice is never lost. With no running turn, or a lane without
+live input, it starts its own turn as before. A steered notice keeps its notice presentation in
+the transcript.
+
 ## 15. Non-goals and deferred
 
 Non-goals: consensus, leader election or automatic failover; a global
