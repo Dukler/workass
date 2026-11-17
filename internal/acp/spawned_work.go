@@ -1405,6 +1405,9 @@ func (m *Manager) spawnedWorkLoop() {
 
 func (m *Manager) reconcileSpawnedWork() {
 	now := time.Now().UTC()
+	// UTC() drops the monotonic reading, so every clock below is wall time;
+	// time the machine spent asleep is taken off the silence clocks first.
+	m.observeHostPass(now, time.Since(hostMonotonicBase))
 	type probeItem struct {
 		key, path, tabID, chatID, doneFile string
 		liveness                           spawnedWorkLivenessClass

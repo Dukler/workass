@@ -224,6 +224,9 @@ type Manager struct {
 	// processSilenceNoticeAfterNs is the owner's notice delay for a silent
 	// supervisor (SetProcessSilenceNoticeAfter); zero tells at the mark.
 	processSilenceNoticeAfterNs atomic.Int64
+	// hostPause measures the wall time between reconcile passes the daemon
+	// was not awake for (host_pause.go).
+	hostPause hostPauseClock
 	// autoUpdateProviders is the owner's "Actualizar agentes solos" choice
 	// (provider_auto_update.go); autoUpdateKick asks its loop to look now.
 	autoUpdateProviders atomic.Bool

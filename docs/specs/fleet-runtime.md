@@ -663,6 +663,10 @@ anything runs.
   heartbeat's, not a second knob); three missed beats with a live pid marks the
   row `not reporting` and raises ONE `attention{not_reporting}`. It settles
   nothing — the work may be going perfectly — and the next report clears it.
+  The beats are counted in time the daemon was awake to hear them: wall time
+  the machine spent asleep (or that passed with no reconcile pass for more than
+  a beat) is taken off every running job's silence clock, so a sleeping Mac
+  does not wake to a notice for every job it holds.
   The gap the supervisor reports on reconnect is kept on the row, so one that
   healed still shows that it happened.
 - A run with no credential is REFUSED rather than run quietly. `--unreported`
