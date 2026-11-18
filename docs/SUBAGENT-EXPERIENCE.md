@@ -62,7 +62,9 @@ running, and report to it themselves, so they never hold a child open.
   be retried by its own chat: each spawn's intent (prompt, selection, cwd, fork)
   is kept in `state/subagent-specs/` from the moment it starts, the retry replays
   it for that exact chat only, at the stored mode, and a deleted chat takes its
-  specs with it.
+  specs with it. A run older than specs gets one, before the ceiling ranks the
+  retry, from the spawn request its chat's actor kept (retry guidance included);
+  selection the request left to inheritance comes from the chat's own.
 - A child's background work finishes and is read before the parent is told;
   any close over live work reads as lost, never as plain `completed`.
 - Results/errors/notes are bounded and secret-redacted.

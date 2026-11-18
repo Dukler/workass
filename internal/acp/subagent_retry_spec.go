@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -132,6 +133,59 @@ func (m *Manager) loadSubagentRetrySpec(chatID, tabID, id string) (subagentRetry
 		}
 	}
 	return subagentRetrySpec{}, false
+}
+
+// SeedSubagentRetrySpec keeps a spec for a run spawned before specs existed,
+// from the spawn request its chat's actor kept. It changes nothing when this
+// process still holds the run or a spec is already kept, so it can never
+// replace the intent a spawn recorded itself. Selection the request left to
+// inheritance resolves against the chat now, as a fresh spawn's would.
+func (m *Manager) SeedSubagentRetrySpec(ctx context.Context, opts SubagentSpawnOptions, id string) error {
+	if m == nil {
+		return errors.New("subagent retry requires the ACP manager")
+	}
+	chatID, tabID, parent, ok := m.subagentOwnerContext(opts.OwnerKey, opts.ParentChatID, opts.ParentTabID)
+	if !ok {
+		return errors.New("no running Workass turn owns this subagent request")
+	}
+	id = strings.TrimSpace(id)
+	m.mu.Lock()
+	_, held := m.subagents[id]
+	m.mu.Unlock()
+	if held || id == "" {
+		return nil
+	}
+	if _, kept := m.loadSubagentRetrySpec(chatID, tabID, id); kept {
+		return nil
+	}
+	prompt := strings.TrimSpace(opts.Prompt)
+	if prompt == "" {
+		return errors.New("the stored spawn request has no prompt")
+	}
+	defaults := parent
+	if defaults == nil {
+		defaults = m.subagentParentDefaults(chatID, tabID)
+	}
+	providerID, modelID, effort, modeID, err := m.resolveSubagentSelection(ctx, defaults, opts)
+	if err != nil {
+		return err
+	}
+	cwd := strings.TrimSpace(opts.CWD)
+	if cwd == "" || strings.EqualFold(cwd, "inherit") {
+		cwd = strings.TrimSpace(defaults.CWD)
+	}
+	if cwd != "" && !filepath.IsAbs(cwd) && m.opts.RootDir != "" {
+		cwd = filepath.Join(m.opts.RootDir, cwd)
+	}
+	label := SanitizeDisplayText(opts.Label, 80)
+	if label == "" {
+		label = compactText(prompt, 80)
+	}
+	return m.persistSubagentRetrySpec(subagentRetrySpec{
+		ID: id, ParentChatID: chatID, ParentTabID: tabID, Prompt: prompt, Label: label,
+		ProviderID: providerID, ModelID: modelID, Effort: effort, ModeID: modeID, CWD: cwd,
+		Forked: opts.Fork,
+	})
 }
 
 // StoredSubagentPermissionMode is SubagentPermissionMode for a run this process

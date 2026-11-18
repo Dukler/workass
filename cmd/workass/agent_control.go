@@ -370,6 +370,11 @@ func (h *agentControlHandler) call(r *http.Request, request agentControlRequest)
 		if err := h.authorizeActorOwner(ownerKey, tabID, chatID, agentOwnerReadError); err != nil {
 			return nil, err
 		}
+		if h.chats != nil && h.chats.providerChats != nil {
+			// Before the ceiling ranks it: a run older than kept spawn specs is
+			// ranked and retried from the request its chat's actor kept.
+			h.chats.providerChats.seedSubagentRetrySpec(r.Context(), ownerKey, tabID, chatID, fieldString(params, "id"))
+		}
 		if err := h.admitSubagentWork(r.Context(), request.Method, ownerKey, tabID, chatID, params); err != nil {
 			return nil, err
 		}

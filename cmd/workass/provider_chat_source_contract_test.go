@@ -325,6 +325,7 @@ func phaseCManagerRules() map[string]phaseCManagerRule {
 		"cmd/workass/permission_ceiling.go:admitSubagentWork:SubagentPermissionMode":                                     {1, "more work for a child runs at the child's level"},
 		"cmd/workass/permission_ceiling.go:admitSubagentWork:SubagentParent":                                             {1, "only a child this chat owns is gated; anything else fails in the call itself"},
 		"cmd/workass/permission_ceiling.go:admitSubagentWork:StoredSubagentPermissionMode":                               {1, "a retry of a child the daemon replacement dropped runs at its stored level"},
+		"cmd/workass/provider_chat_subagent_retry.go:seedSubagentRetrySpec:SeedSubagentRetrySpec":                        {1, "a run older than kept spawn specs gets one from its actor's own spawn request, never over a kept one"},
 		"cmd/workass/permission_ceiling.go:admitSpawn:ResolveSubagentPermission":                                         {1, "the read-only selection a spawn would run at, ranked before it starts"},
 		"cmd/workass/agent_control_remote.go:controllerChatCall:WithActorOwner":                                          {1, "a controller-authorized tool call runs for the addressed chat under a short-lived owner"},
 		"cmd/workass/chat_diagnostics.go:TurnDiagnostics:TurnDiagnostics":                                                {1, "exact actor-fenced, bounded timing-only executor read"},

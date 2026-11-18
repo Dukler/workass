@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"workass/internal/acp"
+	"workass/internal/chat"
+	providercontract "workass/internal/provider"
 )
 
 // bug-20261118-afbfeed6 end to end: a tracked subagent is running when the
@@ -17,6 +21,16 @@ import (
 // workass_retry_subagent through the real handler used to answer "subagent not
 // found for this owner" because only the dead process had its spawn intent.
 func TestSubagentOrphanedByDaemonReplacementCanBeRetried(t *testing.T) {
+	retryOrphanedSubagentAfterReplacement(t, false)
+}
+
+// The reporter's own orphans were spawned by 0.1.299, which kept no spawn spec:
+// the retry is rebuilt from the spawn request the chat's actor kept.
+func TestSubagentSpawnedBeforeSpecsCanBeRetriedAfterReplacement(t *testing.T) {
+	retryOrphanedSubagentAfterReplacement(t, true)
+}
+
+func retryOrphanedSubagentAfterReplacement(t *testing.T, spawnedBeforeSpecs bool) {
 	root := repoRoot(t)
 	const tabID, chatID = "retry-restart-tab", "retry-restart-chat"
 	newManager := func(stateDir string) *acp.Manager {
@@ -101,6 +115,11 @@ func TestSubagentOrphanedByDaemonReplacementCanBeRetried(t *testing.T) {
 	if err := copyLiveStateDir(secondDir, firstDir); err != nil {
 		t.Fatal(err)
 	}
+	if spawnedBeforeSpecs {
+		if err := os.RemoveAll(filepath.Join(secondDir, "subagent-specs")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	second := newManager(secondDir)
 	t.Cleanup(func() { second.Reset() })
 	restarted := newTestProviderChatRuntime(t, second, sharedSessionStore(secondDir), secondDir)
@@ -120,7 +139,43 @@ func TestSubagentOrphanedByDaemonReplacementCanBeRetried(t *testing.T) {
 		t.Fatalf("retry of the orphaned child after restart: %v", err)
 	}
 	encoded := mustJSON(t, result)
-	if !strings.Contains(encoded, `"retryOf":"`+childID+`"`) || !strings.Contains(encoded, `"label":"cut by the update"`) {
+	if !strings.Contains(encoded, `"retryOf":"`+childID+`"`) || !strings.Contains(encoded, `"label":"cut by the update"`) ||
+		!strings.Contains(encoded, `"modelId":"mock-deterministic"`) || !strings.Contains(encoded, `"modeId":"ask"`) {
 		t.Fatalf("retry result = %s", encoded)
+	}
+}
+
+func TestActorSpawnIntentFollowsRetriesBackToTheSpawn(t *testing.T) {
+	completed := func(op string, action chat.BackgroundAction, id string) chat.OutboxEntry {
+		background := action
+		return chat.OutboxEntry{
+			Kind: chat.EffectBackground, OperationID: providercontract.OperationID(op), Status: chat.OutboxCompleted,
+			Background: &background, Result: json.RawMessage(`{"id":"` + id + `"}`),
+		}
+	}
+	state := chat.State{Outbox: []chat.OutboxEntry{
+		completed("spawn", chat.BackgroundAction{Kind: chat.BackgroundSpawnAgent, Spawn: &chat.SpawnAgentAction{
+			Prompt: "original task", Label: "lineage", ModelID: "m", ModeID: "ask", CWD: "/w",
+		}}, "a"),
+		completed("retry-1", chat.BackgroundAction{Kind: chat.BackgroundRetryAgent, Retry: &chat.RetryAgentAction{WorkID: "a", Message: "first note"}}, "b"),
+		completed("retry-2", chat.BackgroundAction{Kind: chat.BackgroundRetryAgent, Retry: &chat.RetryAgentAction{WorkID: "b"}}, "c"),
+		completed("retry-3", chat.BackgroundAction{Kind: chat.BackgroundRetryAgent, Retry: &chat.RetryAgentAction{WorkID: "c", Message: "second note"}}, "d"),
+		completed("hosted", chat.BackgroundAction{Kind: chat.BackgroundSpawnAgent, Spawn: &chat.SpawnAgentAction{
+			Prompt: "runs elsewhere", OriginMachine: "m-other",
+		}}, "h"),
+		completed("loop", chat.BackgroundAction{Kind: chat.BackgroundRetryAgent, Retry: &chat.RetryAgentAction{WorkID: "loop-id"}}, "loop-id"),
+	}}
+	got, ok := actorSpawnIntentForSubagent(state, "d")
+	want := "original task\n\nRetry guidance from the coordinator:\nfirst note\n\nRetry guidance from the coordinator:\nsecond note"
+	if !ok || got.Prompt != want || got.Label != "lineage" || got.ModelID != "m" || got.ModeID != "ask" || got.CWD != "/w" {
+		t.Fatalf("intent for d = %#v ok=%v", got, ok)
+	}
+	if got, ok := actorSpawnIntentForSubagent(state, "a"); !ok || got.Prompt != "original task" {
+		t.Fatalf("intent for a = %#v ok=%v", got, ok)
+	}
+	for _, id := range []string{"h", "loop-id", "missing"} {
+		if got, ok := actorSpawnIntentForSubagent(state, id); ok {
+			t.Fatalf("intent for %s = %#v", id, got)
+		}
 	}
 }
