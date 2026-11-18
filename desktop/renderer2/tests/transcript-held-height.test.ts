@@ -38,3 +38,26 @@ test('a turn ending does not drop the hold; only leaving the chat does', () => {
   assert.match(reset, /\}, \[chat\?\.id\]\);/);
   assert.doesNotMatch(reset, /runningMessage/);
 });
+
+// 2026-11-18 ("spamming the right pane makes the text bounce up A LOT"): with a
+// turn running, every render re-cut the window, and right after the column
+// changed width the top spacer still stood in for unmounted rows by their
+// heights at the old width. The re-cut corrected it by ~200 px; the hold kept
+// the old total, so that much empty page sat under the last line until the
+// release 700 ms later. Rig (real chats, forced re-renders, 1440x900): worst
+// one-frame move of visible text 151-194 px before, at most a glide frame
+// (22-87 px) after, and no drop at the release. The hold now moves with the
+// unit it was taken under, measured by its first box (units are display:
+// contents and have no box of their own).
+test('a commit moves the held height by however much the held unit moved', () => {
+  const commit = source.slice(source.indexOf('const commitLayout = (doc: HTMLDivElement) => {'), source.indexOf('// A window shorter than the screen'));
+  assert.match(commit, /fitTopPad\(\);\s*rebaseHeldHeight\(doc\);/);
+  const rebase = source.slice(source.indexOf('const rebaseHeldHeight = '), source.indexOf('const commitLayout = '));
+  assert.match(rebase, /if \(!stick\.current \|\| heldHeight\.current <= 0 \|\| !held\) return;/);
+  assert.match(rebase, /if \(doc\.offsetWidth !== heldWidth\.current\) return;/);
+  assert.match(rebase, /heldHeight\.current = Math\.max\(0, heldHeight\.current \+ moved\);/);
+  const unitTop = source.slice(source.indexOf('const unitTop = '), source.indexOf('const lastUnit = '));
+  assert.match(unitTop, /firstBox\(unit\)/);
+  const onResize = source.slice(source.indexOf('const onResize = () => {'), source.indexOf('const mo = new MutationObserver'));
+  assert.match(onResize, /heldHeight\.current = height;\s*heldUnit\.current = lastUnit\(doc\);/);
+});

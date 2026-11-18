@@ -64,5 +64,5 @@ test('automatic older reads wait for an opened chat\'s recent slice', () => {
 // Holding the tallest height for a whole long-running turn kept any real
 // shrink as a band of nothing under the newest line.
 test('the streaming height hold is released shortly after growth stops', () => {
-  assert.match(transcript, /holdRelease = window\.setTimeout\(\(\) => \{\s*holdRelease = null;\s*heldHeight\.current = 0;\s*doc\?\.style\.removeProperty\('min-height'\);/);
+  assert.match(transcript, /holdRelease = window\.setTimeout\(\(\) => \{\s*holdRelease = null;\s*heldHeight\.current = 0;\s*heldUnit\.current = null;\s*doc\?\.style\.removeProperty\('min-height'\);/);
 });

@@ -77,7 +77,7 @@ test('the slide reads the final layout before any animation puts the old columns
 test('a followed transcript holds its height only at the width it was measured at', () => {
   const transcript = readFileSync(new URL('../src/components/Transcript.tsx', import.meta.url), 'utf8');
   const onResize = transcript.slice(transcript.indexOf('const onResize = () => {'), transcript.indexOf('const mo = new MutationObserver'));
-  assert.match(onResize, /if \(width !== heldWidth\.current\) \{\s*heldWidth\.current = width;\s*heldHeight\.current = 0;\s*doc\.style\.removeProperty\('min-height'\);/);
+  assert.match(onResize, /if \(width !== heldWidth\.current\) \{\s*heldWidth\.current = width;\s*heldHeight\.current = 0;\s*heldUnit\.current = null;\s*doc\.style\.removeProperty\('min-height'\);/);
   assert.ok(onResize.indexOf('heldWidth.current') < onResize.indexOf('const height = doc.getBoundingClientRect().height;'), 'the new width is settled before the height is read');
 });
 

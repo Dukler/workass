@@ -523,6 +523,16 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   // min-height itself before it rewraps the column, because in a slide's first
   // frame the doc resizes alone and dropping it here would be an observer loop.
   const heldWidth = useRef(0);
+  // The unit that was last when the height was held, and where its top was.
+  // The hold is for the end of the text: a dip under the reader. A re-cut of
+  // the window above it is not one. Right after the right pane changed the
+  // column's width, the top spacer still stood in for unmounted rows by their
+  // heights at the old width; the next render of a running turn re-cut the
+  // window, the spacer was corrected by ~200 px, and the old height held that
+  // much empty page under the last line, so the text jumped up and dropped
+  // back 700 ms later (owner 2026-11-18: "the text bounces up A LOT"). Every
+  // commit moves the held height by however much this unit moved.
+  const heldUnit = useRef<{ key: string; top: number } | null>(null);
   // The width the transcript last laid itself out at (its resize observer). A
   // different width now means the column rewrapped and the observer has not run
   // yet: a scroll in between is the rewrap's, never the reader leaving.
@@ -1111,9 +1121,45 @@ export function Transcript({ chat }: { chat: Chat | null }) {
     const height = Math.max(0, win.topPad - gap);
     if (Math.abs(pad.getBoundingClientRect().height - height) >= 0.5) pad.style.height = `${height}px`;
   };
+  // Where a mounted unit's top is laid out, from the doc's top (a glide's
+  // transform taken off). A unit is display: contents, so its first box
+  // stands for it; null when it draws nothing yet.
+  const unitTop = (doc: HTMLDivElement, unit: HTMLElement): number | null => {
+    const box = firstBox(unit);
+    return box ? box.getBoundingClientRect().top - glideShift(box) - doc.getBoundingClientRect().top : null;
+  };
+  const lastUnit = (doc: HTMLDivElement): { key: string; top: number } | null => {
+    const units = doc.querySelectorAll<HTMLElement>(':scope > [data-vunit]');
+    for (let index = units.length - 1; index >= 0; index--) {
+      const key = units[index].dataset.vunit;
+      const top = unitTop(doc, units[index]);
+      if (key && top !== null) return { key, top };
+    }
+    return null;
+  };
+  // See heldUnit: what moved the held unit moved the whole page above the
+  // reader's bottom, so the held height moves with it. A unit that is gone
+  // (a turn's rows regrouped as it ends) keeps the hold as it is.
+  const rebaseHeldHeight = (doc: HTMLDivElement) => {
+    const held = heldUnit.current;
+    if (!stick.current || heldHeight.current <= 0 || !held) return;
+    // A new width starts a new hold (the resize observer); App's slidePane has
+    // already dropped this one.
+    if (doc.offsetWidth !== heldWidth.current) return;
+    const unit =[...doc.querySelectorAll<HTMLElement>(':scope > [data-vunit]')].find((candidate) => candidate.dataset.vunit === held.key);
+    const top = unit ? unitTop(doc, unit) : null;
+    if (top === null) return;
+    const moved = top - held.top;
+    if (Math.abs(moved) < 0.5) return;
+    held.top = top;
+    heldHeight.current = Math.max(0, heldHeight.current + moved);
+    if (heldHeight.current > 0) doc.style.minHeight = `${heldHeight.current}px`;
+    else doc.style.removeProperty('min-height');
+  };
   const commitLayout = (doc: HTMLDivElement) => {
     mountedWindow.current = win;
     fitTopPad();
+    rebaseHeldHeight(doc);
     recordUnitHeights(heights.current, measureUnits(doc, glideShift));
     if (!virtual) { recordAnchor(); return; }
     if (restoring.current) {
@@ -1182,6 +1228,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   useLayoutEffect(() => {
     heldHeight.current = 0;
     heldWidth.current = 0;
+    heldUnit.current = null;
     laidOutWidth.current = 0;
     docRef.current?.style.removeProperty('min-height');
   }, [chat?.id]);
@@ -1235,6 +1282,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
       holdRelease = window.setTimeout(() => {
         holdRelease = null;
         heldHeight.current = 0;
+        heldUnit.current = null;
         doc?.style.removeProperty('min-height');
       }, HELD_HEIGHT_RELEASE_MS);
     };
@@ -1249,6 +1297,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
         if (width !== heldWidth.current) {
           heldWidth.current = width;
           heldHeight.current = 0;
+          heldUnit.current = null;
           doc.style.removeProperty('min-height');
         }
         // The exact height: offsetHeight is rounded, and a min-height a
@@ -1257,6 +1306,7 @@ export function Transcript({ chat }: { chat: Chat | null }) {
         const height = doc.getBoundingClientRect().height;
         if (height > heldHeight.current) {
           heldHeight.current = height;
+          heldUnit.current = lastUnit(doc);
           doc.style.minHeight = `${height}px`;
           releaseHoldSoon();
         }
