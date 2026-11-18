@@ -599,11 +599,18 @@ func (h *agentControlHandler) admitSubagentWork(ctx context.Context, method, own
 		return nil
 	}
 	id := fieldString(params, "id")
-	parentChat, parentTab, owned := h.manager.SubagentParent(id)
-	if !owned || parentChat != chatID || parentTab != tabID {
-		return nil
+	var providerID, modeID string
+	known := false
+	if parentChat, parentTab, owned := h.manager.SubagentParent(id); owned {
+		if parentChat != chatID || parentTab != tabID {
+			return nil
+		}
+		providerID, modeID, known = h.manager.SubagentPermissionMode(id)
+	} else {
+		// A run this process never held (the daemon was replaced since) is
+		// retried from its stored spawn intent, at the mode stored there.
+		providerID, modeID, known = h.manager.StoredSubagentPermissionMode(chatID, tabID, id)
 	}
-	providerID, modeID, known := h.manager.SubagentPermissionMode(id)
 	if !known {
 		return nil
 	}

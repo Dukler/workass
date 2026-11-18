@@ -468,6 +468,15 @@ func (m *Manager) SpawnSubagent(ctx context.Context, opts SubagentSpawnOptions) 
 		// machine. Registering one here too is what made the child show up as
 		// work of a conversation that never asked for it.
 		m.registerSubagentSpawnedWork(ownerTabID, ownerChatID, snapshot)
+		if err := m.persistSubagentRetrySpec(subagentRetrySpec{
+			ID: id, ParentChatID: ownerChatID, ParentTabID: ownerTabID, Prompt: prompt, Label: label,
+			ProviderID: providerID, ModelID: modelID, Effort: effort, ModeID: modeID, CWD: cwd,
+			Forked: opts.Fork, CreatedAt: snapshot.StartedAt,
+		}); err != nil && m.opts.Logf != nil {
+			m.opts.Logf("a subagent's retry spec was not kept; a retry after a restart will not find it", map[string]any{
+				"subagentId": id, "error": compactText(redactSensitiveText(err.Error()), 200),
+			})
+		}
 	}
 	brand := brandForProvider(providerID)
 	if rootJobID != "" {
@@ -1938,6 +1947,27 @@ func (m *Manager) RetrySubagent(ctx context.Context, ownerKey, parentChatID, par
 	}
 	m.mu.Lock()
 	original := m.subagents[strings.TrimSpace(id)]
+	if original == nil {
+		m.mu.Unlock()
+		// Not in this process's registry: the run ended before a daemon restart
+		// (an update orphans every running child) or left the completed-history
+		// prune. Neither leaves it running, so its durable spawn intent is
+		// replayed for the exact chat that spawned it.
+		spec, found := m.loadSubagentRetrySpec(chatID, tabID, id)
+		if !found {
+			return SubagentRun{}, errors.New("subagent not found for this owner")
+		}
+		prompt := spec.Prompt
+		if extra := strings.TrimSpace(message); extra != "" {
+			prompt += "\n\nRetry guidance from the coordinator:\n" + extra
+		}
+		return m.SpawnSubagent(ctx, SubagentSpawnOptions{
+			OwnerKey: ownerKey, ParentChatID: parentChatID, ParentTabID: parentTabID,
+			Prompt: prompt, Label: spec.Label, ProviderID: spec.ProviderID,
+			ModelID: spec.ModelID, Effort: spec.Effort, ModeID: spec.ModeID,
+			CWD: spec.CWD, RetryOf: spec.ID, Fork: spec.Forked,
+		})
+	}
 	if !m.addressSubagentLocked(original, parent, chatID, tabID) {
 		m.mu.Unlock()
 		return SubagentRun{}, errors.New("subagent not found for this owner")

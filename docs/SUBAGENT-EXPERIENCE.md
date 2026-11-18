@@ -58,6 +58,11 @@ running, and report to it themselves, so they never hold a child open.
 - Parent cancellation cascades and cannot leave an orphan engine.
 - Retry preserves resolved selection and records lineage.
 - Restarted daemon can list prior receipts without exposing another chat.
+- A child the restart orphaned (every update orphans the running ones) can still
+  be retried by its own chat: each spawn's intent (prompt, selection, cwd, fork)
+  is kept in `state/subagent-specs/` from the moment it starts, the retry replays
+  it for that exact chat only, at the stored mode, and a deleted chat takes its
+  specs with it.
 - A child's background work finishes and is read before the parent is told;
   any close over live work reads as lost, never as plain `completed`.
 - Results/errors/notes are bounded and secret-redacted.

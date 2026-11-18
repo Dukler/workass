@@ -47,6 +47,7 @@ var storageTopLevelParts = map[string]string{
 	"checkpoints":                  storagePartChats,
 	"forks":                        storagePartChats,
 	"subagent-receipts":            storagePartChats,
+	"subagent-specs":               storagePartChats,
 	"provider-native":              storagePartChats,
 	"provider-lanes.json":          storagePartChats,
 	"turn-diagnostics.json":        storagePartChats,

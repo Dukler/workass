@@ -144,6 +144,7 @@ type Manager struct {
 	accountResets                accountResetState
 	planUsageGate                planUsageGateState
 	receiptMu                    sync.Mutex
+	subagentSpecMu               sync.Mutex
 	subagentCompletionObserverMu sync.RWMutex
 	subagentCompletionObserver   func(tabID, chatID string, receipt SubagentReceipt) error
 	subagentAttentionObserver    func(tabID, chatID string, notice SubagentAttentionNotice) error
@@ -1085,6 +1086,7 @@ func (m *Manager) ForgetChat(ctx context.Context, tabID, chatID string, operatio
 	}
 	m.cancelAndDrainSubagentsForChat(chatID, tabID, 5*time.Second)
 	m.DropSpawnedWorkForChat(tabID, chatID)
+	m.forgetSubagentRetrySpecs(chatID, tabID)
 	chatToken := m.chatToolTokenForChat(chatID, tabID)
 	m.revokeChatToolToken(chatID, tabID)
 	m.RevokeJobStartTokensForChat(tabID, chatID)
