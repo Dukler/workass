@@ -1133,6 +1133,13 @@ test('native diagnostic error classification accepts only neutral enums and nati
   }
 });
 
+test('a plan usage limit fails the prompt with the structured limit, never parsed from its text', async (t) => {
+  const peer = await goalPeer(t);
+  const failed = await peer.goal('[fixture:usage-limit]', { clientUserMessageId: 'usage-limit' });
+  assert.match(failed.error?.message || '', /usage limit/i);
+  assert.deepEqual(failed.error?.data, { workassUsageLimit: { resetsAt: '', kind: 'usageLimitExceeded' } });
+});
+
 test('native fallback warnings without turn ids are counted only as active exact-thread observations', async (t) => {
   for (const [message, count] of [
     ['Falling back from WebSockets to HTTP(S) transport. token=fixture-private', 1],

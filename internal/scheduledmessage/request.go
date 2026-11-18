@@ -35,6 +35,9 @@ type Request struct {
 	Condition    Condition     // At is zero for after_seconds until scheduled
 	After        time.Duration // set for after_seconds
 	ExpiresAfter time.Duration // zero for "at" and after_seconds
+	// Set only by Workass itself, never parsed from an agent's params.
+	Purpose      string
+	ForMessageID string
 }
 
 var conditionParams = []string{"at", "after_seconds", "when_tcp_up", "when_file_exists", "when_pid_exits"}
@@ -154,9 +157,12 @@ func ParseRequest(params map[string]any) (Request, error) {
 // hash covers the raw request fields, never the computed At, so a retried
 // after_seconds call hashes identically.
 func (r Request) hash() string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		r.Message, r.Field, r.Value, strconv.FormatInt(int64(r.ExpiresAfter/time.Second), 10),
-	}, "\x00")))
+	parts := []string{r.Message, r.Field, r.Value, strconv.FormatInt(int64(r.ExpiresAfter/time.Second), 10)}
+	// Appended only when set, so an agent's saved request keeps its hash.
+	if r.Purpose != "" {
+		parts = append(parts, r.Purpose, r.ForMessageID)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -125,6 +125,9 @@ type Bridge struct {
 	durableModelSelection map[string]string
 
 	sessions map[string]struct{}
+	// The hashed login the provider reported for its sessions (one login per
+	// provider process); a usage-limit stop names it.
+	accountScope string
 	// Commands still running past their turn, and since when (lifecycle.go).
 	outlivingCommands map[string]time.Time
 	seededSessions    map[string]struct{}

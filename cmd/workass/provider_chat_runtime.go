@@ -2064,6 +2064,11 @@ func (r *providerChatRuntime) AdmitStart(ctx context.Context, arg map[string]any
 		release()
 		return nil, err
 	}
+	// The person wrote something else: a "continue" they had scheduled for a
+	// usage limit is no longer wanted (limit_continue.go).
+	if origin == "human" {
+		cancelPendingLimitContinue(r.scheduled, tabID, chatID)
+	}
 	return &providerChatStartAdmission{Receipt: receipt, dispatch: release}, nil
 }
 

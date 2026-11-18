@@ -253,6 +253,9 @@ const LANBridgeJS = `(() => {
     accountsResetsRefresh: (providerId, force) => invoke('accounts:resets-refresh', { providerId, force: force === true }),
     // Automatizaciones: what is scheduled on this machine, and cancelling one scheduled message.
     automationsList: () => invoke('automations:list'), automationsCancel: (o) => invoke('automations:cancel', o || {}),
+    // Continuar on a reply a usage limit stopped (send now or at the reset), its cancel, and what is scheduled.
+    limitContinue: (o) => invoke('chat:limit-continue', o || {}), limitContinueCancel: (o) => invoke('chat:limit-continue-cancel', o || {}),
+    limitContinueStatus: (o) => invoke('chat:limit-continue-status', o || {}),
     // Conectores + alerts (docs/specs/connectors-alerts.md): this daemon's connectors and their alerts.
     connectorsList: () => invoke('connectors:list'), connectorsSet: (o) => invoke('connectors:set', o || {}), connectorsRemove: (o) => invoke('connectors:remove', o || {}),
     connectorsTest: (o) => invoke('connectors:test', o || {}), connectorsRotateSecret: (o) => invoke('connectors:rotate-secret', o || {}),

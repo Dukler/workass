@@ -1258,6 +1258,10 @@ func cloneTerminal(terminal *provider.TerminalEvent) *provider.TerminalEvent {
 	}
 	out.ConsumedSteerIDs = append([]provider.OperationID(nil), terminal.ConsumedSteerIDs...)
 	out.Attachments = append([]provider.Attachment(nil), terminal.Attachments...)
+	if terminal.UsageLimit != nil {
+		limit := *terminal.UsageLimit
+		out.UsageLimit = &limit
+	}
 	return &out
 }
 

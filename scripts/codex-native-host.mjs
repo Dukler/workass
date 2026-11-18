@@ -56,7 +56,11 @@ function nativeTurnError(value) {
   if (Number.isInteger(status) && status >= 100 && status <= 599) labels.push(`HTTP ${status}`);
   const message = safeErrorText(value?.message || 'Codex turn failed');
   const details = typeof value?.additionalDetails === 'string' ? safeErrorText(value.additionalDetails) : '';
-  return new Error(`${message}${labels.length ? ` (${labels.join(', ')})` : ''}${details ? `\nDetails: ${details}` : ''}`);
+  const error = new Error(`${message}${labels.length ? ` (${labels.join(', ')})` : ''}${details ? `\nDetails: ${details}` : ''}`);
+  // A plan's usage limit stops the chat until it comes back; the daemon takes
+  // when from the account's rate limits (owner 2026-11-18: Continuar).
+  if (category === 'usageLimitExceeded') error.data = { workassUsageLimit: { resetsAt: '', kind: category } };
+  return error;
 }
 
 function diagnostic(label, error) {

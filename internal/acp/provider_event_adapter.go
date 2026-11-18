@@ -517,6 +517,7 @@ func (m *Manager) observeProviderLaneJobEvent(payload map[string]any) error {
 				DispositionState: asString(disposition["state"]), DispositionSource: asString(disposition["source"]),
 				DispositionNote:  asString(disposition["note"]),
 				ConsumedSteerIDs: consumedSteerIDs, Attachments: attachments,
+				UsageLimit: usageLimitFromWire(mapFromAny(job["usageLimit"])),
 			},
 		})
 		return err

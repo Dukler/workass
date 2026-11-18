@@ -3406,3 +3406,14 @@ aside.rail.browser-col { padding: 0 13px 14px; display: flex; flex-direction: co
 .stgs .cn-det .btn.acc:disabled:hover { background: var(--acc); }
 .stgs .cn-det select.inp.cn-change { max-width: 110px; color: var(--ink2); }
 .stgs .cn-move .d .mono { font-size: 11.5px; overflow-wrap: anywhere; }
+
+/* Continuar under a reply a usage limit stopped (UsageLimitLine, mock
+   desktop/docs/mocks/limit-resume/option-a-v2.html): the notice line's
+   vocabulary, one fixed height in every state, the action as green text. */
+.note.limitline { height: 22px; margin: 2px 0 10px; }
+.note.limitline .lnm { flex: none; color: var(--ink2); white-space: nowrap; }
+.note.limitline .lact { flex: none; margin-left: 2px; padding: 0; border: 0; background: none; font: inherit; font-weight: 550; color: var(--acc); cursor: pointer; }
+.note.limitline .lact.quiet { font-weight: 400; color: var(--muted); }
+.note.limitline .lact:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.note.limitline .lact:hover:not(:disabled).quiet { color: var(--ink2); }
+.note.limitline .lact:disabled { opacity: .55; cursor: default; }

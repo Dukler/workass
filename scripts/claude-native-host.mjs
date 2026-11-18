@@ -62,7 +62,10 @@ function respond(id, result) {
 }
 
 function fail(id, code, message) {
-  write({ jsonrpc: '2.0', id, error: { code, message: safeErrorText(message) } });
+  const error = { code, message: safeErrorText(message) };
+  // Structured, never free text: only the fields the daemon reads.
+  if (message?.usageLimit) error.data = { workassUsageLimit: { resetsAt: message.usageLimit.resetsAt || '', kind: message.usageLimit.kind || '' } };
+  write({ jsonrpc: '2.0', id, error });
 }
 
 function safeErrorText(value) {
@@ -114,6 +117,32 @@ function claudeResultError(result) {
   if (messages.length) return messages.join('; ');
   const subtype = String(result?.subtype || '').trim();
   return subtype ? `Claude Code turn failed: ${subtype}` : 'Claude Code turn failed';
+}
+
+// A subscription's usage limit (claude.ai plans: the 5-hour window, the
+// weekly ones). Claude Code reports it as a rate_limit_event whose status is
+// "rejected" (and no overage to fall back on), then fails the turn with an
+// error result. The turn's failure carries when the limit comes back, so the
+// chat can offer to continue it then (owner 2026-11-18).
+function blockingRateLimit(info) {
+  if (!info || typeof info !== 'object' || info.status !== 'rejected') return null;
+  // Overage that is allowed keeps the turn going on extra usage: not a stop.
+  if (info.isUsingOverage === true || info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning') return null;
+  const seconds = Number(info.resetsAt);
+  return {
+    resetsAt: Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : '',
+    kind: typeof info.rateLimitType === 'string' ? info.rateLimitType : '',
+  };
+}
+
+// The failed result is a usage-limit stop when Claude Code said so this turn
+// (the blocking event, or an assistant reply flagged rate_limit), or when the
+// result itself is the API's 429. A 429 without a known reset still counts:
+// the daemon then takes the reset from the account's plan usage.
+function usageLimitForResult(result, seen) {
+  if (seen?.block) return seen.block;
+  if (seen?.flagged || Number(result?.api_error_status) === 429) return { resetsAt: '', kind: '' };
+  return null;
 }
 
 function isTransientOAuthRefreshFailure(value) {
@@ -1387,6 +1416,17 @@ class ClaudeSession {
 
   handleMessage(message) {
     if (!message || typeof message !== 'object') return;
+    // Limit state only; the frame itself is never forwarded to the client.
+    if (message.type === 'rate_limit_event') {
+      this.rateLimitSeen = { ...(this.rateLimitSeen || {}), block: blockingRateLimit(message.rate_limit_info) };
+      return;
+    }
+    if (message.type === 'assistant' && message.error === 'rate_limit') {
+      // Claude Code throttles repeated rate_limit_events and repeats the limit
+      // on each blocked reply instead.
+      const repeated = blockingRateLimit(message.api_error_params?.rate_limit_info ?? message.message?.api_error_params?.rate_limit_info);
+      this.rateLimitSeen = { ...(this.rateLimitSeen || {}), flagged: true, ...(repeated ? { block: repeated } : {}) };
+    }
     // Any SDK traffic proves the provider stream is alive again.
     this.retryState = null;
     // EXCEPT system/init: the real CLI (and the mock) emits it the instant the
@@ -1510,6 +1550,10 @@ class ClaudeSession {
       }
       if (message.is_error === true) {
         const error = new Error(claudeResultError(message));
+        const usageLimit = usageLimitForResult(message, this.rateLimitSeen);
+        if (usageLimit) error.usageLimit = usageLimit;
+        // The block stands until an event says otherwise; the flag was this turn's.
+        if (this.rateLimitSeen) this.rateLimitSeen.flagged = false;
         const active = this.activePrompt;
         // A steer that outran the model's first word: recoverable, and the turn
         // must survive it — the direction is re-asked, not lost with the job.
@@ -1535,6 +1579,7 @@ class ClaudeSession {
         this.settlePrompt(null, error);
         return;
       }
+      this.rateLimitSeen = null;
       this.acceptActivePrompt();
       // A steered turn is still the same user-visible turn: hand the receipt to
       // the client and keep streaming the answer to the direction into it.

@@ -188,7 +188,13 @@ export interface Msg {
   // A turn cut off by a daemon disconnect (not a model/agent error). Renders a
   // quiet "sin conexión" row instead of the generic error stamp.
   interrupted?: boolean;
+  // The subscription's usage limit stopped this reply (daemon usage_limit.go):
+  // which one, and when it comes back (RFC 3339; absent when unknown). While
+  // it is the chat's latest reply it carries the Continuar line.
+  usageLimit?: UsageLimit;
 }
+
+export interface UsageLimit { label: string; resetsAt?: string }
 
 // A not-yet-sent image belongs to one chat draft, just like `draft` text. Keep
 // the browser File plus a zero-copy object URL on the interactive path; raw

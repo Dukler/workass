@@ -6,6 +6,8 @@ import { chatPane } from '../store/right-pane';
 import { AssistantMessage, AssistantTurnBlock, LiveTurnPulse } from './AssistantMessage';
 import { UserPill } from './messages';
 import { NoticeLine } from './NoticeLine';
+import { UsageLimitLine } from './UsageLimitLine';
+import { currentLimitedReply } from '../chat/usage-limit';
 import { IcDoc, IcRail, IcBrowser, IcChevron, IcClose, IcFork, IcSearch } from '../icons';
 import { normalizeWorkspacePath, rememberLastProject, workspaceName } from '../workspaces';
 import { createScrollSpring, createTranscriptPinScheduler, latestOrdinaryUserMessageId, transcriptPinnedAfterScroll, transcriptReaderLeftUnannounced } from '../transcript-scroll';
@@ -450,6 +452,8 @@ export function Transcript({ chat }: { chat: Chat | null }) {
   const hidden = selectedFindMatch || (inheritedFold && !inheritedOpen && ownHistoryLoaded)
     ? 0
     : Math.max(0, knownTotal - shown.length);
+  // The reply a usage limit stopped, while nothing came after it (Continuar).
+  const limitedReply = currentLimitedReply(visibleMessages);
   const runningMessage = [...shown].reverse().find((message) => (
     message.role === 'assistant'
     && message.status === 'running'
@@ -1441,7 +1445,13 @@ export function Transcript({ chat }: { chat: Chat | null }) {
                       </div>
                     );
                   }
-                  return <div className="vunit" data-vunit={unit.key} key={unit.key}>{body}</div>;
+                  const limitHere = limitedReply && shown.slice(unit.start, unit.end).some((message) => message.id === limitedReply.id);
+                  return (
+                    <div className="vunit" data-vunit={unit.key} key={unit.key}>
+                      {body}
+                      {limitHere && <UsageLimitLine chat={chat} msg={limitedReply} />}
+                    </div>
+                  );
                 })}
                 {win.bottomPad > 0 && <div className="vpad" style={{ height: win.bottomPad }} aria-hidden="true" />}
               </>

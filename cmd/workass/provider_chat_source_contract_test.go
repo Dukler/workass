@@ -278,6 +278,9 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// Automatizaciones: the crons each provider session reported at its last
 	// turn end, read for a list. It touches no chat actor and decides nothing.
 	"SessionCrons": {},
+	// Continuar: when a provider's account is back, read from its plan usage
+	// for a reply the limit stopped. A read; it touches no chat actor.
+	"UsageLimitReset": {},
 	// Two reads beside them, for a supervised job started from another machine
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.
@@ -732,6 +735,9 @@ var phaseCExpectedChatHandlers = map[string]struct{}{
 	"app-chat:reset": {}, "app-chat:set-model": {}, "app-chat:set-mode": {}, "app-chat:steer": {}, "app-chat:use-rate-limit-reset": {}, "app-chat:detect-acp": {},
 	"app-chat:auto-title": {}, "spawned-work:list": {}, "spawned-work:summary": {}, "spawned-work:read": {}, "spawned-work:stop": {}, "job:start": {}, "job:cancel": {},
 	"visualize:host": {},
+	// Continuar on a reply a usage limit stopped (limit_continue.go): reads the
+	// chat's actor snapshot, then sends through the agent queue or schedules.
+	"chat:limit-continue": {}, "chat:limit-continue-cancel": {}, "chat:limit-continue-status": {},
 }
 
 var phaseCActorHandlerExceptions = map[string]struct{}{

@@ -54,6 +54,9 @@ func (c *chatControlCoordinator) deliverScheduledMessage(ctx context.Context, e 
 	if state.Deleted || strings.TrimSpace(state.Presentation.TabID) != strings.TrimSpace(e.TabID) {
 		return scheduledSendError(scheduledmessage.ErrChatGone, errors.New("chat was deleted or moved"))
 	}
+	if e.Purpose == scheduledmessage.PurposeLimitContinue && limitContinueObsolete(state, e) {
+		return scheduledSendError(scheduledmessage.ErrObsolete, errors.New("the chat moved on before the limit came back"))
+	}
 	operationID := scheduledSendOperationID(e.ID)
 	// A restart between queueing and saving can change the text (late marker)
 	// of an already queued message; the queue would then refuse the changed

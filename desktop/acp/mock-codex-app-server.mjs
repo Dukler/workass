@@ -207,6 +207,11 @@ async function runTurn(id, params) {
     completeTurn(turnId);
     return;
   }
+  // A ChatGPT plan's usage limit stops the turn (owner 2026-11-18: Continuar).
+  if (text.includes('[fixture:usage-limit]')) {
+    completeTurn(turnId, 'failed', { message: "You've hit your usage limit.", codexErrorInfo: 'usageLimitExceeded' });
+    return;
+  }
   if (text.includes('[fixture:error-category]')) {
     const error = JSON.parse(process.env.WORKASS_CODEX_FIXTURE_DIAGNOSTIC_ERROR || '{}');
     notify('error', { threadId: params.threadId, turnId, willRetry: true, error });

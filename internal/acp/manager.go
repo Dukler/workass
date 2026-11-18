@@ -1788,6 +1788,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	res, err := activeBridge.promptForJob(ctx, job.SessionID, job, operationID, promptText, opts.Images, commandInput)
 	if err != nil {
 		displayError := redactSensitiveText(err.Error())
+		job.UsageLimit = m.usageLimitFromPromptError(activeBridge, job.ProviderID, err)
 		if !job.CrashInterrupted {
 			hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, err)
 			if policyErr != nil {
@@ -3326,6 +3327,9 @@ func (b *Bridge) attachSession(sessionID, cwd string, opts SessionOptions, res m
 	b.mu.Lock()
 	currentModelID := b.currentModelSelectionLocked()
 	realmMeta := mapFromAny(mapFromAny(res["_meta"])["workassProviderRealm"])
+	if scope := strings.TrimSpace(asString(realmMeta["accountScope"])); scope != "" {
+		b.accountScope = scope
+	}
 	info := SessionInfo{
 		SessionID:               sessionID,
 		CWD:                     cwd,

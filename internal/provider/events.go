@@ -268,6 +268,25 @@ type TerminalEvent struct {
 	DispositionNote   string
 	ConsumedSteerIDs  []OperationID
 	Attachments       []Attachment
+	// Set when the turn stopped because the subscription it runs on reached
+	// its usage limit (owner 2026-11-18: the chat offers Continuar, which
+	// sends "continue" now or once the limit comes back).
+	UsageLimit *UsageLimit `json:",omitempty"`
+}
+
+// UsageLimit says which subscription stopped a turn and when it comes back.
+type UsageLimit struct {
+	// ResetsAt is RFC 3339; empty when neither the provider nor the
+	// account's plan usage said when.
+	ResetsAt string `json:",omitempty"`
+	// Kind is the provider's name for the window (five_hour, seven_day,
+	// usageLimitExceeded…).
+	Kind string `json:",omitempty"`
+	// Label names the subscription for the person ("Claude Max").
+	Label string `json:",omitempty"`
+	// AccountScope is the hashed login the lane ran on, so two logins of one
+	// provider never share a reset.
+	AccountScope string `json:",omitempty"`
 }
 
 // Event is a typed discriminated union. Exactly the payload matching Kind may

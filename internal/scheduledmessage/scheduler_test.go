@@ -740,3 +740,41 @@ func TestPendingListsEveryChatSoonestFirst(t *testing.T) {
 		t.Fatalf("pending = %+v, want soon then late", got)
 	}
 }
+
+// Continuar on a reply a usage limit stopped (owner 2026-11-18): the person's
+// "continue" arrives as typed, survives a restart, and a chat that moved on
+// before the limit came back drops it instead of retrying.
+func TestLimitContinueIsPlainDurableAndDropsWhenObsolete(t *testing.T) {
+	r := newRig(t)
+	at := r.clock.Now().Add(time.Hour).UTC()
+	req := Request{OperationID: "limit-continue-a1", Message: "continue", Field: "at", Value: at.Format(time.RFC3339),
+		Condition: Condition{Kind: "at", At: at}, Purpose: PurposeLimitContinue, ForMessageID: "a1"}
+	entry, err := r.s.Schedule("tab", "chat", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := r.s.Schedule("tab", "chat", req); err != nil || again.ID != entry.ID {
+		t.Fatalf("a repeated press is the same entry: %v %+v", err, again)
+	}
+	r.reload()
+	got := r.s.List("tab", "chat")[0]
+	if got.Purpose != PurposeLimitContinue || got.ForMessageID != "a1" || Text(got) != "continue" {
+		t.Fatalf("after reload = %+v text %q", got, Text(got))
+	}
+	r.clock.Advance(time.Hour)
+	r.rec.err = fmt.Errorf("deliver: %w", ErrObsolete)
+	r.s.Tick(context.Background())
+	if got := r.s.List("tab", "chat")[0]; got.Status != StatusCancelled || got.Attempts != 0 {
+		t.Fatalf("obsolete = %+v", got)
+	}
+}
+
+func TestAnAgentsScheduledMessageKeepsItsHeaderAndHash(t *testing.T) {
+	req := mustParse(t, after("op", 60))
+	if req.Purpose != "" || req.hash() != (Request{Message: req.Message, Field: req.Field, Value: req.Value, ExpiresAfter: req.ExpiresAfter}).hash() {
+		t.Fatal("an agent's request hashes as before")
+	}
+	if !strings.HasPrefix(Text(Entry{ID: "x", Message: "m", Condition: Condition{Kind: "at", At: time.Now()}}), "[Workass scheduled message x") {
+		t.Fatal("an agent's message keeps its header")
+	}
+}

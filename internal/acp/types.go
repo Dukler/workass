@@ -590,6 +590,8 @@ type Job struct {
 	DispositionSource string
 	DispositionNote   string
 	CrashInterrupted  bool
+	// The subscription's usage limit stopped this turn (usage_limit.go).
+	UsageLimit *providercontract.UsageLimit
 	// A turn the daemon itself ended (restart/handoff) is not an agent error.
 	// The failure is real — the turn did stop — but the cause is ours, so the
 	// sidebar must not report it as a chat that broke.
@@ -774,6 +776,9 @@ func (j *Job) Public() map[string]any {
 	}
 	if j.startOpts.Notice != nil {
 		out["notice"] = j.startOpts.Notice
+	}
+	if j.UsageLimit != nil {
+		out["usageLimit"] = usageLimitWire(j.UsageLimit)
 	}
 	if j.startOpts.DeliveryCapabilities != nil {
 		out["deliveryCapabilities"] = DeliveryCapabilitiesForWire(*j.startOpts.DeliveryCapabilities)

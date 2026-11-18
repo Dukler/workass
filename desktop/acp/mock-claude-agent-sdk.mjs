@@ -520,6 +520,24 @@ class FixtureQuery {
         });
         continue;
       }
+      // A subscription's usage limit, as Claude Code reports it: the blocking
+      // rate_limit_event, the reply flagged rate_limit, then a 429 error
+      // result (owner 2026-11-18: the chat offers Continuar for the reset).
+      if (process.env.WORKASS_CLAUDE_FIXTURE_UNKNOWN_RESULTS === '1'
+          && text.includes('[fixture:usage-limit]')) {
+        this.emit({
+          type: 'rate_limit_event',
+          rate_limit_info: { status: 'rejected', resetsAt: 1795046400, rateLimitType: 'five_hour', overageStatus: 'rejected' },
+          uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit({
+          type: 'assistant', error: 'rate_limit',
+          message: { role: 'assistant', content: [{ type: 'text', text: "You've hit your limit · resets 6:40pm" }] },
+          parent_tool_use_id: null, uuid: randomUUID(), session_id: this.sessionId,
+        });
+        this.emit({ ...this.result('success'), is_error: true, api_error_status: 429, result: "You've hit your limit · resets 6:40pm" });
+        continue;
+      }
       // A NON-error result under an unknown subtype: future CLIs may close a
       // successful turn with extra advisory payloads.
       if (process.env.WORKASS_CLAUDE_FIXTURE_UNKNOWN_RESULTS === '1'

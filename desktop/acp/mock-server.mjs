@@ -230,6 +230,18 @@ async function runPrompt(id, params) {
 			turnId: `mock-native-turn-${session.turn + 1}`,
 		});
 	}
+  // A subscription's usage limit, as the native hosts report it: the prompt
+  // fails with when the limit comes back (an hour from now; already back with
+  // [mock:usage-limit-back]; in 25 s with [mock:usage-limit-soon]) so
+  // Continuar can be driven end to end.
+  if (text.includes('[mock:usage-limit')) {
+    session.turnStatus = 'failed';
+    const back = text.includes('[mock:usage-limit-back]') ? Date.now() - 1000
+      : text.includes('[mock:usage-limit-soon]') ? Date.now() + 25_000 : Date.now() + 3600_000;
+    write({ jsonrpc: '2.0', id, error: { code: -32603, message: "You've hit your limit · resets soon",
+      data: { workassUsageLimit: { resetsAt: new Date(back).toISOString(), kind: 'five_hour' } } } });
+    return;
+  }
   if (text.includes('[mock:error]')) {
     session.turnStatus = 'failed';
     fail(id, -32001, 'Deterministic mock failure.');

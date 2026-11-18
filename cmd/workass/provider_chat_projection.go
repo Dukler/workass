@@ -1556,6 +1556,11 @@ func projectLedgerMessage(event chat.LedgerEvent) (map[string]any, error) {
 	if event.NativeTurnID != "" {
 		message["jobId"] = event.NativeTurnID
 	}
+	if event.Terminal != nil && event.Terminal.UsageLimit != nil {
+		message["usageLimit"] = projectUsageLimit(event.Terminal.UsageLimit)
+	} else {
+		delete(message, "usageLimit")
+	}
 	if event.TurnStartedAt > 0 {
 		message["turnStartedAt"] = event.TurnStartedAt
 	}
@@ -2019,4 +2024,14 @@ func legacyNoticeField(text, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// The subscription limit that stopped this reply (usage_limit.go in acp): the
+// renderer shows its Continuar line while this is the chat's latest reply.
+func projectUsageLimit(limit *providercontract.UsageLimit) map[string]any {
+	out := map[string]any{"label": limit.Label}
+	if limit.ResetsAt != "" {
+		out["resetsAt"] = limit.ResetsAt
+	}
+	return out
 }

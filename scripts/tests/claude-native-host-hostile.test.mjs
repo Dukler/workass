@@ -344,6 +344,27 @@ test('hostile: unknown result subtypes and unknown frames neither wedge the turn
   assert.equal(unknownSuccess.error, undefined, JSON.stringify(unknownSuccess));
   assert.equal(unknownSuccess.result.stopReason, 'end_turn');
   assert.ok(answerChunks(peer).includes('Fixture advisory answer'));
+
+  // A usage-limit stop carries when the subscription is back as structured
+  // data, never parsed from the text (owner 2026-11-18: Continuar).
+  peer.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:usage-limit] keep going' }],
+  } });
+  const limited = await peer.waitFor((message) => message.id === 6);
+  assert.match(limited.error?.message || '', /hit your limit/i);
+  assert.deepEqual(limited.error?.data, { workassUsageLimit: { resetsAt: '2026-11-19T00:00:00.000Z', kind: 'five_hour' } });
+  assert.ok(!peer.rawLines.join('\n').includes('"rejected"'), 'the rate-limit frame itself never reaches the client');
+
+  // The next turn that succeeds clears the limit: a later unrelated failure is not one.
+  peer.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:unknown-success-result] finish' }],
+  } });
+  await peer.waitFor((message) => message.id === 7);
+  peer.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: {
+    sessionId, prompt: [{ type: 'text', text: '[fixture:unknown-error-result] again' }],
+  } });
+  const unrelated = await peer.waitFor((message) => message.id === 8);
+  assert.equal(unrelated.error?.data, undefined, JSON.stringify(unrelated));
   assert.deepEqual(peer.parseFailures, []);
 });
 

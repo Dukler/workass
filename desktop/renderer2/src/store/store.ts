@@ -7190,6 +7190,8 @@ export class Store {
           // The daemon reports its own interruptions now, so a restart-killed
           // turn reads as interrupted here exactly as it does after rehydration.
           if (e.job.interrupted) msg.interrupted = true;
+          // Continuar's line comes with the turn's end, not only with the next read.
+          if (e.job.usageLimit?.label !== undefined) msg.usageLimit = { label: e.job.usageLimit.label, ...(e.job.usageLimit.resetsAt ? { resetsAt: e.job.usageLimit.resetsAt } : {}) };
           if (msg.status === 'failed' && !msg.content && !msg.result) msg.content = e.job.error ? `Error: ${e.job.error}` : 'La tarea falló.';
           msg.at = e.job.finishedAt ?? new Date().toISOString();
           if (e.job.images?.length) {

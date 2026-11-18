@@ -42,6 +42,16 @@ const (
 // longer exists: the scheduled message settles failed at once, without retry.
 var ErrChatGone = errors.New("chat no longer exists")
 
+// ErrObsolete is returned (or wrapped) by a Sender when the message is no
+// longer wanted (a limit continuation after the person already wrote again):
+// it settles cancelled, without retry.
+var ErrObsolete = errors.New("no longer wanted")
+
+// PurposeLimitContinue marks the "continue" a person scheduled from a chat a
+// usage limit stopped (owner 2026-11-18). It is delivered as the plain text,
+// as if typed, and only while the limited reply is still the chat's latest.
+const PurposeLimitContinue = "limit-continue"
+
 // ErrNotFound is returned by Cancel for an id that is not in the caller's chat.
 var ErrNotFound = errors.New("no scheduled message with that id in this chat")
 
@@ -67,9 +77,13 @@ type Entry struct {
 	SettledAt   *time.Time `json:"settledAt,omitempty"`
 	// Late marks an "at" scheduled message that came due while the daemon was
 	// not running.
-	Late     bool   `json:"late,omitempty"`
-	Attempts int    `json:"attempts,omitempty"`
-	Error    string `json:"error,omitempty"` // redacted, short
+	Late bool `json:"late,omitempty"`
+	// Purpose is empty for an agent's own scheduled message;
+	// PurposeLimitContinue for a Continuar, with ForMessageID the limited reply.
+	Purpose      string `json:"purpose,omitempty"`
+	ForMessageID string `json:"forMessageId,omitempty"`
+	Attempts     int    `json:"attempts,omitempty"`
+	Error        string `json:"error,omitempty"` // redacted, short
 }
 
 // Sender delivers text to the entry's own chat.
@@ -312,14 +326,16 @@ func (s *Scheduler) Schedule(tabID, chatID string, req Request) (Entry, error) {
 	}
 	now := s.now()
 	entry := Entry{
-		TabID:       tabID,
-		ChatID:      chatID,
-		OperationID: req.OperationID,
-		Message:     req.Message,
-		RequestHash: hash,
-		Condition:   req.Condition,
-		CreatedAt:   now,
-		Status:      StatusPending,
+		TabID:        tabID,
+		ChatID:       chatID,
+		OperationID:  req.OperationID,
+		Message:      req.Message,
+		RequestHash:  hash,
+		Condition:    req.Condition,
+		CreatedAt:    now,
+		Status:       StatusPending,
+		Purpose:      req.Purpose,
+		ForMessageID: req.ForMessageID,
 	}
 	if req.Field == "after_seconds" {
 		entry.Condition.At = now.Add(req.After).UTC()
@@ -543,6 +559,8 @@ func (s *Scheduler) finish(id string, sendErr error) {
 			s.settle(e, StatusFired, "")
 		case errors.Is(sendErr, ErrChatGone):
 			s.settle(e, StatusFailed, "chat deleted")
+		case errors.Is(sendErr, ErrObsolete):
+			s.settle(e, StatusCancelled, "no longer wanted")
 		default:
 			e.Attempts++
 			e.Error = redact(sendErr.Error())
@@ -571,6 +589,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // Text is the message as delivered into the chat.
 func Text(e Entry) string {
+	if e.Purpose == PurposeLimitContinue {
+		return e.Message
+	}
 	var summary string
 	switch e.Condition.Kind {
 	case "at":
