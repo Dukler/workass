@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Límite de uso · Continuar</title>
+<!--
+  MOCK — not product code. Owner 2026-11-18: when a subscription's usage limit
+  stops a chat, show when that subscription comes back and a Continuar button
+  (button only, nothing is sent by itself). Pressing it sends "continue" to that
+  chat. Three placements; each shows the same two states at one fixed height:
+  before the reset (time it comes back) and after it (Continuar).
+-->
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font: 13.5px/1.6 var(--font-sans); color: var(--foreground); padding: 4px 2px 10px; }
+svg.g { display: block; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+.opt { margin: 0 0 26px; }
+.opt h2 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+.opt h2 span { font: 600 10px/1 var(--font-mono); letter-spacing: .12em; color: var(--muted-foreground); margin-right: 8px; }
+.opt .why { color: var(--muted-foreground); font-size: 12px; margin: 0 0 10px; max-width: 720px; }
+.states { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.cap { font: 600 9.5px/1 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted-foreground); margin: 0 0 6px 2px; }
+.win { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px 12px; background: var(--background); min-height: 212px; display: flex; flex-direction: column; }
+.win .sp { flex: 1; }
+.userpill { display: flex; justify-content: flex-end; margin: 0 0 10px; }
+.userpill > div { background: var(--muted); border: 1px solid var(--border); border-radius: 14px; padding: 5px 12px; font-size: 12.5px; max-width: 86%; }
+.p { margin: 0 0 8px; font-size: 12.5px; }
+.stamp { font-size: 11px; color: var(--muted-foreground); margin: -2px 0 10px; }
+/* the limit line (A) — the NoticeLine vocabulary: icon, name, grey word */
+.lim { display: flex; align-items: center; gap: 8px; height: 22px; font-size: 12px; color: var(--muted-foreground); margin: 2px 0 8px; white-space: nowrap; }
+.lim .ic { width: 14px; height: 14px; flex: none; opacity: .85; }
+.lim .ic svg { width: 14px; height: 14px; }
+.lim .nm { color: var(--secondary-foreground); }
+.lim .act { margin-left: 2px; color: var(--accent); font-weight: 550; cursor: pointer; }
+.lim .act.quiet { color: var(--muted-foreground); font-weight: 400; }
+.lim .act:hover { text-decoration: underline; text-underline-offset: 3px; }
+/* composer (B, C) */
+.comp { border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 8px 10px 7px; }
+.comp .ph { color: var(--muted-foreground); font-size: 12.5px; height: 20px; }
+.comp .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--muted-foreground); }
+.comp .row .send { margin-left: auto; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); display: grid; place-items: center; }
+.comp .row .send svg { width: 12px; height: 12px; }
+/* B: one strip on top of the composer, fixed height */
+.strip { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; margin: 0 6px -1px; border: 1px solid var(--border); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--muted); font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.strip .ic { width: 14px; height: 14px; flex: none; }
+.strip .ic svg { width: 14px; height: 14px; }
+.strip .nm { color: var(--secondary-foreground); }
+.pill { margin-left: auto; height: 22px; padding: 0 10px; border-radius: 11px; border: 1px solid var(--border); background: var(--card); color: var(--muted-foreground); font: inherit; font-size: 11.5px; display: inline-flex; align-items: center; }
+.pill.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+/* C: the reply's own footer word, and the composer's send turns into Continuar */
+.stamp .w { color: var(--secondary-foreground); }
+.comp.c .ph { color: var(--muted-foreground); }
+.comp.c .row .go { margin-left: auto; height: 22px; padding: 0 10px; border-radius: 11px; font-size: 11.5px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); color: var(--muted-foreground); }
+.comp.c .row .go.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.comp.c .row .go svg { width: 11px; height: 11px; }
+.note { color: var(--muted-foreground); font-size: 12px; margin: 4px 0 0; max-width: 760px; }
+.note b { color: var(--secondary-foreground); font-weight: 550; }
+</style>
+</head>
+<body>
+<div id="out"></div>
+<script>
+const G = (d) => `<svg class="g" viewBox="0 0 16 16">${d}</svg>`;
+const GAUGE = G('<path d="M2.6 11.4a5.6 5.6 0 1 1 10.8 0"/><path d="M8 9.2l3.4-2.6"/><circle cx="8" cy="9.4" r=".9"/>');
+const CLOCK = G('<circle cx="8" cy="8" r="5.6"/><path d="M8 5v3.2l2.1 1.3"/>');
+const ARROW = G('<path d="M8 13V3M4 7l4-4 4 4"/>');
+const before = `
+  <div class="userpill"><div>seguí con el resto de la integración</div></div>
+  <p class="p">Llevo cuatro de los seis archivos. Ahora conecto el cliente con la cola de reintentos y…</p>`;
+const comp = `<div class="sp"></div><div class="comp"><div class="ph">Escribe un mensaje…</div><div class="row">Opus 5.5<span class="send">${ARROW}</span></div></div>`;
+const line = (ic, parts) => `<div class="lim"><span class="ic">${ic}</span><span class="nm">Claude Max</span>${parts}</div>`;
+const states = [
+  ['1 · Se cortó', before + line(GAUGE, '<span>· límite de uso · vuelve a las 18:40</span><span class="act">Continuar</span>') + comp],
+  ['2 · Tocaste Continuar', before + line(CLOCK, '<span>· «continue» sale a las 18:40</span><span class="act quiet">Cancelar</span>') + comp],
+  ['3 · Volvió el límite', before + line(GAUGE, '<span>· límite de uso · continuado 18:40</span>') + '<div class="userpill"><div>continue</div></div><p class="p">Sigo: conecto el cliente con la cola de reintentos…</p>' + comp],
+];
+document.getElementById('out').innerHTML = `
+  <section class="opt">
+    <h2><span>A</span>Línea en el chat · Continuar programa el envío</h2>
+    <p class="why">«Continuar» se puede tocar en cualquier momento. Antes del reset de esa suscripción, deja «continue» programado y sale solo cuando el límite vuelve; después del reset, sale enseguida. Mientras está programado, «Cancelar» lo quita. Si mandás otro mensaje antes, lo programado se cancela.</p>
+    <div class="states">${states.map(([cap, html]) => `<div><div class="cap">${cap}</div><div class="win">${html}</div></div>`).join('')}</div>
+    <p class="note">Por suscripción: la hora es la de la cuenta que cortó este chat (otra cuenta de Claude, o Codex, tiene la suya). Si al enviar el límite sigue cerrado, la línea vuelve al estado 1 con la nueva hora.</p>
+  </section>`;
+</script>
+</body>
+</html>
