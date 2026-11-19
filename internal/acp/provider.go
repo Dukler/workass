@@ -1410,7 +1410,12 @@ func providerProbeTimeout(providerID string) time.Duration {
 
 func (m *Manager) prepareDetectedProvider(ctx context.Context, cfg ProviderConfig) (string, []string, map[string]string, string, error) {
 	registration, ok := providerRegistrationForID(cfg.ID)
-	if !ok || registration.Detection == nil {
+	if !ok {
+		// An ACP agent someone added (providers.json, provider_hotadd.go) is
+		// detected like any plain ACP CLI: its command, its own args.
+		return cliDetectionStrategy{}.Prepare(ctx, m, cfg)
+	}
+	if registration.Detection == nil {
 		return "", nil, nil, "", fmt.Errorf("provider %q is not auto-detectable", cfg.ID)
 	}
 	return registration.Detection.Prepare(ctx, m, cfg)
