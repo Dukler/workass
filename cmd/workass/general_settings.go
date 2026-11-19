@@ -15,6 +15,9 @@ import (
 //   - "whileWorking": what Enter does while a turn runs, "queue" or "steer".
 //   - "notices": which events the app announces, and whether with a sound.
 //   - "dictation": the language whisper is told; read here by voice:transcribe.
+//   - "limitContinue": when a subscription's usage limit stops a chat, send it
+//     "continue" once that limit comes back (limit_continue.go). Off unless
+//     the owner turns it on.
 //
 // settings:set replaces the blob, so each key is normalized on every write.
 
@@ -36,6 +39,7 @@ func applyGeneralSettings(next, input map[string]any) {
 	next["whileWorking"] = normalizeWhileWorking(input["whileWorking"])
 	next["notices"] = normalizeNoticeSettings(input["notices"])
 	next["dictation"] = normalizeDictationSettings(input["dictation"])
+	next["limitContinue"] = input["limitContinue"] == true
 }
 
 func normalizeNewChatSettings(value any) map[string]any {

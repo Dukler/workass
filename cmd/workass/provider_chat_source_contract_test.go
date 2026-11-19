@@ -281,6 +281,9 @@ var phaseCManagerReadOnlyMethods = map[string]struct{}{
 	// Continuar: when a provider's account is back, read from its plan usage
 	// for a reply the limit stopped. A read; it touches no chat actor.
 	"UsageLimitReset": {},
+	// The wiring setter for the opt-in automatic Continuar: the manager reports
+	// a usage-limit stop; the daemon schedules. It touches no chat actor.
+	"SetUsageLimitObserver": {},
 	// Two reads beside them, for a supervised job started from another machine
 	// (fleet-runtime §13 P4 + §9's amendment): what one one-shot job credential
 	// authorizes, and the endpoint template a context file is written from.

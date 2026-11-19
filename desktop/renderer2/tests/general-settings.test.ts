@@ -49,7 +49,11 @@ test('the General settings default as before and keep every other key on save', 
     whileWorking: 'steer',
     notices: { needsYou: false, turnEnded: true, jobs: false, sound: true },
     dictation: { lang: 'en' },
+    limitContinue: false,
   });
+  // Continuar solo is opt-in: only an explicit true turns it on (owner 2026-11-19).
+  assert.equal(parseGeneralSettings({ limitContinue: 'yes' }).limitContinue, false);
+  assert.equal(withGeneralSettingsInSettings({}, { ...parsed, limitContinue: true }).limitContinue, true);
   assert.deepEqual(parseGeneralSettings({ newChat: { model: 'large', effort: 'high', folder: 'relative' } }).newChat,
     DEFAULT_GENERAL_SETTINGS.newChat, 'without an agent no model or effort is kept, and a relative folder means the last one');
   assert.equal(parseGeneralSettings({ newChat: { providerId: 'a', effort: 'high' } }).newChat.effort, '', 'an effort needs its model');

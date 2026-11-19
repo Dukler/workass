@@ -6,6 +6,8 @@
 //  - whileWorking: what Enter does while a turn runs.
 //  - notices: which events are announced, and with a sound or not.
 //  - dictation: the language whisper is told (applied by the daemon).
+//  - limitContinue: send "continue" to a chat a usage limit stopped once that
+//    subscription is back (scheduled by the daemon). Off by default.
 
 import type { CatalogGroup, ModelOption } from './wire/types';
 
@@ -17,6 +19,7 @@ export interface GeneralSettings {
   whileWorking: WhileWorking;
   notices: NoticeSettings;
   dictation: { lang: string };
+  limitContinue: boolean;
 }
 
 export const NEW_CHAT_FOLDER_LAST = 'last';
@@ -27,6 +30,7 @@ export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   whileWorking: 'steer',
   notices: { needsYou: true, turnEnded: true, jobs: true, sound: false },
   dictation: { lang: 'es' },
+  limitContinue: false,
 };
 
 const ID_MAX = 200;
@@ -70,6 +74,7 @@ export function parseGeneralSettings(raw: unknown): GeneralSettings {
     whileWorking: value.whileWorking === 'queue' ? 'queue' : 'steer',
     notices: { needsYou: flag('needsYou'), turnEnded: flag('turnEnded'), jobs: flag('jobs'), sound: flag('sound') },
     dictation: { lang: lang === 'auto' || /^[a-z]{2,3}$/.test(lang) ? lang : DEFAULT_GENERAL_SETTINGS.dictation.lang },
+    limitContinue: value.limitContinue === true,
   };
 }
 
@@ -81,7 +86,7 @@ export function generalSettingsFromSettings(reply: unknown): GeneralSettings {
 /** The blob with the General keys replaced and every other key kept. */
 export function withGeneralSettingsInSettings(current: Record<string, unknown> | null | undefined, value: GeneralSettings): Record<string, unknown> {
   const clean = parseGeneralSettings(value);
-  return { ...(current ?? {}), newChat: clean.newChat, whileWorking: clean.whileWorking, notices: clean.notices, dictation: clean.dictation };
+  return { ...(current ?? {}), newChat: clean.newChat, whileWorking: clean.whileWorking, notices: clean.notices, dictation: clean.dictation, limitContinue: clean.limitContinue };
 }
 
 /** The agents a new chat can start with: the ready ones in this machine's catalog. */

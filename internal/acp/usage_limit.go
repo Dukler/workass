@@ -126,3 +126,36 @@ func (m *Manager) UsageLimitReset(providerID string, now time.Time) string {
 	m.mu.Unlock()
 	return exhaustedWindowReset(entries, now)
 }
+
+// UsageLimitStop is a turn the subscription's usage limit stopped, for the
+// daemon's opt-in "continue when it comes back" (Ajustes · General).
+type UsageLimitStop struct {
+	TabID, ChatID, AssistantMessageID, ProviderID string
+	Limit                                         providercontract.UsageLimit
+}
+
+// SetUsageLimitObserver hands the manager the daemon's observer for usage-limit
+// stops. It is called off the turn's goroutine and decides nothing here.
+func (m *Manager) SetUsageLimitObserver(observe func(UsageLimitStop)) {
+	if m == nil {
+		return
+	}
+	m.usageLimitMu.Lock()
+	m.usageLimitObserver = observe
+	m.usageLimitMu.Unlock()
+}
+
+func (m *Manager) noteUsageLimitStop(job *Job) {
+	if m == nil || job == nil || job.UsageLimit == nil {
+		return
+	}
+	m.usageLimitMu.Lock()
+	observe := m.usageLimitObserver
+	m.usageLimitMu.Unlock()
+	if observe == nil {
+		return
+	}
+	stop := UsageLimitStop{TabID: job.TabID, ChatID: job.ChatID, AssistantMessageID: job.startOpts.AssistantMessageID,
+		ProviderID: job.ProviderID, Limit: *job.UsageLimit}
+	go observe(stop)
+}

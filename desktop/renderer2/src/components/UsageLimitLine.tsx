@@ -7,11 +7,13 @@ import { store } from '../store/store';
 import type { LimitContinueScheduled } from '../wire/types';
 import { limitLineState, limitWhenText } from '../chat/usage-limit';
 
-// The Continuar line under a reply a subscription's usage limit stopped
-// (chat/usage-limit.ts). Continuar works at any time: before the limit is back
-// it schedules "continue" for then (durable, in the daemon); after, it sends
-// it now. Once "continue" is in the chat the reply is no longer the latest
-// and this line is gone.
+// The line under a reply a subscription's usage limit stopped
+// (chat/usage-limit.ts): which subscription, and when it comes back. With
+// Ajustes · General · "Continuar solo" on, the daemon has scheduled "continue"
+// for that moment; the line says so and offers Cancelar. There is no
+// Continuar button (owner 2026-11-19: a limit can hit while nobody is there).
+// Once "continue" is in the chat the reply is no longer the latest and this
+// line is gone.
 type Args = Record<string, string>;
 
 function invoke<T>(chat: Chat, channel: 'chat:limit-continue' | 'chat:limit-continue-cancel' | 'chat:limit-continue-status', method: 'limitContinue' | 'limitContinueCancel' | 'limitContinueStatus', args: Args): Promise<T> {
@@ -26,21 +28,19 @@ export function UsageLimitLine({ chat, msg }: { chat: Chat; msg: Msg }) {
   const limit = msg.usageLimit!;
   const [scheduled, setScheduled] = useState<LimitContinueScheduled | null>(null);
   const [busy, setBusy] = useState(false);
-  const [sent, setSent] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  // The daemon schedules as the turn fails, which can land just after this
+  // line mounts: read it again with every tick of the clock below.
   useEffect(() => {
     let live = true;
-    invoke<{ scheduled: LimitContinueScheduled | null }>(chat, 'chat:limit-continue-status', 'limitContinueStatus', {})
+    const read = () => invoke<{ scheduled: LimitContinueScheduled | null }>(chat, 'chat:limit-continue-status', 'limitContinueStatus', {})
       .then((reply) => { if (live) setScheduled(reply?.scheduled?.messageId === msg.id ? reply.scheduled : null); })
       .catch(() => {});
-    return () => { live = false; };
+    void read();
+    const soon = window.setTimeout(() => void read(), 3_000);
+    const timer = window.setInterval(() => { setNow(new Date()); void read(); }, 30_000);
+    return () => { live = false; window.clearTimeout(soon); window.clearInterval(timer); };
   }, [chat.id, chat.chatId, msg.id]);
-  // "vuelve a las 18:40" turns into "ya volvió" on its own.
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  if (sent) return null;
   const state = limitLineState(limit.resetsAt, scheduled?.at ?? null, now);
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
@@ -49,11 +49,6 @@ export function UsageLimitLine({ chat, msg }: { chat: Chat; msg: Msg }) {
       store.addToast('No se pudo', String((error as Error)?.message || error));
     } finally { setBusy(false); }
   };
-  const continueNow = () => run(async () => {
-    const reply = await invoke<{ sent?: boolean; scheduled?: LimitContinueScheduled | null }>(chat, 'chat:limit-continue', 'limitContinue', { messageId: msg.id });
-    if (reply?.scheduled) setScheduled(reply.scheduled);
-    else if (reply?.sent) setSent(true);
-  });
   const cancel = () => run(async () => {
     if (!scheduled) return;
     await invoke(chat, 'chat:limit-continue-cancel', 'limitContinueCancel', { id: scheduled.id });
@@ -76,7 +71,6 @@ export function UsageLimitLine({ chat, msg }: { chat: Chat; msg: Msg }) {
       <span className="ic" aria-hidden="true"><IcGauge /></span>
       <span className="lnm">{label}</span>
       <span className="st">· límite de uso{back}</span>
-      <button type="button" className="lact" disabled={busy} onClick={() => void continueNow()}>Continuar</button>
     </div>
   );
 }

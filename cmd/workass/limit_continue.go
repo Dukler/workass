@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -13,12 +14,14 @@ import (
 	"workass/internal/wire"
 )
 
-// Continuar on a reply a subscription's usage limit stopped (owner
-// 2026-11-18, mock desktop/docs/mocks/limit-resume/option-a-v2.html). It can
-// be pressed at any time: before the limit comes back it schedules "continue"
-// for the moment it does; after, it sends it at once. The scheduled message is
-// durable (scheduledmessage), shows in Automatizaciones, and drops itself if
-// anything was written in the chat since.
+// "continue" for a reply a subscription's usage limit stopped (owner
+// 2026-11-18, mock desktop/docs/mocks/limit-resume/option-a-v2.html). Since
+// 2026-11-19 it is an opt-in setting, not a button ("it could happen while
+// I'm AFK"): with Ajustes · General · limitContinue on, the daemon schedules
+// "continue" for the moment that subscription is back, as soon as the limit
+// stops the turn. The scheduled message is durable (scheduledmessage), shows
+// in Automatizaciones, can be cancelled from the chat's line, and drops itself
+// if anything was written in the chat since.
 //
 //   - chat:limit-continue {tabId, chatId, messageId} → {ok, sent} or
 //     {ok, scheduled: {id, at}}
@@ -197,4 +200,60 @@ func cancelPendingLimitContinue(scheduler *scheduledmessage.Scheduler, tabID, ch
 			_, _ = scheduler.Cancel(tabID, chatID, entry.ID)
 		}
 	}
+}
+
+// limitContinueRetry is how long to wait for the plan usage to say when a
+// subscription is back, when the provider did not (Codex).
+const limitContinueRetry = 2 * time.Minute
+
+// ScheduleLimitContinue is the opt-in automatic Continuar: the reply's
+// "continue" is scheduled for when its subscription is back. It needs no
+// ledger row yet (it runs as the turn fails); delivery checks the row is
+// still the chat's latest. A reset already past, or none known even after the
+// plan usage refreshed, schedules nothing: sending into a limit only fails.
+func (r *providerChatRuntime) ScheduleLimitContinue(manager *acp.Manager, stop acp.UsageLimitStop, now func() time.Time, wait func(time.Duration)) error {
+	scheduler, err := r.limitScheduler()
+	if err != nil {
+		return err
+	}
+	if stop.TabID == "" || stop.ChatID == "" || stop.AssistantMessageID == "" {
+		return errors.New("a usage-limit stop needs its chat and reply")
+	}
+	resetsAt, _ := time.Parse(time.RFC3339, stop.Limit.ResetsAt)
+	if resetsAt.IsZero() && manager != nil {
+		for attempt := 0; attempt < 2 && resetsAt.IsZero(); attempt++ {
+			if attempt > 0 {
+				wait(limitContinueRetry)
+			}
+			resetsAt, _ = time.Parse(time.RFC3339, manager.UsageLimitReset(stop.ProviderID, now()))
+		}
+	}
+	if resetsAt.IsZero() || !resetsAt.After(now()) {
+		return nil
+	}
+	at := resetsAt.Add(limitContinueSlack).UTC()
+	_, err = scheduler.Schedule(stop.TabID, stop.ChatID, scheduledmessage.Request{
+		OperationID: string(limitContinueOperationID(stop.AssistantMessageID)),
+		Message:     limitContinueText,
+		Field:       "at",
+		Value:       at.Format(time.RFC3339),
+		Condition:   scheduledmessage.Condition{Kind: "at", At: at},
+		Purpose:     scheduledmessage.PurposeLimitContinue, ForMessageID: stop.AssistantMessageID,
+	})
+	return err
+}
+
+// watchUsageLimitStops wires the opt-in setting to the manager's stops.
+func watchUsageLimitStops(manager *acp.Manager, chats *providerChatRuntime, settings func() map[string]any) {
+	if manager == nil || chats == nil {
+		return
+	}
+	manager.SetUsageLimitObserver(func(stop acp.UsageLimitStop) {
+		if settings == nil || settings()["limitContinue"] != true {
+			return
+		}
+		if err := chats.ScheduleLimitContinue(manager, stop, time.Now, time.Sleep); err != nil {
+			log.Printf("[workass] usage-limit continue not scheduled: %s", acp.RedactSensitiveText(err.Error()))
+		}
+	})
 }

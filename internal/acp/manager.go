@@ -94,22 +94,25 @@ type Manager struct {
 	latestAppUpdate             any
 	hasAppUpdate                bool
 	planUsageByProvider         map[string]PlanUsageSnapshot
-	jobs                        map[string]*Job
-	finishedJobIDs              map[string]struct{}
-	finishedJobOrder            []string
-	permissions                 map[string]*permissionResolver
-	subagents                   map[string]*SubagentRun
-	subagentWake                chan struct{}
-	providerUpdateRuns          map[string]*providerUpdateRun
-	providerUpdateFailures      map[string]providerUpdateFailure
-	providerUpdateRechecks      map[string]string
-	providerUpdateLastKnown     map[string]ProviderUpdate
-	providerUpdateProgress      map[string]ProviderUpdateProgress
-	spareSessions               []spareRecord
-	spareWarming                map[string]int
-	spareBlocked                map[string]bool
-	providerStartupReady        bool
-	usageBySession              map[string]contextUsage
+	// The daemon's observer for usage-limit stops (usage_limit.go).
+	usageLimitMu            sync.Mutex
+	usageLimitObserver      func(UsageLimitStop)
+	jobs                    map[string]*Job
+	finishedJobIDs          map[string]struct{}
+	finishedJobOrder        []string
+	permissions             map[string]*permissionResolver
+	subagents               map[string]*SubagentRun
+	subagentWake            chan struct{}
+	providerUpdateRuns      map[string]*providerUpdateRun
+	providerUpdateFailures  map[string]providerUpdateFailure
+	providerUpdateRechecks  map[string]string
+	providerUpdateLastKnown map[string]ProviderUpdate
+	providerUpdateProgress  map[string]ProviderUpdateProgress
+	spareSessions           []spareRecord
+	spareWarming            map[string]int
+	spareBlocked            map[string]bool
+	providerStartupReady    bool
+	usageBySession          map[string]contextUsage
 	// commandCatalogs is the memory-only Claude command-catalog cache, keyed by
 	// tab/chat (commandCatalogKey). Never persisted; see command_catalog.go.
 	commandCatalogs map[string]*commandCatalogEntry
@@ -1789,6 +1792,7 @@ func (m *Manager) runAppChatJob(ctx context.Context, bridge *Bridge, job *Job, o
 	if err != nil {
 		displayError := redactSensitiveText(err.Error())
 		job.UsageLimit = m.usageLimitFromPromptError(activeBridge, job.ProviderID, err)
+		m.noteUsageLimitStop(job)
 		if !job.CrashInterrupted {
 			hint, policyErr := m.markProviderNeedsLogin(ctx, job.ProviderID, err)
 			if policyErr != nil {

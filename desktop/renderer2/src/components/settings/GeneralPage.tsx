@@ -189,6 +189,12 @@ export function GeneralPage() {
               </div>
             </Row>
           </div>
+          <div className="gtitle">Si se acaba el uso</div>
+          <div className="group">
+            <Row name="Continuar solo" detail="Cuando una suscripción llega a su límite, el chat recibe «continue» apenas el límite vuelve, aunque no estés. Si escribís antes, no se manda.">
+              <Toggle on={general.limitContinue} label="Continuar solo" onChange={(on) => setGeneral(app, { limitContinue: on })} />
+            </Row>
+          </div>
         </>
       )}
       <div className="gtitle">Avisos</div>

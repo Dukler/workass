@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"workass/internal/acp"
 	"workass/internal/chat"
 	providercontract "workass/internal/provider"
 	"workass/internal/scheduledmessage"
@@ -54,5 +57,50 @@ func TestAgentSendSteersARunningChatByDefault(t *testing.T) {
 	}
 	if got := defaultAgentSendDelivery(map[string]any{"attachments": []any{"a.png"}}, true); got != "auto" {
 		t.Fatalf("with images = %q", got)
+	}
+}
+
+// With "Continuar solo" on, a usage-limit stop schedules "continue" for the
+// reset by itself (owner 2026-11-19: the limit can hit while nobody is there).
+func TestUsageLimitStopSchedulesContinueForTheReset(t *testing.T) {
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	newRuntime := func(t *testing.T) *providerChatRuntime {
+		scheduler, err := scheduledmessage.New(scheduledmessage.Options{StateDir: t.TempDir(), Now: clock, Send: func(context.Context, scheduledmessage.Entry, string) error { return nil }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &providerChatRuntime{scheduled: scheduler}
+	}
+	stop := acp.UsageLimitStop{TabID: "tab", ChatID: "chat", AssistantMessageID: "a1", ProviderID: "claude",
+		Limit: providercontract.UsageLimit{ResetsAt: "2026-11-19T05:00:00Z", Label: "Claude Max"}}
+
+	r := newRuntime(t)
+	if err := r.ScheduleLimitContinue(nil, stop, clock, func(time.Duration) {}); err != nil {
+		t.Fatal(err)
+	}
+	entries := r.scheduled.List("tab", "chat")
+	if len(entries) != 1 || entries[0].Purpose != scheduledmessage.PurposeLimitContinue || entries[0].ForMessageID != "a1" ||
+		!entries[0].Condition.At.Equal(time.Date(2026, 11, 19, 5, 0, 20, 0, time.UTC)) || scheduledmessage.Text(entries[0]) != "continue" {
+		t.Fatalf("scheduled = %+v", entries)
+	}
+	// A repeat of the same stop is the same entry, never a second "continue".
+	if err := r.ScheduleLimitContinue(nil, stop, clock, func(time.Duration) {}); err != nil || len(r.scheduled.List("tab", "chat")) != 1 {
+		t.Fatalf("repeat: %v %d", err, len(r.scheduled.List("tab", "chat")))
+	}
+
+	// No time from the provider and no plan usage to ask: nothing.
+	unknown := stop
+	unknown.Limit.ResetsAt = ""
+	r = newRuntime(t)
+	if err := r.ScheduleLimitContinue(nil, unknown, clock, func(time.Duration) {}); err != nil || len(r.scheduled.List("tab", "chat")) != 0 {
+		t.Fatalf("unknown reset: err=%v entries=%d", err, len(r.scheduled.List("tab", "chat")))
+	}
+	// A reset already past schedules nothing either.
+	past := stop
+	past.Limit.ResetsAt = "2026-11-19T02:00:00Z"
+	r = newRuntime(t)
+	if err := r.ScheduleLimitContinue(nil, past, clock, func(time.Duration) {}); err != nil || len(r.scheduled.List("tab", "chat")) != 0 {
+		t.Fatalf("past reset scheduled: %v", err)
 	}
 }
