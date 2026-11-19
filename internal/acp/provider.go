@@ -1030,6 +1030,9 @@ func (m *Manager) providerRecordsLocked() []ProviderConfig {
 func (m *Manager) persistProviderConfigs() error {
 	m.providerConfigMu.Lock()
 	defer m.providerConfigMu.Unlock()
+	// An agent someone just added to the file is kept, not overwritten
+	// (provider_hotadd.go); the watcher publishes and probes it.
+	m.adoptNewProviderEntriesLocked()
 
 	m.mu.Lock()
 	providers := m.providerRecordsLocked()

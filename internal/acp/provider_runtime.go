@@ -25,25 +25,7 @@ func (m *Manager) initProviderRegistry() {
 		if runtime == nil {
 			continue
 		}
-		fixture := false
-		authentication := providercontract.AuthenticationStrategy(noProviderAuthenticationStrategy{})
-		if registration, ok := providerRegistrationForID(id); ok {
-			fixture = registration.FixtureOnly
-			if registration.Authentication != nil {
-				authentication = registration.Authentication
-			}
-		}
-		definition := providercontract.Definition{
-			Identity: providercontract.ProviderIdentity{
-				ID: providercontract.ID(id), DisplayName: runtime.Config.Name, FixtureOnly: fixture,
-			},
-			Realm:          managerRealmResolver{manager: m, providerID: id},
-			Runtime:        managerLaneFactory{manager: m, providerID: id},
-			Metadata:       managerMetadataSource{manager: m, providerID: id},
-			Update:         managerUpdateStrategy{manager: m, providerID: id},
-			Authentication: authentication,
-		}
-		if err := registry.Register(definition); err != nil {
+		if err := registry.Register(m.providerDefinitionFor(id, runtime)); err != nil {
 			m.providerRegistryErr = errors.Join(m.providerRegistryErr, err)
 		}
 	}
@@ -52,6 +34,30 @@ func (m *Manager) initProviderRegistry() {
 		m.opts.Logf("provider registry initialization failed", map[string]any{
 			"error": redactSensitiveText(m.providerRegistryErr.Error()),
 		})
+	}
+}
+
+// providerDefinitionFor is one runtime's semantic definition: the same at
+// startup and for an agent adopted from providers.json while running
+// (provider_hotadd.go).
+func (m *Manager) providerDefinitionFor(id string, runtime *providerRuntime) providercontract.Definition {
+	fixture := false
+	authentication := providercontract.AuthenticationStrategy(noProviderAuthenticationStrategy{})
+	if registration, ok := providerRegistrationForID(id); ok {
+		fixture = registration.FixtureOnly
+		if registration.Authentication != nil {
+			authentication = registration.Authentication
+		}
+	}
+	return providercontract.Definition{
+		Identity: providercontract.ProviderIdentity{
+			ID: providercontract.ID(id), DisplayName: runtime.Config.Name, FixtureOnly: fixture,
+		},
+		Realm:          managerRealmResolver{manager: m, providerID: id},
+		Runtime:        managerLaneFactory{manager: m, providerID: id},
+		Metadata:       managerMetadataSource{manager: m, providerID: id},
+		Update:         managerUpdateStrategy{manager: m, providerID: id},
+		Authentication: authentication,
 	}
 }
 

@@ -654,6 +654,8 @@ func main() {
 		headlessUpdates.Confirm()
 		acpManager.StartProviderStartup()
 		acpManager.StartProviderDetection(signalCtx)
+		// A new ACP agent in providers.json joins without a restart.
+		acpManager.WatchProviderFile(signalCtx, acp.ProviderFileWatchInterval)
 		return providerChats.ResumeActors()
 	}); err != nil {
 		stopStartedDaemonHTTP(server, listener)
