@@ -586,7 +586,14 @@ func (m *Manager) runSubagent(runCtx context.Context, run *SubagentRun, prompt, 
 	if effort != "" {
 		selectedModel = modelID + "[" + effort + "]"
 	}
-	if _, err := bridge.ensureSessionControls(runCtx, info.SessionID, selectedModel, modeID); err != nil {
+	_, err = bridge.ensureSessionControls(runCtx, info.SessionID, selectedModel, modeID)
+	if err != nil && providerRequestTimedOut(err) && runCtx.Err() == nil && !bridge.Closed() {
+		// A write that went unanswered is not a refusal, and the same values are
+		// safe to write again: try the step once more before failing the child.
+		m.opts.Logf("a subagent's model controls timed out; retrying once", map[string]any{"subagentId": id, "error": err.Error()})
+		_, err = bridge.ensureSessionControls(runCtx, info.SessionID, selectedModel, modeID)
+	}
+	if err != nil {
 		if !run.modelDefaulted || !strings.Contains(err.Error(), "model control:") {
 			m.finishSubagent(run, nil, err)
 			return

@@ -1519,3 +1519,46 @@ func TestAgentCatalogAnswersAnIdleOwningChat(t *testing.T) {
 		t.Fatalf("idle catalog active cwd = %#v", active)
 	}
 }
+
+// A model write the host never answered failed the whole child at start
+// (bug-20261119-8d32076f). The step is retried once, so the child runs.
+func TestSubagentRetriesModelControlsAfterOneUnansweredWrite(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	events := newEventCollector()
+	manager := NewManager(Options{
+		RootDir: root, StateDir: filepath.Join(t.TempDir(), "state"),
+		Provider: ProviderConfig{
+			Command: "node", Args: []string{filepath.Join("desktop", "acp", "mock-server.mjs")}, CWD: root, Label: "Workass Mock ACP",
+			Env: map[string]string{"WORKASS_MOCK_ACP_DROP_FIRST_MODEL_WRITE": "1"},
+		},
+		Broadcast: events.Broadcast, ControlWriteTimeout: 300 * time.Millisecond,
+		StdoutFlushInterval: 10 * time.Millisecond, ThoughtFlushInterval: 10 * time.Millisecond,
+		RSSSampleInterval: time.Hour,
+	})
+	t.Cleanup(func() { manager.Reset() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session := subagentParentSession{ChatID: "chat-control-retry", TabID: "tab-control-retry"}
+	info, err := manager.NewSession(ctx, SessionOptions{ChatID: session.ChatID, TabID: session.TabID, CWD: root})
+	if err != nil {
+		t.Fatalf("new parent session: %v", err)
+	}
+	session.Info = info
+	manager.mu.Lock()
+	ownerKey := manager.agentOwnerBySession[info.SessionID]
+	manager.mu.Unlock()
+
+	run, err := manager.SpawnSubagent(ctx, SubagentSpawnOptions{
+		OwnerKey: ownerKey, ParentChatID: session.ChatID, ParentTabID: session.TabID,
+		Prompt: "run after a dropped model write", Label: "control-retry",
+		ProviderID: info.ProviderID, ModelID: "mock-deterministic", Effort: "high", ModeID: "ask", CWD: root,
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	done := waitForSubagentTerminal(t, manager, ownerKey, session, run.ID, 8*time.Second)
+	if done.Status != "done" {
+		t.Fatalf("child after one unanswered model write = status %q model %q error %q", done.Status, done.ModelID, done.Error)
+	}
+}

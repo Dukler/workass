@@ -439,3 +439,52 @@ func findCatalogGroupFromPayload(payload map[string]any, providerID string) *Cat
 	groups, _ := payload["groups"].([]CatalogGroup)
 	return findCatalogGroup(groups, providerID)
 }
+
+// A session's config_options_update arrives on the bridge's only stdout reader,
+// right before the reply to the set_config_option that caused it. Publishing
+// that change must not wait for another provider's catalog probe: a reader
+// parked there left a subagent's model write unanswered until its 15s ACP
+// timeout (bug-20261119-8d32076f, a just-added Hermes probe ran 20s).
+func TestConfigOptionsNotificationDoesNotWaitForCatalogProbe(t *testing.T) {
+	events := newEventCollector()
+	manager := catalogRefreshTestManager(t, events)
+	done := make(chan struct{}) // another caller's probe that is still running
+	t.Cleanup(func() { close(done) })
+	manager.mu.Lock()
+	runtime := manager.providers["mock"]
+	runtime.Probed = true
+	runtime.Status = providerStatusReady
+	runtime.Models = []Model{{ModelID: "mock-deterministic", Name: "Mock"}}
+	runtime.CatalogCLIVersion = providerVersionIdentity(runtime.CLIVersion)
+	// Expired, so a probing catalog read would join the in-flight refresh.
+	runtime.CatalogRefreshedAt = time.Now().Add(-providerCatalogReadExpiry - time.Second)
+	runtime.CatalogRefreshing = true
+	runtime.CatalogRefreshDone = done
+	manager.mu.Unlock()
+
+	bridge := newBridge("mock:subagent:wa-subagent-test", Options{Provider: ProviderConfig{ID: "mock", Name: "Mock Provider"}}, manager)
+	resolve := make(chan rpcResult, 1)
+	bridge.mu.Lock()
+	bridge.pending["7"] = &pendingRequest{method: "session/set_config_option", resolve: resolve}
+	bridge.mu.Unlock()
+
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		bridge.acceptLine([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"config_options_update","configOptions":[{"id":"model","category":"model","currentValue":"opus","options":[{"value":"opus","name":"Opus"},{"value":"sonnet","name":"Sonnet"}]}]}}}`))
+		bridge.acceptLine([]byte(`{"jsonrpc":"2.0","id":7,"result":{}}`))
+	}()
+	select {
+	case res := <-resolve:
+		if res.err != nil {
+			t.Fatalf("set_config_option reply failed: %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stdout reader is parked on another provider's catalog probe; the model write reply is never read")
+	}
+	<-read
+	ev := events.waitChannel(t, "chat:catalog", time.Second)
+	if group := findCatalogGroupFromPayload(ev.payload.(map[string]any), "mock"); group == nil || findCatalogModel(group.Models, "sonnet") == nil {
+		t.Fatalf("the session's new model list was not published: %#v", ev.payload)
+	}
+}

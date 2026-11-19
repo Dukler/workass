@@ -572,6 +572,9 @@ For cancellation tests, `WORKASS_MOCK_ACP_CONTROL_GATE=/absolute/fixture/path`
 makes `session/set_config_option` create that marker and wait for
 `/absolute/fixture/path.release` before replying. This lets tests prove Stop
 finishes pre-prompt preparation without waiting for a blocked control response.
+`WORKASS_MOCK_ACP_DROP_FIRST_MODEL_WRITE=1` never answers the process's first
+model `session/set_config_option` and answers later ones, for tests of a model
+write that times out once.
 
 - Never write logs or diagnostics to ACP stdout; stdout must contain JSON-RPC messages only.
 - Send diagnostics to stderr.

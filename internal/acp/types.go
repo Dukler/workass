@@ -19,6 +19,9 @@ const (
 
 	defaultInitTimeout            = 60 * time.Second
 	defaultContextReadbackTimeout = 5 * time.Second
+	// One session/set_config_option write (model, effort, mode); a zero
+	// Options.ControlWriteTimeout means this.
+	defaultControlWriteTimeout    = 15 * time.Second
 	defaultStdoutFlush            = 16 * time.Millisecond
 	defaultThoughtFlush           = 24 * time.Millisecond
 	defaultStderrTailBytes        = 16 * 1024
@@ -121,6 +124,7 @@ type Options struct {
 	InitTimeout                    time.Duration
 	PermissionTimeout              time.Duration
 	ContextReadbackTimeout         time.Duration
+	ControlWriteTimeout            time.Duration
 	StdoutFlushInterval            time.Duration
 	ThoughtFlushInterval           time.Duration
 	StderrTailBytes                int

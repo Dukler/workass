@@ -3492,7 +3492,7 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 	defer finishWrite()
 	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
 	defer finishConfigWrite()
-	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modelConfigID, "value": resolution.modelValue}, 15*time.Second)
+	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modelConfigID, "value": resolution.modelValue}, b.controlWriteTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -3511,7 +3511,7 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 		supportedEffort := matchingStringFold(levels, resolution.effort)
 		b.mu.Unlock()
 		if supportedEffort != "" {
-			effortRes, effortErr := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": effortConfigID, "value": supportedEffort}, 15*time.Second)
+			effortRes, effortErr := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": effortConfigID, "value": supportedEffort}, b.controlWriteTimeout())
 			if effortErr != nil {
 				return nil, effortErr
 			}
@@ -3555,6 +3555,13 @@ func (b *Bridge) SetModel(ctx context.Context, sessionID, modelID string) (map[s
 		result["modelWritebackReason"] = reason
 	}
 	return result, nil
+}
+
+func (b *Bridge) controlWriteTimeout() time.Duration {
+	if b.opts.ControlWriteTimeout > 0 {
+		return b.opts.ControlWriteTimeout
+	}
+	return defaultControlWriteTimeout
 }
 
 func (b *Bridge) beginWorkassModelWrite(sessionID string) func() {
@@ -3669,7 +3676,7 @@ func (b *Bridge) SetMode(ctx context.Context, sessionID, modeID string) (map[str
 	b.mu.Unlock()
 	finishConfigWrite := b.beginWorkassConfigWrite(sessionID)
 	defer finishConfigWrite()
-	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modeConfigID, "value": modeID}, 15*time.Second)
+	res, err := b.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": modeConfigID, "value": modeID}, b.controlWriteTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -4343,7 +4350,12 @@ func (b *Bridge) applyConfigOptionsForSession(sessionID string, raw any, broadca
 		catalogChanged = b.manager.updateProviderCatalogFromBridge(b, modelsCopy, modesCopy, false)
 	}
 	if changed && broadcast {
-		b.manager.EmitCatalog(context.Background())
+		// The snapshot, never a probing read: this runs on the bridge's stdout
+		// reader for a config_options_update, and the reply to the write that
+		// caused it is the next line. A probing read waits for any provider's
+		// in-flight catalog probe, so that reply went unread past its ACP
+		// timeout and a subagent failed at start (bug-20261119-8d32076f).
+		b.manager.emitCatalogSnapshot()
 	} else if catalogChanged {
 		// Session attach uses broadcast=false while it assembles its controls.
 		// The live host can still replace a stale provider catalog here, before

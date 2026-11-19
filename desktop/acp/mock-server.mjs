@@ -10,6 +10,7 @@ const sessions = new Map();
 let sessionSeq = 0;
 let inputBuffer = '';
 let clientRequestSeq = 0;
+let droppedFirstModelWrite = false;
 const pendingClientResponses = new Map();
 const backgroundFDs = new Map();
 const traceFile = process.env.WORKASS_MOCK_ACP_TRACE_FILE || '';
@@ -832,6 +833,12 @@ async function handleRequest(message) {
   if (method === 'session/set_config_option') {
     if (process.env.WORKASS_MOCK_ACP_REJECT_MODEL === '1' && params.configId === modelOptionID) {
       return fail(id, -32002, 'Resource not found');
+    }
+    // Leaves this process's first model write unanswered, as a host whose reply
+    // never reached the daemon in time; later writes answer normally.
+    if (process.env.WORKASS_MOCK_ACP_DROP_FIRST_MODEL_WRITE === '1' && params.configId === modelOptionID && !droppedFirstModelWrite) {
+      droppedFirstModelWrite = true;
+      return;
     }
     const session = sessions.get(params.sessionId);
     if (!session) return fail(id, -32000, 'Unknown mock ACP session.');
