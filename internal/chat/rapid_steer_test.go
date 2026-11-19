@@ -180,3 +180,46 @@ func TestRapidSteersRetainIndependentOwnersThroughReceiptsAndTerminal(t *testing
 		})
 	}
 }
+
+// An agent's message waits in the turn FIFO, not the staged queue, but shows
+// in the same "En cola" list with the same steer button. Steering it failed
+// with "queued steer row is no longer owned by this chat" (owner 2026-11-19).
+func TestAnAgentsQueuedMessageCanBeSteeredIntoTheRunningTurn(t *testing.T) {
+	for _, outcome := range []string{"consumed", "rejected"} {
+		t.Run(outcome, func(t *testing.T) {
+			state := rapidSteerState(t)
+			state, _ = apply(t, state, Submit{OperationID: "agent-send", Text: "Coordinator: do the split",
+				Presentation: provider.TurnPresentation{Origin: "agent", QueueID: "agent-row", UserMessageID: "agent-user", AssistantMessageID: "agent-assistant"}})
+			if len(state.Queue) != 1 {
+				t.Fatalf("queue = %d, want the agent's row waiting", len(state.Queue))
+			}
+			state, effects := apply(t, state, Steer{OperationID: "steer-agent-row", Text: "renderer copy", QueueID: "agent-row",
+				QueueRevision: state.Presentation.AgentQueueRevision,
+				Presentation:  provider.TurnPresentation{Origin: "human", UserMessageID: "steer-user", AssistantMessageID: "steer-assistant"}})
+			pending := state.PendingSteerFor("steer-agent-row")
+			if pending == nil || pending.Text != "Coordinator: do the split" || pending.Presentation.QueueID != "agent-row" || len(effects) != 1 {
+				t.Fatalf("pending = %+v effects = %d", pending, len(effects))
+			}
+			if len(state.Queue) != 0 {
+				t.Fatal("the steered row is still waiting in the FIFO")
+			}
+			if err := state.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			switch outcome {
+			case "rejected":
+				state, _ = apply(t, state, SteerFailed{OperationID: "steer-agent-row", Kind: provider.ErrorAdmissionRejected})
+				if len(state.StagedQueue) != 1 || state.StagedQueue[0].Text != "Coordinator: do the split" {
+					t.Fatalf("a refused steer lost the agent's message: %+v", state.StagedQueue)
+				}
+			case "consumed":
+				state, _ = apply(t, state, SteerAdmitted{OperationID: "steer-agent-row", Accepted: true, AwaitConsumption: true})
+				state, _ = apply(t, state, InputConsumed{OperationID: "steer-agent-row"})
+				state, _ = apply(t, state, TurnCompleted{OperationID: "turn", Assistant: "done"})
+				if len(state.Queue) != 0 || len(state.StagedQueue) != 0 {
+					t.Fatal("the agent's message would run a second time")
+				}
+			}
+		})
+	}
+}

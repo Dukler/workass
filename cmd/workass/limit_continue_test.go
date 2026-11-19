@@ -41,3 +41,18 @@ func TestLimitedReplyIsCurrentUntilTheChatMovesOn(t *testing.T) {
 		t.Fatal("still current: not obsolete")
 	}
 }
+
+// An agent's message with no delivery steers into a running local turn, as the
+// person's own Enter does (owner 2026-11-19); images and idle chats stay auto.
+// A send for another machine is forwarded with auto set explicitly.
+func TestAgentSendSteersARunningChatByDefault(t *testing.T) {
+	if got := defaultAgentSendDelivery(map[string]any{}, true); got != "steer" {
+		t.Fatalf("running chat = %q", got)
+	}
+	if got := defaultAgentSendDelivery(map[string]any{}, false); got != "auto" {
+		t.Fatalf("idle chat = %q", got)
+	}
+	if got := defaultAgentSendDelivery(map[string]any{"attachments": []any{"a.png"}}, true); got != "auto" {
+		t.Fatalf("with images = %q", got)
+	}
+}

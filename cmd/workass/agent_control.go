@@ -668,6 +668,11 @@ func (h *agentControlHandler) forwardRemoteAgentCall(ctx context.Context, method
 		forwarded[fleetLimitParam] = limit
 	}
 	if method == "chat.send" {
+		// A chat on another machine is never steered by default (see
+		// defaultAgentSendDelivery): say auto, so the home cannot pick steer.
+		if fieldString(forwarded, "delivery") == "" {
+			forwarded["delivery"] = "auto"
+		}
 		// What the human just approved is what the home has to be told, or it would
 		// refuse the very send they said yes to.
 		approved, err := h.admitRemoteSend(ctx, params)

@@ -2474,6 +2474,14 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 			}
 		}
 		if index < 0 {
+			// A row an agent sent or a notice queued waits in the turn FIFO, not
+			// the staged one, yet it shows in the same "En cola" list with the
+			// same steer button (owner 2026-11-19: "No se pudo dirigir: queued
+			// steer row is no longer owned by this chat").
+			if steered, ok := steerFromTurnQueue(state, pending, queueID); ok {
+				pending = steered
+				goto admitted
+			}
 			return nil, errors.New("queued steer row is no longer owned by this chat")
 		}
 		entry := state.StagedQueue[index]
@@ -2490,6 +2498,7 @@ func reduceSteer(state *State, command Steer) ([]Effect, error) {
 		state.StagedQueue = append(state.StagedQueue[:index:index], state.StagedQueue[index+1:]...)
 		state.Presentation.AgentQueueRevision++
 	}
+admitted:
 	state.Operations[operationID] = struct{}{}
 	state.appendPendingSteer(pending)
 	return []Effect{SteerTurnEffect{
@@ -6333,4 +6342,40 @@ func presentationIDsAvailable(state State, presentation provider.TurnPresentatio
 		return errors.New("turn message id is already used in this chat")
 	}
 	return nil
+}
+
+// steerFromTurnQueue takes a not-yet-started turn-FIFO row (an agent's send, a
+// queued notice) for the running turn: its text and attachments are steered,
+// and it leaves the FIFO. A definite rejection returns it as a staged row at
+// the head (pending.QueuedEntry), so it still runs next and is never lost.
+func steerFromTurnQueue(state *State, pending *PendingSteer, queueID string) (*PendingSteer, bool) {
+	for index, entry := range state.Queue {
+		id := strings.TrimSpace(entry.Presentation.QueueID)
+		if id != queueID && string(entry.OperationID) != queueID {
+			continue
+		}
+		if entry.LaneID != state.Foreground.LaneID {
+			return nil, false
+		}
+		pending.Text, pending.Attachments = entry.Text, append([]provider.Attachment(nil), entry.Attachments...)
+		pending.Presentation.QueueID = queueID
+		pending.Presentation.PromptText = entry.Text
+		if pending.Presentation.Origin == "" {
+			pending.Presentation.Origin = entry.Presentation.Origin
+		}
+		source := entry.Presentation.Origin
+		if source == "" {
+			source = "agent"
+		}
+		pending.QueuedEntry = &StagedQueueEntry{
+			ID: queueID, Text: entry.Text, Source: source, Delivery: "queue",
+			Attachments: append([]provider.Attachment(nil), entry.Attachments...),
+			ModelID:     entry.ModelID, ModeID: entry.ModeID, Permission: entry.Permission,
+		}
+		pending.QueuedIndex = 0
+		state.Queue = append(state.Queue[:index:index], state.Queue[index+1:]...)
+		state.Presentation.AgentQueueRevision++
+		return pending, true
+	}
+	return nil, false
 }

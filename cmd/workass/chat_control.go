@@ -752,15 +752,15 @@ func (c *chatControlCoordinator) send(params map[string]any) (map[string]any, er
 		return nil, err
 	}
 	delivery := fieldString(params, "delivery")
-	if delivery == "" {
-		delivery = "auto"
-	}
-	if delivery != "auto" && delivery != "queue" && delivery != "steer" {
+	if delivery != "" && delivery != "auto" && delivery != "queue" && delivery != "steer" {
 		return nil, errors.New("delivery must be auto, queue, or steer")
 	}
 	_, running, err := c.providerChats.Foreground(tabID, chatID)
 	if err != nil {
 		return nil, err
+	}
+	if delivery == "" {
+		delivery = defaultAgentSendDelivery(params, running)
 	}
 	if delivery == "steer" && !running {
 		return nil, errors.New("cannot steer an idle chat; use auto or queue")
@@ -985,4 +985,18 @@ func validateChatCWD(cwd string) error {
 		return fmt.Errorf("cwd is not an accessible server directory: %s", cwd)
 	}
 	return nil
+}
+
+// defaultAgentSendDelivery is what an agent's send does when it names no
+// delivery (owner 2026-11-19: "messages from agents queued by default instead
+// of steered"). A running turn hears it now, as the person's own Enter does;
+// an idle chat starts a turn with it. Images cannot steer. A send for a chat on
+// another machine is forwarded with delivery auto set explicitly
+// (forwardRemoteAgentCall): steering across a route is refused so a lost reply
+// cannot duplicate live input.
+func defaultAgentSendDelivery(params map[string]any, running bool) string {
+	if !running || len(stringSliceField(params["attachments"])) > 0 {
+		return "auto"
+	}
+	return "steer"
 }
