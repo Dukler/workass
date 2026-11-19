@@ -126,8 +126,6 @@ export interface PublicJob {
   disposition?: { state: string; source?: string };
   // The daemon ended this turn itself (restart/handoff). Older daemons omit it.
   interrupted?: boolean;
-  // The subscription's usage limit stopped this turn (daemon usage_limit.go).
-  usageLimit?: { label?: string; resetsAt?: string };
   consumedSteerIds?: string[];
   // Provider-neutral assistant media. Structured ACP image blocks omit source;
   // workspace-local Markdown imports retain their target for exact rendering.
@@ -1004,9 +1002,6 @@ export interface WorkassApi {
   // its provider sessions last reported; cancel drops one scheduled message.
   automationsList?: () => Promise<{ items: AutomationItem[] }>;
   automationsCancel?: (o: { tabId: string; chatId: string; id: string }) => Promise<{ ok: boolean; id: string; status: string }>;
-  limitContinue?: (o: { tabId: string; chatId: string; messageId: string }) => Promise<{ ok: boolean; sent?: boolean; scheduled?: LimitContinueScheduled | null }>;
-  limitContinueCancel?: (o: { tabId: string; chatId: string; id: string }) => Promise<{ ok: boolean }>;
-  limitContinueStatus?: (o: { tabId: string; chatId: string }) => Promise<{ scheduled: LimitContinueScheduled | null }>;
   // Conectores + alertas (docs/specs/connectors-alerts.md): connectors live on
   // the daemon that listens; alerts never open or touch a chat by themselves.
   connectorsList?: () => Promise<{ connectors: Connector[] }>;
@@ -1328,5 +1323,3 @@ export interface ConnectorAdoptArgs {
   url: string;
 }
 
-/** A Continuar waiting for its subscription's limit to come back. */
-export interface LimitContinueScheduled { id: string; at: string; messageId: string }

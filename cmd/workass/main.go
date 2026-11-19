@@ -1249,7 +1249,6 @@ func registerDaemonHandlers(hub *wire.Hub, cwd string, acpManager *acp.Manager, 
 		count++
 		count += registerAccountResetHandlers(hub, acpManager, state.setting)
 		count += registerAutomationHandlers(hub, acpManager, providerChats)
-		count += registerLimitContinueHandlers(hub, acpManager, providerChats, chatControl)
 		watchUsageLimitStops(acpManager, providerChats, state.setting.get)
 		if providerChats != nil {
 			titler := newChatTitler(acpManager, providerChats, state.setting.get, log.Printf)

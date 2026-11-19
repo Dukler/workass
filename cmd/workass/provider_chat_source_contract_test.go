@@ -738,9 +738,6 @@ var phaseCExpectedChatHandlers = map[string]struct{}{
 	"app-chat:reset": {}, "app-chat:set-model": {}, "app-chat:set-mode": {}, "app-chat:steer": {}, "app-chat:use-rate-limit-reset": {}, "app-chat:detect-acp": {},
 	"app-chat:auto-title": {}, "spawned-work:list": {}, "spawned-work:summary": {}, "spawned-work:read": {}, "spawned-work:stop": {}, "job:start": {}, "job:cancel": {},
 	"visualize:host": {},
-	// Continuar on a reply a usage limit stopped (limit_continue.go): reads the
-	// chat's actor snapshot, then sends through the agent queue or schedules.
-	"chat:limit-continue": {}, "chat:limit-continue-cancel": {}, "chat:limit-continue-status": {},
 }
 
 var phaseCActorHandlerExceptions = map[string]struct{}{

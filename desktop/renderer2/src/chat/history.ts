@@ -49,7 +49,6 @@ export function actorMessages(records: readonly MirrorMsg[], tabId?: string): Ms
       turnStartedAt: record.turnStartedAt,
       interrupted: record.interrupted,
       inherited: record.inherited === true ? true : undefined,
-      usageLimit: usageLimitField(record.usageLimit),
       notice: record.notice && typeof record.notice.kind === 'string' ? record.notice : undefined,
       images: record.images,
       workSummary: record.workSummary && typeof record.workSummary === 'object' ? record.workSummary : undefined,
@@ -102,11 +101,4 @@ export function stampToolDetail(events: TimelineEvent[], tabId: string | undefin
     if (event.kind === 'tool' && (event.outputDeferred || event.inputDeferred || event.titleDeferred)) event.detail = { tabId, messageId };
   }
   return events;
-}
-
-function usageLimitField(raw: MirrorMsg['usageLimit']): Msg['usageLimit'] {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const label = typeof raw.label === 'string' ? raw.label : '';
-  const resetsAt = typeof raw.resetsAt === 'string' && raw.resetsAt ? raw.resetsAt : undefined;
-  return { label, ...(resetsAt ? { resetsAt } : {}) };
 }

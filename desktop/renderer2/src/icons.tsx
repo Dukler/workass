@@ -63,8 +63,6 @@ export const IcCommit = () => <S><circle cx="8" cy="8" r="2" /><path d="M8 2v4M8
 export const IcMic = () => <S width={13}><rect x="6" y="2" width="4" height="8" rx="2" /><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V15" /></S>;
 export const IcStar = () => <S width={13}><path d="M8 2.2l1.75 3.55 3.92.57-2.84 2.77.67 3.91L8 11.16 4.5 13l.67-3.91-2.84-2.77 3.92-.57z" /></S>;
 // effort gauge (P4): speedometer dome + needle — the effort-selector affordance
-// A scheduled send: a clock face (Continuar waiting for a limit to come back).
-export const IcScheduled = () => <S><circle cx="8" cy="8" r="5.6" /><path d="M8 5v3.2l2.1 1.3" /></S>;
 export const IcGauge = () => <S><path d="M2.8 11.2a5.2 5.2 0 0 1 10.4 0" /><path d="M8 11.2l2.6-2.4" /></S>;
 export const IcBrowserCard = () => <S><rect x="2.5" y="3" width="11" height="9" rx="1.5" /><path d="M2.5 6h11" /></S>;
 // Unified background-process glyph: a play-in-circle, stroke-weight 1.3 to match

@@ -24,7 +24,6 @@ export interface MirrorMsg {
   interrupted?: boolean;
   // History this chat inherited from the chat it was forked from.
   inherited?: boolean;
-  usageLimit?: { label?: unknown; resetsAt?: unknown };
   notice?: { kind: string; title?: string; status?: string; body?: string };
   images?: MessageImage[];
   events: unknown[];

@@ -56,10 +56,6 @@ var mutatingChannels = map[string]struct{}{
 	"app-chat:use-rate-limit-reset": {},
 	// Automatizaciones: cancels a pending scheduled message.
 	"automations:cancel": {},
-	// Continuar on a reply a usage limit stopped: sends or schedules
-	// "continue", or cancels that scheduled send.
-	"chat:limit-continue":        {},
-	"chat:limit-continue-cancel": {},
 	// Conectores + alerts: connector config and secrets, and the owner's
 	// decisions on alerts (docs/specs/connectors-alerts.md).
 	"connectors:set":           {},
